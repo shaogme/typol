@@ -6,7 +6,7 @@ use crate::{
 };
 use alloc::string::String;
 use core::{cell::Cell, error::Error as StdError, fmt};
-use opeo::{ErrSlot, OResult, Out, ResultOutExt};
+use opeo::{Caught, ErrSlot, OResult, Out, ResultOutExt};
 use serde::{de::Error as DeError, ser::Error as SerError};
 use typol_core::{BudgetError, ConfigValue, DiagnosticContext, ValueError, diagnostic_context};
 use typol_policy::ValueLimits;
@@ -380,12 +380,18 @@ impl Fault {
         }
     }
 
-    pub(crate) fn record<T>(&self, result: &Result<T, Error>) {
+    fn record(&self, failure: Failure) {
         if self.failure.get().is_none() {
-            if let Err(error) = result {
-                self.failure.set(Some(error.failure));
-            }
+            self.failure.set(Some(failure));
         }
+    }
+
+    // Recursive success paths should not reserve error extraction temporaries at every depth.
+    #[cold]
+    fn failed<T>(&self, caught: Caught<'_, Error>) -> Result<T, Error> {
+        let error = caught.take();
+        self.record(error.failure);
+        Err(error)
     }
 
     pub(crate) fn run<T>(
@@ -397,12 +403,10 @@ impl Fault {
         }
         // Slots follow the callback stack; Cursor bounds recursive child dispatch.
         let mut errors = ErrSlot::new();
-        let result = match errors.try_call(operation) {
+        match errors.try_call(operation) {
             Ok(value) => Ok(value),
-            Err(caught) => Err(caught.take()),
-        };
-        self.record(&result);
-        result
+            Err(caught) => self.failed(caught),
+        }
     }
 
     pub(crate) fn unsupported<T>(&self) -> Result<T, Error> {
