@@ -1,0 +1,16 @@
+[package]
+name = "typol-test-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+opeo.workspace = true
+typol-opeo-test-support.workspace = true
+typol-core.workspace = true
+typol-config.workspace = true
+typol-schema.workspace = true
+typol-semantic.workspace = true
+
+[lints]
+workspace = true

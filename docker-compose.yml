@@ -1,0 +1,82 @@
+x-podman-engine: &podman-engine
+  image: ghcr.io/shaogme/nixos-dockers/podman:${NIXOS_DOCKERS_VERSION:-latest}
+  command: ["podman", "system", "service", "--time=0", "unix:///run/podman/podman.sock"]
+  environment:
+    - PODMAN_SOCKET_GID=${PODMAN_SOCKET_GID:-1000}
+    - PODMAN_SOCKET_MODE=${PODMAN_SOCKET_MODE:-0660}
+  volumes:
+    - podman-socket:/run/podman
+    - podman-data:/var/lib/containers
+    - .:/workspace
+  cgroup: private
+  cap_add:
+    - NET_ADMIN
+    - SYS_ADMIN
+    - SYS_CHROOT
+    - SYS_PTRACE
+    - SYS_RESOURCE
+    - DAC_READ_SEARCH
+    - AUDIT_WRITE
+  security_opt: ["seccomp:unconfined", "systempaths:unconfined", "label=disable"]
+  group_add:
+    - "${PODMAN_SOCKET_GID:-1000}"
+  devices:
+    - /dev/fuse:/dev/fuse
+    - /dev/net/tun:/dev/net/tun
+  healthcheck:
+    test: ["CMD-SHELL", "podman --remote --url unix:///run/podman/podman.sock info >/dev/null 2>&1"]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+
+x-app-base: &app-base
+  image: ghcr.io/shaogme/coding-images/rust-common:latest
+  environment:
+    - DEVBOX_AUTO_INIT=${DEVBOX_AUTO_INIT:-0}
+    - HOST_UID
+    - HOST_GID
+    - PODMAN_SOCKET_GID=${PODMAN_SOCKET_GID:-1000}
+    - CONTAINER_HOST=unix:///run/podman/podman.sock
+    - DOCKER_HOST=unix:///run/podman/podman.sock
+    - CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-0}
+    - CARGO_TARGET_DIR=/data/.cargo/target
+    - SCCACHE_DIR=/data/cache/sccache
+    - SCCACHE_DISABLE=${SCCACHE_DISABLE:-0}
+  # NET_ADMIN and the TAP device are QEMU networking requirements; SYS_PTRACE
+  # is retained for the Rust debugger.
+  cap_add: [NET_ADMIN, SYS_ADMIN, SYS_PTRACE]
+  group_add:
+    - "${PODMAN_SOCKET_GID:-1000}"
+  security_opt: ["seccomp:unconfined", "apparmor:unconfined", "systempaths:unconfined", "label=disable"]
+  devices:
+    - /dev/kvm:/dev/kvm # QEMU KVM acceleration
+    - /dev/net/tun:/dev/net/tun # QEMU TAP networking
+  tty: true
+
+services:
+  podman:
+    <<: *podman-engine
+  dev:
+    <<: *app-base
+    container_name: typol-dev
+    depends_on:
+      podman:
+        condition: service_healthy
+    volumes:
+      - .:/workspace
+      - /workspace/.git
+      - podman-socket:/run/podman
+      - rust-target:/data/.cargo/target
+      - cargo:/data/cargo
+      - cache:/data/cache
+      - devbox-data:/data/devbox
+      - coding-config:/data/coding-config
+
+volumes:
+  podman-socket:
+  podman-data:
+  rust-target:
+  cargo:
+  cache:
+  devbox-data:
+  coding-config:

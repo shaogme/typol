@@ -1,0 +1,50 @@
+// database.tconf
+// 具体配置文件：对应 database.tschem 入口结构体 DatabaseClusterConfig
+// 顶层始终为一个结构体
+// 本文件展示默认值字段省略、枚举、受限环境变量、从库去重与只读路由约束
+// 本例提供 auth 时，校验前需设置必填敏感变量 TYPOL_DB_PASSWORD
+
+{
+    // 主库连接地址：主机名支持受限环境变量注入
+    primary_host: {
+        host: env("TYPOL_DB_HOST", "db-primary.prod.internal"),
+        port: env("TYPOL_DB_PORT", 5432),
+    },
+
+    // 只读从库列表：主机地址互不重复
+    read_replicas: [
+        {
+            host: "db-replica-01.prod.internal",
+            port: 5432,
+        },
+        {
+            host: "db-replica-02.prod.internal",
+            port: 5432,
+        },
+    ],
+    // 从库列表非空，因此必须启用只读路由
+    read_only_routing: true,
+
+    // 数据库驱动类型：前导点语法单元枚举（亦可使用 .DistributedCluster { shard_key: "tenant_id" } 匿名结构体变体）
+    driver: .Postgres,
+
+    // 身份认证信息：隐式 Option 自动提升
+    // password 在 Schema 中标记了 @secret 注解，无论在解析日志、格式化输出还是异常堆栈中，均自动掩码为 ********
+    auth: {
+        username: env("TYPOL_DB_USER", "app_service_user"),
+        // 密码必填；未设置环境变量时不会回退到硬编码凭据
+        password: env("TYPOL_DB_PASSWORD"),
+        database_name: env("TYPOL_DB_NAME", "core_business_db"),
+    },
+
+    // 连接池参数：仅覆盖需要自定义的字段，其余参数（如 idle_timeout_ms, connect_timeout_ms）省略并自动应用 Schema 默认值
+    pool: {
+        max_connections: 200,
+        min_idle_connections: 20,
+    },
+
+    // 默认事务隔离级别字段（default_isolation）在此省略，自动应用 Schema 默认值 .ReadCommitted
+
+    // 慢查询告警阈值（毫秒）：覆盖默认值
+    slow_query_threshold_ms: 500,
+}

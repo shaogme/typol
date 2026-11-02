@@ -1,0 +1,23 @@
+[package]
+name = "typol-std"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+opeo.workspace = true
+typol-core.workspace = true
+typol-policy.workspace = true
+typol-report.workspace = true
+typol-schema.workspace = true
+typol-config.workspace = true
+typol-semantic.workspace = true
+typol-model.workspace = true
+typol-i18n.workspace = true
+u18n.workspace = true
+
+[dev-dependencies]
+typol-opeo-test-support.workspace = true
+
+[lints]
+workspace = true

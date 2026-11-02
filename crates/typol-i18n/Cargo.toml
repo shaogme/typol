@@ -1,0 +1,20 @@
+[package]
+name = "typol-i18n"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+typol-core.workspace = true
+u18n.workspace = true
+
+[build-dependencies]
+u18n-compiler.workspace = true
+
+[lints]
+workspace = true

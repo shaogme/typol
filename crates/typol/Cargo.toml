@@ -1,0 +1,93 @@
+[package]
+name = "typol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+autotests = false
+
+[features]
+default = []
+std = ["dep:typol-std"]
+serde = ["dep:serde", "serde/alloc"]
+config-ir = ["serde"]
+
+[dependencies]
+opeo.workspace = true
+typol-core.workspace = true
+typol-policy.workspace = true
+typol-model.workspace = true
+typol-report.workspace = true
+typol-semantic.workspace = true
+typol-schema.workspace = true
+typol-config.workspace = true
+typol-std = { workspace = true, optional = true }
+typol-i18n.workspace = true
+u18n.workspace = true
+typol-macros.workspace = true
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+typol-test-support.workspace = true
+serde_json.workspace = true
+
+[[test]]
+name = "no_std_consumer"
+path = "tests/no_std_consumer.rs"
+
+[[test]]
+name = "config_ir"
+path = "tests/config_ir.rs"
+required-features = ["std"]
+
+[[test]]
+name = "derive_consumer"
+path = "tests/derive_consumer.rs"
+required-features = ["std"]
+
+[[test]]
+name = "diagnostic_rendering"
+path = "tests/diagnostic_rendering.rs"
+required-features = ["std"]
+
+[[test]]
+name = "fixture_consumer"
+path = "tests/fixture_consumer.rs"
+required-features = ["std"]
+
+[[test]]
+name = "host_faults"
+path = "tests/host_faults.rs"
+required-features = ["std"]
+
+[[test]]
+name = "host_resources"
+path = "tests/host_resources.rs"
+required-features = ["std"]
+
+[[test]]
+name = "loading"
+path = "tests/loading.rs"
+required-features = ["std"]
+
+[[test]]
+name = "manual_contract"
+path = "tests/manual_contract.rs"
+required-features = ["std"]
+
+[[test]]
+name = "public_api"
+path = "tests/public_api.rs"
+required-features = ["std"]
+
+[[test]]
+name = "safe_value_display"
+path = "tests/safe_value_display.rs"
+required-features = ["std"]
+
+[[test]]
+name = "serde_consumer"
+path = "tests/serde_consumer.rs"
+required-features = ["std"]
+
+[lints]
+workspace = true

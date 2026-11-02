@@ -1,0 +1,123 @@
+---
+title: no_std
+description: 在使用 alloc 和显式宿主提供器的 no_std Rust 应用中使用 Typol。
+sidebar:
+  order: 2
+---
+
+Typol facade 默认兼容 `no_std`。它使用 `alloc` 保存拥有型值，因此适用于不使用 Rust 标准库、但仍提供分配器的应用。使用标准库读取文件的应用请从[快速上手](../quickstart/)开始。
+
+## 选择 feature
+
+`typol` crate 没有默认 feature。在 `no_std` 项目的 `Cargo.toml` 中可以明确写出这一选择：
+
+```toml
+[dependencies]
+typol = { version = "0.1", default-features = false }
+```
+
+| Feature | 提供的功能 | 是否可在不启用 `std` 时使用 |
+| --- | --- | --- |
+| *无* | 内存 Schema 加载、文本或字节配置输入、类型绑定和显式 `Environment` 提供器 | 可以 |
+| `serde` | 带 Schema 上下文的 Serde 桥接；Typol 会启用 Serde 的 `alloc` 支持 | 可以 |
+| `std` | 文件和 reader 输入、文件 Schema 加载、进程环境访问和宿主诊断渲染 | 不可以 |
+| `config-ir` | 使用 Serde 和 `alloc` 序列化 Config IR v1 JSON | 可以 |
+
+即使启用 `std` feature，facade 自身仍以 `no_std` 方式编译；`std` 为 API 增加宿主适配器。`no_std` 可执行程序还必须由应用提供平台运行时和全局分配器，Typol 不提供这些组件。
+
+启用 `config-ir` 后，可以在不启用 `std` 时序列化内存中的 `ConfigValue`。返回值是由 `alloc` 支持的拥有型 `Vec<u8>`：
+
+```rust
+#![no_std]
+
+extern crate alloc;
+
+use alloc::vec::Vec;
+use typol::{
+    ConfigIr, ConfigIrError, ConfigIrOptions,
+    core::ConfigValue, semantic::CompiledSchema,
+};
+
+fn export_ir(
+    schema: &CompiledSchema,
+    value: ConfigValue,
+) -> Result<Vec<u8>, ConfigIrError> {
+    ConfigIr::serialize(schema, value, ConfigIrOptions::default())
+}
+```
+
+Schema 和配置值可以来自下文介绍的内存加载 API。目标仍需提供分配器，以存放拥有型值和序列化结果。
+
+## 在内存中读取文本
+
+下面的示例只使用不依赖 `std` 的 API。它编译一个不含导入的 Schema，将其绑定到拥有型 Rust 类型，再解析配置文本：
+
+```rust
+#![no_std]
+
+extern crate alloc;
+
+use alloc::{string::String, vec::Vec};
+use typol::{
+    ConfigInput, EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
+    opeo::{ErrSlot, OResult, Out},
+};
+
+const SCHEMA_TEXT: &str = r#"
+entry struct ServiceConfig {
+    name: string,
+    ports: [u16],
+}
+"#;
+
+const CONFIG_TEXT: &str = r#"{ name: "edge", ports: [8080, 8081] }"#;
+
+#[derive(Typol)]
+struct ServiceConfig {
+    name: String,
+    ports: Vec<u16>,
+}
+
+fn read_config<'slot>(out: Out<'slot, '_, TypolError>) -> OResult<'slot, ServiceConfig> {
+    let loaded = SchemaLoader::new(TypolOptions::default()).compile_text(
+        b"embedded-schema",
+        SCHEMA_TEXT,
+        out.reborrow(),
+    )?;
+    let binding = loaded.bind::<ServiceConfig>(out.reborrow())?;
+    let mut environment = EmptyEnvironment;
+    binding.read(ConfigInput::text(CONFIG_TEXT), &mut environment, out)
+}
+
+fn load_service() -> Result<ServiceConfig, TypolError> {
+    let mut errors = ErrSlot::<TypolError>::new();
+    match errors.try_call(|out| read_config(out)) {
+        Ok(config) => Ok(config),
+        Err(caught) => Err(caught.take()),
+    }
+}
+```
+
+调用方传入 OPEO 错误上下文 `Out`；操作返回 `OResult`。示例中的 `load_service` 使用 `opeo::ErrSlot` 将 `OResult` 转为 core `Result`，并保留 `TypolError`。在 no_std 构建中，`TypolError` 提供阶段信息以及结构化的 Schema、配置、额度或编解码错误。它的 `Display` 文本是简短的阶段摘要；完整的宿主诊断渲染由 `std` 适配器提供。
+
+## 提供输入源和环境访问
+
+内存 API 将宿主访问留给应用处理：
+
+- `SchemaLoader::compile_text` 用于编译不含 `extern mod` 导入的 Schema。若要从内存或打包资源解析导入，请实现 `SchemaResolver` 并将其传给 `SchemaLoader::compile_with_resolver`。由 `SchemaResolver` 决定如何取得源；Typol 在此路径中不会打开文件。
+- `ConfigInput::text` 读取字符串，`ConfigInput::bytes` 通过调用方提供的 `ByteSource` 读取字节。`LoadedSchema::read_value` 和 `BoundSchema::read` 都要求显式传入 `Environment` 提供器。
+- 如果配置不使用环境表达式，可使用 `EmptyEnvironment`。若要读取 `@env` 表达式，请实现 `Environment`，从应用选定的数据源取值。no_std 构建不会自动读取进程环境变量。
+
+启用 `std` 后，同一加载器和读取方法还可使用 `compile_file`、`ConfigInput::file`、`ConfigInput::reader` 和 `ProcessEnvironment`。共有输入与宿主输入的差异见[Config 实现说明](../../specification/config-implementation/)。
+
+## 考虑集合绑定
+
+拥有型字符串和向量使用 `alloc`。内建的 `HashMap<String, T>` 绑定仅在启用 `std` 时可用；Typol 不提供内建 `BTreeMap` 绑定，因为插入树节点时无法报告分配失败。Schema map 仍可解析为 Typol 配置值，但内建映射不支持将其绑定到上述 Rust 集合。选择应用类型时可参考 [Schema 实现说明](../../specification/schema-implementation/)。
+
+库的资源额度会统计 Typol 管理的操作和存储，但不能取代目标平台的分配策略，也不能约束应用及其提供器使用的全部内存。
+
+## 接下来
+
+- 阅读[快速上手](../quickstart/)，了解基于文件的 `std` 工作流。
+- 阅读[进阶教程](../advanced/)，了解导入、自定义校验、Serde 和 Config IR。
+- 查看 [Schema 实现说明](../../specification/schema-implementation/) 和 [Config 实现说明](../../specification/config-implementation/) 了解较底层的 API。

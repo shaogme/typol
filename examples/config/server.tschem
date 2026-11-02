@@ -1,0 +1,163 @@
+// server.tschem
+// 服务端主配置 Schema 定义文件
+// 演示 extern mod、嵌套 mod、各类基础类型、复合类型、约束校验、默认值、受限环境变量注入
+// 拓展支持变体内匿名结构体与 @secret 敏感信息掩码注解
+
+// 显式引入外部 Schema 模块定义
+extern mod common;
+
+// 嵌套模块：服务运行时资源限制与工作线程配置
+mod runtime {
+    // 线程与工作池配置
+    mod worker {
+        struct PoolConfig {
+            // 工作线程数，支持受限环境变量注入与默认值
+            threads: u16 @range(1, 512) @env("TYPOL_WORKER_THREADS") = 32,
+            // 线程优先级，有符号 8 位整数，默认 0
+            priority: i8 @range(-20, 19) = 0,
+            // 任务队列最大堆积容量，默认 10000
+            queue_capacity: u32 @min(100) = 10000,
+        }
+    }
+
+    // 内存与计算资源配额
+    mod limits {
+        struct ResourceQuota {
+            // 最大允许内存占用量（字节），64位无符号整数，允许通过环境变量注入
+            max_memory_bytes: u64 @min(1048576) @env("TYPOL_MAX_MEMORY_BYTES") = 8589934592,
+            // CPU 使用配额百分比，默认 80.0%
+            cpu_percentage: f32 @range(0.1, 100.0) = 80.0,
+            // 双精度浮点采样率，默认 0.25
+            sample_rate: f64 @range(0.0, 1.0) = 0.25,
+            // 性能评测预算（单位：纳秒），双精度浮点数，默认 100000.0
+            perf_budget_ns: f64 = 100000.0,
+        }
+    }
+}
+
+// 嵌套模块：集群拓扑与高可用
+mod cluster {
+    // 节点运行角色：支持单元变体与【变体内匿名结构体】
+    enum NodeRole {
+        // 独立单机模式（无内嵌类型）
+        Standalone,
+        // 主控节点：入口断言要求 peers 为空
+        Leader @assert(
+            root.cluster.peers.is_empty(),
+            "Leader 模式不能配置对等节点"
+        ),
+        // 跟随节点：采用变体内匿名结构体
+        Follower {
+            leader_endpoint: common::network::Endpoint,
+            sync_timeout_ms: u32 @range(100, 30000) = 5000,
+        } @assert(
+            self.leader_endpoint.host != root.listen_endpoint.host,
+            "跟随节点的主节点地址不能与本机监听主机相同"
+        ),
+    }
+
+    // 拓扑节点配置
+    struct Topology {
+        // 当前节点唯一标识符，支持受限环境变量注入
+        node_id: u32 @range(1, 999999) @env("TYPOL_NODE_ID") = 1001,
+        // 节点角色配置，默认独立单机
+        role: NodeRole = .Standalone,
+        // 定长数组：固定 3 个互不重复的仲裁投票节点标识
+        quorum_nodes: [u32; 3] @unique = [1001, 1002, 1003],
+        // 不定长数组：最多 32 个主机唯一的集群对等节点
+        peers: [common::network::Endpoint]
+            @size(min = 0, max = 32)
+            @unique(by = "host"),
+    }
+}
+
+// 身份认证与安全凭证
+mod auth {
+    // 认证凭证类型枚举：支持变体内匿名结构体与 @secret
+    enum Credential {
+        // 禁用认证（无内嵌类型）
+        None,
+        // 简单 API 令牌字符串：敏感值标记 @secret
+        ApiToken(string @secret),
+        // TLS 客户端证书配置
+        ClientCert(common::network::TlsConfig),
+        // OAuth2 鉴权：采用【变体内匿名结构体】，client_secret 标记 @secret 进行日志掩码脱敏
+        OAuth2 {
+            client_id: string @length(1, 64) @env("TYPOL_APP_NAME"),
+            client_secret: string @secret @length(16, 128) @env("TYPOL_CLIENT_SECRET"),
+            token_url: string @regex("^https?://.+"),
+        } @assert(
+            self.client_id == root.app_name && root.security.admin_email.is_some(),
+            "OAuth2 的 client_id 必须与 app_name 一致，且必须配置管理员邮箱"
+        ),
+    }
+
+    struct SecurityPolicy {
+        // 认证模式，默认无认证
+        credential: Credential = .None,
+        // 定长数组：固定 16 字节密钥，标记 @secret 避免日志打印时泄露
+        pre_shared_key: [u8; 16] @secret,
+        // 管理员联系邮箱：使用语义化 Email 类型并授权环境变量注入
+        admin_email: option<common::network::Email> @env("TYPOL_ADMIN_EMAIL"),
+        // 备用联系电话（可选类型）
+        backup_phone: option<string>,
+        // 访问白名单 CIDR 列表：只接受 IPv4 网段
+        ip_whitelist: [common::network::Cidr] @size(min = 1, max = 64)
+            @all(item != "0.0.0.0/0", "访问白名单不能开放整个 IPv4 地址空间"),
+    }
+}
+
+// 演示全范围整数与浮点数基准结构体
+mod metrics {
+    struct BenchmarkStats {
+        // 有符号整数家族
+        signed_8: i8 = -128,
+        signed_16: i16 = -32768,
+        signed_32: i32 = -2147483648,
+        signed_64: i64 = -9223372036854775808,
+        signed_128: i128 = -170141183460469231731687303715884105728,
+        // 无符号整数家族
+        unsigned_8: u8 = 255,
+        unsigned_16: u16 = 65535,
+        unsigned_32: u32 = 4294967295,
+        unsigned_64: u64 = 18446744073709551615,
+        unsigned_128: u128 = 340282366920938463463374607431768211455,
+        // 浮点数类型
+        float_32: f32 = 3.1415927,
+        float_64: f64 = 2.718281828459045,
+    }
+}
+
+// Schema 显式指定的唯一入口结构体
+entry struct ServerConfig {
+    // 服务名称，支持受限环境变量与默认值
+    app_name: string @length(3, 32) @regex("^[a-z][a-z0-9_-]+$") @env("TYPOL_APP_NAME") = "gateway-core",
+    // 主监听网络端点（引用外部 schema 的网络结构体）
+    listen_endpoint: common::network::Endpoint,
+    // 网络传输协议（引用外部 schema 的枚举）
+    protocol: common::network::Protocol,
+    // 日志系统配置（引用外部 schema 的结构体）
+    logging: common::logging::LogConfig,
+    // 存储后端配置（引用外部 schema 的枚举，包含匿名结构体变体）
+    storage: common::storage::StorageEngine,
+    // 运行时工作线程配置（引用嵌套模块结构体）
+    worker_pool: runtime::worker::PoolConfig,
+    // 运行时资源限制配额（引用嵌套模块结构体）
+    resource_limits: runtime::limits::ResourceQuota,
+    // 集群拓扑配置
+    cluster: cluster::Topology,
+    // 安全控制策略
+    security: auth::SecurityPolicy,
+    // 性能指标与数字精度基准
+    benchmark: metrics::BenchmarkStats,
+    // 可选的备用服务描述文本
+    description: option<string>,
+}
+@assert(
+    !self.cluster.peers.any(|peer| peer.host == self.listen_endpoint.host),
+    "集群对等节点不能使用本机监听主机"
+)
+@assert(
+    !self.storage.is_variant("S3") || self.protocol.is_variant("Tls"),
+    "S3 存储必须使用 TLS 传输"
+)

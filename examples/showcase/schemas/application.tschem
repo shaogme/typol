@@ -1,0 +1,48 @@
+// 根 Schema 展示类型别名、枚举载荷、容器约束、默认值与完整值断言。
+// network 模块由同目录的 Schema 文件提供。
+extern mod network;
+
+// 服务标识同时满足长度和命名格式要求。
+type ServiceName = string @length(3, 32) @regex("^[a-z][a-z0-9-]+$");
+
+// 本地存储可使用无载荷或单字符串载荷，对象存储使用匿名结构体载荷。
+enum Storage {
+    Memory,
+    Local(string @length(1, 128)),
+    ObjectStore {
+        bucket: string @length(3, 63) @regex("^[a-z0-9.-]+$"),
+        access_token: string @secret @length(16, 256) @env("SHOWCASE_STORAGE_TOKEN"),
+        region: string @length(2, 32) = "us-east-1",
+    },
+}
+
+// 线程数上下界在结构体实例完成后一起检查。
+struct WorkerPool {
+    min_threads: u16 @range(1, 256) = 2,
+    max_threads: u16 @range(1, 256) = 8,
+} @assert(self.min_threads <= self.max_threads, "线程下界不能大于线程上界")
+
+// 重试间隔使用定长数组，并限制所有间隔的总和。
+struct RetryPolicy {
+    attempts: u8 @range(0, 10) = 3,
+    backoff_ms: [u32; 3] @sum(min = 1, max = 60000) = [0, 100, 500],
+    multiplier: f64 @range(1.0, 10.0) = 2.0,
+}
+
+// entry 声明唯一的根对象；省略项采用默认值或 option 的空值。
+entry struct ShowcaseConfig {
+    service_name: ServiceName @env("SHOWCASE_SERVICE_NAME") = "typol-demo",
+    endpoint: network::Endpoint,
+    protocol: network::Protocol = .Http,
+    storage: Storage = .Memory,
+    worker_pool: WorkerPool = {},
+    retry: RetryPolicy = {},
+    labels: map<string, string> @size(min = 0, max = 16) = {},
+    peers: [network::Endpoint] @size(min = 0, max = 8) @unique(by = "host"),
+    features: [string] @size(min = 1, max = 8) @unique,
+    optional_note: option<string>,
+}
+@assert(
+    !self.peers.any(|peer| peer.host == self.endpoint.host),
+    "对等节点不能与本机使用相同主机名"
+)

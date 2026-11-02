@@ -1,0 +1,19 @@
+[package]
+name = "typol-syntax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+opeo.workspace = true
+typol-core.workspace = true
+typol-i18n.workspace = true
+u18n.workspace = true
+typol-model.workspace = true
+typol-policy.workspace = true
+
+[dev-dependencies]
+typol-test-support = { path = "../typol-test-support" }
+
+[lints]
+workspace = true

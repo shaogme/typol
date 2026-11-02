@@ -1,0 +1,89 @@
+// all_types.tconf
+// 具体配置文件：对应 all_types.tschem 入口结构体 AllTypesConfig
+// 顶层始终为一个结构体，所有字段均遵循强类型与约束校验
+// 本文件展示枚举、字典、数组聚合约束、@secret 掩码、隐式 Option、默认值与受限环境变量
+// 校验本例前需设置必填敏感变量 TYPOL_NOTIFY_TOKEN；可选变量 TYPOL_SECRET_TOKEN 可省略
+
+{
+    // 整数套件实例化：演示环境变量注入与强类型约束
+    integers: {
+        val_i8: 120,
+        val_i16: -32000,
+        // 从受限环境变量注入 i32，并校验 @min(-100000) @max(100000) 约束
+        val_i32: env("TYPOL_SAMPLE_I32", 98765),
+        val_i64: -922337203685477580,
+        val_i128: 1701411834604692317316873037158841057,
+
+        val_u8: 240,
+        // 从受限环境变量注入 u16
+        val_u16: env("TYPOL_SAMPLE_U16", 60000),
+        val_u32: 3000000,
+        val_u64: 1844674407370955160,
+        val_u128: 34028236692093846346337460743176821145,
+    },
+
+    // 浮点数套件实例化
+    floats: {
+        val_f32: 0.85,
+        // 从环境变量注入浮点数
+        val_f64: env("TYPOL_SAMPLE_F64", -78.125),
+    },
+
+    // 文本与布尔值套件实例化
+    texts: {
+        // plain_text 字段在此省略，直接沿用 Schema 默认值 "default-text"
+        bounded_text: "Standard Production Profile",
+        // 从环境变量注入 slug 并校验正则约束
+        slug: env("TYPOL_SAMPLE_SLUG", "eu-central-cluster-01"),
+        contact_email: "devops-lead@cloud.example.org",
+        // 从环境变量注入布尔值，提供默认回退 true
+        is_active: env("TYPOL_SAMPLE_ACTIVE", true),
+    },
+
+    // 复合容器套件实例化
+    collections: {
+        // 定长数组：严格包含 4 个 u8 元素
+        fixed_ipv4_bytes: [192, 168, 1, 254],
+        // fixed_pair 省略，自动应用 Schema 默认值 ["primary", "secondary"]
+        // 不定长数组：元素总数为 1 至 20、元素非负且总和不超过 500
+        dynamic_scores: [99.5, 87.0, 92.3, 76.8],
+        // 不定长数组：结构体动态序列
+        dynamic_tags: [
+            {
+                id: 1,
+                name: "production",
+                labels: {"tier": "production"},
+            },
+            {
+                id: 2,
+                name: "critical-tier",
+                labels: {"tier": "critical"},
+            },
+        ],
+        // 隐式 Option 自动提升：直接赋整数值
+        optional_int: -123456789,
+        // 可选敏感令牌：变量缺失时得到 none，不使用硬编码回退值
+        optional_token: env("TYPOL_SECRET_TOKEN"),
+        // 隐式 Option 自动提升：直接赋结构体字面量
+        optional_tag: {
+            id: 10,
+            name: "observability",
+        },
+        // 显式 none 表示关闭该可选功能
+        disabled_feature: none,
+    },
+
+    // 枚举实例化：使用【变体内匿名结构体】 .CustomHttp { ... } 语法
+    notification: .CustomHttp {
+        endpoint: "https://alerts.monitor.internal/hooks/v1/dispatch",
+        // bearer_token 是必填敏感令牌；Schema 标记 @secret，且没有硬编码回退值
+        bearer_token: env("TYPOL_NOTIFY_TOKEN"),
+        retry_limit: 5,
+    },
+
+    // 深度嵌套模块中的结构体实例化：字段省略演示
+    meta: {
+        key: "schema.author",
+        // value 省略，应用 Schema 默认值 "true"
+    },
+}

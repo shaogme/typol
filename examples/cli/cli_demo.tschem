@@ -1,0 +1,21 @@
+extern mod common;
+
+enum Access {
+    Anonymous,
+    ApiToken(string @secret),
+    Proxy {
+        endpoint: common::network::Endpoint,
+        retries: u8 = 3,
+    },
+}
+
+entry struct CliDemo {
+    endpoint: common::network::Endpoint,
+    access_unit: Access = .Anonymous,
+    access_single: Access = .ApiToken("fixture-token"),
+    access_struct: Access,
+    labels: map<string, string>,
+    attempts: [u32; 2],
+    comment: option<string>,
+    api_key: string @secret @length(16, 64) @env("TYPOL_CLI_DEMO_KEY") = "demo-secret-value",
+}

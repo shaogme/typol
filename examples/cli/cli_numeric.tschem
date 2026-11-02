@@ -1,0 +1,21 @@
+mod left {
+    struct Item {
+        value: i8,
+    }
+}
+
+mod right {
+    struct Item {
+        value: i8,
+    }
+}
+
+entry struct NumericConfig {
+    left: left::Item,
+    right: right::Item,
+    signed_min: i128,
+    unsigned_max: u128,
+    negative_zero_f32: f32,
+    negative_zero_f64: f64,
+    unicode_text: string,
+}

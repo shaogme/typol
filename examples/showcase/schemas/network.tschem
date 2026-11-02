@@ -1,0 +1,25 @@
+// 网络 Schema 由根文件通过 extern mod network 引入。
+mod address {
+    // 别名集中表达主机名与端口的语义约束。
+    type Host = string @host;
+    type Port = u16 @range(1, 65535);
+}
+
+// 环境变量只会在配置显式使用 env(...) 时读取。
+struct Endpoint {
+    host: address::Host @env("SHOWCASE_HOST") = "127.0.0.1",
+    port: address::Port @env("SHOWCASE_PORT") = 8080,
+}
+
+// HTTPS 变体使用单载荷结构体；私钥在诊断中按敏感值处理。
+struct TlsOptions {
+    certificate: string @length(1, 256),
+    private_key: string @secret @length(16, 256) @env("SHOWCASE_PRIVATE_KEY"),
+    verify_peer: bool = true,
+}
+
+// 协议枚举覆盖无载荷与单载荷两种形态。
+enum Protocol {
+    Http,
+    Https(TlsOptions),
+}

@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'typol-cli-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag Name'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.create.outputs.tag }}
+    steps:
+      - uses: actions/checkout@main
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+
+      - name: Create GitHub release
+        id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$RELEASE_TAG" =~ ^typol-cli-v[0-9].* ]]; then
+            echo "Expected a tag in the form typol-cli-v<version>." >&2
+            exit 1
+          fi
+
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --generate-notes \
+              --verify-tag
+          fi
+
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+  upload-assets:
+    needs: create-release
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@main
+        with:
+          ref: ${{ needs.create-release.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build binary
+        run: cargo build --locked --release --package typol-cli --target "$TARGET"
+        shell: bash
+
+      - name: Package and upload Unix archive
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+
+          version="${RELEASE_TAG#typol-cli-v}"
+          archive_dir="typol-cli-${TARGET}-v${version}"
+          mkdir -p "$archive_dir"
+          cp "target/${TARGET}/release/typol" "$archive_dir/"
+          tar -czf "${archive_dir}.tar.gz" "$archive_dir"
+          gh release upload "$RELEASE_TAG" "${archive_dir}.tar.gz" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+        shell: bash
+
+      - name: Package and upload Windows archive
+        if: runner.os == 'Windows'
+        run: |
+          if (-not $env:RELEASE_TAG.StartsWith('typol-cli-v')) {
+            throw 'Expected a tag in the form typol-cli-v<version>.'
+          }
+
+          $version = $env:RELEASE_TAG.Substring('typol-cli-v'.Length)
+          $archiveDir = "typol-cli-$($env:TARGET)-v$version"
+          $archivePath = "$archiveDir.zip"
+          New-Item -ItemType Directory -Path $archiveDir -Force | Out-Null
+          Copy-Item "target/$($env:TARGET)/release/typol.exe" "$archiveDir/typol.exe"
+          Compress-Archive -Path $archiveDir -DestinationPath $archivePath -Force
+          gh release upload $env:RELEASE_TAG $archivePath `
+            --repo $env:GITHUB_REPOSITORY `
+            --clobber
+        shell: pwsh
+
+  publish-checksums:
+    needs:
+      - create-release
+      - upload-assets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
+    steps:
+      - name: Generate and upload SHA256SUMS
+        run: |
+          set -euo pipefail
+
+          mkdir release-assets
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'typol-cli-*' \
+            --dir release-assets
+          (
+            cd release-assets
+            LC_ALL=C sha256sum --binary typol-cli-* > SHA256SUMS
+          )
+          gh release upload "$RELEASE_TAG" release-assets/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+        shell: bash

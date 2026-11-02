@@ -1,0 +1,13 @@
+[package]
+name = "typol-report"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+typol-core.workspace = true
+typol-i18n.workspace = true
+u18n.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,64 @@
+[workspace]
+members = [
+    "crates/typol-core",
+    "crates/typol-model",
+    "crates/typol-policy",
+    "crates/typol-report",
+    "crates/typol-syntax",
+    "crates/typol-regex",
+    "crates/typol-semantic",
+    "crates/typol-schema",
+    "crates/typol-config",
+    "crates/typol-opeo-test-support",
+    "crates/typol-test-support",
+    "crates/typol-std",
+    "crates/typol",
+    "crates/typol-i18n",
+    "crates/typol-cli",
+    "crates/typol-macros",
+    "examples/showcase",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+typol-core = { path = "crates/typol-core", version = "0.1.0" }
+typol-model = { path = "crates/typol-model", version = "0.1.0" }
+typol-policy = { path = "crates/typol-policy", version = "0.1.0" }
+typol-report = { path = "crates/typol-report", version = "0.1.0" }
+typol-syntax = { path = "crates/typol-syntax", version = "0.1.0" }
+typol-regex = { path = "crates/typol-regex", version = "0.1.0" }
+typol-semantic = { path = "crates/typol-semantic", version = "0.1.0" }
+typol-schema = { path = "crates/typol-schema", version = "0.1.0" }
+typol-config = { path = "crates/typol-config", version = "0.1.0" }
+typol-opeo-test-support = { path = "crates/typol-opeo-test-support", version = "0.1.0" }
+typol-test-support = { path = "crates/typol-test-support", version = "0.1.0" }
+typol-std = { path = "crates/typol-std", version = "0.1.0" }
+typol = { path = "crates/typol", version = "0.1.0" }
+typol-i18n = { path = "crates/typol-i18n", version = "0.1.0", default-features = false }
+typol-macros = { path = "crates/typol-macros", version = "0.1.0" }
+u18n = "=0.3.0"
+u18n-compiler = "=0.3.0"
+syn = { version = "=2.0.106", default-features = false, features = ["derive", "parsing", "printing", "proc-macro"] }
+quote = { version = "=1.0.40", default-features = false, features = ["proc-macro"] }
+proc-macro2 = { version = "=1.0.101", default-features = false, features = ["proc-macro"] }
+serde = { version = "=1.0.228", default-features = false, features = ["alloc"] }
+serde_json = { version = "=1.0.149", default-features = false, features = ["alloc"] }
+opeo = "1.0.0"
+
+[workspace.lints.clippy]
+# 将常见的显式 panic 操作设为编译警告或拒绝（deny/warn）
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+panic_in_result_fn = "warn"
+
+# 数组与切片索引越界检查（较严格，如果大量使用索引可能会很啰嗦）
+indexing_slicing = "warn"

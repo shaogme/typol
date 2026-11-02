@@ -1,0 +1,141 @@
+// all_types.tschem
+// Typol 语言全特性全景定义 Schema
+// 展示 10 种整数类型、f32、f64、string、bool
+// 结构体、枚举（单元变体、单载荷变体与变体内匿名结构体）、option<T>、数组和 map<string, T>
+// 嵌套模块、字段默认值、环境变量、敏感值、语义类型以及 size、unique、all、sum 等集合约束
+
+/*
+ * 多行注释示例：
+ * Typol 是一门强类型的配置定义与实例化语言。
+ * 此 Schema 涵盖了 Typol 规范支持的全部语言构造。
+ */
+
+// 嵌套模块层次一
+mod foundation {
+    // 基础整数定义：支持默认值与受限环境变量注入
+    struct IntegerSuite {
+        // 有符号整数家族
+        val_i8: i8 @range(-128, 127) = 0,
+        val_i16: i16 @range(-32768, 32767) = 0,
+        val_i32: i32 @min(-100000) @max(100000) @env("TYPOL_SAMPLE_I32") = 1000,
+        val_i64: i64 = 0,
+        val_i128: i128 = 0,
+
+        // 无符号整数家族
+        val_u8: u8 @range(0, 255) = 1,
+        val_u16: u16 @range(1, 65535) @env("TYPOL_SAMPLE_U16") = 8080,
+        val_u32: u32 @min(1000) = 1000,
+        val_u64: u64 = 0,
+        val_u128: u128 = 0,
+    }
+
+    // 浮点数家族定义：支持默认值
+    struct FloatSuite {
+        // 32 位单精度浮点数
+        val_f32: f32 @range(0.0, 1.0) = 0.5,
+        // 64 位双精度浮点数
+        val_f64: f64 @min(-100.0) @max(100.0) @env("TYPOL_SAMPLE_F64") = 0.0,
+    }
+
+    // 文本与布尔值定义：支持默认值与受限环境变量注入
+    struct TextAndFlagSuite {
+        // 普通字符串，提供默认值
+        plain_text: string = "default-text",
+        // 带长度约束的字符串
+        bounded_text: string @length(5, 50) = "Standard Profile",
+        // 带正则表达式校验的标识符字符串
+        slug: string @regex("^[a-z0-9]+(-[a-z0-9]+)*$") @env("TYPOL_SAMPLE_SLUG") = "default-slug",
+        // 邮箱格式校验字符串
+        contact_email: string @email = "admin@example.org",
+        // 布尔标记，支持环境变量动态控制，默认开启
+        is_active: bool @env("TYPOL_SAMPLE_ACTIVE") = true,
+    }
+}
+
+// 嵌套模块层次二：复合容器与可选类型
+mod container {
+    // 数组内部元素结构体
+    struct TagItem {
+        id: u32,
+        name: string @length(1, 32),
+        labels: map<string, string>
+            @size(min = 0, max = 8)
+            @all(value != "", "标签值不能为空") = {},
+    }
+
+    // 各种数组与可选类型集合
+    struct CollectionSuite {
+        // 定长数组：必须严格包含 4 个元素，提供默认 IP 字节
+        fixed_ipv4_bytes: [u8; 4] = [127, 0, 0, 1],
+        // 定长数组：必须严格包含 2 个字符串
+        fixed_pair: [string; 2] = ["primary", "secondary"],
+        // 不定长数组：校验元素数量、非负条件与总分上限
+        dynamic_scores: [f64]
+            @size(min = 1, max = 20)
+            @all(item >= 0.0, "分数不能为负数")
+            @sum(max = 500.0),
+        // 不定长数组：按 id 保证结构体元素唯一
+        dynamic_tags: [TagItem] @unique(by = "id"),
+        // 可选基础类型：支持隐式提升为 some
+        optional_int: option<i64>,
+        // 可选字符串类型：授权指定环境变量注入，并按长度约束与 @secret 处理
+        optional_token: option<string> @secret @length(16, 64) @env("TYPOL_SECRET_TOKEN"),
+        // 可选结构体类型：支持直接提供结构体字面量隐式自动提升
+        optional_tag: option<TagItem>,
+        // 可选字段：具体配置显式写 none 时得到空值，也可省略且无默认值
+        disabled_feature: option<string>,
+    }
+}
+
+// 嵌套模块层次三：枚举定义
+mod variants {
+    // 状态机通知目标（具名独立结构体）
+    struct WebhookTarget {
+        url: string @regex("^https?://.+"),
+        timeout_ms: u32 @range(50, 10000) = 3000,
+    }
+
+    // 枚举定义：展示无内嵌类型、单内嵌类型与【变体内匿名结构体】
+    enum NotificationChannel {
+        // 无内嵌类型变体：静默不通知
+        Mute,
+        // 无内嵌类型变体：控制台标准输出
+        Console,
+        // 内嵌单类型变体：邮件地址字符串
+        Email(string),
+        // 内嵌单类型变体：WebHook配置结构体
+        Webhook(WebhookTarget),
+        // 【变体内匿名结构体】：自定义 HTTP 回调，包含 @secret 掩码字段
+        CustomHttp {
+            endpoint: string @regex("^https?://.+"),
+            bearer_token: string @secret @env("TYPOL_NOTIFY_TOKEN"),
+            retry_limit: u8 @range(1, 10) = 3,
+        },
+    }
+
+    // 深度嵌套模块：多层 mod 隔离
+    mod deep_mod {
+        mod leaf_mod {
+            struct MetaTag {
+                key: string = "system.default",
+                value: string = "true",
+            }
+        }
+    }
+}
+
+// 显式声明该 Schema 的唯一入口结构体
+entry struct AllTypesConfig {
+    // 整数集合
+    integers: foundation::IntegerSuite,
+    // 浮点数集合
+    floats: foundation::FloatSuite,
+    // 文本与布尔集合
+    texts: foundation::TextAndFlagSuite,
+    // 数组与可选类型集合
+    collections: container::CollectionSuite,
+    // 枚举与多态配置（支持变体内匿名结构体与前导点语法）
+    notification: variants::NotificationChannel = .Console,
+    // 深度嵌套模块的类型引用
+    meta: variants::deep_mod::leaf_mod::MetaTag,
+}

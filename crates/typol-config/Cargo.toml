@@ -1,0 +1,81 @@
+[package]
+name = "typol-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+autotests = false
+
+[dependencies]
+typol-core.workspace = true
+typol-i18n.workspace = true
+u18n.workspace = true
+typol-model.workspace = true
+typol-policy.workspace = true
+typol-report.workspace = true
+typol-syntax.workspace = true
+typol-semantic.workspace = true
+typol-regex.workspace = true
+opeo.workspace = true
+
+[dev-dependencies]
+typol-test-support.workspace = true
+typol-schema.workspace = true
+
+[[test]]
+name = "config_api"
+path = "tests/config_api.rs"
+
+[[test]]
+name = "config_fixtures"
+path = "tests/config_fixtures.rs"
+
+[[test]]
+name = "diagnostic_contracts"
+path = "tests/diagnostic_contracts.rs"
+
+[[test]]
+name = "diagnostic_display_allocations"
+path = "tests/diagnostic_display_allocations.rs"
+
+[[test]]
+name = "execution_stack"
+path = "tests/execution_stack.rs"
+
+[[test]]
+name = "parser_stack"
+path = "tests/parser_stack.rs"
+
+[[test]]
+name = "recovery_mutations"
+path = "tests/recovery_mutations.rs"
+
+[[test]]
+name = "resource_limits"
+path = "tests/resource_limits.rs"
+
+[[test]]
+name = "scaling_regressions"
+path = "examples/scaling_regressions/test.rs"
+
+[[test]]
+name = "shared_execution"
+path = "tests/shared_execution.rs"
+
+[[test]]
+name = "source_excerpts"
+path = "tests/source_excerpts.rs"
+
+[[test]]
+name = "streaming"
+path = "tests/streaming.rs"
+
+[[test]]
+name = "value_validation_stack"
+path = "tests/value_validation_stack.rs"
+
+[[test]]
+name = "allocation_failures"
+path = "tests/allocation_failures.rs"
+
+[lints]
+workspace = true

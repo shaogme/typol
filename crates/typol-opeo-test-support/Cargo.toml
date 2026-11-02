@@ -1,0 +1,11 @@
+[package]
+name = "typol-opeo-test-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+opeo.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,94 @@
+{
+  "format": "typol-config-ir",
+  "version": 1,
+  "root_type": "CliDemo",
+  "value": {
+    "type": { "kind": "struct", "name": "CliDemo" },
+    "fields": [
+      {
+        "name": "endpoint",
+        "value": {
+          "type": { "kind": "struct", "name": "common::network::Endpoint" },
+          "fields": [
+            { "name": "host", "value": { "type": { "kind": "string" }, "value": "demo.internal" } },
+            { "name": "port", "value": { "type": { "kind": "u16" }, "value": "8443" } }
+          ]
+        }
+      },
+      {
+        "name": "access_unit",
+        "value": {
+          "type": { "kind": "enum", "name": "Access" },
+          "variant": "Anonymous",
+          "payload": { "kind": "unit" }
+        }
+      },
+      {
+        "name": "access_single",
+        "value": {
+          "type": { "kind": "enum", "name": "Access" },
+          "variant": "ApiToken",
+          "secret": true,
+          "payload": {
+            "kind": "single",
+            "value": { "type": { "kind": "string" }, "value": "fixture-token" }
+          }
+        }
+      },
+      {
+        "name": "access_struct",
+        "value": {
+          "type": { "kind": "enum", "name": "Access" },
+          "variant": "Proxy",
+          "payload": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "endpoint",
+                "value": {
+                  "type": { "kind": "struct", "name": "common::network::Endpoint" },
+                  "fields": [
+                    { "name": "host", "value": { "type": { "kind": "string" }, "value": "upstream.internal" } },
+                    { "name": "port", "value": { "type": { "kind": "u16" }, "value": "9443" } }
+                  ]
+                }
+              },
+              { "name": "retries", "value": { "type": { "kind": "u8" }, "value": "3" } }
+            ]
+          }
+        }
+      },
+      {
+        "name": "labels",
+        "value": {
+          "type": { "kind": "map", "value": { "kind": "string" } },
+          "entries": [
+            { "key": "alpha", "value": { "type": { "kind": "string" }, "value": "first" } },
+            { "key": "zeta", "value": { "type": { "kind": "string" }, "value": "last" } }
+          ]
+        }
+      },
+      {
+        "name": "attempts",
+        "value": {
+          "type": { "kind": "array", "element": { "kind": "u32" }, "length": 2 },
+          "items": [
+            { "type": { "kind": "u32" }, "value": "1" },
+            { "type": { "kind": "u32" }, "value": "2" }
+          ]
+        }
+      },
+      {
+        "name": "comment",
+        "value": {
+          "type": { "kind": "option", "inner": { "kind": "string" } },
+          "value": null
+        }
+      },
+      {
+        "name": "api_key",
+        "value": { "type": { "kind": "string" }, "value": "demo-secret-value", "secret": true }
+      }
+    ]
+  }
+}

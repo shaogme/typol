@@ -1,0 +1,27 @@
+[package]
+name = "typol-schema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+opeo.workspace = true
+typol-core.workspace = true
+typol-i18n.workspace = true
+u18n.workspace = true
+typol-model.workspace = true
+typol-policy.workspace = true
+typol-report.workspace = true
+typol-syntax.workspace = true
+typol-regex.workspace = true
+typol-semantic = { workspace = true, features = ["compiler"] }
+
+[dev-dependencies]
+typol-test-support.workspace = true
+
+[[test]]
+name = "allocation_harness"
+path = "src/allocation_harness.rs"
+
+[lints]
+workspace = true

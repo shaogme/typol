@@ -1,0 +1,19 @@
+{
+    endpoint: {
+        host: "demo.internal",
+        port: 8443,
+    },
+    access_struct: .Proxy {
+        endpoint: {
+            host: "upstream.internal",
+            port: 9443,
+        },
+    },
+    labels: {
+        "zeta": "last",
+        "alpha": "first",
+    },
+    attempts: [1, 2],
+    comment: none,
+    api_key: env("TYPOL_CLI_DEMO_KEY", "short-secret"),
+}

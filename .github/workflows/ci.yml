@@ -1,0 +1,69 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  config-acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@main
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - uses: shaogme/cargo-cop@main
+      - run: cargo cop --all-targets --all-features --workspace
+      - run: cargo test --locked --workspace
+      - run: cargo test --locked --workspace --all-features
+
+  nix-acceptance:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-26.04-arm
+          - system: aarch64-darwin
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@main
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix eval --raw ".#packages.${{ matrix.system }}.typol-cli.drvPath" > /dev/null
+      - run: nix fmt -- --check flake.nix default.nix shell.nix nix/package.nix nix/lib/typol-config-ir.nix nix/tests/typol-config-ir.nix npins/default.nix
+      - run: nix flake check
+      - run: nix build .#typol-cli
+      - run: nix run .#typol-cli -- --help
+      - run: nix run .#typol-cli -- schema check examples/cli/cli_demo.tschem
+      - run: nix run .#typol-cli -- config check --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf
+      - name: 验证 Flake IR 导出
+        run: |
+          nix run .#typol-cli -- config export-ir --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf > "$RUNNER_TEMP/typol-ir.json"
+          python -m json.tool "$RUNNER_TEMP/typol-ir.json" > /dev/null
+      - name: 验证传统入口
+        run: |
+          package_out="$(nix-build -A typol-cli --no-out-link)"
+          "$package_out/bin/typol" --help
+          "$package_out/bin/typol" schema check examples/cli/cli_demo.tschem
+          "$package_out/bin/typol" config check --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf
+          "$package_out/bin/typol" config export-ir --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf > "$RUNNER_TEMP/typol-legacy-ir.json"
+          python -m json.tool "$RUNNER_TEMP/typol-legacy-ir.json" > /dev/null
+
+  ci-success:
+    name: CI Success
+    if: always()
+    needs: [config-acceptance, nix-acceptance]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all CI jobs succeeded
+        env:
+          CONFIG_RESULT: ${{ needs.config-acceptance.result }}
+          NIX_RESULT: ${{ needs.nix-acceptance.result }}
+        run: |
+          test "$CONFIG_RESULT" = "success"
+          test "$NIX_RESULT" = "success"

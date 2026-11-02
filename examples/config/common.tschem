@@ -1,0 +1,120 @@
+// common.tschem
+// 通用基础设施与网络模型的 Schema 定义文件
+// 提供可复用 Host、Port、Email、Cidr 精化类型，以及网络、日志、存储和安全模型
+
+// 网络相关通用类型定义
+mod network {
+    // 常用语义类型，约束由类型别名集中维护
+    type Host = string @host;
+    type Port = u16 @range(1, 65535);
+    type Email = string @email;
+    type Cidr = string @cidr(v4_only = true);
+
+    // 主机端点配置
+    struct Endpoint {
+        // 主机名或IP地址，支持默认值并授权受限环境变量注入
+        host: Host @env("TYPOL_NET_HOST") = "127.0.0.1",
+        // 端口号，范围限定在标准有效端口内，提供默认值 8080
+        port: Port @env("TYPOL_NET_PORT") = 8080,
+    }
+
+    // 网络协议枚举：支持无类型变体与内嵌单类型变体
+    enum Protocol {
+        // 普通 TCP 协议（无内嵌类型）
+        Tcp,
+        // 普通 UDP 协议（无内嵌类型）
+        Udp,
+        // 加密传输协议（内嵌单个 TlsConfig 结构体）
+        Tls(TlsConfig),
+    }
+
+    // TLS 证书与握手配置
+    struct TlsConfig {
+        // 证书文件路径
+        cert_path: string @length(1, 256),
+        // 私钥文件路径，敏感凭据标记 @secret，在日志与堆栈中自动掩码脱敏
+        key_path: string @length(1, 256) @secret @env("TYPOL_TLS_KEY_PATH"),
+        // 是否跳过证书链安全性校验，提供安全的默认值 false
+        insecure_skip_verify: bool = false,
+    }
+}
+
+// 日志系统配置
+mod logging {
+    // 日志级别枚举（无内嵌类型）
+    enum LogLevel {
+        Trace,
+        Debug,
+        Info,
+        Warn,
+        Error,
+        Fatal,
+    }
+
+    // 日志输出目标枚举（支持无内嵌类型与单内嵌类型）
+    enum OutputSink {
+        // 控制台标准输出
+        Console,
+        // 输出至指定文件路径
+        File(string),
+        // 输出至远程网络接收端
+        Remote(network::Endpoint),
+    }
+
+    // 日志完整配置结构体
+    struct LogConfig {
+        // 当前日志输出级别，默认采用 .Info
+        level: LogLevel = .Info,
+        // 日志输出目标，默认控制台
+        sink: OutputSink = .Console,
+        // 是否启用结构化 JSON 格式，默认开启
+        enable_json: bool = true,
+        // 单个日志文件最大尺寸（单位：MB），提供默认值 512
+        max_size_mb: u32 @range(1, 4096) = 512,
+    }
+}
+
+// 持久化存储定义
+mod storage {
+    // 存储引擎枚举：展示单元变体、单类型内嵌变体与【变体内匿名结构体】
+    enum StorageEngine {
+        // 内存临时存储（无内嵌类型）
+        Memory,
+        // 本地磁盘目录（内嵌单字符串类型）
+        LocalDisk(string),
+        // 云端对象存储：变体内匿名结构体
+        S3 {
+            // 存储桶名称，授权环境变量注入
+            bucket: string @length(3, 63) @regex("^[a-z0-9.-]+$") @env("TYPOL_S3_BUCKET"),
+            // 区域代码，默认 ap-northeast-1
+            region: string @length(2, 32) = "ap-northeast-1",
+            // 自定义接入点URL（可选）
+            endpoint: option<string>,
+        },
+    }
+}
+
+// 嵌套命名空间：安全与证书管理
+mod security {
+    mod crypto {
+        // 密钥衍生参数配置
+        struct CipherSpec {
+            // 算法名称，默认采用 AES-256-GCM
+            algorithm: string @regex("^(AES-128-GCM|AES-256-GCM|CHACHA20-POLY1305)$") = "AES-256-GCM",
+            // 敏感密钥盐值：标记 @secret，日志打印时掩码保护
+            salt: string @secret @length(16, 64) @env("TYPOL_CIPHER_SALT"),
+            // 迭代轮数，默认 100000 轮
+            iterations: u32 @range(1000, 1000000) = 100000,
+        }
+    }
+}
+
+// 可独立加载 common.tschem；被 extern mod 引入时，此 entry 标记不会改变调用方入口
+entry struct CommonMeta {
+    // 基础包语义化版本号
+    version: string @regex("^v[0-9]+\\.[0-9]+\\.[0-9]+$") = "v1.0.0",
+    // 维护者联系邮箱（可选）
+    maintainer: option<network::Email>,
+    // 默认日志配置
+    default_log: logging::LogConfig,
+}

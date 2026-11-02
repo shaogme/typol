@@ -1,0 +1,94 @@
+// database.tschem
+// 关系型数据库与连接池配置 Schema
+// 展示精化类型复用、连接池跨字段断言、从库集合校验和只读路由条件断言
+
+extern mod common;
+
+mod connection {
+    // 数据库网络连接地址
+    struct Address {
+        // 主机名，支持环境变量注入与默认值
+        host: common::network::Host @env("TYPOL_DB_HOST") = "127.0.0.1",
+        // 端口号，默认 PostgreSQL 标准端口 5432
+        port: common::network::Port @env("TYPOL_DB_PORT") = 5432,
+    }
+
+    // 数据库引擎驱动类型：展示单元变体、单类型变体与【变体内匿名结构体】
+    enum DriverType {
+        // SQLite 内嵌单类型：本地数据库文件路径
+        Sqlite(string),
+        // PostgreSQL 远端连接（单元变体）
+        Postgres,
+        // MySQL 远端连接（单元变体）
+        Mysql,
+        // 分布式分片驱动：采用【变体内匿名结构体】
+        DistributedCluster {
+            shard_key: string @regex("^[a-z0-9_]+$"),
+            read_write_splitting: bool = true,
+            max_route_nodes: u16 @range(1, 1024) = 16,
+        },
+    }
+
+    // 认证凭据
+    struct Auth {
+        // 数据库用户名，支持环境变量注入
+        username: string @length(1, 64) @env("TYPOL_DB_USER") = "postgres",
+        // 敏感密码：标记 @secret 注解，在报错堆栈、日志打印与配置格式化输出时严格执行掩码脱敏
+        password: string @secret @length(8, 128) @env("TYPOL_DB_PASSWORD"),
+        // 数据库名称
+        database_name: string @regex("^[a-zA-Z0-9_]+$") @env("TYPOL_DB_NAME") = "app_db",
+    }
+}
+
+mod pool {
+    // 连接池参数控制
+    struct PoolLimits {
+        // 最大连接数，默认 100
+        max_connections: u32 @range(1, 10000) = 100,
+        // 最小空闲连接数，默认 10
+        min_idle_connections: u32 @range(0, 500) = 10,
+        // 空闲连接超时回收时间（单位：毫秒），默认 10 分钟
+        idle_timeout_ms: u64 @min(1000) = 600000,
+        // 连接建立最大超时（单位：毫秒），默认 5000ms
+        connect_timeout_ms: u32 @range(100, 30000) = 5000,
+    }
+
+    @assert(
+        self.min_idle_connections <= self.max_connections,
+        "min_idle_connections 不能大于 max_connections"
+    )
+
+    // 事务隔离级别枚举（纯变体）
+    enum IsolationLevel {
+        ReadUncommitted,
+        ReadCommitted,
+        RepeatableRead,
+        Serializable,
+    }
+}
+
+// 唯一入口结构体定义
+entry struct DatabaseClusterConfig {
+    // 主库连接地址
+    primary_host: connection::Address,
+    // 从库只读节点列表：最多 8 个，主机地址互不重复
+    read_replicas: [connection::Address]
+        @size(min = 0, max = 8)
+        @unique(by = "host") = [],
+    // 存在只读从库时必须启用只读路由
+    read_only_routing: bool = false,
+    // 数据库引擎类型，默认 PostgreSQL
+    driver: connection::DriverType = .Postgres,
+    // 身份认证配置（可选，Sqlite模式下可为 none）
+    auth: option<connection::Auth>,
+    // 连接池配置
+    pool: pool::PoolLimits,
+    // 默认事务隔离级别，默认读已提交
+    default_isolation: pool::IsolationLevel = .ReadCommitted,
+    // 慢查询告警阈值（毫秒），默认 1000ms
+    slow_query_threshold_ms: u32 @range(50, 60000) = 1000,
+}
+@assert(
+    self.read_replicas.is_empty() || self.read_only_routing,
+    "配置只读从库时必须启用 read_only_routing"
+)

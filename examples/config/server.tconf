@@ -1,0 +1,137 @@
+// server.tconf
+// 具体配置文件：对应 server.tschem 入口结构体 ServerConfig
+// 顶层始终为一个完整的结构体
+// 本配置结合语义类型、集合约束、结构体/变体断言、@secret 掩码和受限环境变量
+// 校验本例前需设置必填敏感变量 TYPOL_CLIENT_SECRET
+
+{
+    // 服务基础标识：支持受限环境变量注入，提供回退值
+    app_name: env("TYPOL_APP_NAME", "gateway-core"),
+
+    // 监听网络端点（对应 common::network::Endpoint）
+    listen_endpoint: {
+        // 主机名：支持通过 Endpoint 授权的环境变量 TYPOL_NET_HOST 注入
+        host: env("TYPOL_NET_HOST", "0.0.0.0"),
+        // 端口号：通过 Endpoint 授权的环境变量 TYPOL_NET_PORT 注入，并校验 u16 与 @range 约束
+        port: env("TYPOL_NET_PORT", 8443),
+    },
+
+    // 传输协议：使用前导点语法 .Variant(...)
+    protocol: .Tls({
+        cert_path: "/etc/ssl/certs/gateway.crt",
+        // 私钥路径从安全环境变量注入，该字段在 Schema 中声明了 @secret，输出时将被掩码保护
+        key_path: env("TYPOL_TLS_KEY_PATH", "/etc/ssl/private/gateway.key"),
+        // insecure_skip_verify 字段在此省略，自动使用 Schema 默认值 false
+    }),
+
+    // 日志配置（对应 common::logging::LogConfig）
+    logging: {
+        level: .Info,
+        sink: .Remote({
+            host: "log-collector.internal",
+            port: 5044,
+        }),
+        // enable_json 与 max_size_mb 字段在此省略，直接沿用 Schema 定义的默认值
+    },
+
+    // 存储后端：使用【变体内匿名结构体】 .S3 { ... } 语法
+    storage: .S3 {
+        // 存储桶从环境变量注入
+        bucket: env("TYPOL_S3_BUCKET", "typol-cloud-storage"),
+        // region 省略，使用 Schema 默认值 "ap-northeast-1"
+        // 隐式 Option 自动提升：直接传入字符串
+        endpoint: "https://s3.ap-northeast-1.custom-domain.com",
+    },
+
+    // 运行时工作线程池（对应 runtime::worker::PoolConfig）
+    worker_pool: {
+        // 从环境变量注入工作线程数，自动校验 @range(1, 512) 边界
+        threads: env("TYPOL_WORKER_THREADS", 64),
+        // priority 与 queue_capacity 省略，自动使用 Schema 默认值 (0 与 10000)
+    },
+
+    // 运行时资源限制配额（对应 runtime::limits::ResourceQuota）
+    resource_limits: {
+        // 允许通过环境变量注入最大内存字节数
+        max_memory_bytes: env("TYPOL_MAX_MEMORY_BYTES", 8589934592),
+        cpu_percentage: 80.0,
+        sample_rate: 0.25,
+        // perf_budget_ns 省略，自动应用默认值 100000.0
+    },
+
+    // 集群拓扑配置（对应 cluster::Topology）
+    cluster: {
+        node_id: env("TYPOL_NODE_ID", 1001),
+        // 枚举变体内匿名结构体：跟随节点配置
+        role: .Follower {
+            leader_endpoint: {
+                host: "10.0.0.10",
+                port: 9000,
+            },
+            // sync_timeout_ms 省略，自动沿用 Schema 默认值 5000
+        },
+        // quorum_nodes 省略，自动采用 Schema 默认值 [1001, 1002, 1003]
+        // 不定长数组：集群对等节点端点列表
+        peers: [
+            {
+                host: "10.0.0.11",
+                port: 9000,
+            },
+            {
+                host: "10.0.0.12",
+                port: 9000,
+            },
+            {
+                host: "10.0.0.13",
+                port: 9000,
+            },
+        ],
+    },
+
+    // 认证与安全策略（对应 auth::SecurityPolicy）
+    security: {
+        // 枚举变体内匿名结构体：OAuth2 认证模式，client_secret 在打印时将被自动掩码为 ********
+        credential: .OAuth2 {
+            // 与顶层 app_name 共用变量，满足变体级关联断言
+            client_id: env("TYPOL_APP_NAME", "gateway-core"),
+            // 必填敏感值；变量未设置时配置校验失败
+            client_secret: env("TYPOL_CLIENT_SECRET"),
+            token_url: "https://auth.internal.corp/oauth2/token",
+        },
+        // 定长数组：示例占位密钥 EXAMPLE_ONLY_KEY（16 字节），不可用于真实环境
+        pre_shared_key: [
+            0x45, 0x58, 0x41, 0x4D,
+            0x50, 0x4C, 0x45, 0x5F,
+            0x4F, 0x4E, 0x4C, 0x59,
+            0x5F, 0x4B, 0x45, 0x59,
+        ],
+        // 管理员邮箱从环境变量注入，提升为 option<Email> 并按 @email 校验
+        admin_email: env("TYPOL_ADMIN_EMAIL", "sec-admin@infra.example.com"),
+        // backup_phone 字段在此完全省略，自动推导赋值为 none
+        // 不定长数组：IP 访问白名单
+        ip_whitelist: [
+            "127.0.0.1/32",
+            "10.0.0.0/8",
+            "192.168.1.0/24",
+        ],
+    },
+
+    // 整数与 f32/f64 基准数据：均有默认值，此处显式指定以覆盖
+    benchmark: {
+        signed_8: -128,
+        signed_16: -32768,
+        signed_32: -2147483648,
+        signed_64: -9223372036854775808,
+        signed_128: -170141183460469231731687303715884105728,
+        unsigned_8: 255,
+        unsigned_16: 65535,
+        unsigned_32: 4294967295,
+        unsigned_64: 18446744073709551615,
+        unsigned_128: 340282366920938463463374607431768211455,
+        float_32: 3.1415927,
+        float_64: 2.718281828459045,
+    },
+
+    // 隐式 Option 自动提升：直接赋值字符串
+    description: "生产环境核心反向代理与 API 鉴权网关服务配置",
+}

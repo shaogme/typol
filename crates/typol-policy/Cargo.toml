@@ -1,0 +1,11 @@
+[package]
+name = "typol-policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+typol-core.workspace = true
+
+[lints]
+workspace = true

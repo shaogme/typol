@@ -1,0 +1,21 @@
+[package]
+name = "typol-semantic"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+compiler = []
+
+[dependencies]
+typol-core.workspace = true
+typol-model.workspace = true
+typol-policy.workspace = true
+typol-regex.workspace = true
+opeo.workspace = true
+
+[dev-dependencies]
+typol-test-support.workspace = true
+
+[lints]
+workspace = true

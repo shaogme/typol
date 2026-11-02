@@ -1,0 +1,54 @@
+{
+  "format": "typol-config-ir",
+  "version": 1,
+  "root_type": "NumericConfig",
+  "value": {
+    "type": { "kind": "struct", "name": "NumericConfig" },
+    "fields": [
+      {
+        "name": "left",
+        "value": {
+          "type": { "kind": "struct", "name": "left::Item" },
+          "fields": [
+            { "name": "value", "value": { "type": { "kind": "i8" }, "value": "-128" } }
+          ]
+        }
+      },
+      {
+        "name": "right",
+        "value": {
+          "type": { "kind": "struct", "name": "right::Item" },
+          "fields": [
+            { "name": "value", "value": { "type": { "kind": "i8" }, "value": "127" } }
+          ]
+        }
+      },
+      {
+        "name": "signed_min",
+        "value": {
+          "type": { "kind": "i128" },
+          "value": "-170141183460469231731687303715884105728"
+        }
+      },
+      {
+        "name": "unsigned_max",
+        "value": {
+          "type": { "kind": "u128" },
+          "value": "340282366920938463463374607431768211455"
+        }
+      },
+      {
+        "name": "negative_zero_f32",
+        "value": { "type": { "kind": "f32" }, "value": "-0" }
+      },
+      {
+        "name": "negative_zero_f64",
+        "value": { "type": { "kind": "f64" }, "value": "-0" }
+      },
+      {
+        "name": "unicode_text",
+        "value": { "type": { "kind": "string" }, "value": "界\n😀" }
+      }
+    ]
+  }
+}

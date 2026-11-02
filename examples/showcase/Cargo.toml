@@ -1,0 +1,8 @@
+[package]
+name = "typol-showcase"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+typol = { path = "../../crates/typol", features = ["std"] }
