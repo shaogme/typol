@@ -1,5 +1,5 @@
 name: CI
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 jobs:
   config-acceptance:
     runs-on: ubuntu-latest
@@ -31,6 +31,21 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@main
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Validate generated Release index
+        id: release-index
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s nix -p 'test_*.py'
+          if [[ -f nix/release-assets.json ]]; then
+            python3 nix/release_assets.py validate
+            current="$(python3 nix/release_assets.py has-current-release)"
+          else
+            current=false
+          fi
+          echo "current=$current" >> "$GITHUB_OUTPUT"
       - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
@@ -47,24 +62,58 @@ jobs:
           assert flake["narHash"] == npins["hash"], (flake["narHash"], npins["hash"])
           PY
       - run: nix eval --raw ".#packages.${{ matrix.system }}.typol-cli.drvPath" > /dev/null
-      - run: nix fmt -- --check flake.nix default.nix shell.nix nix/systems.nix nix/assert-supported-system.nix nix/entrypoint.nix nix/package-set.nix nix/dev-shell.nix nix/package.nix nix/lib/typol-config-ir.nix nix/lib/mk-config-ir.nix nix/tests/typol-config-ir.nix nix/tests/config-export.nix nix/tests/entrypoints.nix examples/nix/default.nix npins/default.nix
+      - run: nix fmt -- --check flake.nix default.nix shell.nix nix/systems.nix nix/assert-supported-system.nix nix/entrypoint.nix nix/package-set.nix nix/dev-shell.nix nix/package.nix nix/release-package.nix nix/lib/typol-config-ir.nix nix/lib/mk-config-ir.nix nix/tests/typol-config-ir.nix nix/tests/config-export.nix nix/tests/entrypoints.nix examples/nix/default.nix npins/default.nix
       - run: nix flake check
-      - run: nix build .#typol-cli
-      - run: nix run .#typol-cli -- --help
-      - run: nix run .#typol-cli -- schema check examples/cli/cli_demo.tschem
-      - run: nix run .#typol-cli -- config check --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf
+      - run: nix build .#typol-cli-source
+      - run: nix run .#typol-cli-source -- --help
+      - run: nix run .#typol-cli-source -- schema check examples/cli/cli_demo.tschem
+      - run: nix run .#typol-cli-source -- config check --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf
       - name: 验证 Flake IR 导出
         run: |
-          nix run .#typol-cli -- config export-ir --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf > "$RUNNER_TEMP/typol-ir.json"
+          nix run .#typol-cli-source -- config export-ir --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf > "$RUNNER_TEMP/typol-ir.json"
           python -m json.tool "$RUNNER_TEMP/typol-ir.json" > /dev/null
+      - name: 验证默认发布包
+        if: steps.release-index.outputs.current == 'true'
+        run: |
+          nix build .#typol-cli
+          nix run .#typol-cli -- --help
+          nix run .#typol-cli -- schema check examples/cli/cli_demo.tschem
+          nix run .#typol-cli -- config check --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf
+          nix run .#typol-cli -- config export-ir --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf > "$RUNNER_TEMP/typol-release-ir.json"
+          python -m json.tool "$RUNNER_TEMP/typol-release-ir.json" > /dev/null
+      - name: 验证没有兼容 Release 时默认包明确失败
+        if: steps.release-index.outputs.current != 'true'
+        run: |
+          set +e
+          output="$(nix build .#typol-cli --no-link 2>&1)"
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -F 'No usable Nix Release' <<< "$output"
+          grep -F 'typol-cli-source' <<< "$output"
       - name: 验证传统入口
         run: |
-          package_out="$(nix-build -A typol-cli --no-out-link)"
+          package_out="$(nix-build -A typol-cli-source --no-out-link)"
           "$package_out/bin/typol" --help
           "$package_out/bin/typol" schema check examples/cli/cli_demo.tschem
           "$package_out/bin/typol" config check --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf
           "$package_out/bin/typol" config export-ir --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf > "$RUNNER_TEMP/typol-legacy-ir.json"
           python -m json.tool "$RUNNER_TEMP/typol-legacy-ir.json" > /dev/null
+      - name: 验证传统默认发布包
+        if: steps.release-index.outputs.current == 'true'
+        run: |
+          package_out="$(nix-build -A typol-cli --no-out-link)"
+          "$package_out/bin/typol" --help
+      - name: 验证传统默认包在无兼容 Release 时明确失败
+        if: steps.release-index.outputs.current != 'true'
+        run: |
+          set +e
+          output="$(nix-build -A typol-cli --no-out-link 2>&1)"
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -F 'No usable Nix Release' <<< "$output"
+          grep -F 'typol-cli-source' <<< "$output"
       - name: 验证传统开发 shell
         run: |
           nixpkgs="$(nix eval --raw --impure --expr '(import ./npins).nixpkgs.outPath')"

@@ -12,7 +12,7 @@ let
 in
 builtins.seq supportedSystem (
   rustPlatform.buildRustPackage {
-    pname = "typol-cli";
+    pname = "typol-cli-source";
     inherit version src;
 
     cargoLock.lockFile = ../Cargo.lock;

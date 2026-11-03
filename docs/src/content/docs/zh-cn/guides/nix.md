@@ -3,7 +3,19 @@ title: Nix 集成
 description: 在 Nix derivation 中校验公开配置，并使用纯 Nix helper 消费 Config IR。
 ---
 
-当构建需要校验 Typol 配置，或读取 Config IR 的公开子集时，可以使用 Nix 集成。Flake 与 `default.nix` 入口会导出一致的 `typol-cli`、`lib.typolConfigIr`、`lib.mkConfigIr` 和 overlay。
+当构建需要校验 Typol 配置，或读取 Config IR 的公开子集时，可以使用 Nix 集成。Flake 与 `default.nix` 入口支持 `x86_64-linux`、`aarch64-linux` 和 `aarch64-darwin`，并拒绝 `x86_64-darwin`。两个入口会导出相同的发布包、源码包、`lib.typolConfigIr`、`lib.mkConfigIr` 和 overlay。默认 `typol-cli` 会获取匹配版本的 GitHub Release 二进制；没有可用的兼容 Release 索引时会明确提示选择 `typol-cli-source`。
+
+```sh
+nix build .#typol-cli
+nix run .#typol-cli -- --help
+nix build .#typol-cli-source
+nix run .#typol-cli-source -- --help
+
+nix-build -A typol-cli
+nix-build -A typol-cli-source
+```
+
+源码包始终从仓库构建，也是首个兼容 Release 发布前的显式选择。默认包不会自动回退到源码。
 
 ## 构建公开 Config IR 文件
 
@@ -22,7 +34,7 @@ typol.lib.mkConfigIr {
 }
 ```
 
-derivation 会保留整个源目录结构，让根 Schema 的 `extern mod` 可以从同目录解析导入。CLI 使用 `--environment empty` 和 `--reject-secrets`。无效配置会让构建失败；只要配置中存在任意 `secret: true` 标记，IR 就不会进入 derivation 输出。
+derivation 会保留整个源目录结构，让根 Schema 的 `extern mod` 可以从同目录解析导入。CLI 使用 `--environment empty` 和 `--reject-secrets`。无效配置会让构建失败；只要配置中存在任意 `secret: true` 标记，IR 就不会进入 derivation 输出。需要在仓库测试中从源码构建 CLI 时，将 `typol.typol-cli-source` 显式传给 `typolCli`。
 
 源目录及其中的配置文件会成为 Nix store 输入。Config IR 即使标记为秘密仍保留真实值，因此不要把凭证放进这些文件。Nix 构造器只为不含秘密标记的配置创建 store 输出，也不会把任意环境变量传入 derivation。
 

@@ -1,5 +1,19 @@
 # Nix Integration Example
 
+The default `typol-cli` package uses the GitHub Release archive for `x86_64-linux`, `aarch64-linux`, or `aarch64-darwin`. `x86_64-darwin` is unsupported. Before a compatible Nix Release is available, use the explicit source package:
+
+```sh
+nix build .#typol-cli
+nix run .#typol-cli -- --help
+nix-build -A typol-cli
+
+nix build .#typol-cli-source
+nix run .#typol-cli-source -- --help
+nix-build -A typol-cli-source
+```
+
+The Flake and traditional entry points expose the same `typol-cli` release package and `typol-cli-source` source package. The default package does not build from source when its Release is unavailable.
+
 This example reads a pre-generated Config IR file and selects public values for an application. The default input is `../cli/cli_demo-ir-v1.json`; use the `irFile` parameter to specify another exported file.
 
 From the repository root, run the following commands to export the Config IR and inspect the example output:

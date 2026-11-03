@@ -2,7 +2,7 @@
 let
   sourceDir = ../../examples/nix/fixtures;
   entrypoint = import ../entrypoint.nix { src = ../../.; };
-  typolCli = pkgs.callPackage ../package.nix { src = ../../.; };
+  typolCli = (entrypoint.packageSet pkgs).typol-cli-source;
   publicIr = entrypoint.lib.mkConfigIr {
     inherit pkgs typolCli sourceDir;
     schemaPath = "root.tschem";

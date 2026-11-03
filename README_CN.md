@@ -167,21 +167,26 @@ CLI 操作错误由 `u18n` 生成的目录提供翻译；Typol 库生成的详�
 
 ## Nix
 
-Nix 支持 `x86_64-linux`、`aarch64-linux` 和 `aarch64-darwin`。Flake、传统包入口和开发 shell
-都会拒绝 `x86_64-darwin`。
-
-Flake 与传统 Nix 入口使用同一份锁定源码包：
+Nix 支持 `x86_64-linux`、`aarch64-linux` 和 `aarch64-darwin`。Flake、传统包入口、overlay 和开发
+shell 都会拒绝 `x86_64-darwin`。默认 `typol-cli` 包会获取匹配版本的 GitHub Release 二进制。
+首个兼容的 Nix Release 发布前，请显式选择源码包：
 
 ```sh
 nix build .#typol-cli
 nix run .#typol-cli -- --help
+nix build .#typol-cli-source
+nix run .#typol-cli-source -- --help
 nix flake check
 nix develop
 nix fmt
 
 nix-build -A typol-cli
+nix-build -A typol-cli-source
 nix-shell
 ```
+
+Flake 与传统 Nix 入口提供相同的发布包、源码包、默认 app 和 overlay。源码包始终从仓库构建。
+默认包不会自动切换到源码；没有匹配 Release 时会明确提示使用 `typol-cli-source`。
 
 Nix 消费者可以使用 `lib.mkConfigIr` 在 derivation 中校验 Schema 和 Config，也可以用
 `lib.typolConfigIr` 读取预先生成的公开 IR 文件。derivation 使用空环境，并拒绝含有秘密标记的配置。

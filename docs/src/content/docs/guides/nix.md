@@ -3,7 +3,19 @@ title: Nix integration
 description: Validate public configuration in a Nix derivation and consume Config IR with pure Nix helpers.
 ---
 
-Use the Nix integration when a build needs to validate a Typol configuration or read a public subset of Config IR. The Flake and `default.nix` entry points expose the same `typol-cli`, `lib.typolConfigIr`, `lib.mkConfigIr`, and overlay.
+Use the Nix integration when a build needs to validate a Typol configuration or read a public subset of Config IR. The Flake and `default.nix` entry points support `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`, and reject `x86_64-darwin`. Both expose the same release and source packages, `lib.typolConfigIr`, `lib.mkConfigIr`, and overlay. `typol-cli` defaults to the matching GitHub Release binary; when no compatible Release is indexed, it fails with instructions to choose `typol-cli-source`.
+
+```sh
+nix build .#typol-cli
+nix run .#typol-cli -- --help
+nix build .#typol-cli-source
+nix run .#typol-cli-source -- --help
+
+nix-build -A typol-cli
+nix-build -A typol-cli-source
+```
+
+The source package always builds from the repository and is the explicit choice before the first compatible Release. The default package never falls back to source.
 
 ## Build a public Config IR file
 
@@ -22,7 +34,7 @@ typol.lib.mkConfigIr {
 }
 ```
 
-The source directory is kept intact in the derivation so `extern mod` imports resolve beside the root Schema. The CLI uses `--environment empty` and `--reject-secrets`. Invalid configurations fail the build. A configuration containing any `secret: true` value fails before the IR reaches the derivation output.
+The source directory is kept intact in the derivation so `extern mod` imports resolve beside the root Schema. The CLI uses `--environment empty` and `--reject-secrets`. Invalid configurations fail the build. A configuration containing any `secret: true` value fails before the IR reaches the derivation output. Repository tests that need to compile the CLI from source should pass `typol.typol-cli-source` as `typolCli`.
 
 The source directory and its configuration files become Nix store inputs. Config IR retains the actual value even when marked secret, so do not put credentials in those files. The Nix constructor only creates store outputs for configurations without secret markers. It does not pass arbitrary environment variables into the derivation.
 

@@ -31,16 +31,22 @@
         system:
         let
           pkgs = import nixpkgs { inherit system; };
-          package = (packageSetFor pkgs).typol-cli;
-          app = {
+          packageSet = packageSetFor pkgs;
+          releaseApp = {
             type = "app";
-            program = "${package}/bin/typol";
+            program = "${packageSet.typol-cli}/bin/typol";
             meta.description = "Typol 配置校验与 JSON IR 命令行工具";
+          };
+          sourceApp = {
+            type = "app";
+            program = "${packageSet.typol-cli-source}/bin/typol";
+            meta.description = "Typol CLI built from repository source";
           };
         in
         {
-          typol-cli = app;
-          default = app;
+          typol-cli = releaseApp;
+          typol-cli-source = sourceApp;
+          default = releaseApp;
         }
       );
 
@@ -48,13 +54,17 @@
         system:
         let
           pkgs = import nixpkgs { inherit system; };
-          package = (packageSetFor pkgs).typol-cli;
+          packageSet = packageSetFor pkgs;
         in
         {
-          typol-cli = package;
+          typol-cli-source = packageSet.typol-cli-source;
           typol-config-ir = import ./nix/tests/typol-config-ir.nix { inherit pkgs; };
           nix-config-export = import ./nix/tests/config-export.nix { inherit pkgs; };
-          nix-entrypoints = import ./nix/tests/entrypoints.nix { inherit pkgs; };
+          nix-entrypoints = import ./nix/tests/entrypoints.nix {
+            inherit pkgs;
+            flakePackageSet = packageSet;
+            flakeApps = self.apps.${system};
+          };
         }
       );
 

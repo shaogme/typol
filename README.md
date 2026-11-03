@@ -170,20 +170,27 @@ Translation errors remain visible to the caller and are not replaced with fixed 
 ## Nix
 
 Nix supports `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`. `x86_64-darwin` is rejected by
-the Flake, traditional package entry, and development shell.
-
-The Flake and traditional Nix entry points build the same locked Rust source package:
+the Flake, traditional package entry, overlay, and development shell. The default `typol-cli` package
+fetches the matching GitHub Release binary. Before a compatible Nix Release is available, select the
+source package explicitly:
 
 ```sh
 nix build .#typol-cli
 nix run .#typol-cli -- --help
+nix build .#typol-cli-source
+nix run .#typol-cli-source -- --help
 nix flake check
 nix develop
 nix fmt
 
 nix-build -A typol-cli
+nix-build -A typol-cli-source
 nix-shell
 ```
+
+Both Nix entry points expose the same release package, source package, default app, and overlay
+names. The source package always builds from the repository; the default package never switches to
+source automatically and explains how to select `typol-cli-source` when its Release is unavailable.
 
 Nix consumers can use `lib.mkConfigIr` to validate a Schema and Config in a derivation, or use
 `lib.typolConfigIr` to read a pre-generated public IR file. The derivation uses an empty

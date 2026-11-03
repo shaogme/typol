@@ -6,7 +6,8 @@ let
   };
   packageSet = pkgs: import ./package-set.nix { inherit pkgs src; };
   overlay = final: _prev: {
-    typol-cli = final.callPackage ./package.nix { inherit src; };
+    typol-cli = final.callPackage ./release-package.nix { };
+    typol-cli-source = final.callPackage ./package.nix { inherit src; };
   };
 in
 {
