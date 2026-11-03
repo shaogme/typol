@@ -1,8 +1,8 @@
-# Nix 集成示例
+# Nix Integration Example
 
-此示例演示如何将 Typol CLI 导出的 Config IR 读入 Nix，并投影成应用可直接使用的属性集。默认输入为 `../cli/cli_demo-ir-v1.json`；可通过 `irFile` 参数指定其他导出文件。
+This example reads a pre-generated Config IR file and selects public values for an application. The default input is `../cli/cli_demo-ir-v1.json`; use the `irFile` parameter to specify another exported file.
 
-在仓库根目录运行以下命令，先导出配置 IR，再查看示例结果：
+From the repository root, run the following commands to export the Config IR and inspect the example output:
 
 ```sh
 nix run .#typol-cli -- config export-ir \
@@ -14,6 +14,25 @@ nix eval --impure --json --expr \
   'import ./examples/nix/default.nix { irFile = /tmp/typol-config-ir.json; }'
 ```
 
-示例从 IR 中选择公开字段，并将有界无符号整数转换为 Nix 整数。敏感字段不会进入输出。IR 校验和解码由 `nix/lib/typol-config-ir.nix` 完成。
+The example uses `fromFile`, `decode`, `select`, `at`, and `toInteger` from `nix/lib/typol-config-ir.nix`. The selected output contains only the endpoint, labels, attempts, and optional comment; it does not include the secret API key. Integer conversion declares an explicit Nix integer range, while the IR itself keeps the original decimal strings.
 
-仓库的 `nix flake check` 中包含该示例的回归断言，覆盖结构体和枚举载荷、map、数组、空可选值以及敏感字段省略。
+`select` checks secrets only in each selected subtree. A selected subtree containing `secret: true` fails by default. Set `includeSecrets = true` explicitly to read one; this does not redact or encrypt its contents. Selecting public paths does not include nearby unselected secret fields.
+
+The high-level constructor creates a derivation that validates the Schema and configuration in the build sandbox and writes a public IR file:
+
+```nix
+let
+  typol = import ../.. { inherit pkgs; };
+in
+typol.lib.mkConfigIr {
+  inherit pkgs;
+  typolCli = typol.typol-cli;
+  sourceDir = ./fixtures;
+  schemaPath = "root.tschem";
+  configPath = "public.tconf";
+}
+```
+
+It always uses an empty environment and enables `--reject-secrets`. The complete source directory is a derivation input so relative Schema imports work. Source configuration files enter the Nix store, so never put credentials in them. The IR format still contains actual values when marked secret; the constructor refuses to create a store output for such a configuration. For applications that already have a separately generated public IR file, use the pure helper directly and avoid evaluation-time derivation reads.
+
+Integers remain decimal strings by default and floating-point values remain strings, including `-0`. The repository's `nix flake check` covers IR validation, path selection, numeric bounds, JSON duplicate-key rejection, input budgets, secret handling, imported Schemas, and rejected builds for invalid or secret configurations.

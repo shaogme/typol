@@ -3,36 +3,55 @@
 }:
 let
   ir = import ../../nix/lib/typol-config-ir.nix;
-  decoded = ir.decode (ir.fromFile irFile);
+  decoded = ir.decode { } (ir.fromFile { } irFile);
   root = decoded.value;
-
-  unsignedValue = node:
-    let
-      kind = node.type.kind;
-    in
-    if builtins.elem kind [ "u8" "u16" "u32" ] then
-      builtins.fromJSON (ir.scalarValue kind node)
-    else
-      throw "examples/nix: expected an unsigned integer scalar, got ${kind}";
-
-  projectEndpoint = node: {
-    host = ir.scalarValue "string" (ir.field node "host");
-    port = unsignedValue (ir.field node "port");
-  };
-
-  accessNode = ir.field root "access_struct";
-  accessPayload = accessNode.value.payload;
-  labelsNode = ir.field root "labels";
+  public = ir.select {
+    paths = [
+      [
+        "endpoint"
+        "host"
+      ]
+      [
+        "endpoint"
+        "port"
+      ]
+      [ "labels" ]
+      [ "attempts" ]
+      [ "comment" ]
+    ];
+  } root;
 in
 {
   rootType = decoded.rootType;
-  endpoint = projectEndpoint (ir.field root "endpoint");
-  access = {
-    variant = accessNode.value.variant;
-    endpoint = projectEndpoint accessPayload.fields.endpoint;
-    retries = unsignedValue accessPayload.fields.retries;
+  endpoint = {
+    host = public.endpoint.host;
+    port =
+      ir.toInteger
+        {
+          min = 0;
+          max = 65535;
+        }
+        (
+          ir.at { } root [
+            "endpoint"
+            "port"
+          ]
+        );
   };
-  labels = builtins.mapAttrs (_: node: ir.scalarValue "string" node) labelsNode.value;
-  attempts = map unsignedValue (ir.field root "attempts").value;
-  comment = (ir.field root "comment").value;
+  labels = public.labels;
+  attempts = builtins.genList (
+    index:
+    ir.toInteger
+      {
+        min = 0;
+        max = 4294967295;
+      }
+      (
+        ir.at { } root [
+          "attempts"
+          index
+        ]
+      )
+  ) (builtins.length public.attempts);
+  comment = public.comment;
 }

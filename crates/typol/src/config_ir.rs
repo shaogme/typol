@@ -31,6 +31,7 @@ pub struct ConfigIrOptions {
     max_nesting_depth: usize,
     value_mode: ConfigIrValueMode,
     validation_options: Option<ConfigValidationOptions>,
+    reject_secrets: bool,
 }
 
 /// A stable category for Config IR errors, without their specific payloads.
@@ -43,6 +44,7 @@ pub enum ConfigIrErrorKind {
     WorkspaceLimitExceeded,
     NestingLimitExceeded,
     InvalidNestingDepthLimit,
+    SecretValueRejected,
     AllocationFailed,
     SerializationFailed,
     NormalizationFailed,
@@ -58,6 +60,7 @@ pub enum ConfigIrError {
     WorkspaceLimitExceeded,
     NestingLimitExceeded,
     InvalidNestingDepthLimit { requested: usize, maximum: usize },
+    SecretValueRejected,
     AllocationFailed,
     SerializationFailed,
     NormalizationFailed(ConfigValueErrors),
@@ -75,6 +78,7 @@ impl ConfigIrError {
             Self::WorkspaceLimitExceeded => ConfigIrErrorKind::WorkspaceLimitExceeded,
             Self::NestingLimitExceeded => ConfigIrErrorKind::NestingLimitExceeded,
             Self::InvalidNestingDepthLimit { .. } => ConfigIrErrorKind::InvalidNestingDepthLimit,
+            Self::SecretValueRejected => ConfigIrErrorKind::SecretValueRejected,
             Self::AllocationFailed => ConfigIrErrorKind::AllocationFailed,
             Self::SerializationFailed => ConfigIrErrorKind::SerializationFailed,
             Self::NormalizationFailed(_) => ConfigIrErrorKind::NormalizationFailed,
@@ -151,11 +155,17 @@ impl ConfigIrOptions {
             max_nesting_depth: DEFAULT_MAX_NESTING_DEPTH,
             value_mode: ConfigIrValueMode::Validated,
             validation_options: None,
+            reject_secrets: false,
         }
     }
 
     pub const fn with_pretty(mut self, pretty: bool) -> Self {
         self.pretty = pretty;
+        self
+    }
+
+    pub const fn with_reject_secrets(mut self, reject_secrets: bool) -> Self {
+        self.reject_secrets = reject_secrets;
         self
     }
 
@@ -196,6 +206,10 @@ impl ConfigIrOptions {
 
     pub const fn pretty(&self) -> bool {
         self.pretty
+    }
+
+    pub const fn reject_secrets(&self) -> bool {
+        self.reject_secrets
     }
 
     pub const fn max_output_bytes(&self) -> usize {
@@ -244,6 +258,7 @@ impl fmt::Display for ConfigIrError {
                 formatter,
                 "requested IR nesting depth limit {requested} exceeds the fixed safety limit {maximum}"
             ),
+            Self::SecretValueRejected => formatter.write_str("IR export contains a secret value"),
             Self::AllocationFailed => formatter.write_str("IR serialization allocation failed"),
             Self::SerializationFailed => formatter.write_str("IR JSON serialization failed"),
             Self::NormalizationFailed(errors) => {

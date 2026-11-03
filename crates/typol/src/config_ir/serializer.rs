@@ -112,7 +112,7 @@ impl ConfigIrSerializer {
         let root_type = schema_access(|out| entry.qualified_name(out))
             .map_err(|_| ConfigIrError::SchemaAccess)?
             .ok_or(ConfigIrError::SchemaAccess)?;
-        let state = SerializationState::new(options.max_nesting_depth());
+        let state = SerializationState::new(options.max_nesting_depth(), options.reject_secrets());
         let workspace = WorkspaceBudget::new(options.max_workspace_bytes());
         let mut output = BoundedBuffer::new(options.max_output_bytes());
         let envelope = Envelope {
@@ -248,6 +248,12 @@ impl Serialize for NodeValue<'_> {
         let kind = schema_access_for::<_, S::Error>(self.state, |out| self.ty.kind(out))?;
         let secret = self.secret
             || schema_access_for::<_, S::Error>(self.state, |out| self.ty.is_secret(out))?;
+        if secret && self.state.rejects_secrets() {
+            return Err(serialization_failure(
+                self.state,
+                ConfigIrError::SecretValueRejected,
+            ));
+        }
         let node = ValueNode::resolve(kind, self.value)
             .ok_or_else(|| serialization_failure(self.state, ConfigIrError::ValueShapeMismatch))?;
         match node {
@@ -483,6 +489,12 @@ impl Serialize for NodeValue<'_> {
                     variant_view.is_secret(out)
                 })?;
                 let secret = secret || variant_secret;
+                if secret && self.state.rejects_secrets() {
+                    return Err(serialization_failure(
+                        self.state,
+                        ConfigIrError::SecretValueRejected,
+                    ));
+                }
                 let payload_info =
                     schema_access_for::<_, S::Error>(self.state, |out| variant_view.payload(out))?;
                 let payload = value.resolve_payload(payload_info).ok_or_else(|| {

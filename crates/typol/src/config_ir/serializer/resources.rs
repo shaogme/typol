@@ -26,6 +26,7 @@ pub(super) struct SerializationState {
     value_depth: Cell<usize>,
     type_depth: Cell<usize>,
     max_nesting_depth: usize,
+    reject_secrets: bool,
 }
 
 pub(super) struct DepthReservation<'a> {
@@ -59,12 +60,13 @@ pub(super) struct Decimal<'a, T> {
 }
 
 impl SerializationState {
-    pub(super) const fn new(max_nesting_depth: usize) -> Self {
+    pub(super) const fn new(max_nesting_depth: usize, reject_secrets: bool) -> Self {
         Self {
             failure: Cell::new(None),
             value_depth: Cell::new(0),
             type_depth: Cell::new(0),
             max_nesting_depth,
+            reject_secrets,
         }
     }
 
@@ -74,6 +76,10 @@ impl SerializationState {
 
     pub(super) fn enter_type(&self) -> Result<DepthReservation<'_>, ConfigIrError> {
         reserve_depth(&self.type_depth, self.max_nesting_depth)
+    }
+
+    pub(super) const fn rejects_secrets(&self) -> bool {
+        self.reject_secrets
     }
 
     pub(super) fn take_failure(&self) -> Option<ConfigIrError> {

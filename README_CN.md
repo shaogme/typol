@@ -165,4 +165,28 @@ CLI 操作错误由 `u18n` 生成的目录提供翻译；Typol 库生成的详�
 所有 `zh-*` tag 都选择唯一的简体中文目录。目录 tag 回退只负责选择已编译目录，不会补充缺失的消息翻译。
 翻译错误会沿调用方的错误通道返回，不会被固定文案替代。
 
+## Nix
+
+Nix 支持 `x86_64-linux`、`aarch64-linux` 和 `aarch64-darwin`。Flake、传统包入口和开发 shell
+都会拒绝 `x86_64-darwin`。
+
+Flake 与传统 Nix 入口使用同一份锁定源码包：
+
+```sh
+nix build .#typol-cli
+nix run .#typol-cli -- --help
+nix flake check
+nix develop
+nix fmt
+
+nix-build -A typol-cli
+nix-shell
+```
+
+Nix 消费者可以使用 `lib.mkConfigIr` 在 derivation 中校验 Schema 和 Config，也可以用
+`lib.typolConfigIr` 读取预先生成的公开 IR 文件。derivation 使用空环境，并拒绝含有秘密标记的配置。
+源配置文件会进入 Nix store，因此不能在其中放入凭证。Config IR 标记 `secret: true` 时仍保留真实值；
+详见 [Nix 集成指南](docs/src/content/docs/zh-cn/guides/nix.md) 和
+[集成示例](examples/nix/README.md)。
+
 项目采用 Apache-2.0 或 MIT 双许可证，详见 [LICENSE-APACHE](LICENSE-APACHE) 和 [LICENSE-MIT](LICENSE-MIT)。

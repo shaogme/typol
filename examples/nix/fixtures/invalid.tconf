@@ -1,0 +1,7 @@
+{
+    endpoint: {
+        host: "example.internal",
+        port: 99999,
+    },
+    attempts: [1, 2],
+}

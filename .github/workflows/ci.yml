@@ -35,8 +35,19 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+      - name: 检查 Flake 与 npins 锁定一致
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          flake = json.loads(Path("flake.lock").read_text())["nodes"]["nixpkgs"]["locked"]
+          npins = json.loads(Path("npins/sources.json").read_text())["pins"]["nixpkgs"]
+          assert flake["rev"] == npins["revision"], (flake["rev"], npins["revision"])
+          assert flake["narHash"] == npins["hash"], (flake["narHash"], npins["hash"])
+          PY
       - run: nix eval --raw ".#packages.${{ matrix.system }}.typol-cli.drvPath" > /dev/null
-      - run: nix fmt -- --check flake.nix default.nix shell.nix nix/package.nix nix/lib/typol-config-ir.nix nix/tests/typol-config-ir.nix npins/default.nix
+      - run: nix fmt -- --check flake.nix default.nix shell.nix nix/systems.nix nix/assert-supported-system.nix nix/entrypoint.nix nix/package-set.nix nix/dev-shell.nix nix/package.nix nix/lib/typol-config-ir.nix nix/lib/mk-config-ir.nix nix/tests/typol-config-ir.nix nix/tests/config-export.nix nix/tests/entrypoints.nix examples/nix/default.nix npins/default.nix
       - run: nix flake check
       - run: nix build .#typol-cli
       - run: nix run .#typol-cli -- --help
@@ -54,6 +65,7 @@ jobs:
           "$package_out/bin/typol" config check --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf
           "$package_out/bin/typol" config export-ir --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf > "$RUNNER_TEMP/typol-legacy-ir.json"
           python -m json.tool "$RUNNER_TEMP/typol-legacy-ir.json" > /dev/null
+      - run: nix-shell --run 'cargo --version && rustc --version'
 
   ci-success:
     name: CI Success

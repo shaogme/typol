@@ -1,28 +1,29 @@
 {
   sources ? import ./npins,
-  system ? builtins.currentSystem,
-  pkgs ? import sources.nixpkgs { inherit system; },
-  buildFromSource ? false,
+  system ? null,
+  pkgs ? null,
 }:
 let
-  typol-cli = pkgs.callPackage ./nix/package.nix {
-    src = ./.;
-    inherit buildFromSource;
-  };
-  typol-cli-from-source = pkgs.callPackage ./nix/package.nix {
-    src = ./.;
-    buildFromSource = true;
-  };
+  assertSupportedSystem = import ./nix/assert-supported-system.nix;
+  requestedSystem =
+    if system != null then
+      system
+    else if pkgs != null then
+      pkgs.stdenv.hostPlatform.system
+    else
+      builtins.currentSystem;
+  checkedSystem = assertSupportedSystem requestedSystem;
+  selectedPkgs = if pkgs != null then pkgs else import sources.nixpkgs { system = requestedSystem; };
+  checkedPackageSystem = assertSupportedSystem selectedPkgs.stdenv.hostPlatform.system;
+  shared = import ./nix/entrypoint.nix { src = ./.; };
+  packageSet = shared.packageSet selectedPkgs;
 in
-{
-  inherit typol-cli typol-cli-from-source;
-  default = typol-cli;
-  lib.typolConfigIr = import ./nix/lib/typol-config-ir.nix;
-  overlay = final: _prev: {
-    typol-cli = final.callPackage ./nix/package.nix { src = ./.; };
-    typol-cli-from-source = final.callPackage ./nix/package.nix {
-      src = ./.;
-      buildFromSource = true;
-    };
-  };
-}
+builtins.seq checkedSystem (
+  builtins.seq checkedPackageSystem (
+    packageSet
+    // {
+      inherit (shared) lib overlay;
+      overlays.default = shared.overlay;
+    }
+  )
+)

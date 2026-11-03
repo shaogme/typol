@@ -5,9 +5,9 @@ use std::{
     process::ExitCode,
 };
 use typol::{
-    ConfigInput, ConfigIr, ConfigIrOptions, ConfigIrValueMode, ConfigValue, EmptyEnvironment,
-    LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader, TypolError,
-    TypolOptions,
+    ConfigInput, ConfigIr, ConfigIrErrorKind, ConfigIrOptions, ConfigIrValueMode, ConfigValue,
+    EmptyEnvironment, LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader,
+    TypolError, TypolOptions,
     host::{DiagnosticRenderError, RenderOptions},
     opeo::ErrSlot,
 };
@@ -149,9 +149,13 @@ impl Commands {
             value,
             ConfigIrOptions::default()
                 .with_pretty(request.pretty())
+                .with_reject_secrets(request.reject_secrets())
                 .with_value_mode(ConfigIrValueMode::AsProvided),
         ) {
             Ok(bytes) => bytes,
+            Err(error) if error.kind() == ConfigIrErrorKind::SecretValueRejected => {
+                return Self::operation_failure(t!("cli.ir_secret_rejected", locale = translator));
+            }
             Err(_) => {
                 return Self::operation_failure(t!("cli.ir_error", locale = translator));
             }

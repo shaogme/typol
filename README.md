@@ -167,4 +167,29 @@ catalog fallback, while any `zh-*` tag selects the single Simplified Chinese cat
 fallback only chooses an included catalog and does not provide missing message translations.
 Translation errors remain visible to the caller and are not replaced with fixed fallback text.
 
+## Nix
+
+Nix supports `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`. `x86_64-darwin` is rejected by
+the Flake, traditional package entry, and development shell.
+
+The Flake and traditional Nix entry points build the same locked Rust source package:
+
+```sh
+nix build .#typol-cli
+nix run .#typol-cli -- --help
+nix flake check
+nix develop
+nix fmt
+
+nix-build -A typol-cli
+nix-shell
+```
+
+Nix consumers can use `lib.mkConfigIr` to validate a Schema and Config in a derivation, or use
+`lib.typolConfigIr` to read a pre-generated public IR file. The derivation uses an empty
+environment and rejects secret-marked configurations. Source configuration files become Nix store
+inputs, so they must not contain credentials. Config IR still contains actual values when marked
+`secret: true`; see the [Nix integration guide](docs/src/content/docs/guides/nix.md) and
+[integration example](examples/nix/README.md).
+
 The project is dual-licensed under Apache-2.0 or MIT; see [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT).

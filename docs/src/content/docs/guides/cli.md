@@ -69,6 +69,8 @@ cargo run -p typol-cli -- config export-ir \
 
 See the [Config IR v1 specification](../../specification/config-ir/) for the JSON structure and compatibility rules.
 
+Add `--reject-secrets` when the IR would become a Nix store input. The command then fails before writing output if any node is marked `secret: true`. This option rejects secret-marked configurations; it does not redact their values.
+
 ## Environment selection
 
 `--environment` accepts two values:
@@ -85,12 +87,13 @@ For example, the demo configuration reads `TYPOL_CLI_DEMO_KEY`. With the default
 ```text
 typol schema check <schema.tschem>
 typol config check --schema <schema.tschem> [--environment inherit|empty] <config.tconf>
-typol config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] <config.tconf>
+typol config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] [--reject-secrets] <config.tconf>
 ```
 
 - `--schema <path>` supplies the Schema file for either `config` command.
 - `--environment inherit|empty` selects the environment provider for configuration reads.
 - `--pretty` is available only for `config export-ir`.
+- `--reject-secrets` is available only for `config export-ir`; it prevents output when any secret marker is present.
 - `--language en|zh-CN` selects the language for CLI messages and detailed diagnostics, and must appear before the command. `TYPOL_LANG` can set the same preference.
 - `-h` and `--help` print command help. For example, use `typol --help`, `typol schema check --help`, or `typol config export-ir --help`.
 - In a `config` command, put `--` before a configuration path that begins with `-`, so it is treated as a path rather than an option.

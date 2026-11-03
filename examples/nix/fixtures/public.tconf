@@ -1,0 +1,8 @@
+{
+    endpoint: {
+        host: "example.internal",
+        port: 8443,
+    },
+    attempts: [1, 2],
+    region: env("TYPOL_NIX_REGION", "config-fallback"),
+}

@@ -69,6 +69,8 @@ cargo run -p typol-cli -- config export-ir \
 
 JSON 结构和兼容规则见 [Config IR v1 规范](../../specification/config-ir/)。
 
+如果要把 IR 放入 Nix store，可添加 `--reject-secrets`。只要任意节点带有 `secret: true` 标记，命令就会在写出内容前失败。该选项会拒绝含秘密标记的配置，不会对值进行脱敏。
+
 ## 环境变量模式
 
 `--environment` 接受以下两种值：
@@ -85,12 +87,13 @@ JSON 结构和兼容规则见 [Config IR v1 规范](../../specification/config-i
 ```text
 typol schema check <schema.tschem>
 typol config check --schema <schema.tschem> [--environment inherit|empty] <config.tconf>
-typol config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] <config.tconf>
+typol config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] [--reject-secrets] <config.tconf>
 ```
 
 - `--schema <路径>` 为任一 `config` 命令指定 Schema 文件。
 - `--environment inherit|empty` 选择读取配置时使用的环境变量提供器。
 - `--pretty` 仅适用于 `config export-ir`。
+- `--reject-secrets` 仅适用于 `config export-ir`；检测到任意秘密标记时会阻止输出。
 - `--language en|zh-CN` 选择 CLI 消息和详细诊断的语言，必须放在命令前；也可通过 `TYPOL_LANG` 设置。
 - `-h` 和 `--help` 会显示命令帮助。例如：`typol --help`、`typol schema check --help` 或 `typol config export-ir --help`。
 - 在 `config` 命令中，如果配置文件路径以 `-` 开头，可在路径前加 `--`，将其作为路径而非选项解析。

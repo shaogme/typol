@@ -170,6 +170,72 @@ fn export_ir_writes_to_stdout() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn secret_rejection_prevents_ir_from_reaching_stdout() -> Result<(), Box<dyn Error>> {
+    let mut arguments = config_arguments("export-ir", "cli_demo.tschem", "cli_demo.tconf", false);
+    arguments.insert(arguments.len() - 1, argument("--reject-secrets"));
+    let output = run_cli(arguments)?;
+
+    ensure_equal(
+        output.status.code(),
+        Some(3),
+        "secret IR rejection exit code",
+    )?;
+    ensure(
+        output.stdout.is_empty(),
+        "rejected IR must not reach stdout",
+    )?;
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    ensure(
+        diagnostic.contains("secret value") && !diagnostic.contains("demo-secret-value"),
+        "secret rejection must report a safe diagnostic",
+    )?;
+
+    let mut invalid_arguments =
+        config_arguments("check", "cli_demo.tschem", "cli_demo.tconf", false);
+    invalid_arguments.insert(invalid_arguments.len() - 1, argument("--reject-secrets"));
+    let invalid_option = run_cli(invalid_arguments)?;
+    ensure_equal(
+        invalid_option.status.code(),
+        Some(2),
+        "invalid secret option exit code",
+    )?;
+
+    let schema_path = temp_dir().join(format!("typol-secret-enum-{}.tschem", id()));
+    let config_path = temp_dir().join(format!("typol-secret-enum-{}.tconf", id()));
+    fs::write(
+        &schema_path,
+        "enum Access { Token(string @secret), Ready } entry struct Root { access: Access }",
+    )?;
+    fs::write(&config_path, "{ access: .Token(\"enum-secret-value\") }")?;
+    let enum_output = run_cli(vec![
+        argument("config"),
+        argument("export-ir"),
+        argument("--schema"),
+        schema_path.clone().into_os_string(),
+        argument("--environment"),
+        argument("empty"),
+        argument("--reject-secrets"),
+        config_path.clone().into_os_string(),
+    ])?;
+    fs::remove_file(&schema_path)?;
+    fs::remove_file(&config_path)?;
+    ensure_equal(
+        enum_output.status.code(),
+        Some(3),
+        "secret enum rejection exit code",
+    )?;
+    ensure(
+        enum_output.stdout.is_empty(),
+        "secret enum IR must not reach stdout",
+    )?;
+    ensure(
+        !String::from_utf8_lossy(&enum_output.stderr).contains("enum-secret-value"),
+        "secret enum rejection must not expose its payload",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn environment_mode_selects_process_or_fallback_value() -> Result<(), Box<dyn Error>> {
     let empty = run_cli_with_variable(
         config_arguments_for(

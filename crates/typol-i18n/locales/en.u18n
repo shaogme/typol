@@ -4,7 +4,7 @@ message cli.help = "Usage:
   typol [--language en|zh-CN] --help
   typol [--language en|zh-CN] schema check <schema.tschem>
   typol [--language en|zh-CN] config check --schema <schema.tschem> [--environment inherit|empty] <config.tconf>
-  typol [--language en|zh-CN] config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] <config.tconf>
+  typol [--language en|zh-CN] config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] [--reject-secrets] <config.tconf>
 
 Commands:
   schema check       Compile and check a schema and its imports
@@ -15,6 +15,7 @@ Options:
   --language         Select English or Simplified Chinese (default: detected)
   --environment      inherit (default) reads process environment; empty ignores it
   --pretty           Output IR with indentation
+  --reject-secrets   Fail before writing IR if any value is marked secret
   -h, --help         Show this help
 
 Use --language before the command. Set TYPOL_LANG to select a language when the option is omitted.\n";
@@ -22,6 +23,7 @@ message cli.error_prefix = "Command line error: ";
 message cli.diagnostic_prefix = "Typol diagnostic details:\n";
 message cli.write_stdout_error = "Unable to write to standard output.";
 message cli.ir_error = "IR serialization failed or exceeded the output limit.";
+message cli.ir_secret_rejected = "IR export was rejected because the configuration contains a secret value.";
 message cli.command_utf8 = "Command name must be valid UTF-8 text.";
 message cli.unknown_command = "Unknown command.";
 message cli.schema_action_missing = "Missing schema check subcommand.";
@@ -38,6 +40,8 @@ message cli.environment_value_missing = "--environment is missing a value.";
 message cli.environment_value_invalid = "--environment value must be inherit or empty.";
 message cli.pretty_invalid = "--pretty is only valid for config export-ir.";
 message cli.pretty_repeated = "--pretty may only be specified once.";
+message cli.reject_secrets_invalid = "--reject-secrets is only valid for config export-ir.";
+message cli.reject_secrets_repeated = "--reject-secrets may only be specified once.";
 message cli.option_utf8 = "Option name must be valid UTF-8 text.";
 message cli.option_invalid = "Unknown config option.";
 message cli.schema_option_value_missing = "--schema is missing a value.";

@@ -18,6 +18,7 @@ pub struct ConfigRequest {
     config_path: PathBuf,
     environment: EnvironmentMode,
     pretty: bool,
+    reject_secrets: bool,
 }
 
 pub enum Command {
@@ -62,6 +63,10 @@ impl ConfigRequest {
 
     pub const fn pretty(&self) -> bool {
         self.pretty
+    }
+
+    pub const fn reject_secrets(&self) -> bool {
+        self.reject_secrets
     }
 }
 
@@ -226,6 +231,7 @@ impl Arguments {
         let mut environment = EnvironmentMode::Inherit;
         let mut environment_seen = false;
         let mut pretty = false;
+        let mut reject_secrets = false;
         let mut positional_only = false;
         while let Some(argument) = arguments.next() {
             if !positional_only && argument == "--" {
@@ -294,6 +300,20 @@ impl Arguments {
                     ));
                 }
                 pretty = true;
+            } else if !positional_only && option == "--reject-secrets" {
+                if !export {
+                    return Err(Self::error(
+                        t!("cli.reject_secrets_invalid", locale = translator),
+                        language,
+                    ));
+                }
+                if reject_secrets {
+                    return Err(Self::error(
+                        t!("cli.reject_secrets_repeated", locale = translator),
+                        language,
+                    ));
+                }
+                reject_secrets = true;
             } else if !positional_only && matches!(option, "--help" | "-h") {
                 return Ok(Command::Help);
             } else if !positional_only && option.starts_with('-') {
@@ -320,6 +340,7 @@ impl Arguments {
             config_path,
             environment,
             pretty,
+            reject_secrets,
         };
         if export {
             Ok(Command::ConfigExportIr(request))

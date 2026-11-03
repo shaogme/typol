@@ -1,0 +1,7 @@
+extern mod network;
+
+entry struct PublicConfig {
+    endpoint: network::api::Endpoint,
+    attempts: [u32; 2],
+    region: string @env("TYPOL_NIX_REGION") = "schema-default",
+}

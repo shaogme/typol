@@ -1,0 +1,6 @@
+mod api {
+    struct Endpoint {
+        host: string,
+        port: u16,
+    }
+}

@@ -31,6 +31,7 @@ export default defineConfig({
             'guides/cli',
             'guides/advanced',
             'guides/no_std',
+            'guides/nix',
           ],
         },
         {
