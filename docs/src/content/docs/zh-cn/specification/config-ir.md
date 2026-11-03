@@ -5,6 +5,18 @@ sidebar:
   order: 5
 ---
 
+## 本页要点
+
+:::tip[适用场景]
+消费或生成 Config IR v1 JSON，并需要确认值形状、排序或校验行为时，请查阅本页。
+:::
+
+| 主题 | 关键规则 |
+| --- | --- |
+| 顶层对象 | 成员依次为 `format`、`version`、`root_type`、`value`；成功输出以一个 LF 结束。 |
+| 导出模式 | 默认 `Validated` 会校验约束；`WithDefaults` 补默认值但不校验约束；`AsProvided` 两者都跳过。 |
+| 敏感值 | `secret: true` 仅作标记，不会遮蔽或加密数据；消费者必须保护整个标记子树。 |
+
 本文定义 `typol-config-ir` JSON 格式第 1 版（Config IR v1）的输出结构、排序、敏感值标记和资源边界。Config IR 是编译后 Schema 与完整 `ConfigValue` 的导出格式，不是 `.tconf` 配置语法。配置值的语法和语义见[配置 DSL 规范](../config-dsl/)，Schema 类型和约束见[Schema DSL 规范](../schema-dsl/)。
 
 ## 1. 格式标识与导出边界

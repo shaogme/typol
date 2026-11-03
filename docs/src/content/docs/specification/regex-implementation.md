@@ -5,6 +5,18 @@ sidebar:
   order: 6
 ---
 
+## Quick reference
+
+:::tip[Use this page when]
+You are diagnosing `@regex` compilation, search behavior, or regex-specific resource failures.
+:::
+
+| Topic | Rule to remember |
+| --- | --- |
+| Matching | Typol searches for a match anywhere by default; use both `^` and `$` for whole-string matching. |
+| Execution | Patterns compile to a Thompson NFA and run without backtracking; unsupported host-regex features remain unsupported. |
+| Resource bounds | Compilation and matching use explicit limits; exhaustion returns a structured error and no partial match. |
+
 This document describes Typol's current implementation of the Schema `@regex` annotation: its compiled representation, search execution, limits, diagnostics, and runtime workspace. The regex language and observable match semantics are defined by [Schema DSL §5.1](../schema-dsl/#51-regex-syntax-and-matching). This document records implementation behavior and boundaries without extending the DSL.
 
 ## 1. Scope

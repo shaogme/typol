@@ -5,6 +5,18 @@ sidebar:
   order: 3
 ---
 
+## Quick reference
+
+:::tip[Use this page when]
+You need to trace a configuration read through the parser, environment provider, validation pipeline, or resource limits.
+:::
+
+| Area | Current behavior |
+| --- | --- |
+| Parsing | Reads tokens incrementally against a compiled Schema and builds an owned value without retaining a config AST. |
+| Environment | Reads happen only for authorized `env(...)` expressions through the provider passed by the caller. |
+| Limits and errors | Parsing, validation, diagnostics, and execution use explicit resource budgets and structured failures. |
+
 This document describes the current implementation of `.tconf` handling: entry points, streaming lexical input, Schema-guided value construction, environment reads, constraint validation, error recovery, and safe diagnostics. It supplements the [Config DSL](../config-dsl/) and [Schema implementation](../schema-implementation/) documents without changing DSL semantics.
 
 This description is based on the current source. Config and Schema DSL specifications define semantics; current source defines resource defaults.

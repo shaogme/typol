@@ -5,6 +5,18 @@ sidebar:
   order: 1
 ---
 
+## Quick reference
+
+:::tip[Use this page when]
+You are writing `.tconf` values or need to understand how a compiled Schema controls parsing and defaults.
+:::
+
+| Topic | Rule to remember |
+| --- | --- |
+| File shape | A config file contains one root struct object matching the Schema entry type. |
+| Field resolution | Explicit values win; omitted fields use a Schema default, then `none` for an optional field, otherwise they are required. |
+| Environment | `env(...)` is valid only for a field explicitly authorized with a matching `@env` annotation. |
+
 This document defines the lexical and grammatical rules for `.tconf` files and their value semantics relative to a Schema. Types, fields, enum variants, defaults, and constraints are declared by the [Schema DSL](../schema-dsl/).
 
 ## 1. Files and lexical rules

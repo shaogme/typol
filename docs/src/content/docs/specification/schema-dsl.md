@@ -5,6 +5,18 @@ sidebar:
   order: 2
 ---
 
+## Quick reference
+
+:::tip[Use this page when]
+You are declaring configuration types, defaults, annotations, or cross-field validation rules in `.tschem` files.
+:::
+
+| Topic | Rule to remember |
+| --- | --- |
+| Entry and imports | The root Schema has exactly one `entry struct`; imported declarations use `extern mod`. |
+| Types | Types include scalars, options, arrays, string-keyed maps, structs, and enums; recursive user types and nested options are unsupported. |
+| Validation | Defaults and annotations are checked during Schema compilation; assertions run after a configuration value is constructed. |
+
 This document defines the lexical, grammatical, and static semantic rules for `.tschem` Schema files. A Schema describes configuration types, defaults, and validation rules. The syntax for configuration instances is defined by the [Config DSL specification](../config-dsl/).
 
 ## 1. Lexical rules

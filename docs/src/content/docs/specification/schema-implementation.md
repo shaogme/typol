@@ -5,6 +5,18 @@ sidebar:
   order: 4
 ---
 
+## Quick reference
+
+:::tip[Use this page when]
+You need to understand Schema loading, compilation diagnostics, imported files, or how compiled types reach Config parsing and Rust binding.
+:::
+
+| Stage | Current behavior |
+| --- | --- |
+| Input | Shared streaming lexer and parser produce an owned Schema AST with source spans. |
+| Compilation | The loader resolves imports, checks static semantics, and builds an immutable compiled Schema. |
+| Consumers | Config parsing and Rust binding read compiled Schema views; host file access stays in adapters. |
+
 This document describes how Typol currently implements `.tschem`: crate responsibilities, processing from source text to an immutable compiled result, static semantic checks, and how Config parsing and Rust type binding consume that result. It supplements the [Schema DSL specification](../schema-dsl/) without changing its lexical, grammatical, or semantic rules.
 
 This description follows the current source. The Schema DSL remains normative when behavior is unclear.

@@ -5,6 +5,18 @@ sidebar:
   order: 5
 ---
 
+## Quick reference
+
+:::tip[Use this page when]
+You are consuming or producing Config IR v1 JSON and need exact value shapes, ordering, or validation behavior.
+:::
+
+| Topic | Rule to remember |
+| --- | --- |
+| Envelope | The ordered root members are `format`, `version`, `root_type`, and `value`; successful output ends in one LF. |
+| Export mode | `Validated` is the default and checks constraints; `WithDefaults` fills defaults without constraint validation; `AsProvided` skips both. |
+| Sensitive values | `secret: true` marks data but does not redact or encrypt it; consumers must protect the entire marked subtree. |
+
 This document defines the output structure, ordering, sensitive-value markers, and resource boundaries for version 1 of the `typol-config-ir` JSON format (Config IR v1). Config IR exports a compiled Schema and a complete `ConfigValue`; it is not the `.tconf` configuration syntax. See the [Config DSL](../config-dsl/) for configuration values and the [Schema DSL](../schema-dsl/) for types and constraints.
 
 ## 1. Format identity and export boundary

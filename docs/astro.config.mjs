@@ -21,16 +21,42 @@ export default defineConfig({
           lang: 'zh-CN',
         },
       },
+      customCss: ['/src/styles/typol.css'],
       sidebar: [
         {
           label: 'Guides',
           translations: { 'zh-CN': '教程' },
-          items: [{ autogenerate: { directory: 'guides' } }],
+          items: [
+            'guides/quickstart',
+            'guides/cli',
+            'guides/advanced',
+            'guides/no_std',
+          ],
         },
         {
           label: 'Specifications',
           translations: { 'zh-CN': '规范' },
-          items: [{ autogenerate: { directory: 'specification' } }],
+          items: [
+            {
+              label: 'Schema',
+              translations: { 'zh-CN': 'Schema' },
+              items: ['specification/schema-dsl'],
+            },
+            {
+              label: 'Config',
+              translations: { 'zh-CN': 'Config' },
+              items: ['specification/config-dsl', 'specification/config-ir'],
+            },
+            {
+              label: 'Implementation details',
+              translations: { 'zh-CN': '实现细节' },
+              items: [
+                'specification/schema-implementation',
+                'specification/config-implementation',
+                'specification/regex-implementation',
+              ],
+            },
+          ],
         },
       ],
     }),

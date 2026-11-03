@@ -1,0 +1,143 @@
+:root {
+  --sl-color-accent-low: #dff3ef;
+  --sl-color-accent: #087f78;
+  --sl-color-accent-high: #075750;
+}
+
+:root[data-theme='dark'] {
+  --sl-color-accent-low: #183d3b;
+  --sl-color-accent: #65d2c2;
+  --sl-color-accent-high: #b0f2e7;
+}
+
+.typol-flow {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  margin: 2rem 0 1.5rem;
+}
+
+.typol-flow-step {
+  position: relative;
+  display: grid;
+  min-height: 8.5rem;
+  align-content: start;
+  gap: 0.6rem;
+  padding: 1.15rem;
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 1rem;
+  background: linear-gradient(145deg, var(--sl-color-bg), var(--sl-color-gray-6));
+}
+
+.typol-flow-step:not(:last-child)::after {
+  position: absolute;
+  top: 2.25rem;
+  right: -1.15rem;
+  z-index: 1;
+  width: 1.3rem;
+  height: 1.3rem;
+  border: 1px solid var(--sl-color-accent);
+  border-radius: 50%;
+  background: var(--sl-color-bg);
+  color: var(--sl-color-accent-high);
+  content: '→';
+  font-size: 0.85rem;
+  line-height: 1.15rem;
+  text-align: center;
+}
+
+.typol-flow-index,
+.typol-card-kicker {
+  color: var(--sl-color-accent-high);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.typol-flow-step strong {
+  color: var(--sl-color-text-accent);
+  font-size: 1.05rem;
+}
+
+.typol-flow-step code {
+  width: fit-content;
+  border: 1px solid var(--sl-color-accent-low);
+  border-radius: 0.4rem;
+  background: var(--sl-color-accent-low);
+  color: var(--sl-color-accent-high);
+  font-size: 0.82rem;
+}
+
+.typol-doc-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 1rem;
+  margin: 1.25rem 0 2.5rem;
+}
+
+.typol-doc-card {
+  padding: 1.35rem;
+  border: 1px solid var(--sl-color-gray-5);
+  border-top: 3px solid var(--sl-color-accent);
+  border-radius: 0.9rem;
+  background: var(--sl-color-bg);
+  box-shadow: 0 0.5rem 1.5rem color-mix(in srgb, var(--sl-color-text) 7%, transparent);
+}
+
+.typol-doc-card h3 {
+  margin: 0.55rem 0;
+  font-size: 1.2rem;
+}
+
+.typol-doc-card p {
+  min-height: 3.2em;
+  margin: 0 0 0.8rem;
+  color: var(--sl-color-gray-2);
+  font-size: 0.92rem;
+}
+
+.typol-doc-card ul {
+  margin: 0;
+  padding-inline-start: 1.2rem;
+}
+
+.typol-doc-card li + li {
+  margin-top: 0.35rem;
+}
+
+.sl-markdown-content .starlight-aside {
+  border-radius: 0.7rem;
+}
+
+.sl-markdown-content .expressive-code .frame {
+  border-radius: 0.8rem;
+  box-shadow: 0 0.5rem 1.5rem color-mix(in srgb, var(--sl-color-text) 8%, transparent);
+}
+
+.sl-markdown-content :not(pre) > code {
+  border-radius: 0.3rem;
+}
+
+@media (max-width: 50rem) {
+  .typol-flow,
+  .typol-doc-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .typol-flow-step {
+    min-height: auto;
+  }
+
+  .typol-flow-step:not(:last-child)::after {
+    top: auto;
+    right: 1.25rem;
+    bottom: -0.7rem;
+    transform: rotate(90deg);
+  }
+
+  .typol-doc-card p {
+    min-height: 0;
+  }
+}
