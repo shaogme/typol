@@ -9,7 +9,7 @@ use std::{collections::HashMap, fmt::Debug, io::Cursor, marker::PhantomData, ptr
 use typol::{
     ConfigInput, ConfigParseOptions, ConfigParser, ConfigValue, ConfigValueProcessor,
     EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext, SchemaLoader, Typol,
-    TypolOptions, ValidatedConfigValue,
+    TypolOptions, ValidatedConfigValue, WriteOptions,
     binding::{
         BindOptions, BindingLimitError, BindingLimits, BindingMismatchKind, BindingShape,
         BudgetedTypol, CodecOptions, CodecStage, ConversionLimits, MAX_CONVERSION_DEPTH,
@@ -140,6 +140,30 @@ fn derive_generics_payloads_rename_and_reordered_text_roundtrip() -> TestResult 
 #[derive(Debug, PartialEq, Typol)]
 struct Root {
     value: u8,
+}
+
+#[test]
+fn pretty_codec_options_are_opt_in_for_typed_serialization() -> TestResult {
+    assert!(!CodecOptions::default().pretty());
+    assert!(!WriteOptions::default().pretty());
+    let schema = compile("entry struct Root { value: u8 }")?;
+    let binding =
+        TestOpeo::value(|out| TypedSchema::<Root>::bind(&schema, BindOptions::default(), out))?;
+    assert_eq!(
+        TestOpeo::value(|out| binding.serialize(&Root { value: 7 }, CodecOptions::default(), out))?,
+        "{value: 7}"
+    );
+    assert_eq!(
+        TestOpeo::value(|out| {
+            binding.serialize(
+                &Root { value: 7 },
+                CodecOptions::default().with_pretty(true),
+                out,
+            )
+        })?,
+        "{\n  value: 7,\n}"
+    );
+    Ok(())
 }
 
 #[test]
@@ -573,7 +597,7 @@ fn facade_reads_text_and_reader_with_one_reusable_binding() -> TestResult {
             out,
         )
     })?;
-    let encoded = TestOpeo::value(|out| binding.write(&second, out))?;
+    let encoded = TestOpeo::value(|out| binding.write(&second, WriteOptions::default(), out))?;
     let dynamic: ValidatedConfigValue = TestOpeo::value(|out| {
         schema.read_value(ConfigInput::text("{value: 11}"), &mut environment, out)
     })?;

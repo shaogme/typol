@@ -1,6 +1,6 @@
 use std::{
     env::{temp_dir, var_os},
-    fs::{create_dir_all, remove_dir_all, write},
+    fs::{copy, create_dir_all, remove_dir_all, write},
     path::PathBuf,
     process::{Command, Output, id},
 };
@@ -23,6 +23,11 @@ impl Consumer {
         write(self.root.join("Cargo.toml"), format!(
             "[package]\nname = \"derive-consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\n{dependency} = {{ package = \"typol\", path = {:?} }}\n", facade,
         )).test_value()?;
+        copy(
+            facade.join("../../Cargo.lock"),
+            self.root.join("Cargo.lock"),
+        )
+        .test_value()?;
         write(self.root.join("src/main.rs"), source).test_value()?;
         Command::new(var_os("CARGO").unwrap_or_else(|| "cargo".into()))
             .arg(if run { "run" } else { "check" })

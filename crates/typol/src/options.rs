@@ -282,19 +282,30 @@ impl Default for BindOptions {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Controls validation, conversion, and output limits for typed configuration serialization.
+///
+/// Compact output is the default. Call [`CodecOptions::with_pretty`] to request multi-line text.
 pub struct CodecOptions {
     validation: ConfigValidationOptions,
     conversion: ConversionLimits,
     max_output_bytes: usize,
+    pretty: bool,
 }
 
+/// Controls validated configuration text written by a `BoundSchema`.
+///
+/// Compact output is the default. Conversion limits default to the limits of the loaded schema
+/// when these options are passed to `BoundSchema::write` or `BoundSchema::write_serde`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WriteOptions {
     max_output_bytes: usize,
     conversion: ConversionLimits,
+    conversion_overridden: bool,
+    pretty: bool,
 }
 
 impl WriteOptions {
+    /// Creates writer options with the provided output byte limit and compact formatting.
     pub const fn new(max_output_bytes: usize) -> Self {
         Self {
             max_output_bytes,
@@ -302,6 +313,8 @@ impl WriteOptions {
                 nodes: 100_000,
                 depth: MAX_CONVERSION_DEPTH,
             },
+            conversion_overridden: false,
+            pretty: false,
         }
     }
 
@@ -309,13 +322,34 @@ impl WriteOptions {
         self.max_output_bytes
     }
 
+    /// Returns the configured conversion limits before applying a `BoundSchema` fallback.
     pub const fn conversion_limits(self) -> ConversionLimits {
         self.conversion
     }
 
+    /// Returns whether the writer uses multi-line output with two-space indentation.
+    pub const fn pretty(self) -> bool {
+        self.pretty
+    }
+
     pub const fn with_conversion_limits(mut self, conversion: ConversionLimits) -> Self {
         self.conversion = conversion;
+        self.conversion_overridden = true;
         self
+    }
+
+    /// Selects compact or multi-line configuration text output.
+    pub const fn with_pretty(mut self, pretty: bool) -> Self {
+        self.pretty = pretty;
+        self
+    }
+
+    pub(crate) const fn conversion_limits_or(self, fallback: ConversionLimits) -> ConversionLimits {
+        if self.conversion_overridden {
+            self.conversion
+        } else {
+            fallback
+        }
     }
 }
 
@@ -326,6 +360,7 @@ impl Default for WriteOptions {
 }
 
 impl CodecOptions {
+    /// Creates codec options with compact formatting.
     pub const fn new(
         validation: ConfigValidationOptions,
         conversion: ConversionLimits,
@@ -335,6 +370,7 @@ impl CodecOptions {
             validation,
             conversion,
             max_output_bytes,
+            pretty: false,
         }
     }
 
@@ -350,6 +386,11 @@ impl CodecOptions {
         self.max_output_bytes
     }
 
+    /// Returns whether the encoder uses multi-line output with two-space indentation.
+    pub const fn pretty(self) -> bool {
+        self.pretty
+    }
+
     pub const fn with_validation(mut self, validation: ConfigValidationOptions) -> Self {
         self.validation = validation;
         self
@@ -362,6 +403,12 @@ impl CodecOptions {
 
     pub const fn with_max_output_bytes(mut self, max_output_bytes: usize) -> Self {
         self.max_output_bytes = max_output_bytes;
+        self
+    }
+
+    /// Selects compact or multi-line configuration text output.
+    pub const fn with_pretty(mut self, pretty: bool) -> Self {
+        self.pretty = pretty;
         self
     }
 }

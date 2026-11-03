@@ -1,3 +1,5 @@
+mod pretty;
+
 use crate::{
     BindingTestSupport, TestAssertions,
     codec::ValidatedValue,
@@ -112,15 +114,22 @@ fn parsed_config(
 }
 
 fn encoded(validated: &mut ValidatedValue<'_, '_>) -> TestResult<String> {
-    TestOpeo::value(|out| validated.encode(out))
+    TestOpeo::value(|out| validated.encode(false, out))
 }
 
 fn encode_error(validated: &mut ValidatedValue<'_, '_>) -> TestResult<CodecErrors> {
-    TestOpeo::error(|out| validated.encode(out))
+    TestOpeo::error(|out| validated.encode(false, out))
 }
 
 fn encode_outcome(validated: &mut ValidatedValue<'_, '_>) -> TestOpeoOutcome<String, CodecErrors> {
-    TestOpeo::outcome(|out| validated.encode(out))
+    encode_outcome_with_pretty(validated, false)
+}
+
+fn encode_outcome_with_pretty(
+    validated: &mut ValidatedValue<'_, '_>,
+    pretty: bool,
+) -> TestOpeoOutcome<String, CodecErrors> {
+    TestOpeo::outcome(|out| validated.encode(pretty, out))
 }
 
 fn allocation_encode(outcome: TestOpeoOutcome<String, CodecErrors>) -> TestResult {
@@ -541,9 +550,14 @@ fn allocations_fail_atomically_during_sorting_and_output() -> TestResult {
         &mut Provider(Vec::new()),
         &mut call,
     )?);
-    TestAssertions::assert_atomic_allocations(|| {
-        allocation_encode(encode_outcome(&mut verified.borrow_mut()))
-    })?;
+    for pretty in [false, true] {
+        TestAssertions::assert_atomic_allocations(|| {
+            allocation_encode(encode_outcome_with_pretty(
+                &mut verified.borrow_mut(),
+                pretty,
+            ))
+        })?;
+    }
     Ok(())
 }
 

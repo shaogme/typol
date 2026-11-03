@@ -88,6 +88,22 @@ Fallible facade operations receive an `Out` error context and return an OPEO res
 
 Regular expressions use Typol's documented subset and search semantics. Use `^` and `$` when a pattern must match the entire string. `@secret` controls diagnostic and safe-display behavior; application values and serialized output still contain the actual data.
 
+## Write bound values
+
+Pass `WriteOptions` directly to the bound writer. Compact output remains the default; use `with_pretty(true)` for two-space indentation:
+
+```rust
+use typol::WriteOptions;
+
+let text = binding.write(
+    &config,
+    WriteOptions::default().with_pretty(true),
+    out,
+)?;
+```
+
+The options argument is now part of `BoundSchema::write` and `BoundSchema::write_serde`; migrate calls from `write(value, out)` to `write(value, options, out)`. The old `write_with_options` and `write_serde_with_options` methods are removed. `TypedSchema::serialize` and `serialize_serde` use `CodecOptions::with_pretty` for the same format choice. Formatting whitespace counts toward the output limit, and no partial text is returned on failure. Serialization retains actual `@secret` values.
+
 ## Handwritten `Typol` implementations
 
 `LoadedSchema::bind` and `TypedSchema::bind` are for built-in types and derive-generated types whose nested fields and enum payloads also carry the hidden `BudgetedTypol` marker. Mark a derived type that contains a handwritten implementation with `#[typol(trusted)]`; it remains available through `LoadedSchema::bind_trusted` or `TypedSchema::bind_trusted`, and its returned `TrustedBoundSchema` or `TrustedTypedSchema` keeps that choice visible in the Rust type. Load the schema with `SchemaLoader`, bind the Rust type, and read configuration through the resulting binding; for handwritten types, call `bind_trusted` explicitly.

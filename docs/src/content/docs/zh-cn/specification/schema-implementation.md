@@ -203,6 +203,8 @@ Schema 错误由 `SchemaCompileErrors` 以非空集合或不需分配的内联�
 
 文本解析、外来 `ConfigValue` 规范化和 Rust 序列化使用共享的完整树 Schema 校验入口。Rust 值不能跳过字段/集合约束或完整树断言；序列化输出按 Schema 字段顺序和 map 解码键序构造。上下文 serde 方法在绑定后使用同一验证路径；无 Schema 上下文的普通 serde trait 调用不承诺验证实际 `.tschem`。
 
+`BoundSchema::write(value, options, out)` 和受 feature 控制的 `write_serde` 使用 `WriteOptions`；`WriteOptions::default()` 选择紧凑格式，并在调用方未显式覆盖时继承加载 Schema 的转换额度。`with_pretty(true)` 会将非空结构体、map 和数组展开为两空格缩进的多行文本，每行一个条目并带尾逗号；空容器仍保持内联。`CodecOptions::with_pretty` 为 `TypedSchema::serialize` 和 `serialize_serde` 提供相同选择。格式空白会计入输出和执行额度；编码器仍使用迭代路径，失败时不会返回部分文本。输出末尾没有换行，且仍包含 `@secret` 的实际值。
+
 ### Serde 桥接支持矩阵
 
 `TypedSchema::serialize_serde` 和 `TypedSchema::deserialize_serde` 是 Typol 提供的上下文桥接：它们在成功绑定的 Schema 下消费/产生 Serde 数据模型事件。应用直接把普通 Serde trait 交给自选的 serializer/deserializer 时，不经过该桥接，也没有实际 `.tschem` 的校验保证。无论绑定是否带有 `BudgetedTypol`，调用方提供的 `Serialize`/`Deserialize` 实现都属于用户代码信任边界；桥接只计量其控制的操作，不能限制这些回调的直接分配、阻塞或任意计算。完整矩阵也列于 `typol` crate 的 Rust 文档。

@@ -336,6 +336,8 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
     }
 
     /// Converts and fully validates the actual value before emitting deterministic configuration text.
+    ///
+    /// `CodecOptions::with_pretty` selects multi-line output; compact text remains the default.
     /// Conversion diagnostics follow the bound Schema `@secret` boundary before storage.
     pub fn serialize<'slot>(
         &self,
@@ -362,7 +364,7 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
             &mut session,
             out.reborrow(),
         )?;
-        validated.encode(out.reborrow())
+        validated.encode(options.pretty(), out.reborrow())
     }
 
     /// Parsing and final Rust construction share the request execution budget.
@@ -451,6 +453,7 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
 
     /// Processes Serde events under the current binding’s Schema and emits configuration text after full validation.
     ///
+    /// `CodecOptions::with_pretty` selects multi-line output; compact text remains the default.
     /// Serde and Typol effective names must match. Omitted fields are filled using Schema defaults or `none`; this does not guarantee reconstruction of the original Rust value.
     /// Actual output retains secret values and must not be used as a security log.
     /// Ordinary Serde trait calls without context do not guarantee Schema validation.
@@ -483,7 +486,7 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
             &mut session,
             out.reborrow(),
         )?;
-        validated.encode(out.reborrow())
+        validated.encode(options.pretty(), out.reborrow())
     }
 
     /// Parses and validates the complete configuration before constructing the owned Serde target.

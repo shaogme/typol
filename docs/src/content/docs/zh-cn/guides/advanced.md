@@ -124,6 +124,20 @@ let binding = loaded.bind_trusted::<ServiceConfig>(out.reborrow())?;
 
 `LegacyAccountId` 自身必须实现手写的 `Typol`。这类回调属于应用代码：Typol 只会对经 `ConversionContext` 分发的工作计量，无法约束回调直接执行的任意计算、阻塞或内存分配。输入在转换前会按 Schema 校验，但回调返回的 Rust 值不会再次校验。请保持手写实现简洁并经过审查。实现契约详见[Schema 实现说明](../../specification/schema-implementation/)。
 
+`BoundSchema` 写值时会执行与序列化相同的完整 Schema 校验。将 `WriteOptions` 作为第二个参数传入；`WriteOptions::default()` 保持紧凑输出，`with_pretty(true)` 则以两空格缩进展开容器：
+
+```rust
+use typol::WriteOptions;
+
+let text = binding.write(
+    &config,
+    WriteOptions::default().with_pretty(true),
+    out,
+)?;
+```
+
+输出末尾不会追加换行。格式空白也计入输出字节额度；写入失败时不会返回部分文本。标记为 `@secret` 的字段仍会输出实际值。写入 API 已变更：请将 `write(value, out)` 迁移为 `write(value, options, out)`；旧的 `write_with_options` 方法已移除。启用 `serde` feature 后，`write_serde` 采用相同签名。较低层的 `TypedSchema::serialize` 和 `serialize_serde` 通过 `CodecOptions::with_pretty` 选择 pretty 格式。
+
 可选的 Serde 桥接能在绑定 Schema 的上下文中读取或写入 Serde 类型。启用 Typol 的 `serde` feature 和 Serde 的 derive feature：
 
 ```toml

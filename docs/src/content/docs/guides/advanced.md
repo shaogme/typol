@@ -124,6 +124,20 @@ let binding = loaded.bind_trusted::<ServiceConfig>(out.reborrow())?;
 
 `LegacyAccountId` must have its own handwritten `Typol` implementation. Such callbacks are application code: Typol budgets cover work routed through `ConversionContext`, but cannot constrain arbitrary computation, blocking, or direct allocations in the callback. Input is validated against the Schema before conversion; the returned Rust value is not validated again. Keep handwritten implementations small and reviewed. The API contract is documented in the [Schema implementation](../../specification/schema-implementation/).
 
+`BoundSchema` writes a value with the same complete Schema validation used by serialization. Pass `WriteOptions` as the second argument; `WriteOptions::default()` keeps compact output, while `with_pretty(true)` expands containers with two-space indentation:
+
+```rust
+use typol::WriteOptions;
+
+let text = binding.write(
+    &config,
+    WriteOptions::default().with_pretty(true),
+    out,
+)?;
+```
+
+The writer adds no final newline. Formatting whitespace counts toward the output byte limit, and a failed write returns no partial text. Output includes actual values from fields marked `@secret`. This changes the write API: migrate `write(value, out)` to `write(value, options, out)`; the previous `write_with_options` method is removed. `write_serde` follows the same signature when the `serde` feature is enabled. Lower-level `TypedSchema::serialize` and `serialize_serde` select pretty output through `CodecOptions::with_pretty`.
+
 The optional Serde bridge can read or write Serde types with the bound Schema in context. Enable both Typol's `serde` feature and Serde's derive feature:
 
 ```toml

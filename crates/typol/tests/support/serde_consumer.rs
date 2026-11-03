@@ -1,7 +1,7 @@
 use renamed_typol::{
     ConfigInput, ConfigParseOptions, Environment, EnvironmentError, EnvironmentReadContext, Typol,
     LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader, TypolError,
-    TypolOptions, TypolStage, ValidatedConfigValue,
+    TypolOptions, TypolStage, ValidatedConfigValue, WriteOptions,
     binding::*, config::*, core::*, host::*, schema::*, semantic::*,
     opeo::{OResult, Out},
 };
@@ -496,6 +496,12 @@ fn loaded_serde() {
     write("loading.tschem", schema).unwrap();
     write("loading.tconf", "{value: 3}").unwrap();
     let loaded = invoke(|out| SchemaLoader::new(TypolOptions::default()).compile_file(Path::new("loading.tschem"), out));
+    let bound = invoke(|out| loaded.bind::<Scalar>(out));
+    let value = Scalar { value: 3 };
+    let write_options = WriteOptions::default().with_pretty(true);
+    let expected = "{\n  value: 3,\n}";
+    assert_eq!(invoke(|out| bound.write(&value, write_options, out)), expected);
+    assert_eq!(invoke(|out| bound.write_serde(&value, write_options, out)), expected);
     write("loading-secret-path.tconf", "{value: 1}").unwrap();
     let named_errors = invoke_error(|out| {
         read_serde::<Scalar>(

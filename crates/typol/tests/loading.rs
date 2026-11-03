@@ -10,8 +10,10 @@ use std::{
 use typol::{
     BoundSchema, ConfigInput, ConfigParseOptions, Environment, EnvironmentError,
     EnvironmentReadContext, LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits,
-    SchemaLoader, Typol, TypolError, TypolOptions, TypolStage, ValidatedConfigValue,
-    binding::{BindOptions, CodecStage, Typol as TypolTrait},
+    SchemaLoader, Typol, TypolError, TypolOptions, TypolStage, ValidatedConfigValue, WriteOptions,
+    binding::{
+        BindOptions, CodecStage, ConversionLimits, MAX_CONVERSION_DEPTH, Typol as TypolTrait,
+    },
     config::{ConfigFailureStage, ConfigParseErrors, ConfigParseRequest, ConfigParser},
     core::{BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId},
     host::{
@@ -223,6 +225,34 @@ fn load_error<T>(
     operation: impl for<'slot> FnOnce(Out<'slot, 'slot, TypolError>) -> OResult<'slot, T>,
 ) -> TestResult<TypolError> {
     TestOpeo::error(operation)
+}
+
+#[test]
+fn bound_write_inherits_loaded_conversion_limits_unless_explicitly_overridden() -> TestResult {
+    let loaded_limits = ConversionLimits::new(0, MAX_CONVERSION_DEPTH).test_value()?;
+    let loaded = load(
+        "entry struct Root { value: u8, optional: option<string> }",
+        default_options().with_conversion(loaded_limits),
+    )?;
+    let binding = load_value(|out| loaded.bind::<Root>(out))?;
+    let value = Root {
+        value: 7,
+        optional: None,
+    };
+    let errors = load_error(|out| binding.write(&value, WriteOptions::default(), out))?;
+    assert_eq!(errors.stage(), TypolStage::Encoding);
+    assert_eq!(
+        errors.codec_errors().test_value()?.stage(),
+        CodecStage::Conversion
+    );
+    let options = WriteOptions::default()
+        .with_conversion_limits(ConversionLimits::default())
+        .with_pretty(true);
+    assert_eq!(
+        load_value(|out| binding.write(&value, options, out))?,
+        "{\n  value: 7,\n  optional: none,\n}"
+    );
+    Ok(())
 }
 
 #[test]
@@ -542,7 +572,7 @@ fn failed_name_snapshot_does_not_block_success_and_preserves_original_errors() -
             ConfigInput::text("{value: 3, optional: none}"),
             out.reborrow(),
         )?;
-        bound.write(&value, out)
+        bound.write(&value, WriteOptions::default(), out)
     })?;
     assert!(!encoded.is_empty());
     let errors = load_error(|mut out| {

@@ -1,6 +1,6 @@
 use typol::{
     ConfigInput, EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext,
-    TypolError, TypolStage,
+    TypolError, TypolStage, WriteOptions,
     opeo::{ErrSlot, OResult, Out},
 };
 use typol_showcase::{
@@ -106,7 +106,7 @@ fn derived_binding_round_trips_config_and_checks_collection_constraints() {
         })
         .unwrap();
     let encoded = load_errors
-        .try_call(|out| binding.write(&config, out))
+        .try_call(|out| binding.write(&config, WriteOptions::default(), out))
         .unwrap();
 
     let mut source = encoded.as_bytes();

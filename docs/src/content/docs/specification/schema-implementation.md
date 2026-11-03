@@ -177,6 +177,8 @@ Built-in Rust map binding implements `Typol` only for `HashMap<String, T>`. Deco
 
 Text parsing, foreign `ConfigValue` normalization, and Rust serialization share full-tree Schema validation. Rust values cannot skip field/collection constraints or full-tree assertions. Serialization follows Schema field order and decoded map key order. Contextual Serde methods use the same validation after binding; ordinary Serde traits without Schema context do not promise validation against an actual `.tschem`.
 
+`BoundSchema::write(value, options, out)` and the feature-gated `write_serde` use `WriteOptions`; `WriteOptions::default()` selects compact output and inherits the loaded schema's conversion limits unless the caller explicitly overrides them. `with_pretty(true)` expands non-empty structs, maps, and arrays with two-space indentation, one item per line, and trailing commas; empty containers remain inline. `CodecOptions::with_pretty` provides the same choice for `TypedSchema::serialize` and `serialize_serde`. Formatting whitespace is charged to output and execution limits, the encoder remains iterative, and failures do not return partial text. Output has no final newline and retains actual `@secret` values.
+
 ### Serde bridge support
 
 `TypedSchema::serialize_serde` and `TypedSchema::deserialize_serde` are context-aware Typol bridges that consume or produce Serde data-model events under a successfully bound Schema. Passing a normal Serde trait directly to another serializer/deserializer bypasses this bridge and carries no validation guarantee for a particular `.tschem`. Caller-provided `Serialize`/`Deserialize` code remains a user-code trust boundary even with a `BudgetedTypol` binding; the bridge charges only work it controls.

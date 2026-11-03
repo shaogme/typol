@@ -88,6 +88,22 @@ Facade 的可失败操作接收 `Out` 错误上下文，并返回 OPEO 结果。
 
 正则表达式遵循 Typol 文档规定的子集和搜索语义。需要整个字符串都匹配时，请使用 `^` 和 `$`。`@secret` 控制诊断和安全展示；应用中的值及序列化输出仍包含真实数据。
 
+## 写入绑定值
+
+将 `WriteOptions` 直接传给绑定写入入口。默认仍使用紧凑格式；调用 `with_pretty(true)` 可使用两空格缩进的多行输出：
+
+```rust
+use typol::WriteOptions;
+
+let text = binding.write(
+    &config,
+    WriteOptions::default().with_pretty(true),
+    out,
+)?;
+```
+
+`BoundSchema::write` 和 `BoundSchema::write_serde` 现在都要求显式传入选项；请将 `write(value, out)` 迁移为 `write(value, options, out)`。旧的 `write_with_options` 和 `write_serde_with_options` 方法已移除。`TypedSchema::serialize` 和 `serialize_serde` 使用 `CodecOptions::with_pretty` 选择相同格式。格式空白也计入输出字节额度，失败时不会返回部分文本。序列化结果仍包含 `@secret` 的实际值。
+
 ## 手写 `Typol` 实现
 
 `LoadedSchema::bind` 和 `TypedSchema::bind` 用于内建类型，以及所有嵌套字段和枚举载荷也带有隐藏 `BudgetedTypol` 标记的派生类型。应通过 `SchemaLoader` 加载 Schema、绑定 Rust 类型，再使用绑定读取配置。派生类型包含手写实现时，请添加 `#[typol(trusted)]`，再通过 `LoadedSchema::bind_trusted` 或 `TypedSchema::bind_trusted` 使用；返回的 `TrustedBoundSchema` 或 `TrustedTypedSchema` 会在 Rust 类型中保留此选择。

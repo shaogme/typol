@@ -174,19 +174,11 @@ impl<T: Typol> BoundSchema<'_, T> {
         )
     }
 
+    /// Converts and validates `value`, then writes configuration text using `options`.
+    ///
+    /// Pretty output uses two-space indentation and no final newline. The text retains actual
+    /// values for fields marked `@secret`; treat it as sensitive.
     pub fn write<'slot>(
-        &self,
-        value: &T,
-        out: Out<'slot, '_, TypolError>,
-    ) -> OResult<'slot, String> {
-        self.write_with_options(
-            value,
-            WriteOptions::default().with_conversion_limits(self.loaded.options().conversion()),
-            out,
-        )
-    }
-
-    pub fn write_with_options<'slot>(
         &self,
         value: &T,
         options: WriteOptions,
@@ -195,8 +187,9 @@ impl<T: Typol> BoundSchema<'_, T> {
         let slot = self.loaded.error_slot(out.reborrow())?;
         let codec_options = CodecOptions::default()
             .with_validation(self.loaded.options().validation())
-            .with_conversion(options.conversion_limits())
-            .with_max_output_bytes(options.max_output_bytes());
+            .with_conversion(options.conversion_limits_or(self.loaded.options().conversion()))
+            .with_max_output_bytes(options.max_output_bytes())
+            .with_pretty(options.pretty());
         let mut codec_errors = ErrSlot::new();
         let result = codec_errors
             .try_call(|codec_out| self.binding.serialize(value, codec_options, codec_out));
@@ -222,37 +215,27 @@ impl<T: Typol> BoundSchema<'_, T> {
         )
     }
 
+    /// Converts and validates Serde data, then writes configuration text using `options`.
+    ///
+    /// Pretty output uses two-space indentation and no final newline. The text retains actual
+    /// values for fields marked `@secret`; treat it as sensitive.
     #[cfg(feature = "serde")]
     pub fn write_serde<'slot>(
         &self,
         value: &T,
+        options: WriteOptions,
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, String>
     where
         T: Serialize,
     {
-        self.write_serde_with_options(
-            value,
-            WriteOptions::default().with_conversion_limits(self.loaded.options().conversion()),
-            out,
-        )
-    }
-
-    #[cfg(feature = "serde")]
-    pub fn write_serde_with_options<'slot>(
-        &self,
-        value: &T,
-        options: WriteOptions,
-        mut out: Out<'slot, '_, TypolError>,
-    ) -> OResult<'slot, String>
-    where
-        T: Serialize,
-    {
+        let mut out = out;
         let slot = self.loaded.error_slot(out.reborrow())?;
         let codec_options = CodecOptions::default()
             .with_validation(self.loaded.options().validation())
-            .with_conversion(options.conversion_limits())
-            .with_max_output_bytes(options.max_output_bytes());
+            .with_conversion(options.conversion_limits_or(self.loaded.options().conversion()))
+            .with_max_output_bytes(options.max_output_bytes())
+            .with_pretty(options.pretty());
         let mut codec_errors = ErrSlot::new();
         let result = codec_errors.try_call(|codec_out| {
             self.binding

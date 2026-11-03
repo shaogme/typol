@@ -1,7 +1,7 @@
 use std::{any::TypeId, collections::HashMap, error::Error};
 use typol::{
     ConfigInput, ConfigParseOptions, EmptyEnvironment, SchemaLoader, Typol, TypolOptions,
-    TypolStage,
+    TypolStage, WriteOptions,
     binding::{
         BindOptions, CodecErrors, CodecOptions, CodecStage, ConversionContext, ConversionLimits,
         ConversionValue, DescribeContext, DescriptorNode, DescriptorProvider, TypeDescriptor,
@@ -299,7 +299,9 @@ fn facade_trusted_binding_reads_and_writes_handwritten_types() -> TestResult {
     })?;
     let binding = TestOpeo::value(|out| loaded.bind_trusted::<Manual>(out))?;
     assert_eq!(
-        TestOpeo::value(|out| binding.write(&Manual { value: 5 }, out))?,
+        TestOpeo::value(|out| {
+            binding.write(&Manual { value: 5 }, WriteOptions::default(), out)
+        })?,
         "{value: 5}"
     );
     let mut environment = EmptyEnvironment;
