@@ -1,5 +1,7 @@
 # Typol
 
+[简体中文](README_CN.md)
+
 Typol is a schema-driven configuration library for Rust. It compiles `.tschem` schemas, parses `.tconf` configuration values against the compiled types, validates constraints and assertions, and can bind the result to Rust types with `#[derive(Typol)]`.
 
 The workspace requires Rust 1.85 or newer. The examples below use the `typol` facade crate; the lower-level crates can also be used independently.

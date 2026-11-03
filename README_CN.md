@@ -1,5 +1,7 @@
 # Typol
 
+[English](README.md)
+
 Typol 是面向 Rust 的 Schema 驱动配置库。它编译 `.tschem` Schema，按编译后的类型解析 `.tconf` 配置值，校验约束和断言，并可通过 `#[derive(Typol)]` 将结果绑定到 Rust 类型。
 
 工作区要求 Rust 1.85 或更高版本。以下示例使用 `typol` facade crate；底层 crate 也可以独立使用。
