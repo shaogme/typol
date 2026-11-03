@@ -65,7 +65,10 @@ jobs:
           "$package_out/bin/typol" config check --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf
           "$package_out/bin/typol" config export-ir --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf > "$RUNNER_TEMP/typol-legacy-ir.json"
           python -m json.tool "$RUNNER_TEMP/typol-legacy-ir.json" > /dev/null
-      - run: nix-shell --run 'cargo --version && rustc --version'
+      - name: 验证传统开发 shell
+        run: |
+          nixpkgs="$(nix eval --raw --impure --expr '(import ./npins).nixpkgs.outPath')"
+          nix-shell -I "nixpkgs=$nixpkgs" --run 'cargo --version && rustc --version'
 
   ci-success:
     name: CI Success
