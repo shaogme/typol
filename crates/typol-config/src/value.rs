@@ -92,6 +92,7 @@ impl OwnedNamedValue {
         Ok(Self { name, value })
     }
 
+    #[cfg(test)]
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
@@ -300,6 +301,7 @@ impl ValueFactory {
         builder.finish(root, out.reborrow())
     }
 
+    #[cfg(test)]
     pub(crate) fn array<'slot>(
         values: &[ConfigValue],
         source: ValueSource,
@@ -343,24 +345,6 @@ impl ValueFactory {
         }
         let root = builder.add_array(&children, source, out.reborrow())?;
         builder.finish(root, out.reborrow())
-    }
-
-    pub(crate) fn map<'slot>(
-        values: &[MapEntry],
-        source: ValueSource,
-        budget: Option<&ExecutionBudget>,
-        mut out: Out<'slot, '_, ValueError>,
-    ) -> OResult<'slot, ConfigValue> {
-        Self::named(values, source, budget, true, out.reborrow())
-    }
-
-    pub(crate) fn structure<'slot>(
-        values: &[FieldValue],
-        source: ValueSource,
-        budget: Option<&ExecutionBudget>,
-        mut out: Out<'slot, '_, ValueError>,
-    ) -> OResult<'slot, ConfigValue> {
-        Self::named(values, source, budget, false, out.reborrow())
     }
 
     pub(crate) fn map_owned<'slot>(
@@ -483,28 +467,6 @@ impl ValueFactory {
                     out.reborrow(),
                 )?
             }
-        };
-        builder.finish(root, out.reborrow())
-    }
-
-    fn named<'slot>(
-        values: &[OwnedNamedValue],
-        source: ValueSource,
-        budget: Option<&ExecutionBudget>,
-        map: bool,
-        mut out: Out<'slot, '_, ValueError>,
-    ) -> OResult<'slot, ConfigValue> {
-        let mut builder = ConfigValueBuilder::new(budget, out.reborrow())?;
-        let mut named = ChargedVec::new(budget, out.reborrow())?;
-        named.try_reserve_exact(values.len(), out.reborrow())?;
-        for entry in values {
-            let value = Self::copy_into(&mut builder, entry.value.root(), budget, out.reborrow())?;
-            named.try_push(NamedValue::new(entry.name(), value), out.reborrow())?;
-        }
-        let root = if map {
-            builder.add_map(&named, source, out.reborrow())?
-        } else {
-            builder.add_structure(&named, source, out.reborrow())?
         };
         builder.finish(root, out.reborrow())
     }

@@ -102,9 +102,7 @@ impl NormalizeBuilder {
         let single = NormalizeOps::take_single(&mut children, out.reborrow())?;
         NormalizeOps::value_call(
             &mut state.errors.value,
-            |value_out| {
-                ValueFactory::optional(Some(&single), source, Some(state.budget), value_out)
-            },
+            |value_out| ValueFactory::optional_owned(single, source, Some(state.budget), value_out),
             out,
         )
     }
@@ -114,7 +112,7 @@ impl NormalizeBuilder {
         plan: Plan<'_>,
         children: ChargedVec<ConfigValue>,
         source: ValueSource,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ConfigValue> {
         if plan
             .children
@@ -124,25 +122,9 @@ impl NormalizeBuilder {
             return Err(out.fail(NormalizeOps::invariant_error()));
         }
         let budget = Some(state.budget);
-        let mut output = NormalizeOps::budget_call(
-            &mut state.errors.budget,
-            |budget_out| ChargedVec::new(budget, budget_out),
-            out.reborrow(),
-        )?;
-        NormalizeOps::reserve(
-            &mut output,
-            &mut state.errors,
-            children.len(),
-            out.reborrow(),
-        )?;
-        NormalizeOps::budget_call(
-            &mut state.errors.budget,
-            |budget_out| output.extend(children, budget_out),
-            out.reborrow(),
-        )?;
         NormalizeOps::value_call(
             &mut state.errors.value,
-            |value_out| ValueFactory::array(&output, source, budget, value_out),
+            |value_out| ValueFactory::array_owned(children, source, budget, value_out),
             out,
         )
     }
@@ -183,7 +165,7 @@ impl NormalizeBuilder {
         }
         NormalizeOps::value_call(
             &mut state.errors.value,
-            |value_out| ValueFactory::map(&output, source, budget, value_out),
+            |value_out| ValueFactory::map_owned(output, source, budget, value_out),
             out,
         )
     }
@@ -204,7 +186,9 @@ impl NormalizeBuilder {
         )?;
         NormalizeOps::value_call(
             &mut state.errors.value,
-            |value_out| ValueFactory::structure(&fields, source, Some(state.budget), value_out),
+            |value_out| {
+                ValueFactory::structure_owned(fields, source, Some(state.budget), value_out)
+            },
             out,
         )
     }
