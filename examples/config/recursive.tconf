@@ -1,0 +1,7 @@
+{
+    root: {
+        value: "root",
+        children: [{ value: "leaf", children: [] }],
+    },
+    expression: .Add([.Number(1), .Number(2)]),
+}

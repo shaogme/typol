@@ -436,7 +436,6 @@ impl LoadedSchema {
     ///
     /// Library budgets still cover context-routed work, but cannot constrain callback allocations,
     /// blocking, arbitrary computation, or the Rust value returned by handwritten code.
-    ///
     pub fn bind_trusted<'slot, T: Typol>(
         &self,
         mut out: Out<'slot, '_, TypolError>,

@@ -45,9 +45,15 @@ struct NameCheck<'name, 'path, 'schema> {
     root: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ActiveBinding<'schema> {
+    identity: TypeId,
+    ty: TypeView<'schema>,
+}
+
 pub(crate) struct Matcher<'schema> {
     stack: ChargedVec<Task<'schema>>,
-    active: ChargedVec<TypeId>,
+    active: ChargedVec<ActiveBinding<'schema>>,
     types: ChargedVec<TypeBinding<'schema>>,
     index: BindingIndex<'schema>,
     errors: BindingErrorCollector,
@@ -55,7 +61,7 @@ pub(crate) struct Matcher<'schema> {
 
 pub(crate) struct MatcherBuffers<'schema> {
     pub(crate) stack: ChargedVec<Task<'schema>>,
-    pub(crate) active: ChargedVec<TypeId>,
+    pub(crate) active: ChargedVec<ActiveBinding<'schema>>,
     pub(crate) types: ChargedVec<TypeBinding<'schema>>,
 }
 
@@ -187,11 +193,8 @@ impl<'schema> Matcher<'schema> {
                 |budget_out| context.session().visit(budget_out),
                 out.reborrow(),
             )?;
-            if *active == identity {
-                return Err(out.fail(CodecErrors::emergency(
-                    CodecStage::Binding,
-                    Failure::RecursiveType,
-                )));
+            if active.identity == identity && active.ty == pending.ty {
+                return Ok(());
             }
         }
         if self
@@ -683,7 +686,15 @@ impl<'schema> Matcher<'schema> {
         }
         context.session().budget_codec(
             CodecStage::Binding,
-            |budget_out| self.active.try_push(identity, budget_out),
+            |budget_out| {
+                self.active.try_push(
+                    ActiveBinding {
+                        identity,
+                        ty: pending.ty,
+                    },
+                    budget_out,
+                )
+            },
             out.reborrow(),
         )?;
         self.push(Task::Exit(binding), context, out.reborrow())?;

@@ -107,6 +107,29 @@ let config = binding.read(input, &mut environment, out)?;
 
 ## 绑定自定义 Rust 类型并使用 Serde
 
+递归 Schema 可以表示有限树结构：容器、option、零长数组或枚举终止变体能够结束构造。没有任何有限值的必需环会在编译时被拒绝。derive 支持 `Vec<Self>` 这样的递归字段：
+
+```tschem
+struct Node {
+    value: string,
+    children: [Node],
+}
+
+entry struct TreeConfig {
+    root: Node,
+}
+```
+
+```rust
+#[derive(Typol)]
+struct Node {
+    value: String,
+    children: Vec<Node>,
+}
+```
+
+将 `children` 设为空数组即可构造叶节点。非空值仍受配置嵌套、节点、执行、绑定和转换额度约束。
+
 普通 Rust 结构体和枚举优先使用 `#[derive(Typol)]`。常规 `bind` 入口支持内建或 derive 生成的实现，其嵌套字段和枚举载荷也必须符合相同条件。
 
 类型包含手写 `Typol` 实现时，为包含它的 derive 标记信任属性，并调用 `bind_trusted`：

@@ -1,0 +1,14 @@
+struct Node {
+    value: string,
+    children: [Node],
+}
+
+enum Expr {
+    Number(i64),
+    Add([Expr]),
+}
+
+entry struct RecursiveConfig {
+    root: Node,
+    expression: Expr,
+}

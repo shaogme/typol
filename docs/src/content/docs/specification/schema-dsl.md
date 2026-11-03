@@ -14,7 +14,7 @@ You are declaring configuration types, defaults, annotations, or cross-field val
 | Topic | Rule to remember |
 | --- | --- |
 | Entry and imports | The root Schema has exactly one `entry struct`; imported declarations use `extern mod`. |
-| Types | Types include scalars, options, arrays, string-keyed maps, structs, and enums; recursive user types and nested options are unsupported. |
+| Types | Types include scalars, options, arrays, string-keyed maps, structs, and enums; recursive types are allowed when they have a finite value. Nested options are unsupported. |
 | Validation | Defaults and annotations are checked during Schema compilation; assertions run after a configuration value is constructed. |
 
 This document defines the lexical, grammatical, and static semantic rules for `.tschem` Schema files. A Schema describes configuration types, defaults, and validation rules. The syntax for configuration instances is defined by the [Config DSL specification](../config-dsl/).
@@ -83,7 +83,24 @@ path          ::= identifier ("::" identifier)*
 
 Integer types are signed or unsigned integers of the stated width. `f32` and `f64` are IEEE 754 binary32 and binary64. `option<T>` is an optional `T`; `[T]` is an array of any length; `[T; N]` has exactly `N` elements; and `map<string, T>` maps unique string keys to `T`. `N` is a non-negative decimal integer in the range 0 through `u32::MAX`.
 
-Container elements may themselves use containers or user-declared types. After aliases are fully expanded, nested `option<option<T>>` is unsupported. User-declared types cannot directly or indirectly recurse through containers or aliases.
+Container elements may themselves use containers or user-declared types. After aliases are fully expanded, nested `option<option<T>>` is unsupported. User-declared types may refer to themselves or each other through fields, enum payloads, containers, and non-cyclic aliases when the type graph has a finite value. Options, dynamic arrays, maps, and zero-length fixed arrays can stop recursive construction; a recursive enum needs at least one constructible variant. Positive-length fixed arrays require a constructible element type. A required cycle with no finite branch, such as `struct Loop { next: Loop }`, is a static error. Type aliases must still be acyclic.
+
+```tschem
+struct Node {
+    value: string,
+    children: [Node],
+}
+
+enum Expr {
+    Number(i64),
+    Add([Expr]),
+}
+
+entry struct Config {
+    root: Node,
+    expression: Expr,
+}
+```
 
 ### 3.2 Structs and fields
 
@@ -249,6 +266,6 @@ Equality supports same-type scalars, enums, and comparable optional values; stru
 
 ## 7. Static validity
 
-A Schema is usable for configuration parsing only if its syntax and static semantics are valid. Type references must resolve to structs, enums, or valid aliases. Aliases cannot be cyclic, and user-declared types cannot recurse. Struct fields, enum variants, and declarations in the same namespace cannot be duplicated. The entry must be a struct.
+A Schema is usable for configuration parsing only if its syntax and static semantics are valid. Type references must resolve to structs, enums, or valid aliases. Aliases cannot be cyclic, and recursive user-declared types must have at least one finite value. Struct fields, enum variants, and declarations in the same namespace cannot be duplicated. The entry must be a struct.
 
 Every default must match its declared type and constraints. Annotations must apply to supported target types and have valid arguments and bounds. Assertions and collection expressions must pass static type checking. If any condition fails, the Schema is invalid.

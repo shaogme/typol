@@ -84,55 +84,10 @@ impl ShapeValidation {
             }
             edges.try_push(children, out.reborrow())?;
         }
-        let mut states = ChargedVec::new(Some(execution), out.reborrow())?;
-        states.try_reserve_exact(edges.len(), out.reborrow())?;
-        for _ in 0..edges.len() {
-            execution.consume(1, out.reborrow())?;
-            states.try_push(0_u8, out.reborrow())?;
-        }
-        let mut stack = ChargedVec::new(Some(execution), out.reborrow())?;
-        stack.try_reserve_exact(edges.len(), out.reborrow())?;
-        for root in 0..edges.len() {
-            execution.consume(1, out.reborrow())?;
-            let root_state = *states
-                .get(root)
-                .ok_or(BuildError::internal(SHAPE_VALIDATION_INTERNAL))
-                .store_err_into(out.reborrow())?;
-            if root_state != 0 {
-                continue;
-            }
-            *states
-                .get_mut(root)
-                .ok_or(BuildError::internal(SHAPE_VALIDATION_INTERNAL))
-                .store_err_into(out.reborrow())? = 1;
-            stack.try_push((root, 0), out.reborrow())?;
-            while let Some((node, next)) = stack.last_mut() {
+        for children in &edges {
+            for child in children {
                 execution.consume(1, out.reborrow())?;
-                let node_edges = edges
-                    .get(*node)
-                    .ok_or(BuildError::internal(SHAPE_VALIDATION_INTERNAL))
-                    .store_err_into(out.reborrow())?;
-                if let Some(child) = node_edges.get(*next) {
-                    *next += 1;
-                    let child_state = *states
-                        .get(*child)
-                        .ok_or(BuildError::internal(SHAPE_VALIDATION_INTERNAL))
-                        .store_err_into(out.reborrow())?;
-                    ensure(child_state != 1).store_err_into(out.reborrow())?;
-                    if child_state == 0 {
-                        *states
-                            .get_mut(*child)
-                            .ok_or(BuildError::internal(SHAPE_VALIDATION_INTERNAL))
-                            .store_err_into(out.reborrow())? = 1;
-                        stack.try_push((*child, 0), out.reborrow())?;
-                    }
-                } else {
-                    *states
-                        .get_mut(*node)
-                        .ok_or(BuildError::internal(SHAPE_VALIDATION_INTERNAL))
-                        .store_err_into(out.reborrow())? = 2;
-                    stack.pop();
-                }
+                ensure(edges.get(*child).is_some()).store_err_into(out.reborrow())?;
             }
         }
         Ok(())

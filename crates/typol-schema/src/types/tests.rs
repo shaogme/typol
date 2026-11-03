@@ -50,11 +50,18 @@ impl From<TestFailure> for TypeGraphFailure {
 }
 
 fn type_graph(source: &str) -> Result<ResolvedTypeGraph, TypeGraphFailure> {
+    type_graph_with_step_budget(source, 67_108_864)
+}
+
+fn type_graph_with_step_budget(
+    source: &str,
+    max_steps: usize,
+) -> Result<ResolvedTypeGraph, TypeGraphFailure> {
     let mut operations = TestOperation::new();
     let limits = SchemaLimits::default();
     let root = SchemaSource::from_str(b"root", source);
     let execution = operations
-        .budget(|out| ExecutionBudget::new(ExecutionLimits::new(67_108_864, 67_108_864), out))
+        .budget(|out| ExecutionBudget::new(ExecutionLimits::new(max_steps, 67_108_864), out))
         .into_test_value()?;
     let mut collector = diagnostics(&mut operations, &limits, source, &execution)?;
     let mut budget = operations
@@ -221,23 +228,60 @@ fn detects_alias_cycles_with_related_declarations() -> TestResult {
 }
 
 #[test]
-fn detects_recursive_user_types_through_containers_and_aliases() -> TestResult {
+fn accepts_finite_recursive_types_through_containers_and_aliases() -> TestResult {
     let source = "type Parent = option<map<string, Node>>; entry struct Node { next: [Other], } struct Other { parent: Parent, }";
-    let diagnostic = single_diagnostic(source).into_test_value()?;
-    test_verify_eq!(diagnostic.code(), DiagnosticCode::SCHEMA_SEMANTIC_ERROR);
-    test_verify!(diagnostic.labels().len() >= 2);
-    assert_primary_text(source, &diagnostic, "Parent").into_test_value()?;
+    test_verify!(type_graph(source).is_ok());
+    test_verify!(type_graph("entry struct Node { children: map<string, Node> }").is_ok());
+    test_verify!(type_graph("entry struct Node { next: option<Node> }").is_ok());
 
     Ok(())
 }
 
 #[test]
-fn detects_enum_recursion_through_single_and_struct_payloads() -> TestResult {
+fn constructibility_work_scales_with_dependency_edges() -> TestResult {
+    let dependency_count = 1_000;
+    let mut source = String::new();
+    for index in 0..dependency_count {
+        source.push_str(&format!("struct Leaf{index} {{ value: u8 }}\n"));
+    }
+    source.push_str("entry struct Root {\n");
+    for index in 0..dependency_count {
+        source.push_str(&format!("field{index}: Leaf{index},\n"));
+    }
+    source.push('}');
+
+    test_verify!(type_graph_with_step_budget(&source, 2_000_000).is_ok());
+
+    Ok(())
+}
+
+#[test]
+fn rejects_recursive_types_without_finite_values() -> TestResult {
+    let source = "entry struct Loop { next: Loop, }";
+    let diagnostic = single_diagnostic(source).into_test_value()?;
+    test_verify_eq!(diagnostic.code(), DiagnosticCode::SCHEMA_SEMANTIC_ERROR);
+    test_verify_eq!(diagnostic.message(), "recursive type has no finite value");
+    test_verify!(!diagnostic.labels().is_empty());
+
+    let fixed = single_diagnostic("entry struct Loop { next: [Loop; 1], }").into_test_value()?;
+    test_verify_eq!(fixed.code(), DiagnosticCode::SCHEMA_SEMANTIC_ERROR);
+    test_verify!(type_graph("entry struct Loop { next: [Loop; 0], }").is_ok());
+
+    Ok(())
+}
+
+#[test]
+fn rejects_recursive_enums_without_terminal_variants() -> TestResult {
     let diagnostic = single_diagnostic(
         "enum First { next(Second) } enum Second { previous { value: First } } entry struct Root { value: First, }",
     ).into_test_value()?;
     test_verify_eq!(diagnostic.code(), DiagnosticCode::SCHEMA_SEMANTIC_ERROR);
     test_verify!(diagnostic.labels().len() >= 2);
+
+    test_verify!(type_graph(
+        "enum Expr { Number(i64), Add { left: Expr, right: Expr } } entry struct Root { value: Expr, }"
+    )
+    .is_ok());
 
     Ok(())
 }

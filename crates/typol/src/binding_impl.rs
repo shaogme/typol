@@ -219,7 +219,6 @@ impl<'schema, T: Typol> Deref for TrustedTypedSchema<'schema, T> {
 
 impl<'schema, T: BudgetedTypol> TypedSchema<'schema, T> {
     /// Binds a type whose conversion implementation is built-in or derive-generated.
-    ///
     pub fn bind<'slot>(
         schema: &'schema CompiledSchema,
         options: BindOptions,
@@ -526,7 +525,6 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
     /// The returned type records this path. Context-routed library work remains budgeted, but
     /// direct allocations, blocking, arbitrary computation, and returned Rust values are not
     /// constrained or revalidated by the library.
-    ///
     pub fn bind_trusted<'slot>(
         schema: &'schema CompiledSchema,
         options: BindOptions,

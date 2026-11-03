@@ -91,6 +91,42 @@ fn float64_array(values: &[f64]) -> ConfigValue {
     )
 }
 
+fn recursive_node(value: u128, children: Vec<ConfigValue>) -> Result<ConfigValue, Box<dyn Error>> {
+    let value = ValueSupport::scalar(|builder, out| {
+        builder.add_unsigned(value, ValueSource::RustValue, out)
+    });
+    let children = array_unmetered(children);
+    Ok(capture(|out| {
+        ValueSupport::structure(
+            vec![
+                ValueSupport::field("value".into(), value),
+                ValueSupport::field("children".into(), children),
+            ],
+            None,
+            out,
+        )
+    })?)
+}
+
+fn recursive_config(child_value: u128) -> Result<ConfigValue, Box<dyn Error>> {
+    let child = recursive_node(child_value, Vec::new())?;
+    let node = recursive_node(1, vec![child])?;
+    Ok(capture(|out| {
+        ValueSupport::structure(vec![ValueSupport::field("node".into(), node)], None, out)
+    })?)
+}
+
+fn recursive_assertion_schema() -> Result<LoadedSchema, Box<dyn Error>> {
+    let loader = SchemaLoader::new(TypolOptions::default());
+    Ok(capture(|out| {
+        loader.compile_text(
+            b"recursive-assertion",
+            "struct Node { value: u8, children: [Node] @all(item.value > 0, \"child values must be positive\") } entry struct Root { node: Node }",
+            out,
+        )
+    })?)
+}
+
 fn finite_float_value(
     f32_values: &[f32],
     f64_values: &[f64],
@@ -209,6 +245,148 @@ fn v1_fixture_and_pretty_output_are_deterministic() -> Result<(), Box<dyn Error>
         compact,
         repeated,
         "repeated serialization should produce deterministic bytes",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn recursive_values_keep_the_finite_config_ir_v1_shape() -> Result<(), Box<dyn Error>> {
+    let mut environment = EmptyEnvironment;
+    let bytes = export_fixture(
+        "recursive.tschem",
+        "recursive.tconf",
+        "config",
+        &mut environment,
+        ConfigIrOptions::default(),
+    )?;
+    let document: Value = from_slice(&bytes)?;
+    ensure_equal(
+        document.get("format").and_then(Value::as_str),
+        Some("typol-config-ir"),
+        "recursive format name",
+    )?;
+    ensure_equal(
+        document.get("version").and_then(Value::as_u64),
+        Some(1),
+        "recursive format version",
+    )?;
+    let fields = document
+        .get("value")
+        .and_then(|value| value.get("fields"))
+        .and_then(Value::as_array)
+        .ok_or("recursive root fields are missing from the IR")?;
+    let root = field_value(fields, "root").ok_or("recursive root value is missing")?;
+    let root_fields = root
+        .get("fields")
+        .and_then(Value::as_array)
+        .ok_or("recursive node fields are missing")?;
+    let children = field_value(root_fields, "children")
+        .and_then(|value| value.get("items"))
+        .and_then(Value::as_array)
+        .ok_or("recursive node children are missing")?;
+    ensure_equal(children.len(), 1, "recursive node child count")?;
+    let leaf_fields = children
+        .first()
+        .ok_or("recursive node child is missing")?
+        .get("fields")
+        .and_then(Value::as_array)
+        .ok_or("recursive leaf fields are missing")?;
+    let leaf_children = field_value(leaf_fields, "children")
+        .and_then(|value| value.get("items"))
+        .and_then(Value::as_array)
+        .ok_or("recursive leaf children are missing")?;
+    ensure(leaf_children.is_empty(), "recursive leaf should terminate")?;
+
+    let expression = field_value(fields, "expression").ok_or("recursive enum is missing")?;
+    ensure_equal(
+        expression.get("variant").and_then(Value::as_str),
+        Some("Add"),
+        "recursive enum variant",
+    )?;
+    let items = expression
+        .get("payload")
+        .and_then(|payload| payload.get("value"))
+        .and_then(|value| value.get("items"))
+        .and_then(Value::as_array)
+        .ok_or("recursive enum payload items are missing")?;
+    ensure_equal(items.len(), 2, "recursive enum payload length")?;
+    ensure_equal(
+        items
+            .first()
+            .and_then(|item| item.get("variant"))
+            .and_then(Value::as_str),
+        Some("Number"),
+        "recursive enum terminal value",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn recursive_values_obey_ir_and_normalization_budgets_and_rules() -> Result<(), Box<dyn Error>> {
+    let loaded = recursive_assertion_schema()?;
+    let valid = recursive_config(1)?;
+    let bytes = ConfigIr::serialize(loaded.schema(), valid, ConfigIrOptions::default())?;
+    let document: Value = from_slice(&bytes)?;
+    ensure(
+        document.get("value").is_some(),
+        "validated recursive values should be serialized",
+    )?;
+
+    ensure(
+        matches!(
+            ConfigIr::serialize(
+                loaded.schema(),
+                recursive_config(0)?,
+                ConfigIrOptions::default(),
+            ),
+            Err(error) if error.kind() == ConfigIrErrorKind::ValidationFailed
+        ),
+        "recursive collection rules should validate nested values",
+    )?;
+
+    let mut node_limits = ConfigLimits::default();
+    node_limits = node_limits.with_max_value_nodes(3);
+    let node_limited_options = ConfigIrOptions::default()
+        .with_value_mode(ConfigIrValueMode::WithDefaults)
+        .with_validation_options(ConfigValidationOptions::default().with_config(node_limits));
+    ensure(
+        matches!(
+            ConfigIr::serialize(
+                loaded.schema(),
+                recursive_config(1)?,
+                node_limited_options,
+            ),
+            Err(error) if error.kind() == ConfigIrErrorKind::NormalizationFailed
+        ),
+        "recursive external-value normalization should stop at its node budget",
+    )?;
+
+    let mut depth_limits = ConfigLimits::default();
+    depth_limits = depth_limits.with_max_nesting_depth(1);
+    let depth_limited_options = ConfigIrOptions::default()
+        .with_value_mode(ConfigIrValueMode::WithDefaults)
+        .with_validation_options(ConfigValidationOptions::default().with_config(depth_limits));
+    ensure(
+        matches!(
+            ConfigIr::serialize(
+                loaded.schema(),
+                recursive_config(1)?,
+                depth_limited_options,
+            ),
+            Err(error) if error.kind() == ConfigIrErrorKind::NormalizationFailed
+        ),
+        "recursive external-value normalization should stop at its depth limit",
+    )?;
+
+    let ir_depth_options = ConfigIrOptions::default()
+        .with_value_mode(ConfigIrValueMode::AsProvided)
+        .try_with_max_nesting_depth(1)?;
+    ensure(
+        matches!(
+            ConfigIr::serialize(loaded.schema(), recursive_config(1)?, ir_depth_options),
+            Err(error) if error.kind() == ConfigIrErrorKind::NestingLimitExceeded
+        ),
+        "recursive Config IR serialization should stop at its depth limit",
     )?;
     Ok(())
 }

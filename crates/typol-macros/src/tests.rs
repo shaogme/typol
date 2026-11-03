@@ -354,7 +354,10 @@ fn bounds_follow_type_positions_and_generated_imports_follow_usage() {
 fn budgeted_marker_bounds_follow_nested_and_recursive_types() {
     let output = expand("struct Parent<T> { child: Option<Vec<T>> }");
     assert!(output.contains("T : __typol_0_BudgetedTypol"));
-    assert!(output.contains("Option < Vec < T > > : __typol_0_BudgetedTypol"));
+    assert!(!output.contains("Option < Vec < T > > : __typol_0_BudgetedTypol"));
+
+    let output = expand("struct Parent<T> where T: Iterator { child: Vec<T::Item> }");
+    assert!(output.contains("T :: Item : __typol_0_BudgetedTypol"));
 
     let output = expand("struct Recursive { children: Vec<Self> }");
     assert!(output.contains("impl __typol_0_BudgetedTypol for Recursive"));

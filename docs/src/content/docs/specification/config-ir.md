@@ -60,6 +60,8 @@ Each value node has a `type` member containing a type description object. A desc
 
 Qualified names come from the compiled Schema and separate module paths with `::`. Root-module names have no prefix. An anonymous struct enum payload has no separate type description; its fields are encoded directly in the payload.
 
+Recursive Schema types keep these descriptions finite: a struct or enum description stops at its qualified nominal type name. Recursive Config values are emitted as ordinary nested value nodes, so the existing `max_nesting_depth` applies to every value edge. This behavior does not change the Config IR v1 format or version.
+
 ## 3. Value nodes
 
 Every value node is a JSON object. It writes `type` first, then the data members for that type. If the node is sensitive, `secret` is last. The member is omitted when false; `false` is never emitted.

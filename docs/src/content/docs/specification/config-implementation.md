@@ -90,6 +90,8 @@ The root is parsed as a struct object. Once it is complete, the parser continues
 - Maps accept string keys only. A per-call AVL index detects duplicate decoded keys and emits entries using input slots; map semantics do not promise ordering.
 - Enums resolve a declared variant and require its unit, single-value, or anonymous struct payload shape to match exactly.
 
+Recursive Schema references remain nominal type IDs while parsing; each finite Config value is traversed as an ordinary value tree. Empty arrays and maps, `none`, and enum terminal variants can end a recursive value. Every actual child still consumes the existing depth, node, execution, and workspace budgets, and a failure returns no partial `ConfigValue`.
+
 A struct frame tracks each Schema field as unseen, parsing, complete, failed, or deferred. At object close, it builds `FieldValue`s in Schema declaration order. An explicit value wins; otherwise the parser copies and validates a Schema default, uses `none` for an optional field without a default, or reports a missing required field. Explicit `none` is an explicit value and overrides an optional default.
 
 ### 3.3 Value origins

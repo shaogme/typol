@@ -80,7 +80,7 @@ message diagnostic.schema.type_path_wrong_kind();
 message diagnostic.schema.field_type_unavailable();
 message diagnostic.schema.field_access_requires_struct();
 message diagnostic.schema.field_missing_from_struct();
-message diagnostic.schema.recursive_user_type();
+message diagnostic.schema.recursive_type_no_finite_value();
 message diagnostic.schema.recursive_type_declared_here();
 message diagnostic.schema.recursive_alias();
 message diagnostic.schema.recursive_alias_declared_here();

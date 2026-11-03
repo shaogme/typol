@@ -21,7 +21,7 @@ impl Consumer {
         let facade = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let dependency = if renamed { "renamed_typol" } else { "typol" };
         write(self.root.join("Cargo.toml"), format!(
-            "[package]\nname = \"derive-consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\n{dependency} = {{ package = \"typol\", path = {:?} }}\n", facade,
+            "[package]\nname = \"derive-consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\n{dependency} = {{ package = \"typol\", path = {:?}, features = [\"std\"] }}\n", facade,
         )).test_value()?;
         copy(
             facade.join("../../Cargo.lock"),
@@ -48,14 +48,13 @@ impl Consumer {
 fn real_consumers_cover_renaming_generics_shapes_and_compile_diagnostics() -> TestResult {
     let consumer = Consumer::new()?;
     let source = r#"
+use std::collections::HashMap;
 use renamed_typol::{
     ConfigParseOptions, Environment, EnvironmentError, EnvironmentReadContext, Typol,
-    opeo::{ErrSlot, OResult, Out},
-};
-use renamed_typol::{
     binding::{BindOptions, CodecOptions, ConversionLimits, TypedSchema},
     config::ConfigParseRequest,
     core::SliceSource,
+    opeo::{ErrSlot, OResult, Out},
     schema::{ResolverError, SchemaCompileOptions, SchemaCompiler, SchemaResolveRequest,
         SchemaResolver, SchemaSource},
 };
@@ -94,9 +93,45 @@ struct UnitEmpty;
 #[typol(crate = "::renamed_typol")]
 enum Choice { Unit, One(u8), Object { value: u8 }, Empty {} }
 
-#[derive(Typol)]
+#[derive(Debug, PartialEq, Typol)]
 #[typol(crate = "renamed_typol", rename = "Recursive")]
 struct Recursive { children: Vec<Self> }
+
+#[derive(Debug, PartialEq, Typol)]
+#[typol(crate = "renamed_typol", rename = "Expr")]
+enum RecursiveEnum { Number(i64), Add(Vec<Self>) }
+
+#[derive(Debug, PartialEq, Typol)]
+#[typol(crate = "renamed_typol")]
+struct RecursiveRoot { node: Recursive, expression: RecursiveEnum }
+
+#[derive(Debug, PartialEq, Typol)]
+#[typol(crate = "renamed_typol")]
+struct Left { right: Vec<Right> }
+
+#[derive(Debug, PartialEq, Typol)]
+#[typol(crate = "renamed_typol")]
+struct Right { left: Vec<Left> }
+
+#[derive(Debug, PartialEq, Typol)]
+#[typol(crate = "renamed_typol")]
+struct MutualRoot { value: Left }
+
+#[derive(Debug, PartialEq, Typol)]
+#[typol(crate = "renamed_typol")]
+struct MapNode { children: HashMap<String, MapNode> }
+
+#[derive(Debug, PartialEq, Typol)]
+#[typol(crate = "renamed_typol")]
+struct MapRoot { root: MapNode }
+
+#[derive(Debug, PartialEq, Typol)]
+#[typol(crate = "renamed_typol")]
+struct Shared { children: Vec<Shared> }
+
+#[derive(Debug, PartialEq, Typol)]
+#[typol(crate = "renamed_typol")]
+struct SharedRoot { value: Shared }
 
 struct Resolver;
 impl SchemaResolver for Resolver {
@@ -114,6 +149,34 @@ fn main() {
     let schema = invoke(|out| compiler.compile(SchemaSource::from_str(b"root", "entry struct Root { value: [u8; 2] }"), &mut Resolver, None, out));
     let binding = invoke(|out| TypedSchema::<Root<u8, 2>>::bind(&schema, BindOptions::default(), out));
     let value = Root { value: [1, 2] };
+    let text = invoke(|out| binding.serialize(&value, CodecOptions::default(), out));
+    let mut input = SliceSource::new(text.as_bytes());
+    let request = ConfigParseRequest::new(&mut input, "consumer", ConfigParseOptions::default());
+    assert_eq!(invoke(|out| binding.deserialize(request, &mut Provider, ConversionLimits::default(), out)), value);
+    let compiler = invoke(|out| SchemaCompiler::new(SchemaCompileOptions::default(), out));
+    let mutual = invoke(|out| compiler.compile(SchemaSource::from_str(b"mutual", "struct Left { right: [Right] } struct Right { left: [Left] } entry struct MutualRoot { value: Left }"), &mut Resolver, None, out));
+    let binding = invoke(|out| TypedSchema::<MutualRoot>::bind(&mutual, BindOptions::default(), out));
+    let value = MutualRoot { value: Left { right: vec![Right { left: vec![Left { right: vec![] }] }] } };
+    let text = invoke(|out| binding.serialize(&value, CodecOptions::default(), out));
+    let mut input = SliceSource::new(text.as_bytes());
+    let request = ConfigParseRequest::new(&mut input, "consumer", ConfigParseOptions::default());
+    assert_eq!(invoke(|out| binding.deserialize(request, &mut Provider, ConversionLimits::default(), out)), value);
+    let depth_limits = ConversionLimits::new(100, 0).expect("zero conversion depth is valid");
+    let _depth_error = invoke_error(|out| binding.serialize(&value, CodecOptions::default().with_conversion(depth_limits), out));
+    let node_limits = ConversionLimits::new(0, 128).expect("zero conversion nodes are valid");
+    let _node_error = invoke_error(|out| binding.serialize(&value, CodecOptions::default().with_conversion(node_limits), out));
+    let compiler = invoke(|out| SchemaCompiler::new(SchemaCompileOptions::default(), out));
+    let map_schema = invoke(|out| compiler.compile(SchemaSource::from_str(b"recursive-map", "struct MapNode { children: map<string, MapNode> } entry struct MapRoot { root: MapNode }"), &mut Resolver, None, out));
+    let binding = invoke(|out| TypedSchema::<MapRoot>::bind(&map_schema, BindOptions::default(), out));
+    let value = MapRoot { root: MapNode { children: HashMap::from([("child".to_owned(), MapNode { children: HashMap::new() })]) } };
+    let text = invoke(|out| binding.serialize(&value, CodecOptions::default(), out));
+    let mut input = SliceSource::new(text.as_bytes());
+    let request = ConfigParseRequest::new(&mut input, "consumer", ConfigParseOptions::default());
+    assert_eq!(invoke(|out| binding.deserialize(request, &mut Provider, ConversionLimits::default(), out)), value);
+    let compiler = invoke(|out| SchemaCompiler::new(SchemaCompileOptions::default(), out));
+    let use_sites = invoke(|out| compiler.compile(SchemaSource::from_str(b"recursive-use-sites", "mod first { struct Shared { children: [second::Shared] } } mod second { struct Shared { children: [first::Shared] } } entry struct SharedRoot { value: first::Shared }"), &mut Resolver, None, out));
+    let binding = invoke(|out| TypedSchema::<SharedRoot>::bind(&use_sites, BindOptions::default(), out));
+    let value = SharedRoot { value: Shared { children: vec![Shared { children: vec![] }] } };
     let text = invoke(|out| binding.serialize(&value, CodecOptions::default(), out));
     let mut input = SliceSource::new(text.as_bytes());
     let request = ConfigParseRequest::new(&mut input, "consumer", ConfigParseOptions::default());
@@ -141,8 +204,16 @@ fn main() {
     let errors = invoke_error(|out| TypedSchema::<UnitEmpty>::bind(&mismatched_empty, BindOptions::default(), out));
     assert_eq!(errors.diagnostics().first().map(|diagnostic| diagnostic.code().get()), Some(14));
     let compiler = invoke(|out| SchemaCompiler::new(SchemaCompileOptions::default(), out));
-    let recursive = invoke(|out| compiler.compile(SchemaSource::from_str(b"recursive", "entry struct Recursive { children: [u8] }"), &mut Resolver, None, out));
-    let _errors = invoke_error(|out| TypedSchema::<Recursive>::bind(&recursive, BindOptions::default(), out));
+    let recursive = invoke(|out| compiler.compile(SchemaSource::from_str(b"recursive", "enum Expr { Number(i64), Add([Expr]) } struct Recursive { children: [Recursive] } entry struct RecursiveRoot { node: Recursive, expression: Expr }"), &mut Resolver, None, out));
+    let binding = invoke(|out| TypedSchema::<RecursiveRoot>::bind(&recursive, BindOptions::default(), out));
+    let value = RecursiveRoot {
+        node: Recursive { children: vec![Recursive { children: vec![] }] },
+        expression: RecursiveEnum::Add(vec![RecursiveEnum::Number(42)]),
+    };
+    let text = invoke(|out| binding.serialize(&value, CodecOptions::default(), out));
+    let mut input = SliceSource::new(text.as_bytes());
+    let request = ConfigParseRequest::new(&mut input, "consumer", ConfigParseOptions::default());
+    assert_eq!(invoke(|out| binding.deserialize(request, &mut Provider, ConversionLimits::default(), out)), value);
     let _ = Choice::Unit;
     let _ = Choice::One(1);
     let _ = Choice::Object { value: 1 };

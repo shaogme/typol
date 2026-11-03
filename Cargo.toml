@@ -43,7 +43,7 @@ typol-i18n = { path = "crates/typol-i18n", version = "0.1.0", default-features =
 typol-macros = { path = "crates/typol-macros", version = "0.1.0" }
 u18n = "=0.3.0"
 u18n-compiler = "=0.3.0"
-syn = { version = "=2.0.106", default-features = false, features = ["derive", "parsing", "printing", "proc-macro"] }
+syn = { version = "=2.0.106", default-features = false, features = ["derive", "parsing", "printing", "proc-macro", "visit"] }
 quote = { version = "=1.0.40", default-features = false, features = ["proc-macro"] }
 proc-macro2 = { version = "=1.0.101", default-features = false, features = ["proc-macro"] }
 serde = { version = "=1.0.228", default-features = false, features = ["alloc"] }

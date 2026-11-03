@@ -635,14 +635,36 @@ fn checked_shapes_rules_and_freeze_reject_invalid_references_and_cycles() -> Tes
     let (mut model, base_ids) = base(&mut slots)?;
     let root = base_ids.root;
     let execution = slots.budget(|out| model.execution().try_clone(out))?;
-    let name = slots.budget(|out| ChargedString::copy("cycle", Some(&execution), out))?;
+    let root_shape = slots.build(|out| model.type_shape(root, out))?;
+    let option_shape = slots.build(|out| model.intern_shape(ShapeKind::Option(root_shape), out))?;
+    let option_span = span(&mut slots)?;
+    let option_type = slots.build(|out| model.reserve_type(option_span, out))?;
+    let option_record_span = span(&mut slots)?;
+    let option_record = slots.budget(|out| {
+        TypeRecord::new(
+            TypeRecordOptions {
+                name: None,
+                qualified_name: None,
+                shape: option_shape,
+                child: Some(root),
+                span: option_record_span,
+            },
+            &execution,
+            out,
+        )
+    })?;
+    slots.build(|out| model.set_type(option_type, option_record, out))?;
+    let name = slots.budget(|out| ChargedString::copy("next", Some(&execution), out))?;
     let field_span = span(&mut slots)?;
-    let id = slots.build(|out| model.add_field(FieldRecord::new(name, root, field_span), out))?;
+    let id =
+        slots.build(|out| model.add_field(FieldRecord::new(name, option_type, field_span), out))?;
     let fields = budget_items(&mut slots, &[id], &execution)?;
     slots
         .build(|out| model.type_mut(root, out))?
         .set_fields(fields);
-    freeze_error(&mut slots, model, root)?;
+    let source_locations = locations(&mut slots)?;
+    let source_locations = budget_items(&mut slots, &source_locations, &execution)?;
+    let _schema = slots.build(|out| model.freeze(root, &[""], source_locations, out))?;
     let (model, base_ids) = base(&mut slots)?;
     let root = base_ids.root;
     let execution = slots.budget(|out| model.execution().try_clone(out))?;

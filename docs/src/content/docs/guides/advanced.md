@@ -107,6 +107,29 @@ let config = binding.read(input, &mut environment, out)?;
 
 ## Bind custom Rust types and use Serde
 
+Recursive Schema types can represent finite trees when a container, option, zero-length array, or enum terminal branch can end construction. A required cycle with no finite value is rejected during compilation. Derive supports recursive fields such as `Vec<Self>`:
+
+```tschem
+struct Node {
+    value: string,
+    children: [Node],
+}
+
+entry struct TreeConfig {
+    root: Node,
+}
+```
+
+```rust
+#[derive(Typol)]
+struct Node {
+    value: String,
+    children: Vec<Node>,
+}
+```
+
+Empty `children` arrays provide finite leaf values. Non-empty values use the usual configuration nesting, node, execution, binding, and conversion limits.
+
 For ordinary Rust records and enums, prefer `#[derive(Typol)]`. The normal `bind` path accepts built-in or derive-generated implementations whose nested fields and enum payloads follow the same rule.
 
 When a type contains a handwritten `Typol` implementation, mark the containing derive as trusted and call `bind_trusted`:

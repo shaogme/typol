@@ -78,7 +78,7 @@ Fallible facade operations receive an `Out` error context and return an OPEO res
 
 ## Capabilities
 
-- **Schema DSL:** structs, enums with unit/single/record payloads, aliases, nested modules, defaults, typed assertions, and validation annotations.
+- **Schema DSL:** structs, enums with unit/single/record payloads, aliases, nested modules, finite recursive types, defaults, typed assertions, and validation annotations.
 - **Config DSL:** typed scalars, options, arrays, fixed-size arrays, string-keyed maps, enum values, comments, and explicit `env("NAME")` expressions.
 - **Validation:** scalar and collection constraints, precompiled regular expressions, `@all` predicates, and `@assert` checks over completed values.
 - **Rust integration:** `#[derive(Typol)]` describes Rust structs and enums; binding checks their shape against the compiled entry type. Bound schemas can read and write multiple values.
@@ -87,6 +87,16 @@ Fallible facade operations receive an `Out` error context and return an OPEO res
 - **Resource bounds:** parsing, schema compilation, validation, regular expressions, diagnostics, and IR serialization use configurable limits and report resource failures instead of returning partial results.
 
 Regular expressions use Typol's documented subset and search semantics. Use `^` and `$` when a pattern must match the entire string. `@secret` controls diagnostic and safe-display behavior; application values and serialized output still contain the actual data.
+
+Recursive schemas can describe finite trees and recursive enums. Rust derive supports recursive edges through `Vec<Self>` and the built-in map types; a recursive type still needs a finite branch, and each value remains subject to the configured depth and work limits. See the [recursive Schema](examples/config/recursive.tschem) and [finite Config value](examples/config/recursive.tconf) example:
+
+```rust
+#[derive(Typol)]
+struct Node {
+    value: String,
+    children: Vec<Node>,
+}
+```
 
 ## Write bound values
 

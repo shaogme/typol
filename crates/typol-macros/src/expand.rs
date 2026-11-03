@@ -2,12 +2,40 @@ use crate::model::{BodyModel, FieldModel, Model, PayloadModel, StructureForm, Va
 use proc_macro2::{Ident, Span, TokenStream, TokenTree};
 use quote::{ToTokens, quote};
 use std::collections::HashSet;
-use syn::{GenericArgument, GenericParam, Generics, PathArguments, Result, Type, parse2};
+use syn::{
+    GenericArgument, GenericParam, Generics, PathArguments, Result, Type, TypePath, parse2,
+    visit::{self, Visit},
+};
 
 struct ExpansionBody {
     describe: TokenStream,
     encode: TokenStream,
     decode: TokenStream,
+}
+
+struct AssociatedTypeCollector<'a> {
+    parameters: &'a [Ident],
+    projections: Vec<TokenStream>,
+    seen: HashSet<String>,
+}
+
+impl<'ast> Visit<'ast> for AssociatedTypeCollector<'_> {
+    fn visit_type_path(&mut self, path: &'ast TypePath) {
+        let parameter_projection = path.path.segments.len() > 1
+            && path
+                .path
+                .segments
+                .first()
+                .is_some_and(|segment| self.parameters.contains(&segment.ident));
+        if path.qself.is_some() || parameter_projection {
+            let tokens = path.to_token_stream();
+            let key = tokens.to_string();
+            if self.seen.insert(key) {
+                self.projections.push(tokens);
+            }
+        }
+        visit::visit_type_path(self, path);
+    }
 }
 
 pub(crate) struct Expander<'model> {
@@ -93,6 +121,11 @@ impl<'model> Expander<'model> {
             generics.where_clause = Some(parse2(clause.to_token_stream())?);
         }
         let types = model.types();
+        let parameters: Vec<_> = generics
+            .type_params()
+            .map(|parameter| parameter.ident.clone())
+            .collect();
+        let projections = Self::associated_type_projections(&types, &parameters);
         for parameter in &mut generics.params {
             if let GenericParam::Type(parameter) = parameter {
                 let prefix = parameter.ident.to_string();
@@ -104,21 +137,21 @@ impl<'model> Expander<'model> {
                 }
             }
         }
+        for projection in &projections {
+            if Self::uses_ident(projection.clone(), "Self")
+                || Self::uses_ident(projection.clone(), &ident.to_string())
+            {
+                continue;
+            }
+            generics
+                .make_where_clause()
+                .predicates
+                .push(parse2(quote!(#projection: #trait_name))?);
+        }
         generics
             .make_where_clause()
             .predicates
             .push(parse2(quote!(Self: 'static))?);
-        for ty in &types {
-            // The active descriptor graph rejects self-reference, so adding this field bound could create a trait-solver cycle.
-            if !Self::uses_ident(ty.to_token_stream(), "Self")
-                && !Self::uses_ident(ty.to_token_stream(), &ident.to_string())
-            {
-                generics
-                    .make_where_clause()
-                    .predicates
-                    .push(parse2(quote!(#ty: #trait_name))?);
-            }
-        }
         let split = generics.split_for_impl();
         let impl_generics = split.0;
         let type_generics = split.1;
@@ -141,20 +174,21 @@ impl<'model> Expander<'model> {
                     }
                 }
             }
+            for projection in &projections {
+                if Self::uses_ident(projection.clone(), "Self")
+                    || Self::uses_ident(projection.clone(), &ident.to_string())
+                {
+                    continue;
+                }
+                budgeted_generics
+                    .make_where_clause()
+                    .predicates
+                    .push(parse2(quote!(#projection: #budgeted_trait_name))?);
+            }
             budgeted_generics
                 .make_where_clause()
                 .predicates
                 .push(parse2(quote!(Self: 'static))?);
-            for ty in &types {
-                if !Self::uses_ident(ty.to_token_stream(), "Self")
-                    && !Self::uses_ident(ty.to_token_stream(), &ident.to_string())
-                {
-                    budgeted_generics
-                        .make_where_clause()
-                        .predicates
-                        .push(parse2(quote!(#ty: #budgeted_trait_name))?);
-                }
-            }
             let budgeted_split = budgeted_generics.split_for_impl();
             let budgeted_impl_generics = budgeted_split.0;
             let budgeted_type_generics = budgeted_split.1;
@@ -261,14 +295,6 @@ impl<'model> Expander<'model> {
         })
     }
 
-    fn uses_ident(tokens: TokenStream, name: &str) -> bool {
-        tokens.into_iter().any(|token| match token {
-            TokenTree::Ident(ident) => ident == name,
-            TokenTree::Group(group) => Self::uses_ident(group.stream(), name),
-            _ => false,
-        })
-    }
-
     fn uses_type_parameter(ty: &Type, name: &str) -> bool {
         match ty {
             Type::Path(path) => {
@@ -302,6 +328,26 @@ impl<'model> Expander<'model> {
             Type::Group(inner) => Self::uses_type_parameter(&inner.elem, name),
             _ => false,
         }
+    }
+
+    fn associated_type_projections(types: &[&Type], parameters: &[Ident]) -> Vec<TokenStream> {
+        let mut collector = AssociatedTypeCollector {
+            parameters,
+            projections: Vec::new(),
+            seen: HashSet::new(),
+        };
+        for ty in types {
+            collector.visit_type(ty);
+        }
+        collector.projections
+    }
+
+    fn uses_ident(tokens: TokenStream, name: &str) -> bool {
+        tokens.into_iter().any(|token| match token {
+            TokenTree::Ident(ident) => ident == name,
+            TokenTree::Group(group) => Self::uses_ident(group.stream(), name),
+            TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+        })
     }
 
     fn describe_fields(&self, fields: &[FieldModel]) -> TokenStream {

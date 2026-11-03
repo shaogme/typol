@@ -1,3 +1,4 @@
+mod constructibility;
 mod edges;
 mod propagation;
 
@@ -5,7 +6,6 @@ use crate::{
     context::CompileContext,
     diagnostics::{BuildFailure, DiagnosticCollector},
     module_tree::{ModuleTree, TypeDeclarationKind},
-    session::ObjectState,
     symbols::{SymbolState, SymbolTable, TypeSymbolId},
     types::model::ResolvedTypeGraph,
 };
@@ -14,6 +14,7 @@ use typol_core::{Diagnostic, DiagnosticCode, DiagnosticMessage, DiagnosticMessag
 use typol_i18n::diagnostic_key;
 use typol_syntax::{AstAccessError, VariantPayloadKind};
 
+use constructibility::{TypeConstructibility, TypeConstructibilityInput};
 use edges::{GraphState, TypeEdge, TypeEdgeCollectionInput, TypeEdgeCollector, TypeFrame};
 use propagation::{InvalidTypePropagationInput, InvalidTypePropagator};
 
@@ -286,14 +287,57 @@ impl<'a, 'src, 'd> TypeCycles<'a, 'src, 'd> {
             owner_edges.truncate(retained);
         }
 
+        InvalidTypePropagator::new(InvalidTypePropagationInput {
+            tree: self.tree,
+            symbols: self.symbols,
+            context: self.context,
+            graph: self.graph,
+            diagnostics: self.diagnostics,
+        })
+        .propagate(&edges, out.reborrow())?;
+
+        let result = TypeConstructibility::new(TypeConstructibilityInput {
+            symbols: self.symbols,
+            context: self.context,
+            graph: self.graph,
+            diagnostics: self.diagnostics,
+            root_span,
+        })
+        .evaluate(out.reborrow())?;
+        let constructible = result.constructible;
+        let eligible = result.eligible;
+
         let mut states = self
             .diagnostics
             .new_vec(self.context.execution(), out.reborrow())?;
         states.try_reserve_exact(count, out.reborrow())?;
-        for _ in 0..count {
+        for index in 0..count {
             self.context
                 .consume(1, self.tree.root_span(), self.diagnostics, out.reborrow())?;
-            states.try_push(GraphState::Unvisited, out.reborrow())?;
+            let state =
+                if !*self
+                    .diagnostics
+                    .require(eligible.get(index), root_span, out.reborrow())?
+                    || *self.diagnostics.require(
+                        constructible.get(index),
+                        root_span,
+                        out.reborrow(),
+                    )?
+                {
+                    GraphState::Complete
+                } else {
+                    GraphState::Unvisited
+                };
+            states.try_push(state, out.reborrow())?;
+        }
+        let mut reported_cycles = self
+            .diagnostics
+            .new_vec(self.context.execution(), out.reborrow())?;
+        reported_cycles.try_reserve_exact(count, out.reborrow())?;
+        for _ in 0..count {
+            self.context
+                .consume(1, root_span, self.diagnostics, out.reborrow())?;
+            reported_cycles.try_push(false, out.reborrow())?;
         }
         let mut frames = self
             .diagnostics
@@ -305,6 +349,16 @@ impl<'a, 'src, 'd> TypeCycles<'a, 'src, 'd> {
                 .consume(1, self.tree.root_span(), self.diagnostics, out.reborrow())?;
             if symbol.state() != SymbolState::Valid
                 || matches!(symbol.declaration(), TypeDeclarationKind::Alias(_))
+                || !*self.diagnostics.require(
+                    eligible.get(symbol.id().index()),
+                    symbol.name_span(),
+                    out.reborrow(),
+                )?
+                || *self.diagnostics.require(
+                    constructible.get(symbol.id().index()),
+                    symbol.name_span(),
+                    out.reborrow(),
+                )?
                 || *self.diagnostics.require(
                     states.get(symbol.id().index()),
                     symbol.name_span(),
@@ -401,11 +455,11 @@ impl<'a, 'src, 'd> TypeCycles<'a, 'src, 'd> {
                             let mut reported = true;
                             for item in cycle_frames {
                                 let state = *self.diagnostics.require(
-                                    self.graph.declarations.get(item.symbol.index()),
+                                    reported_cycles.get(item.symbol.index()),
                                     edge.span,
                                     out.reborrow(),
                                 )?;
-                                if state != ObjectState::Invalid {
+                                if !state {
                                     reported = false;
                                 }
                             }
@@ -418,18 +472,20 @@ impl<'a, 'src, 'd> TypeCycles<'a, 'src, 'd> {
                                 )?;
                                 cycle.try_push(item.symbol, out.reborrow())?;
                                 *self.diagnostics.require(
-                                    self.graph.declarations.get_mut(item.symbol.index()),
+                                    reported_cycles.get_mut(item.symbol.index()),
                                     edge.span,
                                     out.reborrow(),
-                                )? = ObjectState::Invalid;
+                                )? = true;
                             }
                             if reported {
                                 continue;
                             }
                             self.report(
                                 TypeCycleReport {
-                                    key: diagnostic_key!("diagnostic.schema.recursive_user_type"),
-                                    message: "user-defined types cannot be recursive",
+                                    key: diagnostic_key!(
+                                        "diagnostic.schema.recursive_type_no_finite_value"
+                                    ),
+                                    message: "recursive type has no finite value",
                                     primary: edge.span,
                                     cycle: &cycle,
                                     label_key: diagnostic_key!(

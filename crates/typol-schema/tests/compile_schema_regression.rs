@@ -224,6 +224,10 @@ fn all_schema_examples_compile_through_public_entry() -> TestResult {
             "examples/config/server.tschem",
             include_str!("../../../examples/config/server.tschem"),
         ),
+        (
+            "examples/config/recursive.tschem",
+            include_str!("../../../examples/config/recursive.tschem"),
+        ),
     ];
 
     for (path, source) in examples {
@@ -364,6 +368,50 @@ fn recursive_imports_resolve_from_each_source_identity() -> TestResult {
         resolver.selected,
         ["pkg/outer.tschem", "pkg/outer/inner.tschem"]
     );
+
+    Ok(())
+}
+
+#[test]
+fn types_can_be_mutually_recursive_across_one_way_imports() -> TestResult {
+    let root = "extern mod child; entry struct Root { children: [child::Node] }";
+    let child = "struct Node { parents: [Root] }";
+    let mut resolver = MemoryResolver::new();
+    resolver.add("pkg/child.tschem", "pkg/child.tschem", child);
+
+    let schema = assert_compiles(
+        &mut resolver,
+        "pkg/root.tschem",
+        root,
+        &SchemaLimits::default(),
+    )
+    .test_value()?;
+    let root_type = schema.entry();
+    let children = field(root_type, "children")?;
+    let children_type = access(|out| children.ty(out))?;
+    let TypeKind::Array {
+        element: child_type,
+        ..
+    } = access(|out| children_type.kind(out))?
+    else {
+        return Err(TestFailure::new("children field is not an array"));
+    };
+    test_verify_eq!(access(|out| child_type.name(out))?, Some("Node"));
+    test_verify!(matches!(
+        access(|out| child_type.kind(out))?,
+        TypeKind::Struct { .. }
+    ));
+    let parents = field(child_type, "parents")?;
+    let parents_type = access(|out| parents.ty(out))?;
+    let TypeKind::Array {
+        element: parent_type,
+        ..
+    } = access(|out| parents_type.kind(out))?
+    else {
+        return Err(TestFailure::new("parents field is not an array"));
+    };
+    test_verify_eq!(access(|out| parent_type.name(out))?, Some("Root"));
+    test_verify_eq!(resolver.selected, ["pkg/child.tschem"]);
 
     Ok(())
 }
@@ -737,7 +785,7 @@ fn invalid_default_and_type_graph_inputs_return_semantic_diagnostics() -> TestRe
     for source in [
         "entry struct Root { value: Missing }",
         "type First = Second; type Second = First; entry struct Root {}",
-        "struct Node { next: option<Node> } entry struct Root { node: Node }",
+        "struct Node { next: Node } entry struct Root { node: Node }",
         "entry struct Root { value: u8 = 256 }",
         "entry struct Root { value: option<option<u8>> }",
     ] {
@@ -1377,7 +1425,7 @@ fn recoverable_import_errors_preserve_independent_semantic_checks() -> TestResul
 }
 
 #[test]
-fn recursive_user_types_skip_derived_default_errors() -> TestResult {
+fn non_constructible_recursive_types_skip_derived_default_errors() -> TestResult {
     let source = "struct Loop { value: Loop = {} } entry struct Root { value: Loop }";
     let errors = MemoryResolver::new()
         .compile("root", source, &SchemaLimits::default())
@@ -1387,13 +1435,41 @@ fn recursive_user_types_skip_derived_default_errors() -> TestResult {
         errors
             .diagnostics()
             .iter()
-            .any(|diagnostic| diagnostic.message() == "user-defined types cannot be recursive")
+            .any(|diagnostic| diagnostic.message() == "recursive type has no finite value")
     );
+    let recursive = errors
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.message() == "recursive type has no finite value")
+        .test_value()?;
+    test_verify_eq!(recursive.labels().len(), 1);
     test_verify!(
         !errors
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.message() == "default value has recursive expansion")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn invalid_references_do_not_cascade_into_recursive_type_diagnostics() -> TestResult {
+    let source = "struct Loop { next: Loop, missing: Missing } entry struct Root { value: Loop }";
+    let errors = MemoryResolver::new()
+        .compile("root", source, &SchemaLimits::default())
+        .test_error()?;
+    test_verify!(
+        errors
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| { diagnostic.message() == "unknown type path" })
+    );
+    test_verify!(
+        errors
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| { diagnostic.message() != "recursive type has no finite value" })
     );
 
     Ok(())
