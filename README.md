@@ -6,7 +6,13 @@ Typol is a schema-driven configuration library for Rust. It compiles `.tschem` s
 
 The workspace requires Rust 1.85 or newer. The examples below use the `typol` facade crate; the lower-level crates can also be used independently.
 
-The facade defaults to `no_std` and uses `alloc` for owned values. Its in-memory loader accepts Schema text or a resolver, and configuration reads take text or a caller-provided `ByteSource` plus an explicit `Environment` provider. The `OrderedMap<T>` binding works without `std`; opt into the `hashbrown` feature and depend directly on `hashbrown` for `hashbrown::HashMap<String, T>`. The `serde` and `config-ir` features remain available without `std`; Config IR serialization returns an `alloc`-backed `Vec<u8>`. Enable `std` for file and reader inputs, process environment access, and host diagnostic rendering.
+The facade defaults to `no_std` and uses `alloc` for owned values. Its in-memory loader accepts Schema text or a resolver, and configuration reads take text or a caller-provided `ByteSource` plus an explicit `Environment` provider. The `OrderedMap<T>` binding works without `std`; opt into `btree-map` for `alloc::collections::BTreeMap<String, T>`, or opt into `hashbrown` and depend directly on `hashbrown` for `hashbrown::HashMap<String, T>`. The BTreeMap feature does not make node allocation failures recoverable, and its target-storage budget is an estimate. The `serde` and `config-ir` features remain available without `std`; Config IR serialization returns an `alloc`-backed `Vec<u8>`. Enable `std` for file and reader inputs, process environment access, and host diagnostic rendering.
+
+Enable `btree-map` explicitly; it does not enable `std`:
+
+```toml
+typol = { version = "0.1", default-features = false, features = ["btree-map"] }
+```
 
 To read process variables, construct `ProcessEnvironment` with `ProcessEnvironmentLimits` and pass it to `BoundSchema::read` or `LoadedSchema::read_value`. Both types are exported from the facade root. Environment limits belong to the provider, so applications can choose them per read policy.
 

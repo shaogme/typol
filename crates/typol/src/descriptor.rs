@@ -1,11 +1,12 @@
+mod builtins;
 mod model;
 
 use crate::{
-    conversion::{ConversionContext, ConversionValue},
     diagnostics::{CodecErrors, CodecStage, Failure},
     options::BindingLimits,
     session::{NodeBudget, SessionBudget},
 };
+pub use builtins::{BudgetedTypol, Typol};
 use core::{
     any::TypeId,
     fmt,
@@ -16,7 +17,7 @@ pub use model::{
     VariantShape,
 };
 use opeo::{OResult, Out, ResultOutExt};
-use typol_core::{ChargedVec, DiagnosticContext, ValueId, diagnostic_context};
+use typol_core::{ChargedVec, DiagnosticContext, diagnostic_context};
 use typol_model::BuiltinType;
 
 static NAME_BUDGET_MISMATCH: DiagnosticContext =
@@ -42,37 +43,6 @@ pub struct DescribeContext<'session> {
     arena: ChargedVec<DescriptorNode>,
     depth: usize,
 }
-
-/// Conversion contract between Rust values and configuration trees. Each implementation must call `start` once, and decoded children must be dispatched through the context.
-/// Derived and built-in implementations route nested conversions through library-budgeted paths; the library cannot limit ordinary allocations, blocking, or arbitrary computation performed directly by handwritten implementations.
-/// `from_config_value` receives input validated against the bound Schema, but the library does not validate the returned `Self` again.
-/// Handwritten structs can reuse the built-in string conversion through `context.read_field::<String>(...)`; it calls `target_text` to charge target text storage.
-/// When a handwritten implementation creates owned text itself, use `target_text` instead of copying the string outside the context.
-/// Handwritten implementations must follow this contract themselves; the library cannot prove or enforce compliance. `target_text` and `target_bytes` are recommended accounting APIs, not interceptors for all target storage.
-pub trait Typol: Sized + 'static {
-    fn describe<'slot, 'borrow>(
-        context: &mut DescribeContext<'_>,
-        out: Out<'slot, 'borrow, CodecErrors>,
-    ) -> OResult<'slot, TypeDescriptor>;
-
-    fn to_config_value<'slot, 'borrow>(
-        &self,
-        context: &mut ConversionContext<'_>,
-        out: Out<'slot, 'borrow, CodecErrors>,
-    ) -> OResult<'slot, ValueId>;
-
-    fn from_config_value<'slot, 'borrow>(
-        value: ConversionValue<'_>,
-        context: &mut ConversionContext<'_>,
-        out: Out<'slot, 'borrow, CodecErrors>,
-    ) -> OResult<'slot, Self>;
-}
-
-/// This hidden capability marker selects the library-managed binding API path. It is not a
-/// sandbox or a security boundary; handwritten Rust code can still be implemented and trusted
-/// explicitly through `bind_trusted`.
-#[doc(hidden)]
-pub trait BudgetedTypol: Typol {}
 
 impl<'session> DescribeContext<'session> {
     pub(crate) fn new<'slot>(

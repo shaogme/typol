@@ -3,6 +3,9 @@
 extern crate alloc;
 extern crate std;
 
+#[cfg(feature = "btree-map")]
+use alloc::collections::BTreeMap;
+
 use alloc::{string::String, vec::Vec};
 use typol::{
     Typol,
@@ -11,14 +14,14 @@ use typol::{
     semantic::CompiledSchema,
 };
 
-#[cfg(not(feature = "std"))]
-use typol::{OrderedMap, WriteOptions};
+#[cfg(any(not(feature = "std"), feature = "btree-map"))]
+use typol::{
+    ConfigInput, EmptyEnvironment, SchemaLoader, TypolError, TypolOptions, WriteOptions,
+    opeo::ErrSlot,
+};
 
 #[cfg(not(feature = "std"))]
-use typol::{
-    ConfigInput, EmptyEnvironment, SchemaLoader, TypolError, TypolOptions, TypolStage,
-    core::SourceId, opeo::ErrSlot,
-};
+use typol::{OrderedMap, TypolStage, core::SourceId};
 
 #[cfg(all(feature = "hashbrown", not(feature = "std")))]
 use hashbrown::HashMap;
@@ -49,6 +52,18 @@ struct OrderedSettings {
 #[derive(Typol)]
 struct RecursiveOrdered {
     children: OrderedMap<RecursiveOrdered>,
+}
+
+#[cfg(feature = "btree-map")]
+#[derive(Typol)]
+struct BTreeSettings {
+    values: BTreeMap<String, u8>,
+}
+
+#[cfg(feature = "btree-map")]
+#[derive(Typol)]
+struct RecursiveBTree {
+    children: BTreeMap<String, RecursiveBTree>,
 }
 
 #[cfg(all(feature = "hashbrown", not(feature = "std")))]
@@ -144,6 +159,41 @@ fn ordered_map_decodes_and_writes_keys_in_order() {
         "ordered map failed with {:?} and diagnostic {code:?}",
         error.as_ref().map(TypolError::stage)
     );
+}
+
+#[cfg(feature = "btree-map")]
+#[test]
+fn btree_map_binds_reads_and_writes_in_key_order() {
+    assert_budgeted::<BTreeMap<String, u8>>();
+    assert_budgeted::<BTreeSettings>();
+
+    let mut errors = ErrSlot::<TypolError>::new();
+    let result = errors.try_call(|mut out| {
+        let loaded = SchemaLoader::new(TypolOptions::default()).compile_text(
+            b"btree-map-test",
+            "entry struct BTreeSettings { values: map<string, u8> }",
+            out.reborrow(),
+        )?;
+        let binding = loaded.bind::<BTreeSettings>(out.reborrow())?;
+        let mut environment = EmptyEnvironment;
+        let config = binding.read(
+            ConfigInput::text("{values: {\"z\": 9, \"a\": 1}}"),
+            &mut environment,
+            out.reborrow(),
+        )?;
+        assert_eq!(config.values.get("a"), Some(&1));
+        let written = binding.write(&config, WriteOptions::default(), out.reborrow())?;
+        assert_eq!(written, "{values: {\"a\": 1, \"z\": 9}}");
+
+        let recursive = SchemaLoader::new(TypolOptions::default()).compile_text(
+            b"recursive-btree-map-test",
+            "entry struct RecursiveBTree { children: map<string, RecursiveBTree> }",
+            out.reborrow(),
+        )?;
+        let _recursive_binding = recursive.bind::<RecursiveBTree>(out)?;
+        Ok(())
+    });
+    assert!(result.is_ok());
 }
 
 #[cfg(all(feature = "hashbrown", not(feature = "std")))]

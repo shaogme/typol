@@ -3,7 +3,7 @@ use crate::{
     BindingTestRoot as Root, BindingTestSupport,
     binding::ConversionErrorKind,
     binding_impl::TypedSchema,
-    conversion::{ConversionContext, ConversionValue},
+    conversion::{Conversion, ConversionContext, ConversionValue},
     descriptor::{DescribeContext, TypeDescriptor, Typol},
     diagnostics::{CodecErrors, CodecStage},
     options::{BindOptions, CodecOptions, ConversionLimits},
@@ -66,6 +66,15 @@ fn decode_error<T: Typol>(
     limits: ConversionLimits,
 ) -> TestResult<CodecErrors> {
     ConversionTestSupport::decode_error(binding, value, session, limits)
+}
+
+fn decode<T: Typol>(
+    binding: &TypedSchema<'_, T>,
+    value: &ConfigValue,
+    session: &SessionBudget,
+    limits: ConversionLimits,
+) -> TestResult<T> {
+    BindingTestSupport::codec_value(|out| Conversion::decode(binding, value, session, limits, out))
 }
 
 fn path_of(errors: &CodecErrors) -> TestResult<&InstancePath> {
@@ -327,4 +336,57 @@ fn secret_array_elements_and_enum_payloads_hide_dynamic_suffixes() -> TestResult
         Some(ConversionErrorKind::EnumPayloadMismatch)
     );
     assert_secret_path_is_redacted(&errors, "value", "Number")
+}
+
+#[test]
+fn unordered_manual_field_slices_keep_name_checks() -> TestResult {
+    let schema = BindingTestSupport::compile("entry struct Renamed { a: u8, b: string }")?;
+    let binding = BindingTestSupport::bind::<Pair>(&schema, BindOptions::default())?;
+    for names in [["b", "a"], ["a", "b"]] {
+        let fields = names
+            .into_iter()
+            .map(|name| {
+                TestValues::field(
+                    name.into(),
+                    if name == "a" {
+                        TestValues::unsigned(42)
+                    } else {
+                        TestValues::string_unmetered("out-of-order".into())
+                    },
+                )
+            })
+            .collect();
+        let value = TestOpeo::value(|out| TestValues::try_structure(fields, out))?;
+        let session = BindingTestSupport::codec_session()?;
+        assert_eq!(
+            decode(&binding, &value, &session, ConversionLimits::default())?,
+            Pair {
+                first: 42,
+                second: "out-of-order".into()
+            }
+        );
+    }
+    let value = TestOpeo::value(|out| {
+        TestValues::try_structure(
+            vec![
+                TestValues::field("a".into(), TestValues::unsigned(42)),
+                TestValues::field(
+                    "unknown".into(),
+                    TestValues::string_unmetered("error name".into()),
+                ),
+            ],
+            out,
+        )
+    })?;
+    let session = BindingTestSupport::codec_session()?;
+    assert_eq!(
+        BindingTestSupport::code(decode_error(
+            &binding,
+            &value,
+            &session,
+            ConversionLimits::default()
+        )?)?,
+        15
+    );
+    Ok(())
 }

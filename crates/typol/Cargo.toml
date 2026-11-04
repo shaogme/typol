@@ -9,6 +9,7 @@ autotests = false
 default = []
 std = ["dep:typol-std"]
 hashbrown = ["dep:hashbrown"]
+btree-map = []
 serde = ["dep:serde", "serde/alloc", "hashbrown?/serde"]
 config-ir = ["serde"]
 

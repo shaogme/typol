@@ -57,6 +57,7 @@
 //! | `std` | File and reader inputs, file-based schema loading, process environment access, and host diagnostic rendering | Yes |
 //! | `serde` | Schema-aware Serde reads and writes for bound types | No |
 //! | `hashbrown` | `hashbrown::HashMap<String, T>` bindings | No |
+//! | `btree-map` | `alloc::collections::BTreeMap<String, T>` bindings; node allocation failure follows the global allocator and may panic or abort | No |
 //! | `config-ir` | Config IR v1 JSON serialization; also enables `serde` | No |
 //!
 //! A `no_std` application needs an allocator for owned values. The library does not provide a
@@ -64,7 +65,8 @@
 //! [`SchemaLoader::compile_text`] or a [`SchemaResolver`], provide configuration through
 //! [`ConfigInput::text`] or [`ConfigInput::bytes`], and pass an [`Environment`] implementation to
 //! each read. [`EmptyEnvironment`] is provided for reads that should not consult an external
-//! source.
+//! source. BTree map target-storage charges estimate logical `(String, T)` entries and key text;
+//! they do not bound actual tree-node or allocator overhead.
 //!
 //! # Validation and resource limits
 //!
@@ -122,7 +124,7 @@ mod loading;
 mod loading_errors;
 mod options;
 mod session;
-#[cfg(feature = "serde")]
+#[cfg(any(feature = "serde", test))]
 mod value;
 mod value_walk;
 

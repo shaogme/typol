@@ -21,6 +21,7 @@ typol = { version = "0.1", default-features = false }
 | *(none)* | In-memory Schema loading, text or byte configuration input, typed bindings, and explicit `Environment` providers | Yes |
 | `serde` | Schema-aware Serde bridge; Typol enables Serde's `alloc` support | Yes |
 | `hashbrown` | `Typol` and `BudgetedTypol` bindings for `hashbrown::HashMap<String, T>` | Yes |
+| `btree-map` | `Typol` and `BudgetedTypol` bindings for `alloc::collections::BTreeMap<String, T>` | Yes |
 | `std` | File and reader inputs, file Schema loading, process environment access, and host diagnostic rendering | No |
 | `config-ir` | Config IR v1 JSON serialization using Serde and `alloc` | Yes |
 
@@ -125,7 +126,14 @@ typol = { version = "0.1", default-features = false, features = ["hashbrown"] }
 
 This feature does not enable `std`. Its default hash builder currently uses foldhash and usually does not protect against HashDoS; assess that trade-off when keys can be chosen by an attacker. The standard library `HashMap` binding remains available with `std` and keeps its own default hash builder. With both `serde` and `hashbrown` enabled, hashbrown's Serde support is forwarded; Serde's own decoding callbacks may allocate outside Typol's fallible map-conversion reserve path.
 
-Typol does not provide a built-in `BTreeMap` binding because its node insertion cannot report allocation failure. See the [Schema implementation](../../specification/schema-implementation/) when choosing application types.
+To bind `alloc::collections::BTreeMap<String, T>`, enable `btree-map` explicitly:
+
+```toml
+[dependencies]
+typol = { version = "0.1", default-features = false, features = ["btree-map"] }
+```
+
+This feature does not enable `std`; `std::collections::BTreeMap` uses the same implementation. Tree-node allocation has no fallible reservation API, so allocation failure follows the global allocator and may panic or abort instead of returning a structured conversion error. The target-storage budget charges an estimate for logical `(String, T)` entries and key text; it does not bound tree-node or allocator overhead. See the [Schema implementation](../../specification/schema-implementation/) for the conversion details.
 
 The library's resource limits account for operations and storage that Typol manages. They do not replace the target's allocator policy or bound all memory used by the application and its providers.
 

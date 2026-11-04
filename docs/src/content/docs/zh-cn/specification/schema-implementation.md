@@ -203,7 +203,7 @@ Schema 错误由 `SchemaCompileErrors` 以非空集合或不需分配的内联�
 
 普通记录和枚举映射应优先使用 derive；只有存在特殊映射且应用已审查并信任其回调时才手写实现。迁移时检查直接 `impl Typol`，以及 derive 类型字段/载荷的传递嵌套；含手写类型的整个父类型都改为 `bind_trusted`，或把映射重构成普通字段和枚举后使用 derive。配置读取应显式执行 Schema 编译、类型绑定和读取；手写类型通过加载后调用 `bind_trusted`。
 
-内建 map 绑定支持无需 `std` 的 `OrderedMap<T>`、启用 `std` 后的 `std::collections::HashMap<String, T>`，以及启用可选 `hashbrown` feature 后的 `hashbrown::HashMap<String, T>`。`OrderedMap` 按 Rust 字符串序保存键；其可失败插入会替换重复键并返回旧值，而转换解码会拒绝重复输入键。解码先对输入键引用排序，再预留最终向量容量，避免构造 map 时发生二次方级元素移动。哈希 map 会在解码条目前预留容量；两种路径都按实际元素容量记入目标额度，并单独统计拥有型键文本。该目标额度估算不包含哈希表控制字节和 allocator 元数据。hashbrown 当前默认的 foldhash 构建器通常不防御 HashDoS，键可由攻击者控制的应用应评估这一取舍。标准库 `HashMap` 仍可使用，并保留其不同的默认哈希构建器。`BTreeMap` 没有可失败的节点预留接口，因此不提供自动 `Typol` 实现。
+内建 map 绑定支持无需 `std` 的 `OrderedMap<T>`、启用 `std` 后的 `std::collections::HashMap<String, T>`、启用可选 `hashbrown` feature 后的 `hashbrown::HashMap<String, T>`，以及启用可选 `btree-map` feature 后的 `alloc::collections::BTreeMap<String, T>`。BTreeMap 实现也适用于 `std::collections::BTreeMap`，且 `btree-map` 不会启用 `std`。`OrderedMap` 按 Rust 字符串序保存键；其可失败插入会替换重复键并返回旧值，而转换解码会拒绝重复输入键。解码先对输入键引用排序，再预留最终向量容量，避免构造 map 时发生二次方级元素移动。哈希 map 会在解码条目前预留容量；`OrderedMap` 和哈希 map 路径都按实际元素容量记入目标额度，并单独统计拥有型键文本。哈希 map 的额度估算不包含哈希表控制字节和 allocator 元数据。hashbrown 当前默认的 foldhash 构建器通常不防御 HashDoS，键可由攻击者控制的应用应评估这一取舍。标准库 `HashMap` 仍可使用，并保留其不同的默认哈希构建器。BTreeMap 解码以 checked multiplication 计算每个 `size_of::<(String, T)>()` 逻辑条目的估算额度，另计拥有型键文本，并直接将条目插入树中。该估算不包含树节点布局或 allocator 元数据。BTreeMap 没有可失败的节点预留接口，因此节点分配失败遵循全局分配器行为，可能 panic 或终止进程；不会返回结构化分配错误。
 
 同时启用 `serde` 和 `hashbrown` 时，Typol 会转发 hashbrown 的 Serde 支持。Serde 自身的 `Deserialize` 回调可能独立分配内存，不经过上述可失败的预留路径。
 

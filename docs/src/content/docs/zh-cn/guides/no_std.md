@@ -21,6 +21,7 @@ typol = { version = "0.1", default-features = false }
 | *无* | 内存 Schema 加载、文本或字节配置输入、类型绑定和显式 `Environment` 提供器 | 可以 |
 | `serde` | 带 Schema 上下文的 Serde 桥接；Typol 会启用 Serde 的 `alloc` 支持 | 可以 |
 | `hashbrown` | 为 `hashbrown::HashMap<String, T>` 提供 `Typol` 和 `BudgetedTypol` 绑定 | 可以 |
+| `btree-map` | 为 `alloc::collections::BTreeMap<String, T>` 提供 `Typol` 和 `BudgetedTypol` 绑定 | 可以 |
 | `std` | 文件和 reader 输入、文件 Schema 加载、进程环境访问和宿主诊断渲染 | 不可以 |
 | `config-ir` | 使用 Serde 和 `alloc` 序列化 Config IR v1 JSON | 可以 |
 
@@ -125,7 +126,14 @@ typol = { version = "0.1", default-features = false, features = ["hashbrown"] }
 
 此 feature 不会启用 `std`。当前默认哈希构建器使用 foldhash，通常不防御 HashDoS；若键可由攻击者选择，请评估这一取舍。启用 `std` 后仍可使用标准库 `HashMap` 绑定，并保留其自身的默认哈希构建器。若同时启用 `serde` 和 `hashbrown`，Typol 会转发 hashbrown 的 Serde 支持；Serde 自身的解码回调可能在 Typol 可失败 map 预留路径之外分配内存。
 
-Typol 不提供内建 `BTreeMap` 绑定，因为插入树节点时无法报告分配失败。选择应用类型时可参考 [Schema 实现说明](../../specification/schema-implementation/)。
+要绑定 `alloc::collections::BTreeMap<String, T>`，请显式启用 `btree-map`：
+
+```toml
+[dependencies]
+typol = { version = "0.1", default-features = false, features = ["btree-map"] }
+```
+
+此 feature 不会启用 `std`；`std::collections::BTreeMap` 使用同一实现。树节点没有可失败的预留接口，因此分配失败遵循全局分配器行为，可能 panic 或终止进程，而不会返回结构化转换错误。目标存储预算按逻辑 `(String, T)` 条目和键文本估算，不限制树节点或 allocator 元数据。转换细节见 [Schema 实现说明](../../specification/schema-implementation/)。
 
 库的资源额度会统计 Typol 管理的操作和存储，但不能取代目标平台的分配策略，也不能约束应用及其提供器使用的全部内存。
 

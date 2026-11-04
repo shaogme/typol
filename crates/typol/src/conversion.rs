@@ -1,12 +1,12 @@
 mod binding;
 mod containers;
 mod pipeline;
-mod scalar;
 mod value_builder;
 
 #[cfg(all(test, feature = "std"))]
 mod tests;
 
+pub(crate) use containers::ContainerConversions;
 pub use containers::OrderedMap;
 
 use alloc::string::String;

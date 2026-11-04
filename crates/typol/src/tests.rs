@@ -2,8 +2,6 @@ mod allocation;
 mod api;
 mod profile;
 
-pub(crate) use allocation::{AllocationScope, TestAssertions};
-
 use crate::{
     conversion::ConversionContext,
     descriptor::{
@@ -24,6 +22,11 @@ use typol_policy::ResourceLimits;
 use typol_test_support::{
     TestExpect, TestExtract, TestResult, test_verify as assert, test_verify_eq as assert_eq,
 };
+
+pub(crate) use allocation::TestAssertions;
+
+#[cfg(feature = "serde")]
+pub(crate) use allocation::AllocationScope;
 
 static TEST_INTERNAL_CONTEXT: DiagnosticContext =
     diagnostic_context!("typol-test", "binding", "test-invariant");

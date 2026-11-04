@@ -4,9 +4,7 @@ use crate::{
         BudgetedTypol, DescribeContext, DescriptorNode, DescriptorProvider, MapContainer,
         TypeDescriptor, TypeShape, Typol,
     },
-    diagnostics::{
-        CodecErrors, CodecStage, ConversionDiagnosticInput, ConversionErrorKind, Failure,
-    },
+    diagnostics::{CodecErrors, CodecStage, Failure},
     value_walk::{NAMED_ENTRY_NAME_MISSING, ValueNodeKind},
 };
 use alloc::{collections::TryReserveError, string::String, vec::Vec};
@@ -17,6 +15,9 @@ use core::{
 };
 use opeo::{OResult, Out};
 use typol_core::{ChargedVec, NamedValue, ValueId, ValueView};
+
+#[cfg(feature = "btree-map")]
+use alloc::collections::BTreeMap;
 
 #[cfg(feature = "std")]
 use std::collections::HashMap as StdHashMap;
@@ -34,8 +35,11 @@ trait HashMapAdapter {
     type Map<T>;
 
     fn new<T>() -> Self::Map<T>;
+
     fn try_reserve<T>(map: &mut Self::Map<T>, additional: usize) -> bool;
+
     fn capacity<T>(map: &Self::Map<T>) -> usize;
+
     fn insert<T>(map: &mut Self::Map<T>, key: String, value: T) -> Option<T>;
 }
 
@@ -139,143 +143,68 @@ impl HashMapAdapter for HashbrownMapAdapter {
     }
 }
 
-impl<T: Typol> Typol for Option<T> {
-    fn describe<'slot, 'borrow>(
+pub(crate) struct ContainerConversions;
+
+impl ContainerConversions {
+    pub(crate) fn describe_container<'slot, 'borrow, T: 'static>(
         context: &mut DescribeContext<'_>,
+        shape: TypeShape,
         out: Out<'slot, 'borrow, CodecErrors>,
     ) -> OResult<'slot, TypeDescriptor> {
-        describe_container::<Self>(
-            context,
-            TypeShape::Option(DescriptorProvider::of::<T>()),
-            out,
-        )
+        describe_container::<T>(context, shape, out)
     }
 
-    fn to_config_value<'slot>(
-        &self,
+    pub(crate) fn write_sequence<'slot, T: Typol>(
+        values: &[T],
         context: &mut ConversionContext<'_>,
-        mut out: Out<'slot, '_, CodecErrors>,
+        out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, ValueId> {
-        context.start::<Self>(out.reborrow())?;
-        let ty = context.element_type(out.reborrow())?;
-        match self {
-            Some(value) => {
-                let value = context.encode_child::<T>(ty, value, out.reborrow())?;
-                context.optional(Some(value), out.reborrow())
-            }
-            None => context.none(out.reborrow()),
-        }
+        write_sequence(values, context, out)
     }
 
-    fn from_config_value<'slot>(
+    pub(crate) fn read_sequence<'slot, T: Typol>(
+        value: ValueView<'_>,
+        context: &mut ConversionContext<'_>,
+        out: Out<'slot, '_, CodecErrors>,
+    ) -> OResult<'slot, ChargedVec<T>> {
+        read_sequence(value, context, out)
+    }
+
+    pub(crate) fn write_map<'slot, 'value, T: Typol>(
+        entries: impl ExactSizeIterator<Item = (&'value str, &'value T)>,
+        context: &mut ConversionContext<'_>,
+        out: Out<'slot, '_, CodecErrors>,
+    ) -> OResult<'slot, ValueId> {
+        write_map(entries, context, out)
+    }
+
+    #[cfg(feature = "btree-map")]
+    pub(crate) fn read_btree_map<'slot, T: Typol>(
         value: ConversionValue<'_>,
         context: &mut ConversionContext<'_>,
-        mut out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, Self> {
-        context.start::<Self>(out.reborrow())?;
-        match context.read_value_node(value.view(), out.reborrow())? {
-            ValueNodeKind::Optional {
-                inner,
-                value: Some(value),
-            } => context
-                .decode_child::<T>(inner, ConversionValue::new(value), out.reborrow())
-                .map(Some),
-            ValueNodeKind::Optional { value: None, .. } => Ok(None),
-            _ => context.reject_with_path(out.reborrow()),
-        }
-    }
-}
-
-impl<T: BudgetedTypol> BudgetedTypol for Option<T> {}
-
-impl<T: Typol> Typol for Vec<T> {
-    fn describe<'slot, 'borrow>(
-        context: &mut DescribeContext<'_>,
-        out: Out<'slot, 'borrow, CodecErrors>,
-    ) -> OResult<'slot, TypeDescriptor> {
-        describe_container::<Self>(
-            context,
-            TypeShape::Sequence(DescriptorProvider::of::<T>()),
-            out,
-        )
+        out: Out<'slot, '_, CodecErrors>,
+    ) -> OResult<'slot, BTreeMap<String, T>> {
+        read_btree_map(value, context, out)
     }
 
-    fn to_config_value<'slot>(
-        &self,
-        context: &mut ConversionContext<'_>,
-        mut out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, ValueId> {
-        context.start::<Self>(out.reborrow())?;
-        write_sequence(self, context, out.reborrow())
-    }
-
-    fn from_config_value<'slot>(
+    #[cfg(feature = "std")]
+    pub(crate) fn read_std_hash_map<'slot, T: Typol>(
         value: ConversionValue<'_>,
         context: &mut ConversionContext<'_>,
-        mut out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, Self> {
-        context.start::<Self>(out.reborrow())?;
-        let values =
-            read_sequence::<T>(value.view(), context, out.reborrow())?.into_unmetered_vec();
-        let Some(bytes) = values.capacity().checked_mul(size_of::<T>()) else {
-            return Err(out.fail(ConversionContext::resource_error()));
-        };
-        context.target_bytes(bytes, out.reborrow())?;
-        Ok(values)
-    }
-}
-
-impl<T: BudgetedTypol> BudgetedTypol for Vec<T> {}
-
-impl<T: Typol, const N: usize> Typol for [T; N] {
-    fn describe<'slot>(
-        context: &mut DescribeContext<'_>,
-        mut out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, TypeDescriptor> {
-        let length = DescribeContext::array_length(N, out.reborrow())?;
-        describe_container::<Self>(
-            context,
-            TypeShape::Array {
-                element: DescriptorProvider::of::<T>(),
-                length,
-            },
-            out.reborrow(),
-        )
+        out: Out<'slot, '_, CodecErrors>,
+    ) -> OResult<'slot, StdHashMap<String, T>> {
+        read_hash_map::<T, StdHashMapAdapter>(value, context, out)
     }
 
-    fn to_config_value<'slot>(
-        &self,
-        context: &mut ConversionContext<'_>,
-        mut out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, ValueId> {
-        context.start::<Self>(out.reborrow())?;
-        write_sequence(self, context, out.reborrow())
-    }
-
-    fn from_config_value<'slot>(
+    #[cfg(feature = "hashbrown")]
+    pub(crate) fn read_hashbrown_map<'slot, T: Typol>(
         value: ConversionValue<'_>,
         context: &mut ConversionContext<'_>,
-        mut out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, Self> {
-        context.start::<Self>(out.reborrow())?;
-        let values =
-            read_sequence::<T>(value.view(), context, out.reborrow())?.into_unmetered_vec();
-        match values.try_into() {
-            Ok(values) => Ok(values),
-            Err(_) => context.fail_as(
-                ConversionDiagnosticInput::new(
-                    ConversionErrorKind::ArrayLengthMismatch,
-                    "value with the Rust fixed-array length",
-                    "array length mismatch",
-                    context.path,
-                ),
-                out.reborrow(),
-            ),
-        }
+        out: Out<'slot, '_, CodecErrors>,
+    ) -> OResult<'slot, HashbrownMap<String, T>> {
+        read_hash_map::<T, HashbrownMapAdapter>(value, context, out)
     }
 }
-
-impl<T: BudgetedTypol, const N: usize> BudgetedTypol for [T; N] {}
 
 impl<T: Typol> Typol for OrderedMap<T> {
     fn describe<'slot, 'borrow>(
@@ -312,90 +241,6 @@ impl<T: Typol> Typol for OrderedMap<T> {
 }
 
 impl<T: BudgetedTypol> BudgetedTypol for OrderedMap<T> {}
-
-#[cfg(feature = "std")]
-impl<T: Typol> Typol for StdHashMap<String, T> {
-    fn describe<'slot, 'borrow>(
-        context: &mut DescribeContext<'_>,
-        out: Out<'slot, 'borrow, CodecErrors>,
-    ) -> OResult<'slot, TypeDescriptor> {
-        describe_container::<Self>(
-            context,
-            TypeShape::Map {
-                container: MapContainer::HashMap,
-                value: DescriptorProvider::of::<T>(),
-            },
-            out,
-        )
-    }
-
-    fn to_config_value<'slot>(
-        &self,
-        context: &mut ConversionContext<'_>,
-        mut out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, ValueId> {
-        context.start::<Self>(out.reborrow())?;
-        write_map(
-            self.iter().map(|(key, value)| (key.as_str(), value)),
-            context,
-            out.reborrow(),
-        )
-    }
-
-    fn from_config_value<'slot>(
-        value: ConversionValue<'_>,
-        context: &mut ConversionContext<'_>,
-        mut out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, Self> {
-        context.start::<Self>(out.reborrow())?;
-        read_hash_map::<T, StdHashMapAdapter>(value, context, out.reborrow())
-    }
-}
-
-#[cfg(feature = "std")]
-impl<T: BudgetedTypol> BudgetedTypol for StdHashMap<String, T> {}
-
-#[cfg(feature = "hashbrown")]
-impl<T: Typol> Typol for HashbrownMap<String, T> {
-    fn describe<'slot, 'borrow>(
-        context: &mut DescribeContext<'_>,
-        out: Out<'slot, 'borrow, CodecErrors>,
-    ) -> OResult<'slot, TypeDescriptor> {
-        describe_container::<Self>(
-            context,
-            TypeShape::Map {
-                container: MapContainer::HashMap,
-                value: DescriptorProvider::of::<T>(),
-            },
-            out,
-        )
-    }
-
-    fn to_config_value<'slot>(
-        &self,
-        context: &mut ConversionContext<'_>,
-        mut out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, ValueId> {
-        context.start::<Self>(out.reborrow())?;
-        write_map(
-            self.iter().map(|(key, value)| (key.as_str(), value)),
-            context,
-            out.reborrow(),
-        )
-    }
-
-    fn from_config_value<'slot>(
-        value: ConversionValue<'_>,
-        context: &mut ConversionContext<'_>,
-        mut out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, Self> {
-        context.start::<Self>(out.reborrow())?;
-        read_hash_map::<T, HashbrownMapAdapter>(value, context, out.reborrow())
-    }
-}
-
-#[cfg(feature = "hashbrown")]
-impl<T: BudgetedTypol> BudgetedTypol for HashbrownMap<String, T> {}
 
 #[cfg(any(feature = "std", feature = "hashbrown"))]
 fn read_hash_map<'slot, T: Typol, Adapter: HashMapAdapter>(
@@ -446,6 +291,51 @@ fn read_hash_map<'slot, T: Typol, Adapter: HashMapAdapter>(
         let value =
             context.decode_child::<T>(ty, ConversionValue::new(entry.value()), out.reborrow())?;
         if Adapter::insert(&mut result, key, value).is_some() {
+            return context.reject_with_path(out.reborrow());
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(feature = "btree-map")]
+fn read_btree_map<'slot, T: Typol>(
+    value: ConversionValue<'_>,
+    context: &mut ConversionContext<'_>,
+    mut out: Out<'slot, '_, CodecErrors>,
+) -> OResult<'slot, BTreeMap<String, T>> {
+    let ValueNodeKind::Map {
+        value_type: ty,
+        values: entries,
+    } = context.read_value_node(value.view(), out.reborrow())?
+    else {
+        return context.reject_with_path(out.reborrow());
+    };
+    let Some(bytes) = entries.len().checked_mul(size_of::<(String, T)>()) else {
+        return Err(out.fail(ConversionContext::resource_error()));
+    };
+    context.target_bytes(bytes, out.reborrow())?;
+    let mut result = BTreeMap::new();
+    for entry in entries {
+        context.child_with_path(
+            None,
+            |child, child_out| child.node(child_out),
+            out.reborrow(),
+        )?;
+        let Some(entry) = entry.as_named() else {
+            return Err(out.fail(CodecErrors::emergency(
+                CodecStage::Conversion,
+                Failure::internal(NAMED_ENTRY_NAME_MISSING),
+            )));
+        };
+        let key = context.target_text(entry.name(), out.reborrow())?;
+        context.session().budget_codec(
+            CodecStage::Conversion,
+            |budget_out| context.session().execution().consume(key.len(), budget_out),
+            out.reborrow(),
+        )?;
+        let value =
+            context.decode_child::<T>(ty, ConversionValue::new(entry.value()), out.reborrow())?;
+        if result.insert(key, value).is_some() {
             return context.reject_with_path(out.reborrow());
         }
     }

@@ -6,7 +6,13 @@ Typol 是面向 Rust 的 Schema 驱动配置库。它编译 `.tschem` Schema，�
 
 工作区要求 Rust 1.85 或更高版本。以下示例使用 `typol` facade crate；底层 crate 也可以独立使用。
 
-Facade 默认使用 `no_std`，拥有型值使用 `alloc`。内存加载器接受 Schema 文本或 resolver；配置读取接受文本或调用方提供的 `ByteSource`，并要求显式传入 `Environment` provider。`OrderedMap<T>` 绑定无需 `std`；启用 `hashbrown` feature 并直接依赖 `hashbrown` 后，可绑定 `hashbrown::HashMap<String, T>`。`serde` 和 `config-ir` feature 均可在不启用 `std` 时使用；Config IR 序列化返回由 `alloc` 支持的 `Vec<u8>`。启用 `std` 后可使用文件和 reader 输入、进程环境访问及宿主诊断渲染。
+Facade 默认使用 `no_std`，拥有型值使用 `alloc`。内存加载器接受 Schema 文本或 resolver；配置读取接受文本或调用方提供的 `ByteSource`，并要求显式传入 `Environment` provider。`OrderedMap<T>` 绑定无需 `std`；启用 `btree-map` 后可绑定 `alloc::collections::BTreeMap<String, T>`，启用 `hashbrown` 并直接依赖 `hashbrown` 后可绑定 `hashbrown::HashMap<String, T>`。BTreeMap 节点分配失败不能恢复为结构化错误，其目标存储预算只是估算。`serde` 和 `config-ir` feature 均可在不启用 `std` 时使用；Config IR 序列化返回由 `alloc` 支持的 `Vec<u8>`。启用 `std` 后可使用文件和 reader 输入、进程环境访问及宿主诊断渲染。
+
+显式启用 `btree-map` 即可使用 BTreeMap 绑定；该 feature 不会启用 `std`：
+
+```toml
+typol = { version = "0.1", default-features = false, features = ["btree-map"] }
+```
 
 要读取进程环境变量，请使用 `ProcessEnvironment::new(ProcessEnvironmentLimits::default())` 创建 provider，再将它传给 `BoundSchema::read` 或 `LoadedSchema::read_value`。这两个类型由 facade 根级导出；环境额度由 provider 自身携带，应用可以按读取策略选择额度。
 
