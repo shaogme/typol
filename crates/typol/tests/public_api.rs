@@ -8,8 +8,8 @@ use value_support::ValueSupport;
 use std::{collections::HashMap, fmt::Debug, io::Cursor, marker::PhantomData, ptr::eq};
 use typol::{
     ConfigInput, ConfigParseOptions, ConfigParser, ConfigValue, ConfigValueProcessor,
-    EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext, SchemaLoader, Typol,
-    TypolOptions, ValidatedConfigValue, WriteOptions,
+    EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext, SchemaLoader, Sourced,
+    Typol, TypolOptions, ValidatedConfigValue, WriteOptions,
     binding::{
         BindOptions, BindingLimitError, BindingLimits, BindingMismatchKind, BindingShape,
         BudgetedTypol, CodecOptions, CodecStage, ConversionLimits, MAX_CONVERSION_DEPTH,
@@ -574,6 +574,33 @@ struct EmptyEnvironmentRoot {
     value: String,
 }
 
+#[derive(Typol)]
+#[typol(rename = "SourcedRoot")]
+struct SourcedRoot {
+    value: Sourced<String>,
+}
+
+#[derive(Typol)]
+#[typol(rename = "OptionalSourcedRoot")]
+struct OptionalSourcedRoot {
+    value: Option<Sourced<String>>,
+}
+
+struct SourcedEnvironment {
+    value: Option<Vec<u8>>,
+}
+
+impl Environment for SourcedEnvironment {
+    fn read<'slot, 'borrow, 'env>(
+        &'env mut self,
+        _: &str,
+        _: EnvironmentReadContext<'_>,
+        _: Out<'slot, 'borrow, EnvironmentError>,
+    ) -> OResult<'slot, Option<&'env [u8]>> {
+        Ok(self.value.as_deref())
+    }
+}
+
 #[test]
 fn facade_reads_text_and_reader_with_one_reusable_binding() -> TestResult {
     let loader = SchemaLoader::new(TypolOptions::default());
@@ -637,6 +664,111 @@ fn standard_empty_environment_uses_missing_value_fallback() -> TestResult {
             value: "fallback".into(),
         }
     );
+    Ok(())
+}
+
+#[test]
+fn sourced_binding_preserves_origins_and_returns_the_validated_tree() -> TestResult {
+    let loader = SchemaLoader::new(TypolOptions::default());
+    let loaded = TestOpeo::value(|out| {
+        loader.compile_text(
+            b"sourced",
+            r#"entry struct SourcedRoot { value: string @env("TYPOL_SOURCED_VALUE") = "default" }"#,
+            out,
+        )
+    })?;
+    let binding = TestOpeo::value(|out| loaded.bind::<SourcedRoot>(out))?;
+    let mut environment = SourcedEnvironment {
+        value: Some(b"environment-value".to_vec()),
+    };
+    let read = TestOpeo::value(|out| {
+        binding.read_with_value(
+            ConfigInput::text("{value: env(\"TYPOL_SOURCED_VALUE\")}"),
+            &mut environment,
+            out,
+        )
+    })?;
+    assert_eq!(read.value().value.value(), "environment-value");
+    assert_eq!(
+        read.value().value.source(),
+        ValueSource::EnvironmentVariable
+    );
+    assert!(matches!(
+        read.validated_value().as_config_value().as_ref(),
+        ValueKind::Structure(_)
+    ));
+
+    let defaulted =
+        TestOpeo::value(|out| binding.read(ConfigInput::text("{}"), &mut EmptyEnvironment, out))?;
+    assert_eq!(defaulted.value.value(), "default");
+    assert_eq!(defaulted.value.source(), ValueSource::SchemaDefault);
+
+    let fallback = TestOpeo::value(|out| {
+        binding.read(
+            ConfigInput::text("{value: env(\"TYPOL_SOURCED_VALUE\", \"explicit-fallback\")}"),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    assert_eq!(fallback.value.value(), "explicit-fallback");
+    assert_eq!(fallback.value.source(), ValueSource::ExplicitFallback);
+    Ok(())
+}
+
+#[test]
+fn optional_sourced_values_keep_environment_origin_and_conversion_limits() -> TestResult {
+    let options = TypolOptions::default()
+        .with_conversion(ConversionLimits::new(2, MAX_CONVERSION_DEPTH).test_value()?);
+    let loader = SchemaLoader::new(options);
+    let loaded = TestOpeo::value(|out| {
+        loader.compile_text(
+            b"optional-sourced",
+            r#"entry struct OptionalSourcedRoot { value: option<string> @env("TYPOL_OPTIONAL_SOURCED_VALUE") }"#,
+            out,
+        )
+    })?;
+    let binding = TestOpeo::value(|out| loaded.bind::<OptionalSourcedRoot>(out))?;
+    let mut environment = SourcedEnvironment {
+        value: Some(b"optional-value".to_vec()),
+    };
+    let error = TestOpeo::error(|out| {
+        binding.read(
+            ConfigInput::text("{value: env(\"TYPOL_OPTIONAL_SOURCED_VALUE\")}"),
+            &mut environment,
+            out,
+        )
+    })?;
+    assert_eq!(
+        error.codec_errors().test_value()?.stage(),
+        CodecStage::Conversion
+    );
+
+    let default_loader = SchemaLoader::new(TypolOptions::default());
+    let default_loaded = TestOpeo::value(|out| {
+        default_loader.compile_text(
+            b"optional-sourced-default",
+            r#"entry struct OptionalSourcedRoot { value: option<string> @env("TYPOL_OPTIONAL_SOURCED_VALUE") }"#,
+            out,
+        )
+    })?;
+    let default_binding = TestOpeo::value(|out| default_loaded.bind::<OptionalSourcedRoot>(out))?;
+    let mut environment = SourcedEnvironment {
+        value: Some(b"optional-value".to_vec()),
+    };
+    let read = TestOpeo::value(|out| {
+        default_binding.read_with_value(
+            ConfigInput::text("{value: env(\"TYPOL_OPTIONAL_SOURCED_VALUE\")}"),
+            &mut environment,
+            out,
+        )
+    })?;
+    let value = read
+        .value()
+        .value
+        .as_ref()
+        .test_expect("the authorized environment value should be present")?;
+    assert_eq!(value.value(), "optional-value");
+    assert_eq!(value.source(), ValueSource::EnvironmentVariable);
     Ok(())
 }
 

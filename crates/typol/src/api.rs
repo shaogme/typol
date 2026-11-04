@@ -7,13 +7,14 @@ pub mod binding {
         },
         conversion::{
             ConversionContext, ConversionFields, ConversionPayload, ConversionValue, EnumInput,
+            Sourced,
         },
         descriptor::{
             BudgetedTypol, DescribeContext, DescriptorName, DescriptorNode, DescriptorProvider,
             MapContainer, TypeDescriptor, TypeShape, Typol, VariantShape,
         },
         diagnostics::{CodecErrors, CodecStage, ConversionErrorKind},
-        loading::{BoundSchema, ConfigInput, LoadedSchema, TrustedBoundSchema},
+        loading::{BoundRead, BoundSchema, ConfigInput, LoadedSchema, TrustedBoundSchema},
         options::{
             BindOptions, BindingLimitError, BindingLimits, CodecOptions, ConversionLimitError,
             ConversionLimits, MAX_CONVERSION_DEPTH,

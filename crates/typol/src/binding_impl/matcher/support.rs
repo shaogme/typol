@@ -46,6 +46,7 @@ impl MatcherSupport {
 
     pub(super) fn rust_shape_shape(shape: &TypeShape) -> BindingShape {
         match shape {
+            TypeShape::Transparent(_) => BindingShape::Transparent,
             TypeShape::Scalar(kind) => BindingShape::Builtin(*kind),
             TypeShape::Option(_) => BindingShape::Option,
             TypeShape::Sequence(_) => BindingShape::Sequence,

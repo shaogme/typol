@@ -143,9 +143,11 @@ pub(crate) use self::{
 #[cfg(all(test, feature = "std", feature = "serde"))]
 pub(crate) use self::tests::AllocationScope;
 
+pub use conversion::Sourced;
 pub use error::{TypolError, TypolStage};
 pub use loading::{
-    BoundSchema, ConfigInput, LoadedSchema, SchemaLoader, SourceNames, TrustedBoundSchema,
+    BoundRead, BoundSchema, ConfigInput, LoadedSchema, SchemaLoader, SourceNames,
+    TrustedBoundSchema,
 };
 pub use opeo;
 pub use options::{ConversionLimitError, TypolOptions, WriteOptions};

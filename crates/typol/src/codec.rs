@@ -15,7 +15,7 @@ use encoder::Encoder;
 use opeo::{OResult, Out};
 use typol_config::{
     ConfigParseRequest, ConfigParser, ConfigValidationOptions, ConfigValidationRequest,
-    ConfigValueProcessor, Environment,
+    ConfigValueProcessor, Environment, ValidatedConfigValue,
 };
 use typol_core::ConfigValue;
 use typol_semantic::{CompiledSchema, TypeKind};
@@ -57,7 +57,7 @@ impl SchemaCompleteValue {
 // The credential owns the value and is tied to this session; callers cannot replace its Schema or budget.
 pub(crate) struct ValidatedValue<'schema, 'call> {
     schema: &'schema CompiledSchema,
-    value: ConfigValue,
+    value: ValidatedConfigValue,
     session: &'call mut SessionBudget,
 }
 
@@ -70,19 +70,17 @@ impl ValidatedValue<'_, '_> {
         mut out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, ValidatedValue<'schema, 'call>> {
         let value = value.into_config_value();
-        let value = session
-            .validation_codec(
-                |validation_out| {
-                    ConfigValueProcessor::new(schema).validate_schema_complete_with_budget(
-                        value,
-                        ConfigValidationRequest::new(options),
-                        session.execution(),
-                        validation_out,
-                    )
-                },
-                out.reborrow(),
-            )?
-            .into_config_value();
+        let value = session.validation_codec(
+            |validation_out| {
+                ConfigValueProcessor::new(schema).validate_schema_complete_with_budget(
+                    value,
+                    ConfigValidationRequest::new(options),
+                    session.execution(),
+                    validation_out,
+                )
+            },
+            out.reborrow(),
+        )?;
         Ok(ValidatedValue {
             schema,
             value,
@@ -96,7 +94,7 @@ impl ValidatedValue<'_, '_> {
         environment: &mut dyn Environment,
         session: &SessionBudget,
         mut out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, ConfigValue> {
+    ) -> OResult<'slot, ValidatedConfigValue> {
         let value = session.parse_codec(
             |parse_out| {
                 ConfigParser::new(schema).parse_with_budget(
@@ -108,12 +106,12 @@ impl ValidatedValue<'_, '_> {
             },
             out.reborrow(),
         )?;
-        Ok(value.into_config_value())
+        Ok(value)
     }
 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn value(&self) -> &ConfigValue {
-        &self.value
+        self.value.as_config_value()
     }
 
     pub(crate) fn encode<'slot>(
@@ -130,7 +128,13 @@ impl ValidatedValue<'_, '_> {
         if !matches!(kind, TypeKind::Struct { .. }) {
             return Err(out.fail(Encoder::invariant_error()));
         }
-        Encoder::run(entry, &self.value, self.session, pretty, out.reborrow())
+        Encoder::run(
+            entry,
+            self.value.as_config_value(),
+            self.session,
+            pretty,
+            out.reborrow(),
+        )
     }
 }
 
@@ -151,9 +155,7 @@ impl<'schema, 'call> ValidatedValue<'schema, 'call> {
         session: &'call mut SessionBudget,
         mut out: Out<'slot, '_, ConfigParseErrors>,
     ) -> OResult<'slot, Self> {
-        let value = ConfigParser::new(schema)
-            .parse(request, environment, out.reborrow())?
-            .into_config_value();
+        let value = ConfigParser::new(schema).parse(request, environment, out.reborrow())?;
         Ok(Self {
             schema,
             value,

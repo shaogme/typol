@@ -5,7 +5,7 @@ mod loader;
 #[cfg(all(test, feature = "std"))]
 mod tests;
 
-pub use bound::{BoundSchema, TrustedBoundSchema};
+pub use bound::{BoundRead, BoundSchema, TrustedBoundSchema};
 pub use config::LoadedSchema;
 pub(crate) use config::{ConfigInputOperation, ConfigInputStrategy, ConfigSourceRequest};
 pub use loader::SchemaLoader;

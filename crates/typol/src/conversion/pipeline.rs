@@ -1,7 +1,10 @@
 use crate::{
     binding_impl::{BindingPlan, TypeBinding, TypedSchema, VariantBinding},
     conversion::{ConversionContext, value_builder::ValueBuilder},
-    descriptor::Typol,
+    descriptor::{
+        BudgetedTypol, DescribeContext, DescriptorNode, DescriptorProvider, TypeDescriptor,
+        TypeShape, Typol,
+    },
     diagnostics::{CodecErrors, CodecStage, Failure},
     options::ConversionLimits,
     session::{SessionBudget, TargetCharge},
@@ -10,8 +13,8 @@ use alloc::string::String;
 use core::any::TypeId;
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
-    BudgetError, ConfigValue, DiagnosticContext, ValueEntries, ValuePayloadView, ValueView,
-    diagnostic_context,
+    BudgetError, ConfigValue, DiagnosticContext, ValueEntries, ValueId, ValuePayloadView,
+    ValueSource, ValueView, diagnostic_context,
 };
 use typol_semantic::TypeView;
 
@@ -34,7 +37,74 @@ impl<'value> ConversionValue<'value> {
     pub(crate) const fn view(self) -> ValueView<'value> {
         self.value
     }
+
+    pub const fn source(self) -> ValueSource {
+        self.value.source()
+    }
 }
+
+/// A decoded value paired with the origin of its configuration node.
+///
+/// The wrapper does not expose `Debug`, so it cannot accidentally reveal a wrapped secret.
+pub struct Sourced<T> {
+    value: T,
+    source: ValueSource,
+}
+
+impl<T> Sourced<T> {
+    pub const fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub const fn source(&self) -> ValueSource {
+        self.source
+    }
+
+    pub fn into_value(self) -> T {
+        self.value
+    }
+}
+
+impl<T: Typol> Typol for Sourced<T> {
+    fn describe<'slot, 'borrow>(
+        context: &mut DescribeContext<'_>,
+        out: Out<'slot, 'borrow, CodecErrors>,
+    ) -> OResult<'slot, TypeDescriptor> {
+        context.insert(
+            DescriptorNode::Type {
+                identity: TypeId::of::<Self>(),
+                name: None,
+                shape: TypeShape::Transparent(DescriptorProvider::of::<T>()),
+            },
+            context.depth(),
+            out,
+        )
+    }
+
+    fn to_config_value<'slot>(
+        &self,
+        context: &mut ConversionContext<'_>,
+        mut out: Out<'slot, '_, CodecErrors>,
+    ) -> OResult<'slot, ValueId> {
+        context.start::<Self>(out.reborrow())?;
+        let ty = context.current_type(out.reborrow())?;
+        context.encode_child::<T>(ty, &self.value, out.reborrow())
+    }
+
+    fn from_config_value<'slot>(
+        value: ConversionValue<'_>,
+        context: &mut ConversionContext<'_>,
+        mut out: Out<'slot, '_, CodecErrors>,
+    ) -> OResult<'slot, Self> {
+        context.start::<Self>(out.reborrow())?;
+        let source = value.source();
+        let ty = context.current_type(out.reborrow())?;
+        let value = context.decode_child::<T>(ty, value, out.reborrow())?;
+        Ok(Self { value, source })
+    }
+}
+
+impl<T: BudgetedTypol> BudgetedTypol for Sourced<T> {}
 
 /// A structure field set validated by the context.
 #[derive(Clone, Copy)]

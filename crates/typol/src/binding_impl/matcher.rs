@@ -236,6 +236,21 @@ impl<'schema> Matcher<'schema> {
             out.reborrow(),
         )?;
         match (shape, kind) {
+            (TypeShape::Transparent(provider), _) => {
+                let path = pending.path.duplicate(context.session(), out.reborrow())?;
+                MatcherSupport::enqueue_child(
+                    &mut children,
+                    Pending {
+                        provider: *provider,
+                        ty: pending.ty,
+                        depth,
+                        path,
+                        field_context: pending.field_context,
+                    },
+                    context,
+                    out.reborrow(),
+                )?;
+            }
             (TypeShape::Scalar(rust), TypeKind::Builtin(schema)) => {
                 if *rust != schema {
                     self.errors.record(

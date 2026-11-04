@@ -30,7 +30,9 @@ use typol_core::{
 use typol_semantic::{TypeKind, TypeView, VariantPayloadInfo};
 
 pub(crate) use pipeline::ConvertedValue;
-pub use pipeline::{Conversion, ConversionFields, ConversionPayload, ConversionValue, EnumInput};
+pub use pipeline::{
+    Conversion, ConversionFields, ConversionPayload, ConversionValue, EnumInput, Sourced,
+};
 
 pub(super) use self::pipeline::{BindingCursor, BindingState, ConversionState, ResolvedBinding};
 

@@ -1,14 +1,14 @@
 use crate::{
     BindingTestRoot as Root, BindingTestSupport, TestAssertions,
     binding_impl::TypedSchema,
-    conversion::{Conversion, ConvertedValue},
+    conversion::{Conversion, ConvertedValue, Sourced},
     descriptor::Typol,
     diagnostics::CodecErrors,
-    options::{BindOptions, CodecOptions, ConversionLimits},
+    options::{BindOptions, CodecOptions, ConversionLimits, MAX_CONVERSION_DEPTH},
     session::SessionBudget,
-    test_support::{TestOpeo, TestOpeoOutcome},
+    test_support::{TestOpeo, TestOpeoOutcome, TestValues},
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, string::String};
 use typol_core::{BudgetError, ConfigValue, DiagnosticCode, ExecutionLimits, ValueSource};
 use typol_test_support::{
     TestExtract, TestFailure, TestResult, test_verify as assert, test_verify_eq as assert_eq,
@@ -324,5 +324,68 @@ fn output_and_owned_targets_remain_valid_after_session_and_schema_drop() -> Test
     };
     assert!(!format!("{:?}", converted.value()).contains("secret"));
     assert_eq!(converted.value().source(), ValueSource::RustValue);
+    Ok(())
+}
+
+#[derive(crate::Typol)]
+#[typol(crate = "crate", rename = "SourcedRoot")]
+struct SourcedRoot {
+    value: Sourced<String>,
+}
+
+#[test]
+fn sourced_values_obey_conversion_node_limits() -> TestResult {
+    let schema = BindingTestSupport::compile("entry struct SourcedRoot { value: string }")?;
+    let binding = TestOpeo::value(|out| {
+        TypedSchema::<SourcedRoot>::bind(&schema, BindOptions::default(), out)
+    })?;
+    let value = TestOpeo::value(|out| {
+        TestValues::try_structure(
+            vec![TestValues::field(
+                String::from("value"),
+                TestValues::string_unmetered(String::from("sourced")),
+            )],
+            out,
+        )
+    })?;
+    let session = BindingTestSupport::codec_session()?;
+    let limits = ConversionLimits::new(2, MAX_CONVERSION_DEPTH).test_value()?;
+    let errors = decode_error(&binding, &value, &session, limits)?;
+    assert_eq!(
+        errors
+            .diagnostics()
+            .last()
+            .map(|diagnostic| diagnostic.code()),
+        Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+    );
+    Ok(())
+}
+
+#[test]
+fn sourced_value_allocations_remain_recoverable_and_leak_free() -> TestResult {
+    let schema = BindingTestSupport::compile("entry struct SourcedRoot { value: string }")?;
+    let binding = TestOpeo::value(|out| {
+        TypedSchema::<SourcedRoot>::bind(&schema, BindOptions::default(), out)
+    })?;
+    let value = TestOpeo::value(|out| {
+        TestValues::try_structure(
+            vec![TestValues::field(
+                String::from("value"),
+                TestValues::string_unmetered(String::from("sourced")),
+            )],
+            out,
+        )
+    })?;
+    let session = BindingTestSupport::codec_session()?;
+    TestAssertions::assert_atomic_allocations(|| {
+        let decoded = allocation_codec(TestOpeo::outcome(|out| {
+            Conversion::decode(&binding, &value, &session, ConversionLimits::default(), out)
+        }))?;
+        if let Some(decoded) = decoded {
+            assert_eq!(decoded.value.value(), "sourced");
+            assert_eq!(decoded.value.source(), ValueSource::RustValue);
+        }
+        Ok(())
+    })?;
     Ok(())
 }

@@ -33,6 +33,7 @@ pub enum MapContainer {
 }
 
 pub enum TypeShape {
+    Transparent(DescriptorProvider),
     Scalar(BuiltinType),
     Option(DescriptorProvider),
     Sequence(DescriptorProvider),

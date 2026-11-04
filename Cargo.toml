@@ -41,8 +41,8 @@ typol-std = { path = "crates/typol-std", version = "0.1.0" }
 typol = { path = "crates/typol", version = "0.1.0" }
 typol-i18n = { path = "crates/typol-i18n", version = "0.1.0", default-features = false }
 typol-macros = { path = "crates/typol-macros", version = "0.1.0" }
-u18n = "=0.3.0"
-u18n-compiler = "=0.3.0"
+u18n = "0.3.1"
+u18n-compiler = "0.3.1"
 syn = { version = "=2.0.106", default-features = false, features = ["derive", "parsing", "printing", "proc-macro", "visit"] }
 quote = { version = "=1.0.40", default-features = false, features = ["proc-macro"] }
 proc-macro2 = { version = "=1.0.101", default-features = false, features = ["proc-macro"] }

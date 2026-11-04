@@ -14,6 +14,7 @@ use crate::{
     conversion::Conversion,
     descriptor::{BudgetedTypol, DescribeContext, DescriptorProvider, Typol},
     diagnostics::{CodecErrors, CodecStage, Failure},
+    loading::BoundRead,
     options::{BindOptions, CodecOptions, ConversionLimits},
     session::SessionBudget,
 };
@@ -387,14 +388,20 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
             &session,
             out.reborrow(),
         )?;
-        Conversion::decode(self, &value, &session, limits, out.reborrow())
+        Conversion::decode(
+            self,
+            value.as_config_value(),
+            &session,
+            limits,
+            out.reborrow(),
+        )
     }
 
-    pub(crate) fn deserialize_with_budget<'slot>(
+    pub(crate) fn deserialize_with_value_and_budget<'slot>(
         &self,
         request: DeserializeRequest<'_, '_, '_>,
         mut out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, T> {
+    ) -> OResult<'slot, BoundRead<T>> {
         let DeserializeRequest {
             request,
             environment,
@@ -413,7 +420,14 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
             &session,
             out.reborrow(),
         )?;
-        Conversion::decode(self, &value, &session, limits, out.reborrow())
+        let decoded = Conversion::decode(
+            self,
+            value.as_config_value(),
+            &session,
+            limits,
+            out.reborrow(),
+        )?;
+        Ok(BoundRead::new(decoded, value))
     }
 
     #[cfg(feature = "serde")]
@@ -443,7 +457,13 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
             &session,
             out.reborrow(),
         )?;
-        Serde::decode(self, &value, &session, limits, out.reborrow())
+        Serde::decode(
+            self,
+            value.as_config_value(),
+            &session,
+            limits,
+            out.reborrow(),
+        )
     }
 
     pub(crate) fn plan(&self) -> &BindingPlan<'schema> {
@@ -515,7 +535,13 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
             &session,
             out.reborrow(),
         )?;
-        Serde::decode(self, &value, &session, limits, out.reborrow())
+        Serde::decode(
+            self,
+            value.as_config_value(),
+            &session,
+            limits,
+            out.reborrow(),
+        )
     }
 }
 

@@ -283,9 +283,9 @@ dependencies = [
 
 [[package]]
 name = "u18n"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa1dc45c9148121f75589815406eb90587edb8439c77b1a9a3addbec964f72d1"
+checksum = "1e114e6956e4e07c28ed9b4581dcfdd7fe56e14d11f6240cb65b8d13e7e6a496"
 dependencies = [
  "u18n-locale-tag",
  "u18n-macros",
@@ -293,15 +293,15 @@ dependencies = [
 
 [[package]]
 name = "u18n-ast"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1125a63e6c1140bea83cd51b569bfe83be4066c801887bd98ec2ac4a341f751"
+checksum = "39814274f0aa0b901d06211df4e0549a13c083c05f253f4d0be30d3614b5d994"
 
 [[package]]
 name = "u18n-compiler"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "795d02b2ec348a86338da59922e2ba1ebebbc4e5e1697d838f35eb733250bec1"
+checksum = "fd4a38bf0f8fb78f550cb07d792e0edbc313d833cfb8e56e871081968a91c5a0"
 dependencies = [
  "u18n-ast",
  "u18n-locale",
@@ -311,9 +311,9 @@ dependencies = [
 
 [[package]]
 name = "u18n-locale"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d5ca1e3506c000387db0a138a237c4d3af4621346f9478631e8b9cac662f8b1"
+checksum = "5630675b093d131cd364acb3c2a665b6b220495f8a8dfa9e9813ad5c728b860c"
 dependencies = [
  "u18n-ast",
  "u18n-locale-tag",
@@ -321,15 +321,15 @@ dependencies = [
 
 [[package]]
 name = "u18n-locale-tag"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4dd53289ea536626ee3c6c33b194915cd83733aeccef9cdf756d01ebcaeaf7c5"
+checksum = "3b8fbda376945457115d4ce36d6e6386a0e4197223c507186bfa7cf3aed39958"
 
 [[package]]
 name = "u18n-macros"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33f80129c2a33c535b31dba686e007566bae86add41495a42be1195f9925d986"
+checksum = "07fd78e7f1b517cd5f8ae8746104fd28c3534300c3ed88c180724a6d95407040"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -338,18 +338,18 @@ dependencies = [
 
 [[package]]
 name = "u18n-schema"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9979abcfa6b845afbe8e9d10b2395244c994b92579b5be28ff5c1871f9d1d511"
+checksum = "4c568758f4471f63e17116c542ef6b0c5936b0ad7bfa04f3d901b37cf92cf693"
 dependencies = [
  "u18n-ast",
 ]
 
 [[package]]
 name = "unicode-ident"
-version = "1.0.26"
+version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
 name = "zmij"

@@ -12,7 +12,7 @@ use crate::{
 use alloc::string::String;
 use core::ops::Deref;
 use opeo::{ErrSlot, OResult, Out};
-use typol_config::{ConfigParseRequest, Environment};
+use typol_config::{ConfigParseRequest, Environment, ValidatedConfigValue};
 use typol_semantic::CompiledSchema;
 
 #[cfg(feature = "std")]
@@ -28,6 +28,37 @@ use serde::{Serialize, de::DeserializeOwned};
 pub struct BoundSchema<'loaded, T: Typol> {
     loaded: &'loaded LoadedSchema,
     binding: TypedSchema<'loaded, T>,
+}
+
+/// A decoded Rust value and the validated input tree produced by the same read.
+pub struct BoundRead<T: Typol> {
+    value: T,
+    validated_value: ValidatedConfigValue,
+}
+
+impl<T: Typol> BoundRead<T> {
+    pub(crate) fn new(value: T, validated_value: ValidatedConfigValue) -> Self {
+        Self {
+            value,
+            validated_value,
+        }
+    }
+
+    pub const fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub const fn validated_value(&self) -> &ValidatedConfigValue {
+        &self.validated_value
+    }
+
+    pub fn into_value(self) -> T {
+        self.value
+    }
+
+    pub fn into_validated_value(self) -> ValidatedConfigValue {
+        self.validated_value
+    }
 }
 
 /// A reusable binding for a handwritten or otherwise trusted `Typol` implementation.
@@ -53,7 +84,7 @@ struct TypolDecode<'bound, 'loaded, T: Typol> {
 }
 
 impl<T: Typol> ConfigInputStrategy for TypolDecode<'_, '_, T> {
-    type Value = T;
+    type Value = BoundRead<T>;
     type Error = CodecErrors;
 
     fn convert<'slot, 'borrow>(
@@ -61,7 +92,7 @@ impl<T: Typol> ConfigInputStrategy for TypolDecode<'_, '_, T> {
         request: ConfigSourceRequest<'_, '_, '_, '_>,
         out: Out<'slot, 'borrow, Self::Error>,
     ) -> OResult<'slot, Self::Value> {
-        self.bound.binding.deserialize_with_budget(
+        self.bound.binding.deserialize_with_value_and_budget(
             DeserializeRequest {
                 request: ConfigParseRequest::new(
                     request.source,
@@ -168,6 +199,19 @@ impl<T: Typol> BoundSchema<'_, T> {
         environment: &mut dyn Environment,
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, T> {
+        self.read_with_value(input, environment, out)
+            .map(BoundRead::into_value)
+    }
+
+    /// Reads one input and returns both the derived Rust value and its validated value tree.
+    ///
+    /// The tree comes from the same parse and validation session as the decoded value.
+    pub fn read_with_value<'slot>(
+        &self,
+        input: ConfigInput<'_>,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, BoundRead<T>> {
         self.loaded.run_input(
             ConfigInputOperation::new(input, environment, TypolDecode { bound: self }),
             out,

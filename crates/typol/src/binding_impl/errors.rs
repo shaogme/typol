@@ -53,6 +53,7 @@ pub enum BindingShape {
     Sequence,
     Array { length: Option<u32> },
     Map { container: Option<MapContainer> },
+    Transparent,
     Structure,
     Enumeration,
     NamedType,
@@ -91,6 +92,7 @@ impl BindingShape {
             Self::Map {
                 container: Some(MapContainer::BTreeMap),
             } => "BTreeMap",
+            Self::Transparent => "transparent wrapper",
             Self::Structure => "struct",
             Self::Enumeration => "enum",
             Self::NamedType => "named field",
