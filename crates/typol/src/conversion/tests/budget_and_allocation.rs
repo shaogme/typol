@@ -1,7 +1,7 @@
 use crate::{
     BindingTestRoot as Root, BindingTestSupport, TestAssertions,
     binding_impl::TypedSchema,
-    conversion::{Conversion, ConvertedValue, Sourced},
+    conversion::{Conversion, ConvertedValue, OrderedMap, Sourced},
     descriptor::Typol,
     diagnostics::CodecErrors,
     options::{BindOptions, CodecOptions, ConversionLimits, MAX_CONVERSION_DEPTH},
@@ -297,6 +297,61 @@ fn binding_tree_and_hashmap_target_allocations_are_recoverable_and_leak_free() -
         if decoded != value {
             return Err(TestFailure::new(
                 "round-trip conversion result differs from the input value",
+            ));
+        }
+        Ok(())
+    })?;
+
+    let ordered_schema =
+        BindingTestSupport::compile("entry struct Root { value: map<string, u8> }")?;
+    let mut ordered = OrderedMap::new();
+    assert!(ordered.try_insert("a".into(), 1).is_ok());
+    assert!(ordered.try_insert("b".into(), 2).is_ok());
+    let ordered_value = Root::new(ordered);
+    TestAssertions::assert_atomic_allocations(|| {
+        let binding = match allocation_codec(TestOpeo::outcome(|out| {
+            TypedSchema::<Root<OrderedMap<u8>>>::bind(&ordered_schema, BindOptions::default(), out)
+        }))? {
+            Some(binding) => binding,
+            None => return Ok(()),
+        };
+        let session =
+            match TestOpeo::outcome(|out| SessionBudget::codec(CodecOptions::default(), out)) {
+                TestOpeoOutcome::Value(session) => session,
+                TestOpeoOutcome::Error(BudgetError::Allocation) => return Ok(()),
+                TestOpeoOutcome::Error(error) => {
+                    return Err(TestFailure::new(format!(
+                        "failed to initialize allocation-test budget: {error:?}"
+                    )));
+                }
+            };
+        let converted = match allocation_codec(TestOpeo::outcome(|out| {
+            Conversion::encode(
+                &binding,
+                &ordered_value,
+                &session,
+                ConversionLimits::default(),
+                out,
+            )
+        }))? {
+            Some(converted) => converted,
+            None => return Ok(()),
+        };
+        let decoded = match allocation_codec(TestOpeo::outcome(|out| {
+            Conversion::decode(
+                &binding,
+                converted.value(),
+                &session,
+                ConversionLimits::default(),
+                out,
+            )
+        }))? {
+            Some(decoded) => decoded,
+            None => return Ok(()),
+        };
+        if decoded != ordered_value {
+            return Err(TestFailure::new(
+                "ordered-map conversion result differs from the input value",
             ));
         }
         Ok(())

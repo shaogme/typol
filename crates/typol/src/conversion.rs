@@ -7,6 +7,8 @@ mod value_builder;
 #[cfg(all(test, feature = "std"))]
 mod tests;
 
+pub use containers::OrderedMap;
+
 use alloc::string::String;
 use binding::BindingConversion;
 use value_builder::ValueBuilder;
@@ -104,19 +106,6 @@ impl<'call> ConversionContext<'call> {
             },
             out.reborrow(),
         )
-    }
-
-    /// Runs one nested conversion within the configured budget.
-    #[cfg(feature = "std")]
-    pub(crate) fn child<'child, 'slot, R>(
-        &'child mut self,
-        convert: impl for<'out_borrow> FnOnce(
-            &mut ConversionContext<'child>,
-            Out<'slot, 'out_borrow, CodecErrors>,
-        ) -> OResult<'slot, R>,
-        out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, R> {
-        self.child_with_path(None, convert, out)
     }
 
     pub(crate) fn child_with_path<'child, 'slot, R>(

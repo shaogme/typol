@@ -56,6 +56,7 @@
 //! | --- | --- | --- |
 //! | `std` | File and reader inputs, file-based schema loading, process environment access, and host diagnostic rendering | Yes |
 //! | `serde` | Schema-aware Serde reads and writes for bound types | No |
+//! | `hashbrown` | `hashbrown::HashMap<String, T>` bindings | No |
 //! | `config-ir` | Config IR v1 JSON serialization; also enables `serde` | No |
 //!
 //! A `no_std` application needs an allocator for owned values. The library does not provide a
@@ -143,7 +144,7 @@ pub(crate) use self::{
 #[cfg(all(test, feature = "std", feature = "serde"))]
 pub(crate) use self::tests::AllocationScope;
 
-pub use conversion::Sourced;
+pub use conversion::{OrderedMap, Sourced};
 pub use error::{TypolError, TypolStage};
 pub use loading::{
     BoundRead, BoundSchema, ConfigInput, LoadedSchema, SchemaLoader, SourceNames,

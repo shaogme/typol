@@ -7,7 +7,7 @@ pub mod binding {
         },
         conversion::{
             ConversionContext, ConversionFields, ConversionPayload, ConversionValue, EnumInput,
-            Sourced,
+            OrderedMap, Sourced,
         },
         descriptor::{
             BudgetedTypol, DescribeContext, DescriptorName, DescriptorNode, DescriptorProvider,

@@ -6,6 +6,7 @@ use crate::{
     binding_impl::TypedSchema,
     conversion::{
         Conversion, ConversionContext, ConversionPayload, ConversionValue, ConvertedValue,
+        OrderedMap,
     },
     descriptor::{
         DescribeContext, DescriptorNode, DescriptorProvider, TypeDescriptor, Typol, VariantShape,
@@ -480,6 +481,30 @@ fn hash_map_uses_unicode_key_order_and_counts_keys_as_nodes() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn ordered_map_sorts_decoded_keys() -> TestResult {
+    let schema = BindingTestSupport::compile("entry struct Root { value: map<string, u8> }")?;
+    let binding =
+        BindingTestSupport::bind::<Root<OrderedMap<u8>>>(&schema, BindOptions::default())?;
+    let input = dynamic(TestValues::map_unmetered(vec![
+        TestValues::map_entry("z".into(), TestValues::unsigned(3)),
+        TestValues::map_entry("a".into(), TestValues::unsigned(1)),
+        TestValues::map_entry("m".into(), TestValues::unsigned(2)),
+    ]))?;
+    let session = BindingTestSupport::codec_session()?;
+    let decoded = decode(&binding, &input, &session, ConversionLimits::default())?;
+    assert_eq!(
+        decoded
+            .into_value()
+            .iter()
+            .map(|(key, value)| (key, *value))
+            .collect::<Vec<_>>(),
+        [("a", 1), ("m", 2), ("z", 3)]
+    );
+
+    Ok(())
+}
+
 #[derive(Debug, PartialEq)]
 pub(crate) enum Choice {
     Object { name: String, count: u8 },
@@ -754,6 +779,19 @@ fn partial_arrays_vectors_and_maps_drop_every_constructed_item() -> TestResult {
         &schema,
         BindOptions::default(),
     )?;
+    assert_eq!(
+        BindingTestSupport::code(decode_error(
+            &binding,
+            &value,
+            &session,
+            ConversionLimits::default()
+        )?)?,
+        15
+    );
+    assert_eq!(LIVE.with(|live| live.get()), 0);
+    let schema = BindingTestSupport::compile("entry struct Root { value: map<string, u8> }")?;
+    let binding =
+        BindingTestSupport::bind::<Root<OrderedMap<Tracked>>>(&schema, BindOptions::default())?;
     assert_eq!(
         BindingTestSupport::code(decode_error(
             &binding,

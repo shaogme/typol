@@ -20,6 +20,7 @@ typol = { version = "0.1", default-features = false }
 | --- | --- | --- |
 | *(none)* | In-memory Schema loading, text or byte configuration input, typed bindings, and explicit `Environment` providers | Yes |
 | `serde` | Schema-aware Serde bridge; Typol enables Serde's `alloc` support | Yes |
+| `hashbrown` | `Typol` and `BudgetedTypol` bindings for `hashbrown::HashMap<String, T>` | Yes |
 | `std` | File and reader inputs, file Schema loading, process environment access, and host diagnostic rendering | No |
 | `config-ir` | Config IR v1 JSON serialization using Serde and `alloc` | Yes |
 
@@ -112,7 +113,19 @@ With `std`, the same loader and read methods can also use `compile_file`, `Confi
 
 ## Account for collection bindings
 
-Owned strings and vectors use `alloc`. The built-in `HashMap<String, T>` binding is available only with `std`; Typol does not provide a built-in `BTreeMap` binding because its node insertion cannot report allocation failure. Schema-level maps can still be parsed into Typol's configuration value model, but binding them to those Rust collections is not supported by the built-in mappings. See the [Schema implementation](../../specification/schema-implementation/) when choosing application types.
+`OrderedMap<T>` is available without additional features. It stores string keys in Rust string order, and `try_insert` reports allocation errors while replacing and returning an existing value for duplicate keys. Decoding a Schema map sorts its input keys once and reserves the final vector before decoding values.
+
+To use `hashbrown::HashMap<String, T>`, enable `typol/hashbrown` and add a direct dependency on the same `hashbrown` version:
+
+```toml
+[dependencies]
+hashbrown = { version = "0.17.1", default-features = false, features = ["default-hasher"] }
+typol = { version = "0.1", default-features = false, features = ["hashbrown"] }
+```
+
+This feature does not enable `std`. Its default hash builder currently uses foldhash and usually does not protect against HashDoS; assess that trade-off when keys can be chosen by an attacker. The standard library `HashMap` binding remains available with `std` and keeps its own default hash builder. With both `serde` and `hashbrown` enabled, hashbrown's Serde support is forwarded; Serde's own decoding callbacks may allocate outside Typol's fallible map-conversion reserve path.
+
+Typol does not provide a built-in `BTreeMap` binding because its node insertion cannot report allocation failure. See the [Schema implementation](../../specification/schema-implementation/) when choosing application types.
 
 The library's resource limits account for operations and storage that Typol manages. They do not replace the target's allocator policy or bound all memory used by the application and its providers.
 

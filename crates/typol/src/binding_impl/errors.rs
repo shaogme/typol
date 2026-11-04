@@ -92,6 +92,9 @@ impl BindingShape {
             Self::Map {
                 container: Some(MapContainer::BTreeMap),
             } => "BTreeMap",
+            Self::Map {
+                container: Some(MapContainer::OrderedMap),
+            } => "OrderedMap",
             Self::Transparent => "transparent wrapper",
             Self::Structure => "struct",
             Self::Enumeration => "enum",

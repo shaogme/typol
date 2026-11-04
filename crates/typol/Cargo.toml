@@ -8,7 +8,8 @@ autotests = false
 [features]
 default = []
 std = ["dep:typol-std"]
-serde = ["dep:serde", "serde/alloc"]
+hashbrown = ["dep:hashbrown"]
+serde = ["dep:serde", "serde/alloc", "hashbrown?/serde"]
 config-ir = ["serde"]
 
 [dependencies]
@@ -25,6 +26,7 @@ typol-i18n.workspace = true
 u18n.workspace = true
 typol-macros.workspace = true
 serde = { workspace = true, optional = true }
+hashbrown = { workspace = true, optional = true }
 
 [dev-dependencies]
 typol-test-support.workspace = true

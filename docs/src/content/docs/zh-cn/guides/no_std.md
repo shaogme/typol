@@ -20,6 +20,7 @@ typol = { version = "0.1", default-features = false }
 | --- | --- | --- |
 | *无* | 内存 Schema 加载、文本或字节配置输入、类型绑定和显式 `Environment` 提供器 | 可以 |
 | `serde` | 带 Schema 上下文的 Serde 桥接；Typol 会启用 Serde 的 `alloc` 支持 | 可以 |
+| `hashbrown` | 为 `hashbrown::HashMap<String, T>` 提供 `Typol` 和 `BudgetedTypol` 绑定 | 可以 |
 | `std` | 文件和 reader 输入、文件 Schema 加载、进程环境访问和宿主诊断渲染 | 不可以 |
 | `config-ir` | 使用 Serde 和 `alloc` 序列化 Config IR v1 JSON | 可以 |
 
@@ -112,7 +113,19 @@ fn load_service() -> Result<ServiceConfig, TypolError> {
 
 ## 考虑集合绑定
 
-拥有型字符串和向量使用 `alloc`。内建的 `HashMap<String, T>` 绑定仅在启用 `std` 时可用；Typol 不提供内建 `BTreeMap` 绑定，因为插入树节点时无法报告分配失败。Schema map 仍可解析为 Typol 配置值，但内建映射不支持将其绑定到上述 Rust 集合。选择应用类型时可参考 [Schema 实现说明](../../specification/schema-implementation/)。
+`OrderedMap<T>` 无需额外 feature 即可使用。它按 Rust 字符串序保存键；`try_insert` 会报告分配错误，遇到重复键时会替换并返回旧值。解码 Schema map 时会先对输入键排序一次，并在解码值前预留最终向量容量。
+
+要使用 `hashbrown::HashMap<String, T>`，请启用 `typol/hashbrown`，并直接依赖相同版本的 `hashbrown`：
+
+```toml
+[dependencies]
+hashbrown = { version = "0.17.1", default-features = false, features = ["default-hasher"] }
+typol = { version = "0.1", default-features = false, features = ["hashbrown"] }
+```
+
+此 feature 不会启用 `std`。当前默认哈希构建器使用 foldhash，通常不防御 HashDoS；若键可由攻击者选择，请评估这一取舍。启用 `std` 后仍可使用标准库 `HashMap` 绑定，并保留其自身的默认哈希构建器。若同时启用 `serde` 和 `hashbrown`，Typol 会转发 hashbrown 的 Serde 支持；Serde 自身的解码回调可能在 Typol 可失败 map 预留路径之外分配内存。
+
+Typol 不提供内建 `BTreeMap` 绑定，因为插入树节点时无法报告分配失败。选择应用类型时可参考 [Schema 实现说明](../../specification/schema-implementation/)。
 
 库的资源额度会统计 Typol 管理的操作和存储，但不能取代目标平台的分配策略，也不能约束应用及其提供器使用的全部内存。
 

@@ -209,6 +209,10 @@ fn descriptor_providers_are_lazy_and_preserve_actual_type_identity() -> TestResu
             container: MapContainer::HashMap,
             value: deferred,
         },
+        TypeShape::Map {
+            container: MapContainer::OrderedMap,
+            value: deferred,
+        },
     ] {
         TestOpeo::value(|out| {
             ctx.insert(
@@ -424,7 +428,11 @@ fn conversion_children_share_node_counts_and_restore_parent_depth_on_failure() -
     codec_value(|out| ctx.node(out))?;
     assert_code(
         codec_error(|out| {
-            ctx.child::<()>(|_, child_out| ConversionContext::reject(child_out), out)
+            ctx.child_with_path::<()>(
+                None,
+                |_, child_out| ConversionContext::reject(child_out),
+                out,
+            )
         })?,
         1,
     )?;
@@ -432,11 +440,12 @@ fn conversion_children_share_node_counts_and_restore_parent_depth_on_failure() -
     let mut nodes = ConversionContext::counters(ConversionLimits::new(3, 1).test_value()?);
     let mut ctx = ConversionContext::new(&call, &mut nodes);
     codec_value(|out| ctx.node(out))?;
-    codec_value(|out| ctx.child(|child, child_out| child.node(child_out), out))?;
+    codec_value(|out| ctx.child_with_path(None, |child, child_out| child.node(child_out), out))?;
     assert_code(
         codec_error(|out| {
-            ctx.child(
-                |child, child_out| child.child(|_, _nested_out| Ok(()), child_out),
+            ctx.child_with_path(
+                None,
+                |child, child_out| child.child_with_path(None, |_, _nested_out| Ok(()), child_out),
                 out,
             )
         })?,
@@ -448,7 +457,8 @@ fn conversion_children_share_node_counts_and_restore_parent_depth_on_failure() -
     codec_value(|out| ctx.node(out))?;
     assert_code(
         codec_error(|out| {
-            ctx.child(
+            ctx.child_with_path(
+                None,
                 |child, mut child_out| {
                     child.node(child_out.reborrow())?;
                     Err::<(), _>(child_out.fail(CodecErrors::emergency(

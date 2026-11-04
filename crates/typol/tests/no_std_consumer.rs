@@ -12,10 +12,16 @@ use typol::{
 };
 
 #[cfg(not(feature = "std"))]
+use typol::{OrderedMap, WriteOptions};
+
+#[cfg(not(feature = "std"))]
 use typol::{
     ConfigInput, EmptyEnvironment, SchemaLoader, TypolError, TypolOptions, TypolStage,
     core::SourceId, opeo::ErrSlot,
 };
+
+#[cfg(all(feature = "hashbrown", not(feature = "std")))]
+use hashbrown::HashMap;
 
 #[cfg(all(feature = "config-ir", not(feature = "std")))]
 use typol::{ConfigIr, ConfigIrOptions};
@@ -31,6 +37,30 @@ struct Service {
 enum Mode {
     Local,
     Remote { endpoint: String },
+}
+
+#[cfg(not(feature = "std"))]
+#[derive(Typol)]
+struct OrderedSettings {
+    values: OrderedMap<u8>,
+}
+
+#[cfg(not(feature = "std"))]
+#[derive(Typol)]
+struct RecursiveOrdered {
+    children: OrderedMap<RecursiveOrdered>,
+}
+
+#[cfg(all(feature = "hashbrown", not(feature = "std")))]
+#[derive(Typol)]
+struct HashbrownSettings {
+    values: HashMap<String, u8>,
+}
+
+#[cfg(all(feature = "hashbrown", not(feature = "std")))]
+#[derive(Typol)]
+struct RecursiveHashbrown {
+    children: HashMap<String, RecursiveHashbrown>,
 }
 
 fn bind_service<'slot, 'schema, 'borrow>(
@@ -56,6 +86,112 @@ fn derived_types_compile_without_the_standard_library() {
     };
     assert!(matches!(mode, Mode::Remote { endpoint } if endpoint == "127.0.0.1"));
     assert!(matches!(Mode::Local, Mode::Local));
+}
+
+#[cfg(not(feature = "std"))]
+#[test]
+fn ordered_map_decodes_and_writes_keys_in_order() {
+    let mut values = OrderedMap::new();
+    assert!(values.try_insert(String::from("z"), 9).is_ok());
+    assert!(values.try_insert(String::from("a"), 1).is_ok());
+    assert!(matches!(
+        values.try_insert(String::from("a"), 2),
+        Ok(Some(1))
+    ));
+    assert_eq!(values.len(), 2);
+    assert_eq!(values.get("a"), Some(&2));
+    assert_eq!(
+        values.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+        ["a", "z"]
+    );
+
+    let mut errors = ErrSlot::<TypolError>::new();
+    let result = errors.try_call(|mut out| {
+        let loaded = SchemaLoader::new(TypolOptions::default()).compile_text(
+            b"ordered-map-test",
+            "entry struct OrderedSettings { values: map<string, u8> }",
+            out.reborrow(),
+        )?;
+        let binding = loaded.bind::<OrderedSettings>(out.reborrow())?;
+        let mut environment = EmptyEnvironment;
+        let config = binding.read(
+            ConfigInput::text("{values: {\"z\": 9, \"m\": 5, \"a\": 1}}"),
+            &mut environment,
+            out.reborrow(),
+        )?;
+        assert_eq!(
+            config.values.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+            ["a", "m", "z"]
+        );
+        let written = binding.write(&config, WriteOptions::default(), out.reborrow())?;
+        assert_eq!(written, "{values: {\"a\": 1, \"m\": 5, \"z\": 9}}");
+        let recursive = SchemaLoader::new(TypolOptions::default()).compile_text(
+            b"recursive-ordered-map-test",
+            "entry struct RecursiveOrdered { children: map<string, RecursiveOrdered> }",
+            out.reborrow(),
+        )?;
+        let _recursive_binding = recursive.bind::<RecursiveOrdered>(out)?;
+        Ok(())
+    });
+    let error = result.err().map(|caught| caught.take());
+    let code = error
+        .as_ref()
+        .and_then(TypolError::codec_errors)
+        .and_then(|errors| errors.diagnostics().last())
+        .map(|diagnostic| diagnostic.code().get());
+    assert!(
+        error.is_none(),
+        "ordered map failed with {:?} and diagnostic {code:?}",
+        error.as_ref().map(TypolError::stage)
+    );
+}
+
+#[cfg(all(feature = "hashbrown", not(feature = "std")))]
+#[test]
+fn hashbrown_map_binds_without_enabling_std() {
+    let mut errors = ErrSlot::<TypolError>::new();
+    let result = errors.try_call(|mut out| {
+        let loaded = SchemaLoader::new(TypolOptions::default()).compile_text(
+            b"hashbrown-map-test",
+            "entry struct HashbrownSettings { values: map<string, u8> }",
+            out.reborrow(),
+        )?;
+        let binding = loaded.bind::<HashbrownSettings>(out.reborrow())?;
+        let mut environment = EmptyEnvironment;
+        let config = binding.read(
+            ConfigInput::text("{values: {\"z\": 9, \"a\": 1}}"),
+            &mut environment,
+            out.reborrow(),
+        )?;
+        assert_eq!(config.values.get("a"), Some(&1));
+        let written = binding.write(&config, WriteOptions::default(), out.reborrow())?;
+        assert_eq!(written, "{values: {\"a\": 1, \"z\": 9}}");
+        let mut alternate_values = HashMap::new();
+        alternate_values.insert(String::from("a"), 1);
+        alternate_values.insert(String::from("z"), 9);
+        let alternate = HashbrownSettings {
+            values: alternate_values,
+        };
+        let alternate_written =
+            binding.write(&alternate, WriteOptions::default(), out.reborrow())?;
+        assert_eq!(written, alternate_written);
+        let recursive = SchemaLoader::new(TypolOptions::default()).compile_text(
+            b"recursive-hashbrown-map-test",
+            "entry struct RecursiveHashbrown { children: map<string, RecursiveHashbrown> }",
+            out.reborrow(),
+        )?;
+        let _recursive_binding = recursive.bind::<RecursiveHashbrown>(out)?;
+        Ok(())
+    });
+    assert!(result.is_ok());
+}
+
+#[cfg(all(feature = "hashbrown", feature = "serde", not(feature = "std")))]
+#[test]
+fn hashbrown_map_uses_its_serde_implementation_when_enabled() {
+    fn assert_serde<T: serde::Serialize + serde::de::DeserializeOwned>() {}
+
+    assert_serde::<HashMap<String, u8>>();
 }
 
 #[test]

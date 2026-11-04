@@ -30,6 +30,7 @@ pub struct DescriptorProvider {
 pub enum MapContainer {
     BTreeMap,
     HashMap,
+    OrderedMap,
 }
 
 pub enum TypeShape {
