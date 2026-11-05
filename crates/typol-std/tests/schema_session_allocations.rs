@@ -17,7 +17,8 @@ use std::{
 use typol_core::{ExcerptLimits, ExecutionLimits, SourceId};
 use typol_schema::{SchemaCompileOptions, SchemaCompileUsage, SchemaLimits};
 use typol_std::{
-    FileSchemaCompileOptions, FileSchemaCompiler, FileSchemaLimits, SourceNameLimits, opeo::ErrSlot,
+    FileSchemaCompileErrors, FileSchemaCompileOptions, FileSchemaCompiler, FileSchemaLimits,
+    SourceNameLimits, opeo::ErrSlot,
 };
 
 #[derive(Clone, Copy)]
@@ -119,7 +120,7 @@ fn measure(path: &Path, count: usize) -> Result<Measurement, Box<dyn Error>> {
         })
     });
     let start = Instant::now();
-    let result = ErrSlot::<typol_std::FileSchemaCompileErrors>::new()
+    let result = ErrSlot::<FileSchemaCompileErrors>::new()
         .call(|out| FileSchemaCompiler::compile(path, FileSchemaCompileOptions::default(), out));
     let elapsed_ns = start.elapsed().as_nanos();
     let usage = result
@@ -223,7 +224,7 @@ fn file_compilation_releases_all_tracked_payloads_and_reports_growth() -> Result
         let mut resources = SchemaLimits::default();
         resources.set_excerpts(ExcerptLimits::default().with_max_bytes(0));
         let required_options = SchemaCompileOptions::new(resources);
-        let required_steps = ErrSlot::<typol_std::FileSchemaCompileErrors>::new()
+        let required_steps = ErrSlot::<FileSchemaCompileErrors>::new()
             .call(|out| {
                 FileSchemaCompiler::compile(
                     &path,
@@ -237,7 +238,7 @@ fn file_compilation_releases_all_tracked_payloads_and_reports_growth() -> Result
             })?
             .usage()
             .steps;
-        let errors = ErrSlot::<typol_std::FileSchemaCompileErrors>::new()
+        let errors = ErrSlot::<FileSchemaCompileErrors>::new()
             .call(|out| {
                 FileSchemaCompiler::compile(
                     &path,

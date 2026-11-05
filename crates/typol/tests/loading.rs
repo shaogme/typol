@@ -28,7 +28,7 @@ use typol::{
         HostOperation, Language, RenderOptions, SourceNameEditOptions, SourceNameLimits,
         Translator,
     },
-    io::ReadRequest,
+    io::{Read as TypolRead, ReadRequest},
     opeo::{OResult, Out},
     schema::{
         ResolverError, SchemaCompileContextFailure, SchemaCompileErrors, SchemaCompileOptions,
@@ -41,7 +41,7 @@ use typol_test_support::{
 };
 
 trait BoundProcessEnvironmentTestExt<T: TypolTrait> {
-    fn read_with_process_environment<'slot, R: typol::io::Read>(
+    fn read_with_process_environment<'slot, R: TypolRead>(
         &self,
         input: ReadRequest<'_, R>,
         out: Out<'slot, '_, TypolError>,
@@ -69,7 +69,7 @@ trait BoundProcessEnvironmentTestExt<T: TypolTrait> {
 }
 
 impl<T: TypolTrait> BoundProcessEnvironmentTestExt<T> for BoundSchema<'_, T> {
-    fn read_with_process_environment<'slot, R: typol::io::Read>(
+    fn read_with_process_environment<'slot, R: TypolRead>(
         &self,
         input: ReadRequest<'_, R>,
         out: Out<'slot, '_, TypolError>,
@@ -109,7 +109,7 @@ impl<T: TypolTrait> BoundProcessEnvironmentTestExt<T> for BoundSchema<'_, T> {
 }
 
 trait LoadedProcessEnvironmentTestExt {
-    fn read_value_with_process_environment<'slot, R: typol::io::Read>(
+    fn read_value_with_process_environment<'slot, R: TypolRead>(
         &self,
         input: ReadRequest<'_, R>,
         out: Out<'slot, '_, TypolError>,
@@ -137,7 +137,7 @@ trait LoadedProcessEnvironmentTestExt {
 }
 
 impl LoadedProcessEnvironmentTestExt for LoadedSchema {
-    fn read_value_with_process_environment<'slot, R: typol::io::Read>(
+    fn read_value_with_process_environment<'slot, R: TypolRead>(
         &self,
         input: ReadRequest<'_, R>,
         out: Out<'slot, '_, TypolError>,

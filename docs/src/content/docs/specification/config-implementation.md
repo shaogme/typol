@@ -188,7 +188,9 @@ Default excerpt limits are 65,536 total bytes, 512 bytes per line, 128 records, 
 
 Value depth counts parent-child edges: the root is depth zero, and a present optional payload and single enum payload each add one level. Anonymous struct enum payloads add another level between the payload struct and its fields: for enum depth `d`, payload fields start at `d + 2`. Empty containers are checked at their own depth. Recovery scanning converts delimiter-stack limits from the root object's baseline rather than treating absolute delimiter count as value depth.
 
-Dynamic workspace uses fallible allocation and is charged to the execution budget. Limit exhaustion, insufficient workspace, and allocation failure are distinct terminal errors. Parsing and normalization use explicit frames, so the depth limit does not rely on the host call stack. Temporary values, caches, and workspace are released after failure; partial results are never published.
+Direct `typol-core` callers that copy a `ValueView` with `ConfigValueBuilder::append_view` must provide `ValueCopyLimits`; the root is depth zero and the operation accepts values at the limit. Copying uses an explicit post-order frame stack, and frame and child storage uses fallible allocation charged to the builder's shared execution budget when present. This per-copy depth limit is separate from `ExecutionLimits`, which continues to cap cumulative steps and workspace bytes.
+
+Dynamic workspace uses fallible allocation and is charged to the execution budget. Limit exhaustion, insufficient workspace, and allocation failure are distinct terminal errors. Parsing, normalization, and value-view copying use explicit frames, so their depth limits do not rely on the host call stack. Temporary values, caches, and workspace are released after failure; partial results are never published.
 
 ## 8. Secrets and sensitive data
 

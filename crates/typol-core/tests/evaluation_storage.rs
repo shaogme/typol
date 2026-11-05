@@ -1,7 +1,8 @@
 use std::{error::Error, io::Error as IoError};
 use typol_core::{
-    BudgetError, ChargedString, ChargedVec, DiagnosticContext, ExecutionBudget, ExecutionLimits,
-    diagnostic_context,
+    BudgetError, ChargedString, ChargedVec, ConfigValueBuilder, DiagnosticContext, ExecutionBudget,
+    ExecutionLimits, NamedValue, ValueCopyLimits, ValueError, ValueKind, ValuePayload,
+    ValuePayloadView, ValueSource, diagnostic_context,
 };
 use typol_opeo_test_support::TestOpeo;
 
@@ -178,6 +179,67 @@ fn standard_container_exact_blocks_handle_alignment_and_zero_size() -> Result<()
     drop(empty);
     drop(values);
     ensure_eq!(budget.workspace_bytes(), initial);
+    Ok(())
+}
+
+#[test]
+fn value_builder_copies_nested_views_and_preserves_source_tags() -> Result<(), Box<dyn Error>> {
+    let mut original_builder =
+        TestOpeo::call::<ValueError, _>(|out| ConfigValueBuilder::new(None, out))?;
+    let token = TestOpeo::call::<ValueError, _>(|out| {
+        original_builder.add_string("UPINS_TOKEN", ValueSource::EnvironmentVariable, out)
+    })?;
+    let fields = [NamedValue::new("token", token)];
+    let payload = TestOpeo::call::<ValueError, _>(|out| {
+        original_builder.add_structure(&fields, ValueSource::ConfigLiteral, out)
+    })?;
+    let selection = TestOpeo::call::<ValueError, _>(|out| {
+        original_builder.add_enumeration(
+            "Credential",
+            ValuePayload::Single(payload),
+            ValueSource::ConfigLiteral,
+            out,
+        )
+    })?;
+    let values = [selection];
+    let array = TestOpeo::call::<ValueError, _>(|out| {
+        original_builder.add_array(&values, ValueSource::RustValue, out)
+    })?;
+    let original = TestOpeo::call::<ValueError, _>(|out| original_builder.finish(array, out))?;
+
+    let mut copied_builder =
+        TestOpeo::call::<ValueError, _>(|out| ConfigValueBuilder::new(None, out))?;
+    let copied_root = TestOpeo::call::<ValueError, _>(|out| {
+        copied_builder.append_view(original.root(), ValueCopyLimits::new(3), out)
+    })?;
+    let copied = TestOpeo::call::<ValueError, _>(|out| copied_builder.finish(copied_root, out))?;
+
+    ensure_eq!(copied.root().source(), ValueSource::RustValue);
+    let ValueKind::Array(entries) = copied.as_ref() else {
+        return Err(IoError::other("copied root should remain an array").into());
+    };
+    let selection = entries
+        .get(0)
+        .ok_or_else(|| IoError::other("copied array item is missing"))?
+        .value();
+    ensure_eq!(selection.source(), ValueSource::ConfigLiteral);
+    let ValueKind::Enumeration {
+        variant,
+        payload: ValuePayloadView::Single(payload),
+    } = selection.as_ref()
+    else {
+        return Err(IoError::other("copied array item should remain an enum").into());
+    };
+    ensure_eq!(variant, "Credential");
+    let ValueKind::Structure(fields) = payload.as_ref() else {
+        return Err(IoError::other("copied enum payload should remain a structure").into());
+    };
+    let token = fields
+        .get(0)
+        .ok_or_else(|| IoError::other("copied token field is missing"))?
+        .value();
+    ensure_eq!(token.source(), ValueSource::EnvironmentVariable);
+    ensure!(matches!(token.as_ref(), ValueKind::String("UPINS_TOKEN")));
     Ok(())
 }
 

@@ -98,7 +98,7 @@ fn compile(text: &str) -> TestResult<CompiledSchema> {
 fn parse_document<'schema>(
     schema: &'schema CompiledSchema,
     source: &str,
-) -> TestResult<typol_config::ConfigDocument<'schema>> {
+) -> TestResult<ConfigDocument<'schema>> {
     parse_document_with_options(schema, source, ConfigParseOptions::default())
 }
 
@@ -106,7 +106,7 @@ fn parse_document_with_options<'schema>(
     schema: &'schema CompiledSchema,
     source: &str,
     options: ConfigParseOptions,
-) -> TestResult<typol_config::ConfigDocument<'schema>> {
+) -> TestResult<ConfigDocument<'schema>> {
     let mut input = SliceSource::new(source.as_bytes());
     TestOpeo::value(|out| {
         ConfigParser::new(schema).parse_document(
@@ -573,6 +573,15 @@ fn structural_edit_batch_inserts_fields_map_entries_and_array_items() -> TestRes
         document.source(),
         "{labels: {\"one\":1, \"ø\":2}, items: [1, 9, 2], port: 9000}"
     );
+    Ok(())
+}
+
+#[test]
+fn source_document_reports_explicit_and_defaulted_paths() -> TestResult {
+    let schema = compile("entry struct Root { value: u16 = 3, items: [u16] = [] }")?;
+    let document = parse_document(&schema, "{items: []}")?;
+    test_assert!(document.is_explicit(&ConfigPath::new().field("items")));
+    test_assert!(!document.is_explicit(&ConfigPath::new().field("value")));
     Ok(())
 }
 

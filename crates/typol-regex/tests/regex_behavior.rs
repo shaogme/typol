@@ -114,7 +114,7 @@ fn compile_pattern(
     limits: &ResourceLimits,
     compilation: &ExecutionBudget,
     errors: &mut RegexErrors,
-) -> Option<typol_regex::Regex> {
+) -> Option<Regex> {
     clippy::Clippy::succeed_opeo(
         errors.compile(pattern, limits, compilation),
         "regex should compile successfully",

@@ -1,6 +1,6 @@
 use std::{error::Error, fmt, io};
 
-use typol_i18n::{Language, Translator, diagnostic_message, t};
+use typol_i18n::{DiagnosticMessageKey, Language, Translator, diagnostic_message, t};
 
 struct FailingWriter;
 
@@ -45,7 +45,7 @@ fn translates_schema_generated_diagnostic_keys() -> Result<(), Box<dyn Error>> {
         return Err(io::Error::other("diagnostic catalog output did not match").into());
     }
     if Translator::new(Language::English)
-        .translate_diagnostic(typol_i18n::DiagnosticMessageKey::__from_index(u16::MAX))
+        .translate_diagnostic(DiagnosticMessageKey::__from_index(u16::MAX))
         .is_ok()
     {
         return Err(io::Error::other("invalid diagnostic key was accepted").into());
@@ -81,7 +81,7 @@ fn writes_diagnostic_text_without_owning_the_translation() -> Result<(), Box<dyn
     let mut invalid_output = String::new();
     if translator
         .write_diagnostic(
-            typol_i18n::DiagnosticMessageKey::__from_index(u16::MAX),
+            DiagnosticMessageKey::__from_index(u16::MAX),
             &mut invalid_output,
         )
         .is_ok()

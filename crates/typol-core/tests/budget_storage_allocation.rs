@@ -10,7 +10,7 @@ use std::{
 };
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, ConfigValueBuilder, DiagnosticContext, ExecutionBudget,
-    ExecutionLimits, ValueError, ValueErrorKind, ValueSource, diagnostic_context,
+    ExecutionLimits, ValueCopyLimits, ValueError, ValueErrorKind, ValueSource, diagnostic_context,
 };
 use typol_opeo_test_support::TestOpeo;
 
@@ -208,12 +208,18 @@ fn workload() -> Result<Usage, WorkloadError> {
         builder.add_array(&[first, second, third], ValueSource::RustValue, out)
     })?;
     let copied = TestOpeo::call(|out| builder.finish(root, out))?;
+    let mut view_builder = TestOpeo::call(|out| ConfigValueBuilder::new(Some(&budget), out))?;
+    let view_root = TestOpeo::call(|out| {
+        view_builder.append_view(copied.root(), ValueCopyLimits::new(1), out)
+    })?;
+    let view_copy = TestOpeo::call(|out| view_builder.finish(view_root, out))?;
     let text = TestOpeo::call::<BudgetError, _>(|out| {
         ChargedString::copy("€size test", Some(&budget), out)
     })?;
     let same_live = STATE.with(|cell| cell.get().live == budget.workspace_bytes());
     let peak = budget.peak_workspace_bytes();
     drop(text);
+    drop(view_copy);
     drop(copied);
     drop(values);
     Ok(Usage {

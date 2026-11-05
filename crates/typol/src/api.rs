@@ -42,8 +42,8 @@ pub mod core {
         AllocationError, BudgetError, ChargedString, ChargedVec, ConfigValue, ConfigValueBuilder,
         Diagnostic, DiagnosticCode, DiagnosticContext as ErrorContext, ExecutionBudget,
         ExecutionLimits, LocatedSpan, NamedValue, NamedValueEntryView, Read, SliceSource, SourceId,
-        SourceReadError, SourceSpan, ValueEntries, ValueEntryView, ValueError, ValueId, ValueKind,
-        ValuePayload, ValuePayloadView, ValueSource, ValueView,
+        SourceReadError, SourceSpan, ValueCopyLimits, ValueEntries, ValueEntryView, ValueError,
+        ValueId, ValueKind, ValuePayload, ValuePayloadView, ValueSource, ValueView,
     };
 
     pub use crate::loading::SourceNames;

@@ -40,7 +40,7 @@ pub use source::{
 pub use storage::WorkspaceString as ChargedString;
 pub use value::{
     AllocationError, ConfigValue, ConfigValueBuilder, NamedValue, NamedValueEntryView,
-    ValueEntries, ValueEntryView, ValueError, ValueErrorKind, ValueId, ValueKind, ValuePayload,
-    ValuePayloadView, ValueSource, ValueView,
+    ValueCopyLimits, ValueEntries, ValueEntryView, ValueError, ValueErrorKind, ValueId, ValueKind,
+    ValuePayload, ValuePayloadView, ValueSource, ValueView,
 };
 pub use workspace::WorkspaceVec as ChargedVec;

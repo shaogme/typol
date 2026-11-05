@@ -1,8 +1,16 @@
 mod arena;
+mod copy;
 mod errors;
+mod views;
 
 use arena::{ArenaRebase, EdgeRange, NodeKind, PayloadKind, TextRange, ValueEdge, ValueNode};
+pub use copy::ValueCopyLimits;
 pub use errors::{AllocationError, ValueError, ValueErrorKind, ValueSource};
+use views::ConfigValueParts;
+pub use views::{
+    ConfigValue, NamedValueEntryView, ValueEntries, ValueEntryView, ValueId, ValueKind,
+    ValuePayloadView, ValueView,
+};
 
 use crate::{
     BudgetError, DiagnosticContext, ExecutionBudget, diagnostic_context, storage::WorkspaceString,
@@ -10,7 +18,6 @@ use crate::{
 };
 use core::{
     cmp::Ordering,
-    fmt,
     sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
 };
 use opeo::{OResult, Out, ResultOutExt};
@@ -51,12 +58,6 @@ static ARENA_EDGE_WRITE: DiagnosticContext =
     diagnostic_context!("typol-core", "value-arena", "reserved-edge-write-failed",);
 static VALUE_NAME_INDEX_MISSING: DiagnosticContext =
     diagnostic_context!("typol-core", "value-arena", "named-value-index-missing",);
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ValueId {
-    arena_id: usize,
-    index: usize,
-}
 
 #[derive(Clone, Copy)]
 pub struct NamedValue<'a> {
@@ -104,73 +105,17 @@ pub struct ConfigValueBuilder {
     text: WorkspaceVec<WorkspaceString>,
 }
 
-/// A root value owned by a flat arena; dropping nodes does not recursively traverse child values.
-pub struct ConfigValue {
-    arena_id: usize,
-    root_index: usize,
-    root: ValueNode,
-    nodes: WorkspaceVec<ValueNode>,
-    edges: WorkspaceVec<ValueEdge>,
-    text: WorkspaceVec<WorkspaceString>,
-}
-
-#[derive(Clone, Copy)]
-pub struct ValueView<'a> {
-    owner: &'a ConfigValue,
-    index: usize,
-    node: &'a ValueNode,
-}
-
-#[derive(Clone, Copy)]
-pub struct ValueEntries<'a> {
-    owner: &'a ConfigValue,
-    range: EdgeRange,
-}
-
-#[derive(Clone, Copy)]
-pub struct ValueEntryView<'a> {
-    name: Option<&'a str>,
-    value: ValueView<'a>,
-}
-
-#[derive(Clone, Copy)]
-pub struct NamedValueEntryView<'a>(&'a str, ValueView<'a>);
-
-#[derive(Clone, Copy)]
-pub enum ValuePayloadView<'a> {
-    Unit,
-    Single(ValueView<'a>),
-    Structure(ValueEntries<'a>),
-}
-
-pub enum ValueKind<'a> {
-    Signed(i128),
-    Unsigned(u128),
-    Float32(f32),
-    Float64(f64),
-    String(&'a str),
-    Bool(bool),
-    Optional(Option<ValueView<'a>>),
-    Array(ValueEntries<'a>),
-    Map(ValueEntries<'a>),
-    Structure(ValueEntries<'a>),
-    Enumeration {
-        variant: &'a str,
-        payload: ValuePayloadView<'a>,
-    },
-}
-
 impl ConfigValueBuilder {
     /// Consume an existing value and continue building in its arena, preserving child indexes.
     pub fn from_value(value: ConfigValue) -> (Self, ValueId) {
-        let ConfigValue {
+        let ConfigValueParts {
             arena_id,
             root_index,
             root: _,
             nodes,
             edges,
             text,
-        } = value;
+        } = value.into_parts();
         (
             Self {
                 arena_id,
@@ -212,7 +157,7 @@ impl ConfigValueBuilder {
         value: ConfigValue,
         mut out: Out<'slot, '_, ValueError>,
     ) -> OResult<'slot, ValueId> {
-        let same_budget = match (self.nodes.budget(), value.nodes.budget()) {
+        let same_budget = match (self.nodes.budget(), value.budget()) {
             (Some(left), Some(right)) => left.same_call(right),
             (None, None) => true,
             _ => false,
@@ -220,14 +165,14 @@ impl ConfigValueBuilder {
         if !same_budget {
             return Err(out.fail(ValueError::internal(ARENA_BUDGET_MISMATCH)));
         }
-        let ConfigValue {
+        let ConfigValueParts {
             arena_id: _,
             root_index,
             root: _,
             nodes,
             edges,
             text,
-        } = value;
+        } = value.into_parts();
         let node_offset = self.nodes.len();
         let edge_offset = self.edges.len();
         let text_offset = self.text.len();
@@ -274,6 +219,27 @@ impl ConfigValueBuilder {
             arena_id: self.arena_id,
             index,
         })
+    }
+
+    /// Copies a value subtree with an explicit logical nesting limit and preserves its source tags.
+    ///
+    /// The root has depth zero; optional children, container entries, and single enum payloads
+    /// add one level. Enum structure payload fields add two levels because their anonymous
+    /// structure contributes an additional level. A depth equal to the limit is accepted.
+    /// Depth violations return `ResourceLimitExceeded`; depth arithmetic overflow returns
+    /// `CapacityExceeded`. Frame and child storage uses the builder's execution budget when set.
+    pub fn append_view<'slot>(
+        &mut self,
+        value: ValueView<'_>,
+        limits: ValueCopyLimits,
+        mut out: Out<'slot, '_, ValueError>,
+    ) -> OResult<'slot, ValueId> {
+        let budget = self
+            .nodes
+            .budget()
+            .map(|budget| budget.try_clone(out.reborrow()))
+            .transpose()?;
+        copy::ValueViewCopier::new(budget).copy_to(self, value, limits, out)
     }
 
     pub fn add_signed<'slot>(
@@ -449,7 +415,7 @@ impl ConfigValueBuilder {
         let Some(root_node) = self.nodes.get(root.index) else {
             return Err(out.fail(ValueError::internal(ARENA_ID_MISMATCH)));
         };
-        Ok(ConfigValue {
+        Ok(ConfigValue::from_parts(ConfigValueParts {
             arena_id: self.arena_id,
             root_index: root.index,
             root: ValueNode {
@@ -459,7 +425,7 @@ impl ConfigValueBuilder {
             nodes: self.nodes,
             edges: self.edges,
             text: self.text,
-        })
+        }))
     }
 
     fn add_simple<'slot>(
@@ -674,201 +640,5 @@ impl ConfigValueBuilder {
             arena_id: self.arena_id,
             index,
         })
-    }
-}
-
-impl ConfigValue {
-    pub fn root(&self) -> ValueView<'_> {
-        ValueView {
-            owner: self,
-            index: self.root_index,
-            node: &self.root,
-        }
-    }
-
-    pub fn as_ref(&self) -> ValueKind<'_> {
-        self.root().as_ref()
-    }
-
-    pub fn source(&self) -> ValueSource {
-        self.root().source()
-    }
-
-    pub fn budget(&self) -> Option<&ExecutionBudget> {
-        self.nodes.budget()
-    }
-
-    pub fn node_count(&self) -> usize {
-        self.nodes.len()
-    }
-
-    fn view(&self, index: usize) -> Option<ValueView<'_>> {
-        let node = self.nodes.get(index)?;
-        Some(ValueView {
-            owner: self,
-            index,
-            node,
-        })
-    }
-
-    fn text_range(&self, range: TextRange) -> Option<&str> {
-        self.text
-            .get(range.segment)
-            .and_then(|text| text.get(range.start..range.end))
-    }
-}
-
-impl<'a> ValueView<'a> {
-    pub const fn source(self) -> ValueSource {
-        self.node.source
-    }
-
-    pub fn as_ref(self) -> ValueKind<'a> {
-        match self.node.kind {
-            NodeKind::Signed(value) => ValueKind::Signed(value),
-            NodeKind::Unsigned(value) => ValueKind::Unsigned(value),
-            NodeKind::Float32(value) => ValueKind::Float32(value),
-            NodeKind::Float64(value) => ValueKind::Float64(value),
-            NodeKind::String(range) => {
-                ValueKind::String(self.owner.text_range(range).unwrap_or_default())
-            }
-            NodeKind::Bool(value) => ValueKind::Bool(value),
-            NodeKind::Optional(child) => {
-                ValueKind::Optional(child.and_then(|index| self.owner.view(index)))
-            }
-            NodeKind::Array(range) => ValueKind::Array(ValueEntries::new(self.owner, range)),
-            NodeKind::Map(range) => ValueKind::Map(ValueEntries::new(self.owner, range)),
-            NodeKind::Structure(range) => {
-                ValueKind::Structure(ValueEntries::new(self.owner, range))
-            }
-            NodeKind::Enumeration { variant, payload } => {
-                let variant = self.owner.text_range(variant).unwrap_or_default();
-                let payload = match payload {
-                    PayloadKind::Unit => ValuePayloadView::Unit,
-                    PayloadKind::Single(index) => self
-                        .owner
-                        .view(index)
-                        .map_or(ValuePayloadView::Unit, ValuePayloadView::Single),
-                    PayloadKind::Structure(range) => {
-                        ValuePayloadView::Structure(ValueEntries::new(self.owner, range))
-                    }
-                };
-                ValueKind::Enumeration { variant, payload }
-            }
-        }
-    }
-
-    pub const fn id(self) -> ValueId {
-        ValueId {
-            arena_id: self.owner.arena_id,
-            index: self.index,
-        }
-    }
-}
-
-impl<'a> ValueEntries<'a> {
-    fn new(owner: &'a ConfigValue, range: EdgeRange) -> Self {
-        Self { owner, range }
-    }
-
-    /// Read an entry by its zero-based container slot without changing the iterator cursor.
-    pub fn get(self, index: usize) -> Option<ValueEntryView<'a>> {
-        let edge_index = self.range.start.checked_add(index)?;
-        if edge_index >= self.range.end {
-            return None;
-        }
-        let edge = self.owner.edges.get(edge_index)?;
-        let value = self.owner.view(edge.child)?;
-        let name = edge.name.and_then(|range| self.owner.text_range(range));
-        Some(ValueEntryView { name, value })
-    }
-}
-
-impl<'a> Iterator for ValueEntries<'a> {
-    type Item = ValueEntryView<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.range.start >= self.range.end {
-            return None;
-        }
-        let edge_index = self.range.start;
-        self.range.start += 1;
-        let edge = self.owner.edges.get(edge_index)?;
-        let value = self.owner.view(edge.child)?;
-        let name = edge.name.and_then(|range| self.owner.text_range(range));
-        Some(ValueEntryView { name, value })
-    }
-
-    fn nth(&mut self, n: usize) -> Option<Self::Item> {
-        if n >= self.len() {
-            self.range.start = self.range.end;
-            return None;
-        }
-        self.range.start += n;
-        self.next()
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.range.end.saturating_sub(self.range.start);
-        (remaining, Some(remaining))
-    }
-}
-
-impl DoubleEndedIterator for ValueEntries<'_> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        if self.range.start >= self.range.end {
-            return None;
-        }
-        self.range.end -= 1;
-        let edge = self.owner.edges.get(self.range.end)?;
-        let value = self.owner.view(edge.child)?;
-        let name = edge.name.and_then(|range| self.owner.text_range(range));
-        Some(ValueEntryView { name, value })
-    }
-
-    fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
-        if n >= self.len() {
-            self.range.end = self.range.start;
-            return None;
-        }
-        self.range.end -= n;
-        self.next_back()
-    }
-}
-
-impl ExactSizeIterator for ValueEntries<'_> {}
-
-impl<'a> ValueEntryView<'a> {
-    pub const fn name(&self) -> Option<&'a str> {
-        self.name
-    }
-
-    pub fn as_named(&self) -> Option<NamedValueEntryView<'a>> {
-        Some(NamedValueEntryView(self.name?, self.value))
-    }
-
-    pub const fn value(&self) -> ValueView<'a> {
-        self.value
-    }
-}
-
-impl<'a> NamedValueEntryView<'a> {
-    pub const fn name(&self) -> &'a str {
-        self.0
-    }
-
-    pub const fn value(&self) -> ValueView<'a> {
-        self.1
-    }
-}
-
-impl fmt::Debug for ConfigValue {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ConfigValue")
-            .field("node_count", &self.nodes.len())
-            .field("edge_count", &self.edges.len())
-            .field("source", &self.source())
-            .finish()
     }
 }

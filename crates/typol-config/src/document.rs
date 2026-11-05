@@ -216,6 +216,11 @@ impl<'schema> ConfigDocument<'schema> {
         &self.value
     }
 
+    /// Returns whether a path has a value written explicitly in the retained source.
+    pub fn is_explicit(&self, path: &ConfigPath) -> bool {
+        matches!(self.index.lookup(path), PathLookup::Explicit(_))
+    }
+
     pub const fn source_expectation(&self) -> ConfigSourceExpectation<'static> {
         ConfigSourceExpectation::DocumentSnapshot
     }

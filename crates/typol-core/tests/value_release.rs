@@ -6,7 +6,7 @@ use std::{
     ptr,
 };
 use typol_core::{
-    ConfigValueBuilder, ExecutionBudget, ExecutionLimits, ValueKind, ValuePayload,
+    ConfigValueBuilder, ExecutionBudget, ExecutionLimits, ValueCopyLimits, ValueKind, ValuePayload,
     ValuePayloadView, ValueSource,
 };
 use typol_opeo_test_support::TestOpeo;
@@ -54,8 +54,9 @@ static ALLOCATOR: ReleaseObserver = ReleaseObserver;
 #[test]
 fn deep_value_drop_is_iterative_and_keeps_text_charged_until_deallocation()
 -> Result<(), Box<dyn Error>> {
-    let budget =
-        TestOpeo::call(|out| ExecutionBudget::new(ExecutionLimits::new(10_000, 1_048_576), out))?;
+    let budget = TestOpeo::call(|out| {
+        ExecutionBudget::new(ExecutionLimits::new(1_000_000, 16_777_216), out)
+    })?;
     let initial = budget.workspace_bytes();
     let text = "arena text must remain charged";
     let mut builder = TestOpeo::call(|out| ConfigValueBuilder::new(Some(&budget), out))?;
@@ -75,7 +76,12 @@ fn deep_value_drop_is_iterative_and_keeps_text_charged_until_deallocation()
         };
     }
     let value = TestOpeo::call(|out| builder.finish(root, out))?;
-    let mut view = value.root();
+    let mut copied_builder = TestOpeo::call(|out| ConfigValueBuilder::new(Some(&budget), out))?;
+    let copied_root = TestOpeo::call(|out| {
+        copied_builder.append_view(value.root(), ValueCopyLimits::new(512), out)
+    })?;
+    let copied = TestOpeo::call(|out| copied_builder.finish(copied_root, out))?;
+    let mut view = copied.root();
     loop {
         match view.as_ref() {
             ValueKind::Optional(Some(child)) => view = child,
@@ -105,16 +111,17 @@ fn deep_value_drop_is_iterative_and_keeps_text_charged_until_deallocation()
             charged: false,
         }))
     });
-    drop(value);
+    drop(copied);
     let observation = OBSERVATION
         .with(|cell| cell.replace(None))
         .ok_or_else(|| IoError::other("drop observation data is missing"))?;
     if target.is_null() || !observation.released || !observation.charged {
         return Err(IoError::other(
-            "budget token did not remain alive while arena text was released",
+            "budget token did not remain alive while copied arena text was released",
         )
         .into());
     }
+    drop(value);
     if budget.workspace_bytes() != initial {
         return Err(
             IoError::other("workspace balance was not restored after arena release").into(),
