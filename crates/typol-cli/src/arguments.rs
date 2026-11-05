@@ -19,6 +19,7 @@ pub struct ConfigRequest {
     environment: EnvironmentMode,
     pretty: bool,
     reject_secrets: bool,
+    format_check: bool,
 }
 
 pub enum Command {
@@ -26,6 +27,7 @@ pub enum Command {
     SchemaCheck(PathBuf),
     ConfigCheck(ConfigRequest),
     ConfigExportIr(ConfigRequest),
+    ConfigFmt(ConfigRequest),
 }
 
 pub struct ParsedCommand {
@@ -67,6 +69,10 @@ impl ConfigRequest {
 
     pub const fn reject_secrets(&self) -> bool {
         self.reject_secrets
+    }
+
+    pub const fn format_check(&self) -> bool {
+        self.format_check
     }
 }
 
@@ -216,7 +222,7 @@ impl Arguments {
             return Ok(Command::Help);
         }
         let export = match action {
-            "check" => false,
+            "check" | "fmt" => false,
             "export-ir" => true,
             _ => {
                 return Err(Self::error(
@@ -232,6 +238,8 @@ impl Arguments {
         let mut environment_seen = false;
         let mut pretty = false;
         let mut reject_secrets = false;
+        let mut format_check = false;
+        let mut format_check_seen = false;
         let mut positional_only = false;
         while let Some(argument) = arguments.next() {
             if !positional_only && argument == "--" {
@@ -300,6 +308,21 @@ impl Arguments {
                     ));
                 }
                 pretty = true;
+            } else if !positional_only && option == "--check" {
+                if action != "fmt" {
+                    return Err(Self::error(
+                        t!("cli.format_check_invalid", locale = translator),
+                        language,
+                    ));
+                }
+                if format_check_seen {
+                    return Err(Self::error(
+                        t!("cli.format_check_repeated", locale = translator),
+                        language,
+                    ));
+                }
+                format_check = true;
+                format_check_seen = true;
             } else if !positional_only && option == "--reject-secrets" {
                 if !export {
                     return Err(Self::error(
@@ -341,8 +364,11 @@ impl Arguments {
             environment,
             pretty,
             reject_secrets,
+            format_check,
         };
-        if export {
+        if action == "fmt" {
+            Ok(Command::ConfigFmt(request))
+        } else if export {
             Ok(Command::ConfigExportIr(request))
         } else {
             Ok(Command::ConfigCheck(request))

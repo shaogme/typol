@@ -5,17 +5,20 @@ message cli.help = "Usage:
   typol [--language en|zh-CN] schema check <schema.tschem>
   typol [--language en|zh-CN] config check --schema <schema.tschem> [--environment inherit|empty] <config.tconf>
   typol [--language en|zh-CN] config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] [--reject-secrets] <config.tconf>
+  typol [--language en|zh-CN] config fmt --schema <schema.tschem> [--environment inherit|empty] [--check] <config.tconf>
 
 Commands:
   schema check       Compile and check a schema and its imports
   config check       Validate configuration against a schema
   config export-ir   Load and validate configuration, then output typed JSON IR v1
+  config fmt         Format a validated configuration file in place
 
 Options:
   --language         Select English or Simplified Chinese (default: detected)
   --environment      inherit (default) reads process environment; empty ignores it
   --pretty           Output IR with indentation
   --reject-secrets   Fail before writing IR if any value is marked secret
+  --check            Check config fmt without writing the file
   -h, --help         Show this help
 
 Use --language before the command. Set TYPOL_LANG to select a language when the option is omitted.\n";
@@ -24,6 +27,8 @@ message cli.diagnostic_prefix = "Typol diagnostic details:\n";
 message cli.write_stdout_error = "Unable to write to standard output.";
 message cli.ir_error = "IR serialization failed or exceeded the output limit.";
 message cli.ir_secret_rejected = "IR export was rejected because the configuration contains a secret value.";
+message cli.format_error = "Configuration formatting or file replacement failed.";
+message cli.format_check_failed = "Configuration needs formatting.";
 message cli.command_utf8 = "Command name must be valid UTF-8 text.";
 message cli.unknown_command = "Unknown command.";
 message cli.schema_action_missing = "Missing schema check subcommand.";
@@ -31,9 +36,9 @@ message cli.schema_action_utf8 = "Schema subcommand must be valid UTF-8 text.";
 message cli.schema_action_invalid = "Schema supports only the check subcommand.";
 message cli.schema_path_missing = "Missing schema file path.";
 message cli.schema_path_extra = "Schema check accepts only one schema file path.";
-message cli.config_action_missing = "Missing config check or config export-ir subcommand.";
+message cli.config_action_missing = "Missing config check, config export-ir, or config fmt subcommand.";
 message cli.config_action_utf8 = "Config subcommand must be valid UTF-8 text.";
-message cli.config_action_invalid = "Config supports only check and export-ir subcommands.";
+message cli.config_action_invalid = "Config supports only check, export-ir, and fmt subcommands.";
 message cli.schema_option_repeated = "--schema may only be specified once.";
 message cli.environment_option_repeated = "--environment may only be specified once.";
 message cli.environment_value_missing = "--environment is missing a value.";
@@ -42,6 +47,8 @@ message cli.pretty_invalid = "--pretty is only valid for config export-ir.";
 message cli.pretty_repeated = "--pretty may only be specified once.";
 message cli.reject_secrets_invalid = "--reject-secrets is only valid for config export-ir.";
 message cli.reject_secrets_repeated = "--reject-secrets may only be specified once.";
+message cli.format_check_invalid = "--check is only valid for config fmt.";
+message cli.format_check_repeated = "--check may only be specified once.";
 message cli.option_utf8 = "Option name must be valid UTF-8 text.";
 message cli.option_invalid = "Unknown config option.";
 message cli.schema_option_value_missing = "--schema is missing a value.";

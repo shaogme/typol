@@ -5,17 +5,20 @@ message cli.help = "用法：
   typol [--language en|zh-CN] schema check <schema.tschem>
   typol [--language en|zh-CN] config check --schema <schema.tschem> [--environment inherit|empty] <config.tconf>
   typol [--language en|zh-CN] config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] [--reject-secrets] <config.tconf>
+  typol [--language en|zh-CN] config fmt --schema <schema.tschem> [--environment inherit|empty] [--check] <config.tconf>
 
 命令：
   schema check       编译并检查 Schema 及其导入
   config check       根据 Schema 校验配置
   config export-ir   加载并校验配置，然后输出类型化 JSON IR v1
+  config fmt         格式化经过校验的配置文件并原地写回
 
 选项：
   --language         选择英文或简体中文（默认：自动检测）
   --environment      inherit（默认）读取进程环境变量；empty 忽略环境变量
   --pretty           以缩进格式输出 IR
   --reject-secrets   配置含有秘密标记时，在写出 IR 前失败
+  --check            检查 config fmt 的格式，不写入文件
   -h, --help         显示此帮助
 
 请在命令前使用 --language。省略该选项时，可通过 TYPOL_LANG 设置语言。\n";
@@ -24,6 +27,8 @@ message cli.diagnostic_prefix = "Typol 诊断详情：\n";
 message cli.write_stdout_error = "无法写入标准输出。";
 message cli.ir_error = "IR 序列化失败或超出输出限制。";
 message cli.ir_secret_rejected = "配置包含秘密值，已拒绝导出 IR。";
+message cli.format_error = "配置格式化或文件替换失败。";
+message cli.format_check_failed = "配置需要格式化。";
 message cli.command_utf8 = "命令名称必须是有效的 UTF-8 文本。";
 message cli.unknown_command = "未知命令。";
 message cli.schema_action_missing = "缺少 schema check 子命令。";
@@ -31,9 +36,9 @@ message cli.schema_action_utf8 = "Schema 子命令必须是有效的 UTF-8 文�
 message cli.schema_action_invalid = "Schema 目前只支持 check 子命令。";
 message cli.schema_path_missing = "缺少 Schema 文件路径。";
 message cli.schema_path_extra = "schema check 只能接受一个 Schema 文件路径。";
-message cli.config_action_missing = "缺少 config check 或 config export-ir 子命令。";
+message cli.config_action_missing = "缺少 config check、config export-ir 或 config fmt 子命令。";
 message cli.config_action_utf8 = "Config 子命令必须是有效的 UTF-8 文本。";
-message cli.config_action_invalid = "Config 目前只支持 check 和 export-ir 子命令。";
+message cli.config_action_invalid = "Config 目前只支持 check、export-ir 和 fmt 子命令。";
 message cli.schema_option_repeated = "--schema 只能指定一次。";
 message cli.environment_option_repeated = "--environment 只能指定一次。";
 message cli.environment_value_missing = "--environment 缺少取值。";
@@ -42,6 +47,8 @@ message cli.pretty_invalid = "--pretty 仅适用于 config export-ir。";
 message cli.pretty_repeated = "--pretty 只能指定一次。";
 message cli.reject_secrets_invalid = "--reject-secrets 仅适用于 config export-ir。";
 message cli.reject_secrets_repeated = "--reject-secrets 只能指定一次。";
+message cli.format_check_invalid = "--check 仅适用于 config fmt。";
+message cli.format_check_repeated = "--check 只能指定一次。";
 message cli.option_utf8 = "选项名称必须是有效的 UTF-8 文本。";
 message cli.option_invalid = "未知的 config 选项。";
 message cli.schema_option_value_missing = "--schema 缺少取值。";

@@ -151,3 +151,11 @@ An environment variable is referenced explicitly with `env("NAME")`. The express
 Environment text is interpreted according to the target scalar type: strings are used as-is, booleans accept only `true` or `false`, and numbers follow Section 1. Leading or trailing whitespace is not trimmed, and the text must be valid UTF-8. An empty string is a set value; the target type and constraints determine whether it is valid. A set value that fails parsing or validation invalidates the configuration; it does not fall back.
 
 An expression may provide a scalar literal fallback: `env("NAME", fallback)`. The fallback must match the target scalar type and satisfy the field's constraints even if the environment variable is set. The expression fallback takes precedence over a Schema default. If the environment value is set, it is used; otherwise the explicit fallback is used. If the variable is unset and there is no fallback, normal field omission rules apply: Schema default, optional `none`, or a required-field error. For an `option<T>` field, a successfully resolved environment value or fallback is present.
+
+## 7. Canonical formatting
+
+`typol config fmt` formats a configuration only after it has been parsed and validated with its root Schema. Formatting changes whitespace and line breaks while preserving every source value token, comment text, and entry order. It does not serialize the resolved value, write environment contents, or insert omitted Schema defaults.
+
+Nonempty arrays, struct objects, maps, and anonymous struct enum payloads use one item per line, four spaces per nesting level, and a trailing comma after each item. Empty arrays and objects remain `[]` and `{}`. A colon is followed by one space. Single-value enum payloads and `env(...)` calls keep compact parentheses; containers inside them follow the same multiline rules. Comments remain in source order, and line comments always end their line. The formatter preserves CRLF when the input uses CRLF and otherwise uses LF; formatted output ends with a newline.
+
+Formatting is deterministic and idempotent: formatting an already formatted document produces the same bytes. The CLI writes the complete result back to the input file by default. `--check` reports whether a change is needed without writing the file.

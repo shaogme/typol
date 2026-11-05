@@ -1,11 +1,11 @@
 ---
 title: CLI 使用指南
-description: 使用 Typol CLI 检查 Schema 和配置，并将校验后的值导出为 Config IR。
+description: 使用 Typol CLI 检查、格式化配置，并将校验后的值导出为 Config IR。
 sidebar:
   order: 2
 ---
 
-`typol` 命令行工具可以检查 `.tschem` Schema、校验 `.tconf` 配置文件，并将配置值导出为类型化 JSON。它与 [Rust 快速上手教程](../quickstart/)互为补充：可直接用 CLI 检查文件，也可在应用中使用 Rust 库读取配置。
+`typol` 命令行工具可以检查 `.tschem` Schema、校验和格式化 `.tconf` 配置文件，并将配置值导出为类型化 JSON。它与 [Rust 快速上手教程](../quickstart/)互为补充：可直接用 CLI 检查或格式化文件，也可在应用中使用 Rust 库读取配置。
 
 CLI 支持英文和简体中文。帮助、命令行错误、操作提示以及详细的 Schema 和配置诊断都会使用同一种选定语言，并由 `typol-i18n` 中通过 `u18n` 在构建期生成的翻译目录渲染。
 
@@ -71,6 +71,17 @@ JSON 结构和兼容规则见 [Config IR v1 规范](../../specification/config-i
 
 如果要把 IR 放入 Nix store，可添加 `--reject-secrets`。只要任意节点带有 `secret: true` 标记，命令就会在写出内容前失败。该选项会拒绝含秘密标记的配置，不会对值进行脱敏。
 
+### 格式化配置
+
+```sh
+cargo run -p typol-cli -- config fmt \
+  --schema examples/cli/cli_demo.tschem \
+  --environment empty \
+  examples/cli/cli_demo.tconf
+```
+
+`config fmt` 会先根据 Schema 校验文件，再将规范格式原子写回同一文件。非空数组和对象会按每层 4 个空格展开。它保留源值、注释和条目顺序，不会把解析得到的环境变量值或省略的 Schema 默认字段写入文件。添加 `--check` 可只检查格式、不修改文件；需要格式化时退出状态为 `1`。
+
 ## 环境变量模式
 
 `--environment` 接受以下两种值：
@@ -88,12 +99,14 @@ JSON 结构和兼容规则见 [Config IR v1 规范](../../specification/config-i
 typol schema check <schema.tschem>
 typol config check --schema <schema.tschem> [--environment inherit|empty] <config.tconf>
 typol config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] [--reject-secrets] <config.tconf>
+typol config fmt --schema <schema.tschem> [--environment inherit|empty] [--check] <config.tconf>
 ```
 
 - `--schema <路径>` 为任一 `config` 命令指定 Schema 文件。
 - `--environment inherit|empty` 选择读取配置时使用的环境变量提供器。
 - `--pretty` 仅适用于 `config export-ir`。
 - `--reject-secrets` 仅适用于 `config export-ir`；检测到任意秘密标记时会阻止输出。
+- `--check` 仅适用于 `config fmt`；它检查格式但不写入文件。
 - `--language en|zh-CN` 选择 CLI 消息和详细诊断的语言，必须放在命令前；也可通过 `TYPOL_LANG` 设置。
 - `-h` 和 `--help` 会显示命令帮助。例如：`typol --help`、`typol schema check --help` 或 `typol config export-ir --help`。
 - 在 `config` 命令中，如果配置文件路径以 `-` 开头，可在路径前加 `--`，将其作为路径而非选项解析。
@@ -102,12 +115,12 @@ CLI 接受文件路径，不会从标准输入读取 Schema 或配置文本。Sc
 
 ## 输出和退出状态
 
-检查成功时不会输出内容。`config export-ir` 会将 JSON 写入标准输出。诊断和命令行错误会写入标准错误。
+检查命令和 `config fmt` 成功时不会输出内容。`config fmt --check` 发现需要格式化时会向标准错误写入本地化提示。`config export-ir` 会将 JSON 写入标准输出。诊断和命令行错误会写入标准错误。
 
 | 状态码 | 含义 |
 | ---: | --- |
 | `0` | 成功，包括显示帮助。 |
-| `1` | Schema 或配置诊断，例如语法无效或校验失败。 |
+| `1` | Schema 或配置诊断、校验失败，或 `config fmt --check` 检查出需要格式化。 |
 | `2` | 命令行用法错误，例如缺少参数或选项未知。 |
 | `3` | 宿主或 I/O 错误、翻译渲染失败，或写入、序列化输出失败。|
 

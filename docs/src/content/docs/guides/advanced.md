@@ -296,6 +296,6 @@ These limits cover library-managed inputs and workspaces. They are not operating
 ## Next steps
 
 - See `examples/showcase` in the repository for a complete multi-file application.
-- Use the [CLI guide](../cli/) to validate files or export a Config IR document.
+- Use the [CLI guide](../cli/) to validate or format files, or export a Config IR document.
 - Read the [Schema DSL](../../specification/schema-dsl/) and [Config DSL](../../specification/config-dsl/) for normative language behavior.
 - Consult the [Schema implementation](../../specification/schema-implementation/), [Config implementation](../../specification/config-implementation/), and [Config IR v1 reference](../../specification/config-ir/) for detailed contracts.

@@ -1,5 +1,6 @@
 mod edit;
 mod encoding;
+mod formatter;
 mod path;
 mod syntax;
 
@@ -27,6 +28,9 @@ use syntax::SourceSyntax;
 
 pub use edit::{ConfigEdit, ConfigEditError};
 pub use encoding::ConfigEditErrorKind;
+pub use formatter::{
+    ConfigFormatError, ConfigFormatErrorKind, ConfigFormatOptions, FormattedConfig,
+};
 pub use path::{ConfigPath, ConfigPathSegment, ConfigReplacement};
 
 static EDIT_SOURCE_RANGE_INVALID: DiagnosticContext = diagnostic_context!(
@@ -45,6 +49,9 @@ pub struct ConfigDocument<'schema> {
     value: ValidatedConfigValue,
     index: SourcePathIndex,
 }
+
+/// Formats a validated configuration document while preserving its source tokens and comments.
+pub struct ConfigFormatter;
 
 /// The target state required before an atomic source replacement.
 pub enum ConfigSourceExpectation<'snapshot> {
@@ -105,6 +112,26 @@ impl ConfigSourceRevision {
 
     pub const fn value(self) -> u64 {
         self.0
+    }
+}
+
+impl ConfigFormatter {
+    /// Produces an independently owned canonical representation of a parsed document.
+    pub fn format<'slot>(
+        document: &ConfigDocument<'_>,
+        options: ConfigFormatOptions,
+        out: Out<'slot, '_, ConfigFormatError>,
+    ) -> OResult<'slot, FormattedConfig> {
+        formatter::FormatterEngine::format_source(
+            formatter::FormatRequest {
+                source: document.source(),
+                budget: document.snapshot.budget(),
+                source_limit: document.options.config().max_source_bytes(),
+                constructed_text_limit: document.options.config().max_constructed_text_bytes(),
+                options,
+            },
+            out,
+        )
     }
 }
 

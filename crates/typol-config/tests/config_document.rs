@@ -4,8 +4,9 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 use typol_config::{
-    ConfigEdit, ConfigEditErrorKind, ConfigLimits, ConfigParseOptions, ConfigParseRequest,
-    ConfigParser, ConfigPath, ConfigReplacement, ConfigSourceCommitError, ConfigSourceExpectation,
+    ConfigDocument, ConfigEdit, ConfigEditErrorKind, ConfigFormatErrorKind, ConfigFormatOptions,
+    ConfigFormatter, ConfigLimits, ConfigParseOptions, ConfigParseRequest, ConfigParser,
+    ConfigPath, ConfigReplacement, ConfigSourceCommitError, ConfigSourceExpectation,
     ConfigSourceRevision, ConfigSourceWriter, EmptyEnvironment, Environment, EnvironmentError,
     EnvironmentReadContext,
 };
@@ -114,6 +115,160 @@ fn parse_document_with_options<'schema>(
             out,
         )
     })
+}
+
+fn format_document(
+    document: &ConfigDocument<'_>,
+    options: ConfigFormatOptions,
+) -> TestResult<String> {
+    let formatted = TestOpeo::value(|out| ConfigFormatter::format(document, options, out))?;
+    Ok(formatted.as_str().to_owned())
+}
+
+#[test]
+fn formatter_expands_containers_and_preserves_source_expressions_and_order() -> TestResult<()> {
+    let schema = compile(
+        r#"
+        enum Mode { Ready, Named(string), Details { name: string, }, }
+        entry struct Root {
+            title: string,
+            values: [u8],
+            settings: map<string, u8>,
+            mode: Mode,
+            details: Mode,
+            port: u16 @env("PORT"),
+        }
+        "#,
+    )?;
+    let source = r#"{title:"中,}/*",values:[1,2],settings:{"b":2,"a":1},mode:.Named("x, //"),details:.Details{name:"owner"},port:env("PORT",3)}"#;
+    let document = parse_document(&schema, source)?;
+    let formatted = format_document(&document, ConfigFormatOptions::default())?;
+    test_eq!(
+        formatted,
+        concat!(
+            "{\n",
+            "    title: \"中,}/*\",\n",
+            "    values: [\n",
+            "        1,\n",
+            "        2,\n",
+            "    ],\n",
+            "    settings: {\n",
+            "        \"b\": 2,\n",
+            "        \"a\": 1,\n",
+            "    },\n",
+            "    mode: .Named(\"x, //\"),\n",
+            "    details: .Details {\n",
+            "        name: \"owner\",\n",
+            "    },\n",
+            "    port: env(\"PORT\", 3),\n",
+            "}\n"
+        )
+    );
+    let formatted_document = parse_document(&schema, &formatted)?;
+    test_eq!(
+        format_document(&formatted_document, ConfigFormatOptions::default())?,
+        formatted
+    );
+    Ok(())
+}
+
+#[test]
+fn formatter_preserves_comments_and_crlf_while_ending_with_a_newline() -> TestResult<()> {
+    let schema = compile("entry struct Root { first: u8, second: [u8] }")?;
+    let source = "{/* leading */first:1,/* between */second:[/* item */2]}";
+    let document = parse_document(&schema, source)?;
+    let formatted = format_document(&document, ConfigFormatOptions::default())?;
+    test_assert!(formatted.contains("/* leading */"));
+    test_assert!(formatted.contains("/* between */"));
+    test_assert!(formatted.contains("/* item */"));
+    let formatted_document = parse_document(&schema, &formatted)?;
+    test_eq!(
+        format_document(&formatted_document, ConfigFormatOptions::default())?,
+        formatted
+    );
+
+    let line_comments = "{ // root\nfirst:1, // first\nsecond:[2] // trailing\n}";
+    let line_document = parse_document(&schema, line_comments)?;
+    let formatted_lines = format_document(&line_document, ConfigFormatOptions::default())?;
+    test_assert!(formatted_lines.contains("// root\n"));
+    test_assert!(formatted_lines.contains("first: 1, // first\n"));
+    test_assert!(formatted_lines.contains("], // trailing\n"));
+    let formatted_line_document = parse_document(&schema, &formatted_lines)?;
+    test_eq!(
+        format_document(&formatted_line_document, ConfigFormatOptions::default())?,
+        formatted_lines
+    );
+
+    let crlf = "{\r\nfirst:1,\r\nsecond:[],\r\n}";
+    let crlf_document = parse_document(&schema, crlf)?;
+    let formatted_crlf = format_document(&crlf_document, ConfigFormatOptions::default())?;
+    test_assert!(formatted_crlf.contains("\r\n"));
+    test_assert!(!formatted_crlf.replace("\r\n", "").contains('\n'));
+    test_assert!(formatted_crlf.ends_with("}\r\n"));
+    Ok(())
+}
+
+#[test]
+fn formatter_keeps_root_comments_at_column_zero_and_removes_comment_tail_space() -> TestResult<()> {
+    let schema = compile("entry struct Root { first: u8, second: [u8] }")?;
+    let root_line_comment = "// note\n{first:1,second:[]}";
+    let line_document = parse_document(&schema, root_line_comment)?;
+    let formatted_line = format_document(&line_document, ConfigFormatOptions::default())?;
+    test_eq!(
+        formatted_line,
+        "// note\n{\n    first: 1,\n    second: [],\n}\n"
+    );
+
+    let root_block_comment = "/* note */\n{first:1,second:[]}";
+    let block_document = parse_document(&schema, root_block_comment)?;
+    let formatted_block = format_document(&block_document, ConfigFormatOptions::default())?;
+    test_eq!(
+        formatted_block,
+        "/* note */\n{\n    first: 1,\n    second: [],\n}\n"
+    );
+
+    let trailing_comment_schema = compile("entry struct Root { value: u8 }")?;
+    let trailing_comment_document = parse_document(&trailing_comment_schema, "{value:1 /*note*/}")?;
+    let formatted_trailing_comment =
+        format_document(&trailing_comment_document, ConfigFormatOptions::default())?;
+    test_eq!(formatted_trailing_comment, "{\n    value: 1, /*note*/\n}\n");
+    let reparsed = parse_document(&trailing_comment_schema, &formatted_trailing_comment)?;
+    test_eq!(
+        format_document(&reparsed, ConfigFormatOptions::default())?,
+        formatted_trailing_comment
+    );
+    Ok(())
+}
+
+#[test]
+fn formatter_enforces_output_and_workspace_limits_without_returning_partial_text() -> TestResult<()>
+{
+    let schema = compile("entry struct Root { value: u8 }")?;
+    let document = parse_document(&schema, "{value:1}")?;
+    let output_error = TestOpeo::error(|out| {
+        ConfigFormatter::format(
+            &document,
+            ConfigFormatOptions::default().with_max_output_bytes(1),
+            out,
+        )
+    })?;
+    test_eq!(
+        output_error.kind(),
+        ConfigFormatErrorKind::ResourceLimitExceeded
+    );
+
+    let workspace_error = TestOpeo::error(|out| {
+        ConfigFormatter::format(
+            &document,
+            ConfigFormatOptions::default().with_max_workspace_bytes(0),
+            out,
+        )
+    })?;
+    test_eq!(
+        workspace_error.kind(),
+        ConfigFormatErrorKind::ResourceLimitExceeded
+    );
+    Ok(())
 }
 
 struct FailingEnvironment;

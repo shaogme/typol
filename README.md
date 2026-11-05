@@ -84,14 +84,14 @@ The source is split by responsibility. The normal application API is in `crates/
 | `typol-model` | Shared Schema operator and built-in type definitions |
 | `typol-schema` | Imports, name and type resolution, static checks, and Schema compilation |
 | `typol-semantic` | Compiled Schema model, constraints, expression programs, and evaluation |
-| `typol-config` | Schema-guided configuration parsing, validation, and source-preserving documents |
+| `typol-config` | Schema-guided configuration parsing, validation, formatting, and source-preserving documents |
 | `typol-regex` | Bounded regular-expression compiler and matcher |
 | `typol-core` | Shared values, sources, diagnostics, and execution budgets |
 | `typol-policy` | Shared resource-limit policies |
 | `typol-report` | Localized diagnostic report formatting |
 | `typol-std` | Optional file, process-environment, and diagnostic host adapters |
 | `typol-i18n` | English and Simplified Chinese message catalogs |
-| `typol-cli` | Schema and configuration checks, plus Config IR export |
+| `typol-cli` | Schema and configuration checks, `.tconf` formatting, and Config IR export |
 
 ## Choose a guide
 
@@ -100,7 +100,7 @@ The source is split by responsibility. The normal application API is in `crates/
 | Build a typed configuration loader and understand the core types and methods | [Quick start](docs/src/content/docs/guides/quickstart.md) |
 | Use imported Schemas, cross-field checks, Serde, or Config IR | [Advanced tutorial](docs/src/content/docs/guides/advanced.md) |
 | Use Typol without the standard library | [no_std guide](docs/src/content/docs/guides/no_std.md) |
-| Check files or export Config IR from the command line | [CLI guide](docs/src/content/docs/guides/cli.md) |
+| Check or format files, or export Config IR from the command line | [CLI guide](docs/src/content/docs/guides/cli.md) |
 | Look up Schema or configuration syntax | [Schema DSL](docs/src/content/docs/specification/schema-dsl.md) · [Config DSL](docs/src/content/docs/specification/config-dsl.md) |
 | Understand implementation details | [Schema implementation](docs/src/content/docs/specification/schema-implementation.md) · [Config implementation](docs/src/content/docs/specification/config-implementation.md) |
 

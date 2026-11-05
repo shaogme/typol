@@ -73,6 +73,31 @@ fn config_arguments_for(
     arguments
 }
 
+fn format_arguments(schema: &Path, config: &Path, check: bool) -> Vec<OsString> {
+    format_arguments_for(schema, config, "empty", check)
+}
+
+fn format_arguments_for(
+    schema: &Path,
+    config: &Path,
+    environment: &str,
+    check: bool,
+) -> Vec<OsString> {
+    let mut arguments = vec![
+        argument("config"),
+        argument("fmt"),
+        argument("--schema"),
+        schema.as_os_str().to_owned(),
+        argument("--environment"),
+        argument(environment),
+    ];
+    if check {
+        arguments.push(argument("--check"));
+    }
+    arguments.push(config.as_os_str().to_owned());
+    arguments
+}
+
 fn ensure(condition: bool, message: &str) -> Result<(), Box<dyn Error>> {
     if condition {
         Ok(())
@@ -141,6 +166,90 @@ fn schema_and_config_checks_succeed_without_stdout() -> Result<(), Box<dyn Error
         config.stdout.is_empty(),
         "config check must not write to stdout",
     )?;
+    Ok(())
+}
+
+#[test]
+fn config_format_writes_atomically_and_check_mode_never_changes_the_file()
+-> Result<(), Box<dyn Error>> {
+    let schema_path = temp_dir().join(format!("typol-fmt-schema-{}.tschem", id()));
+    let config_path = temp_dir().join(format!("typol-fmt-config-{}.tconf", id()));
+    fs::write(
+        &schema_path,
+        "entry struct Root { title: string, values: [u8], port: u16 @env(\"PORT\") = 2, defaulted: u8 = 4 }",
+    )?;
+    fs::write(
+        &config_path,
+        "{title:\"x\",values:[1,2],port:env(\"PORT\",3)}",
+    )?;
+
+    let first = run_cli_with_variable(
+        format_arguments_for(&schema_path, &config_path, "inherit", false),
+        "PORT",
+        "8080",
+    )?;
+    ensure_equal(first.status.code(), Some(0), "config fmt exit code")?;
+    ensure(
+        first.stdout.is_empty(),
+        "successful config fmt must be quiet",
+    )?;
+    ensure(
+        first.stderr.is_empty(),
+        "successful config fmt must be quiet",
+    )?;
+    let formatted = fs::read_to_string(&config_path)?;
+    ensure(
+        formatted.contains("port: env(\"PORT\", 3)"),
+        "fmt must preserve environment expressions",
+    )?;
+    ensure(
+        !formatted.contains("defaulted"),
+        "fmt must not insert schema default fields",
+    )?;
+
+    let second = run_cli(format_arguments(&schema_path, &config_path, false))?;
+    ensure_equal(
+        second.status.code(),
+        Some(0),
+        "repeated config fmt exit code",
+    )?;
+    ensure_equal(
+        fs::read_to_string(&config_path)?,
+        formatted.clone(),
+        "repeated config fmt must be idempotent",
+    )?;
+
+    let clean_check = run_cli(format_arguments(&schema_path, &config_path, true))?;
+    ensure_equal(
+        clean_check.status.code(),
+        Some(0),
+        "clean fmt check exit code",
+    )?;
+    ensure_equal(
+        fs::read_to_string(&config_path)?,
+        formatted.clone(),
+        "clean fmt check must preserve the file",
+    )?;
+
+    let unformatted = "{ title: \"x\", values: [1, 2], port: env(\"PORT\", 3) }";
+    fs::write(&config_path, unformatted)?;
+    let dirty_check = run_cli(format_arguments(&schema_path, &config_path, true))?;
+    ensure_equal(
+        dirty_check.status.code(),
+        Some(1),
+        "dirty fmt check exit code",
+    )?;
+    ensure(
+        String::from_utf8_lossy(&dirty_check.stderr).contains("needs formatting"),
+        "dirty fmt check must explain that formatting is needed",
+    )?;
+    ensure_equal(
+        fs::read_to_string(&config_path)?,
+        unformatted.to_owned(),
+        "dirty fmt check must not change the file",
+    )?;
+    fs::remove_file(&schema_path)?;
+    fs::remove_file(&config_path)?;
     Ok(())
 }
 
@@ -344,6 +453,10 @@ fn language_option_localizes_help_and_usage_errors() -> Result<(), Box<dyn Error
         "English help must use the English catalog",
     )?;
     ensure(
+        String::from_utf8_lossy(&english.stdout).contains("config fmt"),
+        "English help must describe config fmt",
+    )?;
+    ensure(
         english.stdout.ends_with(b"\n"),
         "help output must end with a newline",
     )?;
@@ -357,6 +470,10 @@ fn language_option_localizes_help_and_usage_errors() -> Result<(), Box<dyn Error
     ensure(
         String::from_utf8_lossy(&chinese_help.stdout).starts_with("用法："),
         "the equals form must select Simplified Chinese",
+    )?;
+    ensure(
+        String::from_utf8_lossy(&chinese_help.stdout).contains("config fmt"),
+        "Chinese help must describe config fmt",
     )?;
 
     let detected = run_cli_with_variable(vec![argument("--help")], "TYPOL_LANG", "zh_CN.UTF-8")?;
@@ -425,6 +542,27 @@ fn language_option_localizes_help_and_usage_errors() -> Result<(), Box<dyn Error
         diagnostic.contains("用法："),
         "Chinese usage errors must include Chinese help",
     )?;
+    for (language, expected) in [
+        ("en", "--check may only be specified once."),
+        ("zh-CN", "--check 只能指定一次。"),
+    ] {
+        let usage = run_cli(vec![
+            argument(&format!("--language={language}")),
+            argument("config"),
+            argument("fmt"),
+            argument("--check"),
+            argument("--check"),
+        ])?;
+        ensure_equal(
+            usage.status.code(),
+            Some(2),
+            "localized fmt usage exit code",
+        )?;
+        ensure(
+            String::from_utf8_lossy(&usage.stderr).contains(expected),
+            "fmt usage errors must use the selected catalog",
+        )?;
+    }
     Ok(())
 }
 

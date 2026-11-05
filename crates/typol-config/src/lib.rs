@@ -23,9 +23,10 @@ mod value_validation;
 pub use api::{ConfigDiagnosticRedactor, ConfigParser, ConfigValueProcessor};
 pub use diagnostics::{ConfigFailureStage, ConfigParseErrors, ConfigValueErrors};
 pub use document::{
-    ConfigDocument, ConfigEdit, ConfigEditError, ConfigEditErrorKind, ConfigPath,
-    ConfigPathSegment, ConfigReplacement, ConfigSourceCommitError, ConfigSourceExpectation,
-    ConfigSourceRevision, ConfigSourceWriter,
+    ConfigDocument, ConfigEdit, ConfigEditError, ConfigEditErrorKind, ConfigFormatError,
+    ConfigFormatErrorKind, ConfigFormatOptions, ConfigFormatter, ConfigPath, ConfigPathSegment,
+    ConfigReplacement, ConfigSourceCommitError, ConfigSourceExpectation, ConfigSourceRevision,
+    ConfigSourceWriter, FormattedConfig,
 };
 pub use environment::{EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext};
 pub use opeo;

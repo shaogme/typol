@@ -84,14 +84,14 @@ Schema 和 Rust 声明中的字段名及类型必须匹配。[快速上手](docs
 | `typol-model` | Schema 运算符和内建类型的共享定义 |
 | `typol-schema` | 导入、名称和类型解析、静态检查及 Schema 编译 |
 | `typol-semantic` | 编译后的 Schema 模型、约束、表达式程序及求值 |
-| `typol-config` | Schema 指导的配置解析、校验和保留源格式的文档编辑 |
+| `typol-config` | Schema 指导的配置解析、校验、格式化和保留源文本的文档 |
 | `typol-regex` | 有界正则编译器和匹配器 |
 | `typol-core` | 共享值、源码、诊断和执行预算 |
 | `typol-policy` | 共享资源限制策略 |
 | `typol-report` | 本地化诊断报告格式化 |
 | `typol-std` | 可选的文件、进程环境和诊断宿主适配器 |
 | `typol-i18n` | 英文和简体中文消息目录 |
-| `typol-cli` | Schema 与配置检查，以及 Config IR 导出 |
+| `typol-cli` | Schema 与配置检查、`.tconf` 格式化，以及 Config IR 导出 |
 
 ## 按需阅读
 
@@ -100,7 +100,7 @@ Schema 和 Rust 声明中的字段名及类型必须匹配。[快速上手](docs
 | 构建类型化配置加载器，了解核心类型和方法 | [快速上手](docs/src/content/docs/zh-cn/guides/quickstart.md) |
 | 使用导入 Schema、跨字段检查、Serde 或 Config IR | [进阶教程](docs/src/content/docs/zh-cn/guides/advanced.md) |
 | 不依赖标准库使用 Typol | [no_std 指南](docs/src/content/docs/zh-cn/guides/no_std.md) |
-| 从命令行检查文件或导出 Config IR | [CLI 使用指南](docs/src/content/docs/zh-cn/guides/cli.md) |
+| 从命令行检查或格式化文件，或导出 Config IR | [CLI 使用指南](docs/src/content/docs/zh-cn/guides/cli.md) |
 | 查询 Schema 或配置语法 | [Schema DSL](docs/src/content/docs/zh-cn/specification/schema-dsl.md) · [Config DSL](docs/src/content/docs/zh-cn/specification/config-dsl.md) |
 | 了解实现细节 | [Schema 实现](docs/src/content/docs/zh-cn/specification/schema-implementation.md) · [Config 实现](docs/src/content/docs/zh-cn/specification/config-implementation.md) |
 

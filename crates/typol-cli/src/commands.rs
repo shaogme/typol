@@ -5,10 +5,11 @@ use std::{
     process::ExitCode,
 };
 use typol::{
-    ConfigIr, ConfigIrErrorKind, ConfigIrOptions, ConfigIrValueMode, ConfigValue, EmptyEnvironment,
-    LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader, TypolError,
-    TypolOptions,
-    host::{DiagnosticRenderError, RenderOptions},
+    ConfigDocument, ConfigFormatOptions, ConfigFormatter, ConfigIr, ConfigIrErrorKind,
+    ConfigIrOptions, ConfigIrValueMode, ConfigSourceExpectation, ConfigSourceWriter, ConfigValue,
+    EmptyEnvironment, LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader,
+    TypolError, TypolOptions,
+    host::{DiagnosticRenderError, FileConfigSourceWriter, RenderOptions},
     opeo::ErrSlot,
 };
 use typol_i18n::{Translator, t};
@@ -50,6 +51,7 @@ impl Commands {
             Command::SchemaCheck(path) => Self::schema_check(path, translator),
             Command::ConfigCheck(request) => Self::config_check(request, translator),
             Command::ConfigExportIr(request) => Self::config_export_ir(request, translator),
+            Command::ConfigFmt(request) => Self::config_fmt(request, translator),
         }
     }
 
@@ -86,9 +88,15 @@ impl Commands {
     }
 
     fn operation_failure(message: TranslationResult<&'static str>) -> TranslationResult<ExitCode> {
+        Self::report_failure(message, 3)
+    }
+
+    fn report_failure(
+        message: TranslationResult<&'static str>,
+        status: u8,
+    ) -> TranslationResult<ExitCode> {
         let message = message?;
-        Self::write_stderr(message);
-        Ok(ExitCode::from(3))
+        Ok(Self::result_code(status, Self::write_stderr(message)))
     }
 
     fn load_status(errors: &TypolError) -> u8 {
@@ -163,6 +171,47 @@ impl Commands {
         Self::write_ir(&bytes, translator)
     }
 
+    fn config_fmt(request: &ConfigRequest, translator: Translator) -> TranslationResult<ExitCode> {
+        let loaded = match Self::load_schema(request.schema_path()) {
+            Ok(loaded) => loaded,
+            Err(errors) => return Self::load_failure(&errors, translator),
+        };
+        let document = match Self::load_document(&loaded, request) {
+            Ok(document) => document,
+            Err(errors) => return Self::load_failure(&errors, translator),
+        };
+        let mut format_errors = ErrSlot::new();
+        let formatted = match format_errors
+            .try_call(|out| ConfigFormatter::format(&document, ConfigFormatOptions::default(), out))
+        {
+            Ok(formatted) => formatted,
+            Err(_) => return Self::operation_failure(t!("cli.format_error", locale = translator)),
+        };
+        if request.format_check() {
+            if formatted.as_str() == document.source() {
+                return Ok(ExitCode::SUCCESS);
+            }
+            return Self::report_failure(t!("cli.format_check_failed", locale = translator), 1);
+        }
+        let limits = loaded.options().file_input_limits();
+        let max_bytes = loaded
+            .options()
+            .config()
+            .config()
+            .max_source_bytes()
+            .min(limits.max_file_bytes());
+        let mut writer = FileConfigSourceWriter::new(limits.max_path_bytes());
+        match writer.replace_atomically(
+            request.config_path(),
+            ConfigSourceExpectation::ReplaceAny,
+            formatted.as_str().as_bytes(),
+            max_bytes,
+        ) {
+            Ok(_) => Ok(ExitCode::SUCCESS),
+            Err(_) => Self::operation_failure(t!("cli.format_error", locale = translator)),
+        }
+    }
+
     fn load_schema(path: &Path) -> LoadResult<LoadedSchema> {
         let loader = SchemaLoader::new(TypolOptions::default());
         let mut errors = ErrSlot::<TypolError>::new();
@@ -176,6 +225,34 @@ impl Commands {
         match request.environment() {
             EnvironmentMode::Inherit => Self::load_inherited(loaded, request),
             EnvironmentMode::Empty => Self::load_empty(loaded, request),
+        }
+    }
+
+    fn load_document<'loaded>(
+        loaded: &'loaded LoadedSchema,
+        request: &ConfigRequest,
+    ) -> LoadResult<ConfigDocument<'loaded>> {
+        match request.environment() {
+            EnvironmentMode::Inherit => {
+                let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
+                let mut errors = ErrSlot::<TypolError>::new();
+                match errors
+                    .try_call(|out| loaded.read_file(request.config_path(), &mut environment, out))
+                {
+                    Ok(document) => Ok(document),
+                    Err(caught) => Err(Box::new(caught.take())),
+                }
+            }
+            EnvironmentMode::Empty => {
+                let mut environment = EmptyEnvironment;
+                let mut errors = ErrSlot::<TypolError>::new();
+                match errors
+                    .try_call(|out| loaded.read_file(request.config_path(), &mut environment, out))
+                {
+                    Ok(document) => Ok(document),
+                    Err(caught) => Err(Box::new(caught.take())),
+                }
+            }
         }
     }
 

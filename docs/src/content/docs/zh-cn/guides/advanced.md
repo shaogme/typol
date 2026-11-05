@@ -296,6 +296,6 @@ let options = TypolOptions::default().with_config_limits(
 ## 接下来
 
 - 完整多文件应用示例位于仓库的 `examples/showcase`。
-- 通过 [CLI 使用指南](../cli/)校验文件或导出 Config IR 文档。
+- 通过 [CLI 使用指南](../cli/)校验或格式化文件，或导出 Config IR 文档。
 - 阅读 [Schema DSL](../../specification/schema-dsl/) 和 [Config DSL](../../specification/config-dsl/)了解规范性语言行为。
 - 查阅 [Schema 实现](../../specification/schema-implementation/)、[Config 实现](../../specification/config-implementation/) 和 [Config IR v1 参考](../../specification/config-ir/)了解详细约定。

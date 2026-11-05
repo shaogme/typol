@@ -28,11 +28,12 @@ pub mod config {
 
     pub use typol_config::{
         ConfigDocument, ConfigEdit, ConfigEditError, ConfigEditErrorKind, ConfigFailureStage,
+        ConfigFormatError, ConfigFormatErrorKind, ConfigFormatOptions, ConfigFormatter,
         ConfigLimits, ConfigParseErrors, ConfigParseRequest, ConfigParser, ConfigPath,
         ConfigPathSegment, ConfigReplacement, ConfigSourceCommitError, ConfigSourceExpectation,
         ConfigSourceRevision, ConfigSourceWriter, ConfigValidationOptions, ConfigValidationRequest,
-        ConfigValueProcessor, EnvironmentReadContext, NormalizedConfigValue, StreamLimits,
-        ValidatedConfigValue,
+        ConfigValueProcessor, EnvironmentReadContext, FormattedConfig, NormalizedConfigValue,
+        StreamLimits, ValidatedConfigValue,
     };
 }
 

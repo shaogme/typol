@@ -15,6 +15,7 @@ sidebar:
 | --- | --- |
 | 解析 | 值读取增量消费 token，不保留 AST；文档读取还会在额度内保留源文本和解析器生成的值跨度。 |
 | 环境变量 | 只有遇到已授权的 `env(...)` 表达式时，才调用调用方传入的提供器读取环境变量。 |
+| 格式化 | `ConfigFormatter` 使用显式分隔符栈扫描已校验文档，并保留源 token 与注释。 |
 | 限制与错误 | 解析、校验、诊断和执行都有显式资源额度，并通过结构化错误报告失败。 |
 
 本文说明 Typol 当前如何实现 `.tconf` 配置：解析入口、流式词法输入、Schema 指导下的值构造、环境变量读取、约束校验、错误恢复和安全诊断。本文补充[Config DSL 规范](../config-dsl/)及[Schema 实现说明](../schema-implementation/)，不改变 DSL 的词法、语法和语义。
@@ -45,6 +46,7 @@ sidebar:
 | 默认值复制、外来值规范化和实例定位 | `crates/typol-config/src/value_normalization.rs`、`crates/typol-config/src/instance.rs` |
 | 标量、集合、断言和完整树校验 | `crates/typol-config/src/validation.rs`、`crates/typol-config/src/validation/`、`crates/typol-config/src/value_validation.rs` |
 | 诊断、路径裁剪和秘密值隐藏 | `crates/typol-config/src/diagnostics.rs`、`crates/typol-config/src/secret.rs` |
+| 源格式化与词法注释扫描 | `crates/typol-config/src/document.rs`、`document/formatter.rs`、`document/formatter/format_scan.rs` |
 | token 流和 UTF-8 输入 | `crates/typol-syntax/src/input.rs`、`crates/typol-syntax/src/lexer.rs`、`crates/typol-syntax/src/cursor.rs` |
 | 值来源和共享执行额度 | `crates/typol-core/src/value.rs`、`crates/typol-core/src/budget.rs` |
 | 共享资源策略和源码快照额度 | `crates/typol-policy/src/lib.rs`、`crates/typol-core/src/excerpt_limits.rs` |
@@ -67,6 +69,10 @@ ConfigParser::new(schema).parse(request, environment)
 `ConfigParseRequest` 包含可读 `Read`、显示名称和 `ConfigParseOptions`。选项由四部分组成：共享 `ResourceLimits`、配置专属 `ConfigLimits`、执行/工作区 `ExecutionLimits` 和词法流 `StreamLimits`。显示名称仅用于诊断元数据，不是配置文本的一部分。
 
 `ConfigParser::parse_document` 和 `LoadedSchema::read_document` 会在额度内保留源文及 parser 的语义定位索引。`ConfigDocument::write_to` 原样输出保留的文本。`apply_edits` 通过 parser 索引解析带类型的替换、字段/map 项/数组元素插入和删除操作，拒绝重叠源范围，组装一个候选文档，再重解析并校验后提交内存文档。替换会编码目标子树；插入会推断容器换行、缩进和键分隔空格。删除和复合值替换会提取受影响范围内的注释，并把注释字节保留在替换区域。未触及的源范围逐字节不变。编辑器扫描受限的源切片定位分隔符和注释范围，不另建 token/trivia CST。
+
+`ConfigFormatter::format(&document, options, out)` 只格式化成功解析得到的 `ConfigDocument`。它使用显式分隔符栈直接扫描保留的源文，不构造配置 AST，也不重新编码 `ConfigValue`。`FormattedConfig` 独立拥有完整结果，提供只读字符串视图，并可通过 `typol_core::Write` sink 消费写出。原文档及其源位置保持不变。格式化按顺序保留所有非空白源 token 和注释，包括字符串/数值写法和 `env(...)` 表达式。非空容器按每行一个条目展开，使用 4 空格缩进并添加尾逗号；空容器保持紧凑。枚举单值载荷和 `env(...)` 括号保持紧凑，其中的容器除外。输入采用 LF 或 CRLF 时保留对应风格，输出以相应换行符结束，并满足幂等性。
+
+`ConfigFormatOptions` 只提供输出字节、格式化工作区和嵌套深度额度，不提供会产生多种规范格式的样式选项。格式化还受文档的源码和构造文本额度约束；输出、栈存储和扫描工作计入文档共享执行预算。结果写入拥有型计费缓冲区，只有扫描、范围检查和输出计量全部成功后才返回。结构错误、资源超限、分配失败和后续输出 sink 错误保持不同类别；格式化中断时不会把部分缓冲区作为成功结果返回。
 
 `LoadedSchema::read_file` 返回 `ConfigDocument`；只需要原有已校验值结果时使用 `read_file_value`。启用 `std` 后，`LoadedSchema::write_file` 使用文档快照期望值，并同时限制源字节和文件输入字节。普通文件系统不能把按字节比较与路径替换作为一个原子操作，因此本地 adapter 对 `ExactSnapshot` 返回 `AtomicReplaceUnsupported`。新目标使用 `write_file_with_expectation` 和 `MustBeAbsent`；有意覆盖时显式选择 `ReplaceAny`。Unix 通过同目录硬链接原子创建新目标；Windows 使用同卷且不允许覆盖的写穿透移动，两者都不会覆盖并发创建的目标。`ReplaceAny` 使用原子替换；Unix 在提交后同步父目录，若无法确认持久性则返回专门错误。Windows 使用同卷写穿透移动。no_std 调用方为自己的目标实现 `ConfigSourceWriter`，并负责提供所选期望值要求的原子语义。
 
@@ -175,6 +181,9 @@ Schema 编译期为授权名称建立规范化槽位；同名授权共享一个�
 | `ConfigLimits::max_environment_entries` | 本次调用缓存的不同授权环境名称数量 |
 | `ConfigLimits::max_environment_bytes` | 本次调用缓存的环境原始字节总量 |
 | `ConfigLimits::max_constructed_text_bytes` | 本次调用新构造/复制文本的累计额度 |
+| `ConfigFormatOptions::max_output_bytes` | 格式化输出字节数，并受文档源码与构造文本额度进一步限制 |
+| `ConfigFormatOptions::max_workspace_bytes` | formatter 帧存储的逻辑额度；实际分配也计入共享执行工作区 |
+| `ConfigFormatOptions::max_nesting_depth` | formatter 遍历的最大分隔符深度 |
 | `ConfigLimits::max_display_name_bytes` | 诊断显示名称的长度上限 |
 | `StreamLimits::chunk_bytes` | 流式输入窗口大小；`StreamLimits::try_new` 在限制构造时拒绝零值 |
 | `StreamLimits::max_token_bytes` | 单个 token 的源文本长度上限 |
@@ -230,13 +239,13 @@ let limits = ConfigLimits::default()
 
 `SchemaLoader` 持有编译 Schema 和源名称。文件配置通过 `typol_std::FileConfigInput` 打开并由词法器按需读取；标准 I/O reader 配置通过 `ReadSource` 将 `std::io::Read` 适配为 `typol_core::Read`。这些适配器负责宿主 I/O 和有限错误分类，配置语法及 Schema 校验仍由 `typol-config` 完成。
 
-启用 `typol` 的 `config-ir` feature 后，Rust 调用方可通过 `ConfigIr::serialize` 导出 Config IR v1，格式定义见 [Config IR v1 规范](../config-ir/)。默认模式先补齐默认值并执行完整 Schema 校验；需要跳过约束校验时，必须显式选择 `AsProvided`。类型和值遍历、秘密标记、确定性排序、输出/排序工作区/嵌套深度额度及序列化错误分类由 facade 实现；输出超限与排序工作区超限使用独立错误类别。默认嵌套深度为 128，可由 `ConfigIrOptions` 降低，序列化器不会允许提高该上限。`typol-cli` 在配置读取阶段已完成校验，因此以 `AsProvided` 编码已校验值，避免重复校验；它只选择环境模式、加载值、调用该 API 并将完整结果写入 stdout。命令用法见 [CLI 使用指南](../../guides/cli/)。IR 中 `secret: true` 仍保留对应真实值，调用方须按敏感数据处理。
+启用 `typol` 的 `config-ir` feature 后，Rust 调用方可通过 `ConfigIr::serialize` 导出 Config IR v1，格式定义见 [Config IR v1 规范](../config-ir/)。默认模式先补齐默认值并执行完整 Schema 校验；需要跳过约束校验时，必须显式选择 `AsProvided`。类型和值遍历、秘密标记、确定性排序、输出/排序工作区/嵌套深度额度及序列化错误分类由 facade 实现；输出超限与排序工作区超限使用独立错误类别。默认嵌套深度为 128，可由 `ConfigIrOptions` 降低，序列化器不会允许提高该上限。`typol-cli` 在配置读取阶段已完成校验，因此以 `AsProvided` 编码已校验值，避免重复校验；它只选择环境模式、加载值、调用该 API 并将完整结果写入 stdout。其 `config fmt` 命令则读取 `ConfigDocument`、格式化保留源文并原子替换同一文件；`--check` 只比较格式化结果，不写文件。它不会把环境解析结果或补齐的默认值序列化回源文。命令用法见 [CLI 使用指南](../../guides/cli/)。IR 中 `secret: true` 仍保留对应真实值，调用方须按敏感数据处理。
 
 `TypedSchema::deserialize` 先复用同一个配置解析和完整校验，再将拥有型值转换为 Rust 类型。`typol` 编解码器和上下文 serde 对外来/序列化值调用 `ConfigValueProcessor::validate_with_budget`，再编码或解码；绑定、配置解析和转换可共享外层执行余额。没有 Schema 上下文的普通 serde trait 调用不属于此配置校验保证。
 
 ## 10. 验收与维护
 
-配置实现的测试按职责分布在 `crates/typol-config/src/parser/tests/`、`src/value_validation/tests.rs` 及 `crates/typol-config/tests/`。维护解析器时应覆盖流式分块、词法/语法错误、嵌套恢复、字段默认与可选补齐、枚举载荷、环境缓存/回退/转换、标量和集合规则、完整树断言、秘密路径裁剪、输入位置快照、执行/工作区额度以及分配失败原子性。外围 `typol` 与 `typol-std` 测试覆盖文件、reader、进程环境、类型绑定和安全诊断集成。
+配置实现的测试按职责分布在 `crates/typol-config/src/parser/tests/`、`src/value_validation/tests.rs` 及 `crates/typol-config/tests/`。维护解析器时应覆盖流式分块、词法/语法错误、嵌套恢复、字段默认与可选补齐、枚举载荷、环境缓存/回退/转换、标量和集合规则、完整树断言、秘密路径裁剪、输入位置快照、执行/工作区额度以及分配失败原子性。formatter 测试覆盖 token/注释保留、各类分隔符、env 与枚举表达式、LF/CRLF、尾随注释、幂等性、输出/工作区额度以及失败时不返回半成品。CLI 测试覆盖原子原地替换、重复运行幂等、只读检查模式、本地化帮助和用法错误，以及格式化失败。外围 `typol` 与 `typol-std` 测试覆盖文件、reader、进程环境、类型绑定和安全诊断集成。
 
 若实现行为与 Config DSL 或 Schema DSL 规范冲突，应先修订对应语义规范或决策记录，再调整实现；不得由配置 parser 或宿主适配器私自改变 DSL 语义。
 
