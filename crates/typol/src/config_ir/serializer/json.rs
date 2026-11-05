@@ -8,19 +8,19 @@ use serde::{
 #[derive(Clone, Copy, Debug)]
 pub(super) struct JsonError;
 
-pub(super) struct JsonSerializer<'buffer> {
-    output: &'buffer mut BoundedBuffer,
+pub(super) struct JsonSerializer<'buffer, 'sink> {
+    output: &'buffer mut BoundedBuffer<'sink>,
     pretty: bool,
     depth: usize,
 }
 
-pub(super) struct Compound<'serializer, 'buffer> {
-    serializer: &'serializer mut JsonSerializer<'buffer>,
+pub(super) struct Compound<'serializer, 'buffer, 'sink> {
+    serializer: &'serializer mut JsonSerializer<'buffer, 'sink>,
     elements: usize,
 }
 
-impl<'buffer> JsonSerializer<'buffer> {
-    pub(super) fn new(output: &'buffer mut BoundedBuffer, pretty: bool) -> Self {
+impl<'buffer, 'sink> JsonSerializer<'buffer, 'sink> {
+    pub(super) fn new(output: &'buffer mut BoundedBuffer<'sink>, pretty: bool) -> Self {
         Self {
             output,
             pretty,
@@ -146,15 +146,15 @@ impl ser::Error for JsonError {
     }
 }
 
-impl<'serializer, 'buffer> Serializer for &'serializer mut JsonSerializer<'buffer> {
+impl<'serializer, 'buffer, 'sink> Serializer for &'serializer mut JsonSerializer<'buffer, 'sink> {
     type Ok = ();
     type Error = JsonError;
-    type SerializeSeq = Compound<'serializer, 'buffer>;
+    type SerializeSeq = Compound<'serializer, 'buffer, 'sink>;
     type SerializeTuple = Impossible<(), JsonError>;
     type SerializeTupleStruct = Impossible<(), JsonError>;
     type SerializeTupleVariant = Impossible<(), JsonError>;
     type SerializeMap = Impossible<(), JsonError>;
-    type SerializeStruct = Compound<'serializer, 'buffer>;
+    type SerializeStruct = Compound<'serializer, 'buffer, 'sink>;
     type SerializeStructVariant = Impossible<(), JsonError>;
 
     fn serialize_bool(self, value: bool) -> Result<Self::Ok, Self::Error> {
@@ -331,7 +331,7 @@ impl<'serializer, 'buffer> Serializer for &'serializer mut JsonSerializer<'buffe
     }
 }
 
-impl SerializeSeq for Compound<'_, '_> {
+impl SerializeSeq for Compound<'_, '_, '_> {
     type Ok = ();
     type Error = JsonError;
 
@@ -350,7 +350,7 @@ impl SerializeSeq for Compound<'_, '_> {
     }
 }
 
-impl SerializeStruct for Compound<'_, '_> {
+impl SerializeStruct for Compound<'_, '_, '_> {
     type Ok = ();
     type Error = JsonError;
 

@@ -1,8 +1,9 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use typol::{
-    ConfigInput, Environment, LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits,
-    SchemaLoader, Typol, TypolError, TypolOptions,
+    Environment, LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader, Typol,
+    TypolError, TypolOptions,
+    io::ReadRequest,
     opeo::{OResult, Out},
 };
 
@@ -151,11 +152,7 @@ pub fn load_demo_config<'slot, 'borrow>(
     let loaded = load_schema(out.reborrow())?;
     let bound = loaded.bind::<ShowcaseConfig>(out.reborrow())?;
     let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
-    bound.read(
-        ConfigInput::file(config_path().as_path()),
-        &mut environment,
-        out,
-    )
+    bound.read_file(config_path().as_path(), &mut environment, out)
 }
 
 pub fn load_demo_config_with_environment<'slot, 'borrow>(
@@ -163,8 +160,8 @@ pub fn load_demo_config_with_environment<'slot, 'borrow>(
     mut out: Out<'slot, 'borrow, TypolError>,
 ) -> OResult<'slot, ShowcaseConfig> {
     let loaded = load_schema(out.reborrow())?;
-    loaded.bind::<ShowcaseConfig>(out.reborrow())?.read(
-        ConfigInput::file(config_path().as_path()),
+    loaded.bind::<ShowcaseConfig>(out.reborrow())?.read_file(
+        config_path().as_path(),
         environment,
         out.reborrow(),
     )
@@ -177,7 +174,7 @@ pub fn load_text_with_environment<'slot, 'borrow>(
 ) -> OResult<'slot, ShowcaseConfig> {
     let loaded = load_schema(out.reborrow())?;
     loaded.bind::<ShowcaseConfig>(out.reborrow())?.read(
-        ConfigInput::text(text).named("内存配置"),
+        ReadRequest::from_text(text).named("内存配置"),
         environment,
         out.reborrow(),
     )

@@ -1,19 +1,19 @@
-use super::{FileConfigInput, FileSchemaInput, ReadSource};
+use super::{FileConfigInput, FileSchemaInput, IoWriteSink, ReadSource};
 use crate::{FileConfigInputLimits, HostError, HostErrorKind, HostOperation};
 use opeo::ErrSlot;
 use std::{
     env::temp_dir,
     error::Error,
     fs::{OpenOptions, remove_file, rename, write},
-    io::{self, Read, Write},
+    io::{self, ErrorKind, Read as IoRead, Write as IoWrite},
     path::{Path, PathBuf},
     process::id,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
 use typol_core::{
-    BudgetError, ByteSource, ExecutionBudget, ExecutionLimits, SourceId, SourceReadError,
-    SourceReadErrorKind,
+    BudgetError, ExecutionBudget, ExecutionLimits, Read as SourceRead, SourceId, SourceReadError,
+    SourceReadErrorKind, Write as SinkWrite, WriteError,
 };
 
 #[cfg(target_os = "linux")]
@@ -154,7 +154,7 @@ fn read_schema_input(
 }
 
 fn new_read_source<'reader>(
-    reader: &'reader mut dyn Read,
+    reader: &'reader mut dyn IoRead,
     budget: &ExecutionBudget,
 ) -> Result<ReadSource<'reader>, SourceReadError> {
     let mut errors = ErrSlot::<SourceReadError>::new();
@@ -170,6 +170,85 @@ fn read_source(source: &mut ReadSource<'_>, output: &mut [u8]) -> Result<usize, 
         Ok(count) => Ok(count),
         Err(caught) => Err(caught.take()),
     }
+}
+
+struct ShortWriter {
+    bytes: Vec<u8>,
+    interrupted: bool,
+}
+
+impl IoWrite for ShortWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if !self.interrupted {
+            self.interrupted = true;
+            return Err(io::Error::from(ErrorKind::Interrupted));
+        }
+        let count = bytes.len().min(2);
+        let written = bytes
+            .get(..count)
+            .ok_or_else(|| io::Error::other("write count exceeded the input slice"))?;
+        self.bytes.extend_from_slice(written);
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct ZeroWriter;
+
+impl IoWrite for ZeroWriter {
+    fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+        Ok(0)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct FailingWriter;
+
+impl IoWrite for FailingWriter {
+    fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+        Err(io::Error::from(ErrorKind::BrokenPipe))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn io_write_sink_retries_interrupted_and_short_writes() {
+    let mut writer = ShortWriter {
+        bytes: Vec::new(),
+        interrupted: false,
+    };
+    let mut sink = IoWriteSink::new(&mut writer);
+    assert_eq!(SinkWrite::write_all(&mut sink, b"abcdef"), Ok(()));
+    assert_eq!(writer.bytes.as_slice(), b"abcdef");
+}
+
+#[test]
+fn io_write_sink_rejects_zero_progress() {
+    let mut writer = ZeroWriter;
+    let mut sink = IoWriteSink::new(&mut writer);
+    assert_eq!(
+        SinkWrite::write_all(&mut sink, b"data"),
+        Err(WriteError::HostFailure)
+    );
+}
+
+#[test]
+fn io_write_sink_maps_host_errors_to_a_finite_category() {
+    let mut writer = FailingWriter;
+    let mut sink = IoWriteSink::new(&mut writer);
+    assert_eq!(
+        SinkWrite::write_all(&mut sink, b"data"),
+        Err(WriteError::HostFailure)
+    );
 }
 
 #[test]
@@ -287,7 +366,7 @@ fn file_schema_input_rejects_metadata_size_above_limit() -> Result<(), Box<dyn E
 
 struct FailingReader;
 
-impl Read for FailingReader {
+impl IoRead for FailingReader {
     fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -298,7 +377,7 @@ impl Read for FailingReader {
 
 struct OverreportingReader;
 
-impl Read for OverreportingReader {
+impl IoRead for OverreportingReader {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
         Ok(output.len() + 1)
     }

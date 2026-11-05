@@ -1,7 +1,7 @@
 use crate::{
     BindingTestSupport,
     diagnostics::CodecErrors,
-    options::{CodecOptions, ConversionLimits},
+    options::{ConversionLimits, WriteOptions},
     serde::Model as OpeoModel,
     session::SessionBudget,
     test_support::{TestOpeo, TestOpeoOutcome},
@@ -21,7 +21,7 @@ pub(crate) struct SerdeTestSupport;
 
 impl SerdeTestSupport {
     pub(crate) fn session() -> TestResult<SessionBudget> {
-        TestOpeo::value(|out| SessionBudget::codec(CodecOptions::default(), out))
+        TestOpeo::value(|out| SessionBudget::codec(WriteOptions::default(), out))
     }
 
     pub(crate) fn new_session(
@@ -178,7 +178,7 @@ impl SerdeTestSupport {
     }
 
     pub(crate) fn allocation_session() -> TestResult<Option<SessionBudget>> {
-        match TestOpeo::outcome(|out| SessionBudget::codec(CodecOptions::default(), out)) {
+        match TestOpeo::outcome(|out| SessionBudget::codec(WriteOptions::default(), out)) {
             TestOpeoOutcome::Value(session) => Ok(Some(session)),
             TestOpeoOutcome::Error(BudgetError::Allocation) => Ok(None),
             TestOpeoOutcome::Error(error) => {

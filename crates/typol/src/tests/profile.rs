@@ -6,7 +6,7 @@ use crate::{
         DescribeContext, DescriptorNode, DescriptorProvider, TypeDescriptor, TypeShape, Typol,
     },
     diagnostics::{CodecErrors, CodecStage, Failure},
-    options::{BindOptions, CodecOptions, ConversionLimits},
+    options::{BindOptions, ConversionLimits, WriteOptions},
     session::SessionBudget,
     test_support::{TestOpeo, TestOpeoOutcome},
 };
@@ -224,10 +224,11 @@ fn wide_public_pipeline_limits_and_allocation_failures_are_atomic() -> TestResul
     })?;
     TestAssertions::assert_atomic_allocations(|| {
         allocation_codec(TestOpeo::outcome(|out| {
-            binding.serialize(&value, CodecOptions::default(), out)
+            binding.serialize_to_string(&value, WriteOptions::default(), out)
         }))
     })?;
-    let text = codec_value(|out| binding.serialize(&value, CodecOptions::default(), out))?;
+    let text =
+        codec_value(|out| binding.serialize_to_string(&value, WriteOptions::default(), out))?;
     TestAssertions::assert_atomic_allocations(|| {
         let mut request_input = SliceSource::new(text.as_bytes());
         let request = ConfigParseRequest::new(
@@ -258,7 +259,7 @@ fn wide_name_lookup_succeeds_with_defaults_and_preserves_shared_step_boundary() 
         TypedSchema::<Wide<2048>>::bind_trusted(&schema, BindOptions::default(), out)
     })?;
     let text = codec_value(|out| {
-        binding.serialize(&Wide { values: [42; 2048] }, CodecOptions::default(), out)
+        binding.serialize_to_string(&Wide { values: [42; 2048] }, WriteOptions::default(), out)
     })?;
     let run = |steps| {
         codec_succeeds(|out| {
@@ -320,7 +321,7 @@ fn wide_decoding_steps<const N: usize>() -> TestResult<usize> {
     let expected = Wide {
         values: array::from_fn(|index| index as u64),
     };
-    let session = budget_value(|out| SessionBudget::codec(CodecOptions::default(), out))?;
+    let session = budget_value(|out| SessionBudget::codec(WriteOptions::default(), out))?;
     let tree = codec_value(|out| {
         Conversion::encode(
             &binding,
@@ -331,7 +332,7 @@ fn wide_decoding_steps<const N: usize>() -> TestResult<usize> {
         )
     })?
     .into_value();
-    let session = budget_value(|out| SessionBudget::codec(CodecOptions::default(), out))?;
+    let session = budget_value(|out| SessionBudget::codec(WriteOptions::default(), out))?;
     let initial = session.execution().workspace_bytes();
     let actual = codec_value(|out| {
         Conversion::decode(&binding, &tree, &session, ConversionLimits::default(), out)

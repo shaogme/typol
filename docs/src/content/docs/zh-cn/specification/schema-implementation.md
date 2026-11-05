@@ -51,13 +51,13 @@ Schema 实现分为四层：
 
 ### 2.1 字节流与 token
 
-Schema 输入必须是有效 UTF-8。词法约定以[Schema DSL §1](../schema-dsl/#1-词法规则)为准。`ByteSource` 按顺序提供字节，短读不代表结束，零字节表示 EOF；parser 不要求输入可重放，也不保存完整源文本。Lexer 按需扫描，不生成完整 token 数组；`TokenCursor` 最多缓存当前事件和一个前瞻事件。token 保存 `SourceSpan`（源 ID 与 UTF-8 字节范围），标识符/数字可读取原文，字符串提供解码内容。EOF 的跨度是源末尾的空范围。
+Schema 输入必须是有效 UTF-8。词法约定以[Schema DSL §1](../schema-dsl/#1-词法规则)为准。`Read` 按顺序提供字节，短读不代表结束，零字节表示 EOF；parser 不要求输入可重放，也不保存完整源文本。Lexer 按需扫描，不生成完整 token 数组；`TokenCursor` 最多缓存当前事件和一个前瞻事件。token 保存 `SourceSpan`（源 ID 与 UTF-8 字节范围），标识符/数字可读取原文，字符串提供解码内容。EOF 的跨度是源末尾的空范围。
 
-标识符和数字 token 使用受预算约束的拥有缓冲；Schema parser 借用 token 文本并复制到 AST 文本池。字符串始终使用受预算约束的拥有型解码缓冲，无论原文是否含转义；Schema parser 将解码缓冲直接移交 AST。共享 lexer 通过可复用窗口读取 `ByteSource`，不会向 token 暴露稳定的源文本切片。token、AST 的调试输出避免打印字面值，只暴露种类、跨度和长度等信息。
+标识符和数字 token 使用受预算约束的拥有缓冲；Schema parser 借用 token 文本并复制到 AST 文本池。字符串始终使用受预算约束的拥有型解码缓冲，无论原文是否含转义；Schema parser 将解码缓冲直接移交 AST。共享 lexer 通过可复用窗口读取 `Read`，不会向 token 暴露稳定的源文本切片。token、AST 的调试输出避免打印字面值，只暴露种类、跨度和长度等信息。
 
 ### 2.2 Schema AST
 
-`SchemaParser::parse(source_id, byte_source, options, budget)` 接收 `ByteSource<Diagnostic>` 并使用统一的 `SchemaParseOptions` 配置 `SyntaxLimits` 与 `StreamLimits`；`parse_str` 只将字符串包装为 `SliceSource`。需要后续源位置查询时使用 `parse_with_positions`，成功结果同时拥有 `SchemaAst` 和预算化 `SourcePositionIndex`。位置索引记录词法 token 起止端点的字节偏移、行号和 Unicode 标量列号，不保留源字节；EOF token 提供实际源长度及 EOF 位置。parser 不预读或缓存整份输入；来源上限在读取期间约束输入，EOF token 确认后的实际字节偏移用于 `SchemaAst::span()`，AST 存储也在成功完成时将跨度边界收紧到该长度。诊断初始化和 EOF 未知时的通用锚点使用当前已知位置，EOF 语法错误使用 EOF token 的精确跨度。默认调用可使用 `SchemaParseOptions::default()`。成功时返回 AST；词法或语法错误返回非空 `SyntaxErrors`，不会返回可被误用的部分 AST。parser 在顶层声明、模块成员、字段和变体边界的可靠同步点继续收集后续独立错误；恢复循环与 parser 的 token 访问共用 `ExecutionBudget`，资源耗尽、分配失败和内部错误等终止错误会停止解析。
+`SchemaParser::parse(source_id, byte_source, options, budget)` 接收 `Read<Diagnostic>` 并使用统一的 `SchemaParseOptions` 配置 `SyntaxLimits` 与 `StreamLimits`；`parse_str` 只将字符串包装为 `SliceSource`。需要后续源位置查询时使用 `parse_with_positions`，成功结果同时拥有 `SchemaAst` 和预算化 `SourcePositionIndex`。位置索引记录词法 token 起止端点的字节偏移、行号和 Unicode 标量列号，不保留源字节；EOF token 提供实际源长度及 EOF 位置。parser 不预读或缓存整份输入；来源上限在读取期间约束输入，EOF token 确认后的实际字节偏移用于 `SchemaAst::span()`，AST 存储也在成功完成时将跨度边界收紧到该长度。诊断初始化和 EOF 未知时的通用锚点使用当前已知位置，EOF 语法错误使用 EOF token 的精确跨度。默认调用可使用 `SchemaParseOptions::default()`。成功时返回 AST；词法或语法错误返回非空 `SyntaxErrors`，不会返回可被误用的部分 AST。parser 在顶层声明、模块成员、字段和变体边界的可靠同步点继续收集后续独立错误；恢复循环与 parser 的 token 访问共用 `ExecutionBudget`，资源耗尽、分配失败和内部错误等终止错误会停止解析。
 
 `SchemaAst` 由分表节点存储和拥有型文本缓冲持有，不借用输入源。公开节点是只能通过所属 AST 读取的只读视图；节点、ID 和存储表不可由调用方伪造。AST 保留：
 
@@ -80,7 +80,7 @@ Schema parser 从 `SchemaLimits::syntax()` 读取 `SyntaxLimits`：解析深度�
 
 ### 3.1 编译入口
 
-通用/no_std 调用方使用 `SchemaCompiler::new(SchemaCompileOptions)` 建立一次性会话。需要导入时调用 `compile(root, resolver, observer)`；不含 `extern mod` 的内存源可直接调用 `compile_without_imports(root)`，该入口遇到导入时会给出明确诊断。需要登记源名称时使用 `compile_without_imports_with_observer`。`SchemaSource::from_source` 接收一次性 `ByteSource<SourceReadError>`，`from_str` 为内存字符串提供便捷适配；源身份按字节精确比较，但不写入编译产物。源对象不能复制，loader 消费后输入不可复用。可选 `SchemaCompileContext` 将根读取、resolver 和编译各阶段绑定到同一调用余额。
+通用/no_std 调用方使用 `SchemaCompiler::new(SchemaCompileOptions)` 建立一次性会话。需要导入时调用 `compile(root, resolver, observer)`；不含 `extern mod` 的内存源可直接调用 `compile_without_imports(root)`，该入口遇到导入时会给出明确诊断。需要登记源名称时使用 `compile_without_imports_with_observer`。`SchemaSource::from_source` 接收一次性 `Read<SourceReadError>`，`from_str` 为内存字符串提供便捷适配；源身份按字节精确比较，但不写入编译产物。源对象不能复制，loader 消费后输入不可复用。可选 `SchemaCompileContext` 将根读取、resolver 和编译各阶段绑定到同一调用余额。
 
 `SchemaResolver::resolve` 接收当前源身份、单段模块名、剩余源字节额度和编译上下文，返回下一份 Schema 源或有限的 `ResolverError`。导入者负责如何映射模块名到文件/内存源。可选 `SourceObserver` 按源登记身份到 `SourceId` 的关联，供宿主保存可读源名称；身份重复时不会重复登记。
 
@@ -209,7 +209,7 @@ Schema 错误由 `SchemaCompileErrors` 以非空集合或不需分配的内联�
 
 文本解析、外来 `ConfigValue` 规范化和 Rust 序列化使用共享的完整树 Schema 校验入口。Rust 值不能跳过字段/集合约束或完整树断言；序列化输出按 Schema 字段顺序和 map 解码键序构造。上下文 serde 方法在绑定后使用同一验证路径；无 Schema 上下文的普通 serde trait 调用不承诺验证实际 `.tschem`。
 
-`BoundSchema::write(value, options, out)` 和受 feature 控制的 `write_serde` 使用 `WriteOptions`；`WriteOptions::default()` 选择紧凑格式，并在调用方未显式覆盖时继承加载 Schema 的转换额度。`with_pretty(true)` 会将非空结构体、map 和数组展开为两空格缩进的多行文本，每行一个条目并带尾逗号；空容器仍保持内联。`CodecOptions::with_pretty` 为 `TypedSchema::serialize` 和 `serialize_serde` 提供相同选择。格式空白会计入输出和执行额度；编码器仍使用迭代路径，失败时不会返回部分文本。输出末尾没有换行，且仍包含 `@secret` 的实际值。
+`BoundSchema::write(value, sink, options, out)` 和受 feature 控制的 `write_serde` 使用 `WriteOptions`；`WriteOptions::default()` 选择紧凑格式，并在调用方未显式覆盖时继承加载 Schema 的转换额度。`with_pretty(true)` 会将非空结构体、map 和数组展开为两空格缩进的多行文本，每行一个条目并带尾逗号；空容器仍保持内联。`TypedSchema::serialize` 和 `serialize_serde` 使用相同选项并写入调用方提供的 sink。格式空白会计入输出和执行额度；编码器仍使用迭代路径。写出前会完成转换和完整 Schema 校验；sink 或输出额度错误可能留下已写入的前缀。输出末尾没有换行，且仍包含 `@secret` 的实际值。
 
 ### Serde 桥接支持矩阵
 
@@ -239,7 +239,7 @@ Serde 在读取结构体字段名和枚举变体名时会内部使用 `deseriali
 
 `typol-std` 提供 `FileSchemaResolver`/`FileSchemaCompiler` 与 `ProcessEnvironment` 等标准库适配。`SchemaLoader` 和 `LoadedSchema` 组织 Schema 加载、源名称、类型绑定和配置读取；核心 parser/compiler 不调用文件 API、`std::env` 或终端输出。
 
-加载 facade 在 `no_std + alloc` 和 `std` 构建中使用同一组 `SchemaLoader`、`LoadedSchema`、`BoundSchema`、`ConfigInput`、`TypolError` 与 `TypolStage` 类型。共有读取入口显式接收 `Environment`；文件和 reader 输入及进程环境快捷入口仅由宿主适配器提供。
+加载 facade 在 `no_std + alloc` 和 `std` 构建中使用同一组 `SchemaLoader`、`LoadedSchema`、`BoundSchema`、`ReadRequest`、`TypolError` 与 `TypolStage` 类型。共有读取入口显式接收 `Environment`；文件和 reader 来源及进程环境快捷入口仅由宿主适配器提供。
 
 ## 8. 安全和数据处理要求
 

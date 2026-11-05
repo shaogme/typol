@@ -1,12 +1,10 @@
 use opeo::{ErrSlot, OResult, Out};
-use typol_core::{
-    ByteSource, Diagnostic, SourceCapture, SourceId, SourceReadError, SourceSpan, Span,
-};
+use typol_core::{Diagnostic, Read, SourceCapture, SourceId, SourceReadError, SourceSpan, Span};
 
-use crate::{diagnostics::EmergencyDiagnostics, resolver::SchemaInput, session::CompileBudget};
+use crate::{SchemaSource, diagnostics::EmergencyDiagnostics, session::CompileBudget};
 
 pub(super) struct BoundedSource<'a> {
-    source: &'a mut dyn ByteSource<SourceReadError>,
+    source: &'a mut dyn Read<SourceReadError>,
     budget: &'a mut CompileBudget,
     capture: &'a mut SourceCapture,
     source_id: SourceId,
@@ -17,7 +15,7 @@ pub(super) struct BoundedSource<'a> {
 
 impl BoundedSource<'_> {
     pub(super) fn new<'a>(
-        source: &'a mut dyn ByteSource<SourceReadError>,
+        source: &'a mut dyn Read<SourceReadError>,
         budget: &'a mut CompileBudget,
         capture: &'a mut SourceCapture,
         source_id: SourceId,
@@ -48,7 +46,7 @@ impl BoundedSource<'_> {
     }
 }
 
-impl ByteSource<Diagnostic> for BoundedSource<'_> {
+impl Read<Diagnostic> for BoundedSource<'_> {
     fn read<'slot>(
         &mut self,
         output: &mut [u8],
@@ -101,7 +99,7 @@ impl ByteSource<Diagnostic> for BoundedSource<'_> {
                     }
                 }
                 self.capture.invalidate();
-                return Err(out.reborrow().fail(SchemaInput::source_read_diagnostic(
+                return Err(out.reborrow().fail(SchemaSource::source_read_diagnostic(
                     error, source_id, offset,
                 )));
             }

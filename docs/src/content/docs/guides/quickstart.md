@@ -67,7 +67,7 @@ Put this in `src/main.rs`:
 use std::{path::Path, process::ExitCode};
 
 use typol::{
-    ConfigInput, EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
+    EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
     host::{DiagnosticRenderError, Language, RenderOptions, Translator},
     opeo::ErrSlot,
 };
@@ -89,11 +89,7 @@ fn main() -> ExitCode {
             .compile_file(Path::new("service.tschem"), out.reborrow())?;
         let binding = loaded.bind::<ServiceConfig>(out.reborrow())?;
         let mut environment = EmptyEnvironment;
-        let config = binding.read(
-            ConfigInput::file(Path::new("service.tconf")),
-            &mut environment,
-            out,
-        )?;
+        let config = binding.read_file(Path::new("service.tconf"), &mut environment, out)?;
 
         println!("{config:#?}");
         Ok(())

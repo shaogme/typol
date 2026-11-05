@@ -27,7 +27,7 @@ typol = { version = "0.1", default-features = false }
 
 即使启用 `std` feature，facade 自身仍以 `no_std` 方式编译；`std` 为 API 增加宿主适配器。`no_std` 可执行程序还必须由应用提供平台运行时和全局分配器，Typol 不提供这些组件。
 
-启用 `config-ir` 后，可以在不启用 `std` 时序列化内存中的 `ConfigValue`。返回值是由 `alloc` 支持的拥有型 `Vec<u8>`：
+启用 `config-ir` 后，可以在不启用 `std` 时将内存中的 `ConfigValue` 写入任意 `typol::io::Write` sink：
 
 ```rust
 #![no_std]
@@ -44,7 +44,9 @@ fn export_ir(
     schema: &CompiledSchema,
     value: ConfigValue,
 ) -> Result<Vec<u8>, ConfigIrError> {
-    ConfigIr::serialize(schema, value, ConfigIrOptions::default())
+    let mut output = Vec::new();
+    ConfigIr::serialize_to(schema, value, ConfigIrOptions::default(), &mut output)?;
+    Ok(output)
 }
 ```
 
@@ -61,7 +63,8 @@ extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
 use typol::{
-    ConfigInput, EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
+    EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
+    io::{ReadRequest, SliceSource},
     opeo::{ErrSlot, OResult, Out},
 };
 
@@ -88,7 +91,8 @@ fn read_config<'slot>(out: Out<'slot, '_, TypolError>) -> OResult<'slot, Service
     )?;
     let binding = loaded.bind::<ServiceConfig>(out.reborrow())?;
     let mut environment = EmptyEnvironment;
-    binding.read(ConfigInput::text(CONFIG_TEXT), &mut environment, out)
+    let source = SliceSource::new(CONFIG_TEXT.as_bytes());
+    binding.read(ReadRequest::new(source, "embedded-config"), &mut environment, out)
 }
 
 fn load_service() -> Result<ServiceConfig, TypolError> {
@@ -107,10 +111,10 @@ fn load_service() -> Result<ServiceConfig, TypolError> {
 内存 API 将宿主访问留给应用处理：
 
 - `SchemaLoader::compile_text` 用于编译不含 `extern mod` 导入的 Schema。若要从内存或打包资源解析导入，请实现 `SchemaResolver` 并将其传给 `SchemaLoader::compile_with_resolver`。由 `SchemaResolver` 决定如何取得源；Typol 在此路径中不会打开文件。
-- `ConfigInput::text` 读取字符串，`ConfigInput::bytes` 通过调用方提供的 `ByteSource` 读取字节。`LoadedSchema::read_value` 和 `BoundSchema::read` 都要求显式传入 `Environment` 提供器。
+- `ReadRequest` 携带调用方提供的 `Read` 来源及显示名称。`SliceSource` 可适配文本或字节切片；`LoadedSchema::read_value` 和 `BoundSchema::read` 都显式接收 `Environment` 提供器。
 - 如果配置不使用环境表达式，可使用 `EmptyEnvironment`。若要读取 `@env` 表达式，请实现 `Environment`，从应用选定的数据源取值。no_std 构建不会自动读取进程环境变量。
 
-启用 `std` 后，同一加载器和读取方法还可使用 `compile_file`、`ConfigInput::file`、`ConfigInput::reader` 和 `ProcessEnvironment`。共有输入与宿主输入的差异见[Config 实现说明](../../specification/config-implementation/)。
+启用 `std` 后，同一加载器还可使用 `compile_file`、`FileConfigInput`、`ReadSource` 和 `ProcessEnvironment`。共有输入与宿主输入的差异见[Config 实现说明](../../specification/config-implementation/)。
 
 ## 考虑集合绑定
 

@@ -27,7 +27,10 @@ pub use diagnostic::{
 pub use excerpt_capture::{SecretRange, SourceCapture};
 pub use excerpt_limits::ExcerptLimits;
 pub use excerpts::{ExcerptStatus, SourceExcerpt, SourceExcerptSet};
-pub use input::{ByteSource, SliceSource, SourceReadError, SourceReadErrorKind};
+pub use input::{
+    FmtWriteSink, Read, ReadRequest, SliceSource, SourceReadError, SourceReadErrorKind, Write,
+    WriteError,
+};
 pub use numeric::{FloatConversionError, NumericLiteral, NumericTokenKind};
 pub use path::{InstancePath, PathSegment};
 pub use source::{

@@ -6,7 +6,7 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{
-    BudgetError, ByteSource, DiagnosticCode, ExecutionBudget, ExecutionLimits, SliceSource,
+    BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read, SliceSource,
 };
 use typol_policy::ResourceLimits;
 use typol_schema::{SchemaCompileOptions, SchemaSource};
@@ -503,7 +503,7 @@ fn large_array_and_map_all_constraints_fit_default_execution_budget() -> TestRes
 }
 
 fn config_request<'a>(
-    source: (&'a mut impl ByteSource, &'a str),
+    source: (&'a mut impl Read, &'a str),
     limits: &ResourceLimits,
 ) -> ConfigParseRequest<'a> {
     ConfigParseRequest::new(

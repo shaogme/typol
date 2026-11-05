@@ -15,8 +15,8 @@ use std::{
 
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ByteSource, DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId,
-    SourceReadError, SourceReadErrorKind,
+    BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read, SourceId, SourceReadError,
+    SourceReadErrorKind,
 };
 use typol_schema::{
     ResolverError, SchemaCompileErrors, SchemaCompileOptions, SchemaCompileStage, SchemaCompiler,

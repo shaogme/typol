@@ -25,8 +25,8 @@ use crate::{
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ByteSource, ChargedString, ConfigValue, Diagnostic, DiagnosticCode,
-    DiagnosticContext, SourceId, diagnostic_context,
+    BudgetError, ChargedString, ConfigValue, Diagnostic, DiagnosticCode, DiagnosticContext, Read,
+    SourceId, diagnostic_context,
 };
 use typol_i18n::diagnostic_key;
 use typol_semantic::{CompiledSchema, TypeKind, TypeView};
@@ -59,7 +59,7 @@ pub(super) struct Parser<'schema, 'source, 'limits> {
 impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
     pub(super) fn new<'slot, 'borrow>(
         schema: &'schema CompiledSchema,
-        source: &'source mut dyn ByteSource<Diagnostic>,
+        source: &'source mut dyn Read<Diagnostic>,
         limits: &'limits ConfigLimits,
         session: ConfigSession<'limits>,
         out: Out<'slot, 'borrow, ConfigParseErrors>,
@@ -78,7 +78,7 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
 
     fn initialize<'slot>(
         schema: &'schema CompiledSchema,
-        source: &'source mut dyn ByteSource<Diagnostic>,
+        source: &'source mut dyn Read<Diagnostic>,
         limits: &'limits ConfigLimits,
         mut session: ConfigSession<'limits>,
         mut out: Out<'slot, '_, Diagnostic>,

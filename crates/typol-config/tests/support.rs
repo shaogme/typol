@@ -2,7 +2,7 @@ use typol_config::{
     ConfigParseErrors, ConfigParseRequest, ConfigParser, Environment, ValidatedConfigValue,
     opeo::{ErrSlot, OResult, Out},
 };
-use typol_core::ConfigValue;
+use typol_core::{ConfigValue, Read, SourceReadError};
 use typol_schema::{
     SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaResolver, SchemaSource,
     SourceObserver,
@@ -87,9 +87,9 @@ impl Support {
         })
     }
 
-    pub(crate) fn compile_schema(
+    pub(crate) fn compile_schema<S: Read<SourceReadError>>(
         options: SchemaCompileOptions,
-        source: SchemaSource<'_>,
+        source: SchemaSource<'_, S>,
         resolver: Option<&mut dyn SchemaResolver>,
         observer: Option<&mut dyn SourceObserver>,
     ) -> TestOpeoOutcome<CompiledSchema, SchemaCompileErrors> {

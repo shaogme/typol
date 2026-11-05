@@ -8,7 +8,7 @@ use std::{
     error::Error,
     fmt::Debug,
     fs::{copy, create_dir, create_dir_all, hard_link, remove_dir_all, rename, write},
-    io::{self, Read},
+    io::{self, Read as IoRead},
     path::{Path, PathBuf},
     process::id,
     rc::Rc,
@@ -20,7 +20,7 @@ use typol_config::{
     EnvironmentError, EnvironmentReadContext,
 };
 use typol_core::{
-    BudgetError, ByteSource, DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId,
+    BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read as SourceRead, SourceId,
     SourceReadError, SourceReadErrorKind, ValueKind,
 };
 use typol_schema::{
@@ -144,7 +144,7 @@ fn open_config_input(
         .call(|out| FileConfigInput::open(path, limits, source_byte_limit, budget, out))
 }
 
-fn read_source<S: ByteSource<SourceReadError> + ?Sized>(
+fn read_source<S: SourceRead<SourceReadError> + ?Sized>(
     source: &mut S,
     output: &mut [u8],
     source_id: SourceId,
@@ -153,7 +153,7 @@ fn read_source<S: ByteSource<SourceReadError> + ?Sized>(
     ErrSlot::<SourceReadError>::new().call(|out| source.read(output, source_id, offset, out))
 }
 
-fn new_read_source<'reader, R: Read>(
+fn new_read_source<'reader, R: IoRead>(
     reader: &'reader mut R,
     budget: &ExecutionBudget,
 ) -> Result<ReadSource<'reader>, SourceReadError> {
@@ -1293,7 +1293,7 @@ struct ResurrectingReader<'a> {
     calls: &'a Cell<usize>,
 }
 
-impl Read for ResurrectingReader<'_> {
+impl IoRead for ResurrectingReader<'_> {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
         self.calls.set(self.calls.get() + 1);
         if self.calls.get() == 1 {
@@ -1309,7 +1309,7 @@ impl Read for ResurrectingReader<'_> {
 
 struct FailingReader;
 
-impl Read for FailingReader {
+impl IoRead for FailingReader {
     fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -1320,7 +1320,7 @@ impl Read for FailingReader {
 
 struct OverreportingReader;
 
-impl Read for OverreportingReader {
+impl IoRead for OverreportingReader {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
         Ok(output.len() + 1)
     }

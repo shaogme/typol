@@ -30,7 +30,9 @@ pub use display::{DisplayOptions, SafeValueFormatter};
 pub use environment::ProcessEnvironment;
 #[cfg(all(test, windows))]
 pub(crate) use environment::{EnvironmentBytes, EnvironmentFailure};
-pub use filesystem::{FileConfigInput, FileSchemaResolver, FileSchemaSource, ReadSource};
+pub use filesystem::{
+    FileConfigInput, FileSchemaResolver, FileSchemaSource, IoWriteSink, ReadSource,
+};
 pub use host::{
     FileConfigInputLimitParams, FileConfigInputLimits, HostError, HostErrorKind, HostFailureStep,
     HostOperation, ProcessEnvironmentLimitParams, ProcessEnvironmentLimits,

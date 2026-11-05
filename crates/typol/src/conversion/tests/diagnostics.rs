@@ -6,7 +6,7 @@ use crate::{
     conversion::{Conversion, ConversionContext, ConversionValue},
     descriptor::{DescribeContext, TypeDescriptor, Typol},
     diagnostics::{CodecErrors, CodecStage},
-    options::{BindOptions, CodecOptions, ConversionLimits},
+    options::{BindOptions, ConversionLimits, WriteOptions},
     session::SessionBudget,
     test_support::{TestOpeo, TestValues},
     value::EnumPayload,
@@ -263,7 +263,7 @@ fn typed_schema_conversion_redacts_secret_paths_in_both_directions() -> TestResu
         reading: RejectingScalar,
     });
     let errors = BindingTestSupport::codec_error(|out| {
-        binding.serialize(&value, CodecOptions::default(), out)
+        binding.serialize_to_string(&value, WriteOptions::default(), out)
     })?;
     assert_eq!(
         errors.conversion_error_kind(),
@@ -294,7 +294,7 @@ fn secret_array_elements_and_enum_payloads_hide_dynamic_suffixes() -> TestResult
     let scalar_binding =
         BindingTestSupport::bind::<Root<f32>>(&scalar_schema, BindOptions::default())?;
     let errors = BindingTestSupport::codec_error(|out| {
-        scalar_binding.serialize(&Root::new(f32::NAN), CodecOptions::default(), out)
+        scalar_binding.serialize_to_string(&Root::new(f32::NAN), WriteOptions::default(), out)
     })?;
     assert_eq!(
         errors.conversion_error_kind(),
@@ -308,9 +308,9 @@ fn secret_array_elements_and_enum_payloads_hide_dynamic_suffixes() -> TestResult
     let array_binding =
         BindingTestSupport::bind::<Root<Vec<f32>>>(&array_schema, BindOptions::default())?;
     let errors = BindingTestSupport::codec_error(|out| {
-        array_binding.serialize(
+        array_binding.serialize_to_string(
             &Root::new(vec![1.0, f32::NAN]),
-            CodecOptions::default(),
+            WriteOptions::default(),
             out,
         )
     })?;

@@ -9,7 +9,7 @@ use crate::{
         TypeShape, VariantShape,
     },
     diagnostics::{CodecErrors, CodecStage, ErrorBuffer, Failure},
-    options::{BindOptions, BindingLimits, CodecOptions, ConversionLimits},
+    options::{BindOptions, BindingLimits, ConversionLimits, WriteOptions},
     session::{NodeBudget, SessionBudget},
     test_support::{TestOpeo, TestValues},
 };
@@ -32,7 +32,7 @@ static TEST_INTERNAL_CONTEXT: DiagnosticContext =
     diagnostic_context!("typol-test", "binding", "test-invariant");
 
 fn session() -> TestResult<SessionBudget> {
-    TestOpeo::value(|out| SessionBudget::codec(CodecOptions::default(), out))
+    TestOpeo::value(|out| SessionBudget::codec(WriteOptions::default(), out))
 }
 
 fn context<'session>(
@@ -110,7 +110,7 @@ fn defaults_are_finite_and_zero_options_are_preserved() -> TestResult {
         bind.execution(),
         ExecutionLimits::new(16_777_216, 67_108_864)
     );
-    let codec = CodecOptions::default();
+    let codec = WriteOptions::default();
     assert_eq!(
         codec.conversion(),
         ConversionLimits::new(100_000, 128).test_value()?
@@ -554,7 +554,9 @@ fn diagnostic_limits_preserve_nonempty_terminal_and_real_failure_codes() -> Test
     );
     let call = budget_value(|out| {
         SessionBudget::codec(
-            CodecOptions::new(options, ConversionLimits::default(), 0),
+            WriteOptions::new(0)
+                .with_validation(options)
+                .with_conversion_limits(ConversionLimits::default()),
             out,
         )
     })?;

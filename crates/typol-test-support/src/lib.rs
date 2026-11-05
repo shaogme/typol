@@ -4,12 +4,13 @@ extern crate alloc;
 
 mod config_values;
 
-use alloc::format;
+use alloc::{format, vec::Vec};
 use core::{fmt::Debug, ops::Range};
+use opeo::{OResult, Out};
 use typol_config::{
     ConfigParseErrors, ConfigParseRequest, ConfigParser, Environment, ValidatedConfigValue,
 };
-use typol_core::ConfigValue;
+use typol_core::{ConfigValue, Read, SourceId, SourceReadError, SourceReadErrorKind};
 use typol_schema::{
     SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaResolver, SchemaSource,
     SourceObserver,
@@ -19,6 +20,68 @@ use typol_semantic::CompiledSchema;
 pub use typol_opeo_test_support::{TestFailure, TestOpeo, TestOpeoOutcome, TestResult, TestSlot};
 
 pub use config_values::{FieldValue, MapEntry, Named, Payload, ValueFactory, ValueViewInput};
+
+pub struct OwnedReadSource {
+    bytes: Vec<u8>,
+    offset: usize,
+}
+
+impl OwnedReadSource {
+    pub fn new(text: &str) -> Self {
+        Self {
+            bytes: text.as_bytes().to_vec(),
+            offset: 0,
+        }
+    }
+
+    pub fn replace(&mut self, text: &str) {
+        self.bytes.clear();
+        self.bytes.extend_from_slice(text.as_bytes());
+        self.offset = 0;
+    }
+}
+
+impl Default for OwnedReadSource {
+    fn default() -> Self {
+        Self::new("")
+    }
+}
+
+impl Read<SourceReadError> for OwnedReadSource {
+    fn read<'slot>(
+        &mut self,
+        output: &mut [u8],
+        source_id: SourceId,
+        offset: usize,
+        out: Out<'slot, '_, SourceReadError>,
+    ) -> OResult<'slot, usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        let Some(start) = self.bytes.get(self.offset..) else {
+            return Err(out.fail(
+                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
+                    .with_input(source_id, offset),
+            ));
+        };
+        let count = start.len().min(output.len());
+        let Some(source) = start.get(..count) else {
+            return Err(out.fail(
+                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
+                    .with_input(source_id, offset),
+            ));
+        };
+        let Some(destination) = output.get_mut(..count) else {
+            return Err(out.fail(
+                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
+                    .with_input(source_id, offset),
+            ));
+        };
+        destination.copy_from_slice(source);
+        self.offset += count;
+        Ok(count)
+    }
+}
 
 pub struct ConfigTestSupport;
 
@@ -42,9 +105,9 @@ impl ConfigTestSupport {
         TestOpeo::outcome(|out| ConfigParser::new(schema).parse(request, environment, out))
     }
 
-    pub fn compile_schema(
+    pub fn compile_schema<S: Read<SourceReadError>>(
         options: SchemaCompileOptions,
-        source: SchemaSource<'_>,
+        source: SchemaSource<'_, S>,
         resolver: Option<&mut dyn SchemaResolver>,
         observer: Option<&mut dyn SourceObserver>,
     ) -> TestOpeoOutcome<CompiledSchema, SchemaCompileErrors> {

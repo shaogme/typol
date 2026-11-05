@@ -12,7 +12,7 @@ use typol_config::{
     EnvironmentReadContext,
     opeo::{OResult, Out},
 };
-use typol_core::{ByteSource, ExecutionLimits, SliceSource, ValueKind};
+use typol_core::{ExecutionLimits, Read, SliceSource, ValueKind};
 use typol_policy::{RegexLimits, ResourceLimits, ValueLimits};
 use typol_schema::{SchemaCompileOptions, SchemaLimits, SchemaSource};
 use typol_semantic::{
@@ -193,7 +193,7 @@ fn deep_config_execution_and_destruction_use_bounded_host_stack() -> TestResult<
 }
 
 fn config_request<'a>(
-    source: (&'a mut impl ByteSource, &'a str),
+    source: (&'a mut impl Read, &'a str),
     limits: &ConfigLimits,
 ) -> ConfigParseRequest<'a> {
     ConfigParseRequest::new(

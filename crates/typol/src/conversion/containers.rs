@@ -170,6 +170,7 @@ impl ContainerConversions {
         read_sequence(value, context, out)
     }
 
+    #[cfg(any(feature = "btree-map", feature = "hashbrown", feature = "std"))]
     pub(crate) fn write_map<'slot, 'value, T: Typol>(
         entries: impl ExactSizeIterator<Item = (&'value str, &'value T)>,
         context: &mut ConversionContext<'_>,

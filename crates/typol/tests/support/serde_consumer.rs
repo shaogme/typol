@@ -1,5 +1,9 @@
+#[path = "read_input.rs"]
+mod read_input;
+
+use read_input::TestSource;
 use renamed_typol::{
-    ConfigInput, ConfigParseOptions, Environment, EnvironmentError, EnvironmentReadContext, Typol,
+    ConfigParseOptions, Environment, EnvironmentError, EnvironmentReadContext, Typol,
     LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader, TypolError,
     TypolOptions, TypolStage, ValidatedConfigValue, WriteOptions,
     binding::*, config::*, core::*, host::*, schema::*, semantic::*,
@@ -45,32 +49,30 @@ where
 
 fn read_serde<'slot, T: BudgetedTypol + DeserializeOwned>(
     loaded: &LoadedSchema,
-    input: ConfigInput<'_>,
+    input: TestSource<'_>,
     mut out: Out<'slot, '_, TypolError>,
 ) -> OResult<'slot, T> {
     let bound = loaded.bind::<T>(out.reborrow())?;
     let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
-    bound.read_serde(input, &mut environment, out)
+    input.read_serde(&bound, &mut environment, out)
 }
 
 fn read_value_with_process_environment<'slot>(
     loaded: &LoadedSchema,
-    input: ConfigInput<'_>,
+    input: TestSource<'_>,
     out: Out<'slot, '_, TypolError>,
 ) -> OResult<'slot, ValidatedConfigValue> {
     let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
-    loaded.read_value(input, &mut environment, out)
+    input.read_value(loaded, &mut environment, out)
 }
 
 fn read_serde_with_environment<'slot, T: BudgetedTypol + DeserializeOwned>(
     loaded: &LoadedSchema,
-    input: ConfigInput<'_>,
+    input: TestSource<'_>,
     environment: &mut dyn Environment,
     mut out: Out<'slot, '_, TypolError>,
 ) -> OResult<'slot, T> {
-    loaded
-        .bind::<T>(out.reborrow())?
-        .read_serde(input, environment, out)
+    input.read_serde(&loaded.bind::<T>(out.reborrow())?, environment, out)
 }
 
 struct Resolver;
@@ -179,12 +181,12 @@ fn roundtrips_and_validation() {
         Choice::Empty {},
     ] {
         value.choice = choice;
-        let text = invoke(|out| binding.serialize_serde(&value, CodecOptions::default(), out));
+        let text = invoke(|out| binding.serialize_serde_to_string(&value, WriteOptions::default(), out));
         assert!(text.contains("actual secret"));
         assert!(!text.contains("env("));
         assert_eq!(
             text,
-            invoke(|out| binding.serialize(&value, CodecOptions::default(), out))
+            invoke(|out| binding.serialize_to_string(&value, WriteOptions::default(), out))
         );
         assert_eq!(
             invoke(|out| binding.deserialize_serde(
@@ -198,13 +200,13 @@ fn roundtrips_and_validation() {
     }
     value.child.low = 8;
     assert_eq!(
-        invoke_error(|out| binding.serialize_serde(&value, CodecOptions::default(), out)).stage(),
+        invoke_error(|out| binding.serialize_serde_to_string(&value, WriteOptions::default(), out)).stage(),
         CodecStage::Validation
     );
     value.child.low = 2;
     value.values = [1, 1];
     assert_eq!(
-        invoke_error(|out| binding.serialize_serde(&value, CodecOptions::default(), out)).stage(),
+        invoke_error(|out| binding.serialize_serde_to_string(&value, WriteOptions::default(), out)).stage(),
         CodecStage::Validation
     );
     value.values = [1, 2];
@@ -212,7 +214,7 @@ fn roundtrips_and_validation() {
         count: 9,
         label: "secret payload".into(),
     };
-    let errors = invoke_error(|out| binding.serialize_serde(&value, CodecOptions::default(), out));
+    let errors = invoke_error(|out| binding.serialize_serde_to_string(&value, WriteOptions::default(), out));
     assert_eq!(errors.stage(), CodecStage::Validation);
     assert!(
         errors
@@ -258,7 +260,7 @@ fn defaults_and_output_limits() {
         value: 42,
         optional: Some(3),
     };
-    let text = invoke(|out| binding.serialize_serde(&value, CodecOptions::default(), out));
+    let text = invoke(|out| binding.serialize_serde_to_string(&value, WriteOptions::default(), out));
     assert_eq!(text, "{value: 7, optional: none}");
     assert_eq!(
         invoke(|out| binding.deserialize_serde(
@@ -273,18 +275,18 @@ fn defaults_and_output_limits() {
         }
     );
     for (limit, success) in [(text.len(), true), (text.len() - 1, false)] {
-        let defaults = CodecOptions::default();
+        let defaults = WriteOptions::default();
         if success {
-            invoke(|out| binding.serialize_serde(&value, defaults.with_max_output_bytes(limit), out));
+            invoke(|out| binding.serialize_serde_to_string(&value, defaults.with_max_output_bytes(limit), out));
         } else {
-            let errors = invoke_error(|out| binding.serialize_serde(&value, defaults.with_max_output_bytes(limit), out));
+            let errors = invoke_error(|out| binding.serialize_serde_to_string(&value, defaults.with_max_output_bytes(limit), out));
             assert_eq!(errors.stage(), CodecStage::Encoding);
         }
     }
     let required = compile("entry struct Root { value: u8, optional: option<u8> }");
     let binding = invoke(|out| TypedSchema::<Defaults>::bind(&required, BindOptions::default(), out));
     assert_eq!(
-        invoke_error(|out| binding.serialize_serde(&value, CodecOptions::default(), out))
+        invoke_error(|out| binding.serialize_serde_to_string(&value, WriteOptions::default(), out))
             .diagnostics().first().map(|diagnostic| diagnostic.code()),
         Some(DiagnosticCode::RUST_CONVERSION_ERROR)
     );
@@ -332,7 +334,7 @@ fn reject_custom<const MODE: u8>() {
     let schema = compile("entry struct Root { value: u8 @range(2, 9) @secret }");
     let binding = invoke(|out| TypedSchema::<Custom<MODE>>::bind(&schema, BindOptions::default(), out));
     let errors = invoke_error(|out| {
-        binding.serialize_serde(&Custom { value: 3 }, CodecOptions::default(), out)
+        binding.serialize_serde_to_string(&Custom { value: 3 }, WriteOptions::default(), out)
     });
     assert_eq!(errors.stage(), CodecStage::Conversion);
     assert_eq!(
@@ -417,7 +419,7 @@ fn shared_budget_and_snapshots() {
         Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
     );
     let errors: CodecErrors = invoke_error(|out| {
-        binding.serialize_serde(&Scalar { value: 1 }, CodecOptions::default(), out)
+        binding.serialize_serde_to_string(&Scalar { value: 1 }, WriteOptions::default(), out)
     });
     let span = errors.diagnostics().first().unwrap().labels()[0].span();
     let location = errors.span_location(span).unwrap();
@@ -436,7 +438,7 @@ struct Mismatched {
 fn mismatched_names_reject_after_binding() {
     let schema = compile("entry struct Root { value: u8 }");
     let binding = invoke(|out| TypedSchema::<Mismatched>::bind(&schema, BindOptions::default(), out));
-    let errors = invoke_error(|out| binding.serialize_serde(&Mismatched { value: 3 }, CodecOptions::default(), out));
+    let errors = invoke_error(|out| binding.serialize_serde_to_string(&Mismatched { value: 3 }, WriteOptions::default(), out));
     assert_eq!(errors.stage(), CodecStage::Conversion);
     assert_serde_failure_point(&errors, "serde-schema-shape-mismatch");
     let errors = invoke_error(|out| binding.deserialize_serde(
@@ -468,9 +470,9 @@ fn unsupported_serde_operations_have_a_public_failure_point() {
         TypedSchema::<UnsupportedOperation>::bind(&schema, BindOptions::default(), out)
     });
     let errors = invoke_error(|out| {
-        binding.serialize_serde(
+        binding.serialize_serde_to_string(
             &UnsupportedOperation { value: 3 },
-            CodecOptions::default(),
+            WriteOptions::default(),
             out,
         )
     });
@@ -500,13 +502,19 @@ fn loaded_serde() {
     let value = Scalar { value: 3 };
     let write_options = WriteOptions::default().with_pretty(true);
     let expected = "{\n  value: 3,\n}";
-    assert_eq!(invoke(|out| bound.write(&value, write_options, out)), expected);
-    assert_eq!(invoke(|out| bound.write_serde(&value, write_options, out)), expected);
+    assert_eq!(
+        invoke(|out| bound.write_to_string(&value, write_options, out)),
+        expected
+    );
+    assert_eq!(
+        invoke(|out| bound.write_serde_to_string(&value, write_options, out)),
+        expected
+    );
     write("loading-secret-path.tconf", "{value: 1}").unwrap();
     let named_errors = invoke_error(|out| {
         read_serde::<Scalar>(
             &loaded,
-            ConfigInput::file(Path::new("loading-secret-path.tconf")).named("config\u{1b}\n"),
+            TestSource::file(Path::new("loading-secret-path.tconf")).named("config\u{1b}\n"),
             out,
         )
     });
@@ -521,23 +529,23 @@ fn loaded_serde() {
     assert!(!named_display.contains('\u{1b}'));
     assert!(!named_display.contains("loading-secret-path.tconf"));
     assert_eq!(
-        invoke(|out| read_serde::<Scalar>(&loaded, ConfigInput::file(Path::new("loading.tconf")), out)).value,
+        invoke(|out| read_serde::<Scalar>(&loaded, TestSource::file(Path::new("loading.tconf")), out)).value,
         3
     );
     assert_eq!(
-        invoke(|out| read_serde_with_environment::<Scalar>(&loaded, ConfigInput::file(Path::new("loading.tconf")), &mut Provider, out)).value,
+        invoke(|out| read_serde_with_environment::<Scalar>(&loaded, TestSource::file(Path::new("loading.tconf")), &mut Provider, out)).value,
         3
     );
     let mut reader = Cursor::new(b"{value: 3}".as_slice());
     assert_eq!(
-        invoke(|out| read_serde::<Scalar>(&loaded, ConfigInput::reader(&mut reader).named("reader"), out)).value,
+        invoke(|out| read_serde::<Scalar>(&loaded, TestSource::reader(&mut reader).named("reader"), out)).value,
         3
     );
     let mut reader = Cursor::new(b"{value: 3}".as_slice());
     assert_eq!(
         invoke(|out| read_serde_with_environment::<Scalar>(
                 &loaded,
-                ConfigInput::reader(&mut reader).named("reader"),
+                TestSource::reader(&mut reader).named("reader"),
                 &mut Provider,
                 out,
             )).value,
@@ -546,7 +554,7 @@ fn loaded_serde() {
     let mut reader = FailingReader {
         input: Cursor::new(b"{value: 3}"),
     };
-    let errors = invoke_error(|out| read_serde::<Scalar>(&loaded, ConfigInput::reader(&mut reader).named("reader"), out));
+    let errors = invoke_error(|out| read_serde::<Scalar>(&loaded, TestSource::reader(&mut reader).named("reader"), out));
     assert_eq!(errors.stage(), TypolStage::ConfigRead);
     assert_eq!(
         errors.host_error().unwrap().kind(),
@@ -574,8 +582,8 @@ fn loaded_serde() {
         ExecutionLimits::new(budget.steps(), defaults.execution().max_workspace_bytes()),
     )))
     .compile_file(Path::new("loading.tschem"), out));
-    invoke(|out| read_value_with_process_environment(&limited, ConfigInput::file(Path::new("loading.tconf")), out));
-    let errors = invoke_error(|out| read_serde::<Scalar>(&limited, ConfigInput::file(Path::new("loading.tconf")), out));
+    invoke(|out| read_value_with_process_environment(&limited, TestSource::file(Path::new("loading.tconf")), out));
+    let errors = invoke_error(|out| read_serde::<Scalar>(&limited, TestSource::file(Path::new("loading.tconf")), out));
     assert_eq!(errors.stage(), TypolStage::Decoding);
     assert_eq!(
         errors.codec_errors().unwrap().stage(),

@@ -2,6 +2,7 @@ use core::{
     fmt::{self, Debug, Formatter},
     ops::{Deref, DerefMut},
 };
+use typol_core::{Read, SourceReadError};
 
 use typol_regex::RegexCompileError;
 use typol_semantic::CompiledSchema;
@@ -80,9 +81,13 @@ impl CompileRunErrors {
         CompileRunFailure(&self.error)
     }
 
-    pub(crate) fn run_with_context<'errors, R: SchemaResolver + ?Sized>(
+    pub(crate) fn run_with_context<
+        'errors,
+        R: SchemaResolver + ?Sized,
+        S: Read<SourceReadError>,
+    >(
         options: SchemaCompileOptions,
-        source: SchemaSource<'_>,
+        source: SchemaSource<'_, S>,
         resolver: &mut R,
         observer: Option<&mut dyn SourceObserver>,
         compile_errors: &'errors mut Self,

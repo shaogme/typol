@@ -1,5 +1,9 @@
+#[path = "read_input.rs"]
+mod read_input;
+
+use read_input::TestSource;
 use renamed_typol::{
-    ConfigInput, ConfigParseOptions, Environment, EnvironmentError, EnvironmentReadContext, Typol,
+    ConfigParseOptions, Environment, EnvironmentError, EnvironmentReadContext, Typol,
     LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader, TypolError,
     TypolOptions, TypolStage, ValidatedConfigValue,
     binding::*, config::*, core::*, host::*, schema::*, semantic::*,
@@ -9,10 +13,11 @@ use std::{
     collections::{BTreeMap, HashMap},
     error::Error,
     fmt::Debug,
-    fs::write,
+    fs::{read_to_string, write},
+    io::Cursor,
     path::Path,
 };
-use typol_test_support::TestOpeo;
+use typol_test_support::{OwnedReadSource, TestOpeo};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -380,7 +385,9 @@ where
     }
 }
 
-struct Resolver;
+struct Resolver {
+    source: OwnedReadSource,
+}
 
 impl SchemaResolver for Resolver {
     fn resolve<'slot, 'borrow, 'src>(
@@ -397,7 +404,8 @@ impl SchemaResolver for Resolver {
         if text.len() > max {
             return Err(out.fail(ResolverError::ResourceLimitExceeded));
         }
-        Ok(SchemaSource::from_str(b"common", text))
+        self.source.replace(text);
+        Ok(SchemaSource::from_source(b"common", &mut self.source))
     }
 }
 
@@ -438,55 +446,52 @@ impl<T: BudgetedTypol + Debug + PartialEq + Serialize + DeserializeOwned> Target
 
 fn read_typed<'slot, T: Target>(
     loaded: &LoadedSchema,
-    input: ConfigInput<'_>,
+    input: TestSource<'_>,
     mut out: Out<'slot, '_, TypolError>,
 ) -> OResult<'slot, T> {
     let bound = loaded.bind::<T>(out.reborrow())?;
     let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
-    bound.read(input, &mut environment, out)
+    input.read_bound(&bound, &mut environment, out)
 }
 
 fn read_value_with_process_environment<'slot>(
     loaded: &LoadedSchema,
-    input: ConfigInput<'_>,
+    input: TestSource<'_>,
     out: Out<'slot, '_, TypolError>,
 ) -> OResult<'slot, ValidatedConfigValue> {
     let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
-    loaded.read_value(input, &mut environment, out)
+    input.read_value(loaded, &mut environment, out)
 }
 
 fn read_typed_with_environment<'slot, T: Target>(
     loaded: &LoadedSchema,
-    input: ConfigInput<'_>,
+    input: TestSource<'_>,
     environment: &mut dyn Environment,
     mut out: Out<'slot, '_, TypolError>,
 ) -> OResult<'slot, T> {
-    loaded
-        .bind::<T>(out.reborrow())?
-        .read(input, environment, out)
+    let bound = loaded.bind::<T>(out.reborrow())?;
+    input.read_bound(&bound, environment, out)
 }
 
 #[cfg(feature = "serde")]
 fn read_serde<'slot, T: Target>(
     loaded: &LoadedSchema,
-    input: ConfigInput<'_>,
+    input: TestSource<'_>,
     mut out: Out<'slot, '_, TypolError>,
 ) -> OResult<'slot, T> {
     let bound = loaded.bind::<T>(out.reborrow())?;
     let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
-    bound.read_serde(input, &mut environment, out)
+    input.read_serde(&bound, &mut environment, out)
 }
 
 #[cfg(feature = "serde")]
 fn read_serde_with_environment<'slot, T: Target>(
     loaded: &LoadedSchema,
-    input: ConfigInput<'_>,
+    input: TestSource<'_>,
     environment: &mut dyn Environment,
     mut out: Out<'slot, '_, TypolError>,
 ) -> OResult<'slot, T> {
-    loaded
-        .bind::<T>(out.reborrow())?
-        .read_serde(input, environment, out)
+    input.read_serde(&loaded.bind::<T>(out.reborrow())?, environment, out)
 }
 
 fn request<'a>(input: &'a mut SliceSource<'_>) -> ConfigParseRequest<'a> {
@@ -500,7 +505,9 @@ fn compile(name: &str, text: &str) -> CompiledSchema {
     invoke(|out| {
         compiler.compile(
             SchemaSource::from_str(name.as_bytes(), text),
-            &mut Resolver,
+            &mut Resolver {
+                source: OwnedReadSource::default(),
+            },
             None,
             out,
         )
@@ -551,7 +558,7 @@ fn roundtrip<T: Target>(binding: &TypedSchema<'_, T>, input: &str, calls: usize)
         ));
     assert_eq!(provider.calls.len(), calls);
     assert!(provider.calls.values().all(|count| *count == 1));
-    let text = invoke(|out| binding.serialize(&value, CodecOptions::default(), out));
+    let text = invoke(|out| binding.serialize_to_string(&value, WriteOptions::default(), out));
     assert!(text.contains(SECRET));
     assert!(!text.contains("env("));
     let decoded = invoke(|out| binding.deserialize(
@@ -580,15 +587,15 @@ fn roundtrip<T: Target>(binding: &TypedSchema<'_, T>, input: &str, calls: usize)
 
     assert_eq!(
         text,
-        invoke(|out| binding.serialize(&decoded, CodecOptions::default(), out))
+        invoke(|out| binding.serialize_to_string(&decoded, WriteOptions::default(), out))
     );
-    let defaults = CodecOptions::default();
+    let defaults = WriteOptions::default();
     assert_eq!(
         text,
-        invoke(|out| binding.serialize(&value, defaults.with_max_output_bytes(text.len()), out))
+        invoke(|out| binding.serialize_to_string(&value, defaults.with_max_output_bytes(text.len()), out))
     );
     let errors = invoke_error(|out| {
-        binding.serialize(&value, defaults.with_max_output_bytes(text.len() - 1), out)
+        binding.serialize_to_string(&value, defaults.with_max_output_bytes(text.len() - 1), out)
     });
     assert_eq!(
         errors.diagnostics().last().unwrap().code(),
@@ -623,7 +630,7 @@ fn roundtrip<T: Target>(binding: &TypedSchema<'_, T>, input: &str, calls: usize)
         assert!(provider.calls.values().all(|count| *count == 1));
         assert_eq!(
             text,
-            invoke(|out| binding.serialize_serde(&serde_value, CodecOptions::default(), out))
+            invoke(|out| binding.serialize_serde_to_string(&serde_value, WriteOptions::default(), out))
         );
         assert_eq!(
             value,
@@ -643,7 +650,7 @@ fn roundtrip<T: Target>(binding: &TypedSchema<'_, T>, input: &str, calls: usize)
 
 fn reject<T: Target>(binding: &TypedSchema<'_, T>, value: &T) -> CodecErrors {
     let errors = invoke_error(|out| {
-        binding.serialize(value, CodecOptions::default(), out)
+        binding.serialize_to_string(value, WriteOptions::default(), out)
     });
     assert_eq!(errors.stage(), CodecStage::Validation);
     assert!(errors.diagnostics().iter().all(|d| d.primary().is_none()));
@@ -654,7 +661,7 @@ fn reject<T: Target>(binding: &TypedSchema<'_, T>, value: &T) -> CodecErrors {
     #[cfg(feature = "serde")]
     {
         let serde_errors = invoke_error(|out| {
-            binding.serialize_serde(value, CodecOptions::default(), out)
+            binding.serialize_serde_to_string(value, WriteOptions::default(), out)
         });
         assert_eq!(serde_errors.stage(), CodecStage::Validation);
         assert!(!format!("{serde_errors:?}{serde_errors}").contains(SECRET));
@@ -678,7 +685,7 @@ fn server() {
         value.resource_limits.perf_budget_ns = number;
         value.benchmark.float_32 = f32::from_bits(1);
         value.benchmark.float_64 = -0.0;
-        let text = invoke(|out| binding.serialize(&value, CodecOptions::default(), out));
+        let text = invoke(|out| binding.serialize_to_string(&value, WriteOptions::default(), out));
         let decoded = invoke(|out| binding.deserialize(
                 request(&mut SliceSource::new(text.as_bytes())),
                 &mut Provider {
@@ -704,7 +711,7 @@ fn server() {
         {
             assert_eq!(
                 text,
-                invoke(|out| binding.serialize_serde(&value, CodecOptions::default(), out))
+                invoke(|out| binding.serialize_serde_to_string(&value, WriteOptions::default(), out))
             );
             let decoded = invoke(|out| binding.deserialize_serde(
                     request(&mut SliceSource::new(text.as_bytes())),
@@ -789,7 +796,7 @@ fn database() {
     reject(&binding, &value);
     value.read_replicas.clear();
     value.auth = None;
-    let text = invoke(|out| binding.serialize(&value, CodecOptions::default(), out));
+    let text = invoke(|out| binding.serialize_to_string(&value, WriteOptions::default(), out));
     assert!(text.contains("auth: none"));
     assert_eq!(
         value,
@@ -819,7 +826,7 @@ fn all_types() {
     for key in ["😀", "ö", "a", "z"] {
         labels.insert(key.into(), key.into());
     }
-    let first = invoke(|out| binding.serialize(&value, CodecOptions::default(), out));
+    let first = invoke(|out| binding.serialize_to_string(&value, WriteOptions::default(), out));
     value.collections.dynamic_tags[0].labels.clear();
     for key in ["z", "a", "ö", "😀"] {
         value.collections.dynamic_tags[0]
@@ -828,12 +835,12 @@ fn all_types() {
     }
     assert_eq!(
         first,
-        invoke(|out| binding.serialize(&value, CodecOptions::default(), out))
+        invoke(|out| binding.serialize_to_string(&value, WriteOptions::default(), out))
     );
     #[cfg(feature = "serde")]
     assert_eq!(
         first,
-        invoke(|out| binding.serialize_serde(&value, CodecOptions::default(), out))
+        invoke(|out| binding.serialize_serde_to_string(&value, WriteOptions::default(), out))
     );
     value.collections.dynamic_scores = vec![200.0, 200.0, 200.0];
     reject(&binding, &value);
@@ -855,20 +862,33 @@ fn loaded_fixture<T: Target>(name: &str) -> T {
     let config_path = format!("fixtures/{name}.tconf");
     let loaded = invoke(|out| SchemaLoader::new(TypolOptions::default()).compile_file(Path::new(&schema_path), out));
     let binding = invoke(|out| TypedSchema::<T>::bind(loaded.schema(), BindOptions::default(), out));
+    let text = read_to_string(&config_path).unwrap();
+    let text_value = invoke(|out| read_typed::<T>(
+        &loaded,
+        TestSource::text(&text).named("inline config"),
+        out,
+    ));
+    let mut reader = Cursor::new(text.as_bytes());
+    let reader_value = invoke(|out| read_typed::<T>(
+        &loaded,
+        TestSource::reader(&mut reader).named("reader config"),
+        out,
+    ));
+    assert_eq!(text_value, reader_value);
     let missing = Path::new("fixtures/never-read.tconf");
     let mut denied = Provider {
         deny: true,
         ..Provider::default()
     };
-    let binding_error = invoke_error(|out| read_typed_with_environment::<u8>(&loaded, ConfigInput::file(missing), &mut denied, out));
+    let binding_error = invoke_error(|out| read_typed_with_environment::<u8>(&loaded, TestSource::file(missing), &mut denied, out));
     assert_eq!(binding_error.stage(), TypolStage::Binding);
-    let read_error = invoke_error(|out| read_typed_with_environment::<T>(&loaded, ConfigInput::file(missing), &mut denied, out));
+    let read_error = invoke_error(|out| read_typed_with_environment::<T>(&loaded, TestSource::file(missing), &mut denied, out));
     assert_eq!(read_error.stage(), TypolStage::ConfigRead);
     assert!(denied.calls.is_empty());
-    let expected = invoke(|out| read_typed_with_environment::<T>(&loaded, ConfigInput::file(Path::new(&config_path)), &mut Provider::default(), out));
-    let value = invoke(|out| read_typed::<T>(&loaded, ConfigInput::file(Path::new(&config_path)), out));
+    let expected = invoke(|out| read_typed_with_environment::<T>(&loaded, TestSource::file(Path::new(&config_path)), &mut Provider::default(), out));
+    let value = invoke(|out| read_typed::<T>(&loaded, TestSource::file(Path::new(&config_path)), out));
     assert_eq!(value, expected);
-    let dynamic = invoke(|out| read_value_with_process_environment(&loaded, ConfigInput::file(Path::new(&config_path)), out));
+    let dynamic = invoke(|out| read_value_with_process_environment(&loaded, TestSource::file(Path::new(&config_path)), out));
     let display = invoke(|out| SafeValueFormatter::format(loaded.schema(), dynamic.as_config_value(), DisplayOptions::default(), out));
     assert!(display.contains("********"));
     assert!(!display.contains(SECRET));
@@ -876,8 +896,8 @@ fn loaded_fixture<T: Target>(name: &str) -> T {
     let invalid_path = format!("fixtures/{name}-invalid.tconf");
     write(&invalid_path, "{}").unwrap();
     for errors in [
-        invoke_error(|out| read_value_with_process_environment(&loaded, ConfigInput::file(Path::new(&invalid_path)), out)),
-        invoke_error(|out| read_typed_with_environment::<T>(&loaded, ConfigInput::file(Path::new(&invalid_path)), &mut denied, out)),
+        invoke_error(|out| read_value_with_process_environment(&loaded, TestSource::file(Path::new(&invalid_path)), out)),
+        invoke_error(|out| read_typed_with_environment::<T>(&loaded, TestSource::file(Path::new(&invalid_path)), &mut denied, out)),
     ] {
         let mut safe = format!(
             "{errors:?}{errors}{}",
@@ -900,7 +920,7 @@ fn loaded_fixture<T: Target>(name: &str) -> T {
         }
         assert!(!safe.contains(SECRET));
     }
-    let encoded = invoke(|out| binding.serialize(&value, CodecOptions::default(), out));
+    let encoded = invoke(|out| binding.serialize_to_string(&value, WriteOptions::default(), out));
     assert!(encoded.contains(SECRET));
     assert!(!encoded.contains("env("));
     let frozen = format!("fixtures/{name}-frozen.tconf");
@@ -909,7 +929,7 @@ fn loaded_fixture<T: Target>(name: &str) -> T {
         value,
         invoke(|out| read_typed_with_environment::<T>(
                 &loaded,
-                ConfigInput::file(Path::new(&frozen)),
+                TestSource::file(Path::new(&frozen)),
                 &mut Provider {
                     deny: true,
                     ..Provider::default()
@@ -921,17 +941,17 @@ fn loaded_fixture<T: Target>(name: &str) -> T {
     {
         assert_eq!(
             value,
-            invoke(|out| read_serde::<T>(&loaded, ConfigInput::file(Path::new(&config_path)), out))
+            invoke(|out| read_serde::<T>(&loaded, TestSource::file(Path::new(&config_path)), out))
         );
         assert_eq!(
             value,
-            invoke(|out| read_serde_with_environment::<T>(&loaded, ConfigInput::file(Path::new(&config_path)), &mut Provider::default(), out))
+            invoke(|out| read_serde_with_environment::<T>(&loaded, TestSource::file(Path::new(&config_path)), &mut Provider::default(), out))
         );
         assert_eq!(
             value,
             invoke(|out| read_serde_with_environment::<T>(
                     &loaded,
-                    ConfigInput::file(Path::new(&frozen)),
+                    TestSource::file(Path::new(&frozen)),
                     &mut Provider {
                         deny: true,
                         ..Provider::default()
@@ -941,7 +961,7 @@ fn loaded_fixture<T: Target>(name: &str) -> T {
         );
         assert_eq!(
             encoded,
-            invoke(|out| binding.serialize_serde(&value, CodecOptions::default(), out))
+            invoke(|out| binding.serialize_serde_to_string(&value, WriteOptions::default(), out))
         );
     }
     drop(binding);

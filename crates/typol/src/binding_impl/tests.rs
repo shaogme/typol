@@ -8,7 +8,7 @@ use crate::{
         TypeDescriptor, TypeShape, Typol, VariantShape,
     },
     diagnostics::{CodecErrors, CodecStage},
-    options::{BindOptions, BindingLimits, CodecOptions},
+    options::{BindOptions, BindingLimits, WriteOptions},
     session::SessionBudget,
     test_support::TestOpeo,
 };
@@ -97,7 +97,7 @@ fn codec_error<T>(
 }
 
 fn codec_session() -> TestResult<SessionBudget> {
-    TestOpeo::value(|out| SessionBudget::codec(CodecOptions::default(), out))
+    TestOpeo::value(|out| SessionBudget::codec(WriteOptions::default(), out))
 }
 
 struct NoImports;

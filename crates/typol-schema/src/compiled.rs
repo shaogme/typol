@@ -3,6 +3,7 @@ mod errors;
 mod records;
 
 use opeo::{ErrSlot, OResult, Out};
+use typol_core::{Read, SourceReadError};
 use typol_semantic::{CompiledSchema, SchemaFreezeInput};
 
 pub use errors::{
@@ -38,8 +39,8 @@ struct PreparedSchemaCompilation {
 }
 
 impl SchemaCompilation {
-    pub(crate) fn compile<'slot, R: SchemaResolver + ?Sized>(
-        root: SchemaSource<'_>,
+    pub(crate) fn compile<'slot, R: SchemaResolver + ?Sized, S: Read<SourceReadError>>(
+        root: SchemaSource<'_, S>,
         resolver: &mut R,
         context: &SchemaCompileContext,
         observer: Option<&mut dyn SourceObserver>,

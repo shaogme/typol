@@ -1,7 +1,7 @@
 #[path = "support/schema_compile.rs"]
 mod schema_support;
 
-use typol_core::{DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId};
+use typol_core::{DiagnosticCode, ExecutionBudget, ExecutionLimits, SliceSource, SourceId};
 use typol_schema::{
     LocationFailure, LocationStatus, ResolverError, SchemaCompileErrors, SchemaCompileOptions,
     SchemaLimits, SchemaResolveRequest, SchemaResolver, SchemaSource, SourceLoadedRequest,
@@ -14,6 +14,8 @@ use typol_syntax::{SchemaParseOptions, SchemaParser, StreamLimits};
 
 struct Sources {
     requests: Vec<String>,
+    broken_source: SliceSource<'static>,
+    child_source: SliceSource<'static>,
 }
 
 impl SchemaResolver for Sources {
@@ -25,8 +27,17 @@ impl SchemaResolver for Sources {
         let module = request.module_name;
         self.requests.push(module.to_owned());
         match module {
-            "broken" => Ok(SchemaSource::from_str(b"broken", "struct")),
-            "child" => Ok(SchemaSource::from_str(b"child", "?")),
+            "broken" => {
+                self.broken_source = SliceSource::new(b"struct");
+                Ok(SchemaSource::from_source(
+                    b"broken",
+                    &mut self.broken_source,
+                ))
+            }
+            "child" => {
+                self.child_source = SliceSource::new(b"?");
+                Ok(SchemaSource::from_source(b"child", &mut self.child_source))
+            }
             _ => Err(out.fail(ResolverError::NotFound)),
         }
     }
@@ -83,6 +94,8 @@ fn observer_failure_is_terminal_before_current_parse_and_later_imports() -> Test
                 };
                 let mut sources = Sources {
                     requests: Vec::new(),
+                    broken_source: SliceSource::new(b""),
+                    child_source: SliceSource::new(b""),
                 };
                 let mut limits = SchemaLimits::default();
                 limits.set_max_diagnostics(limit);
@@ -190,6 +203,8 @@ fn observer_failure_preserves_diagnostics_without_unparsed_source_locations() ->
     };
     let mut sources = Sources {
         requests: Vec::new(),
+        broken_source: SliceSource::new(b""),
+        child_source: SliceSource::new(b""),
     };
     let errors = schema_support::SchemaCompileTestSupport::run(
         SchemaCompileOptions::default(),
@@ -411,6 +426,7 @@ fn default_regex_searches_share_one_cumulative_budget() -> TestResult {
 struct WideSource {
     text: String,
     requests: usize,
+    source: OwnedReadSource,
 }
 
 impl SchemaResolver for WideSource {
@@ -424,7 +440,8 @@ impl SchemaResolver for WideSource {
             return Err(out.fail(ResolverError::NotFound));
         }
         self.requests += 1;
-        Ok(SchemaSource::from_str(b"child", &self.text))
+        self.source.replace(&self.text);
+        Ok(SchemaSource::from_source(b"child", &mut self.source))
     }
 }
 
@@ -467,6 +484,7 @@ fn compiler_budget_is_cumulative_across_imports_without_defaults() -> TestResult
     let mut resolver = WideSource {
         text: child,
         requests: 0,
+        source: OwnedReadSource::new(""),
     };
     let errors = schema_support::SchemaCompileTestSupport::run(
         SchemaCompileOptions::default().with_execution(execution),

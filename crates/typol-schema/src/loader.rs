@@ -4,8 +4,8 @@ mod support;
 use core::cell::RefCell;
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticMessage, ExecutionBudget, SourceCapture,
-    SourceId, SourceSpan,
+    BudgetError, ChargedVec, Diagnostic, DiagnosticMessage, ExecutionBudget, Read, SourceCapture,
+    SourceId, SourceReadError, SourceSpan,
 };
 use typol_i18n::diagnostic_message;
 use typol_syntax::{
@@ -17,7 +17,6 @@ use crate::{
     ResolverError, SchemaCompileContext, SchemaLimits, SchemaResolveRequest, SchemaResolver,
     SchemaSource, SourceLoadedRequest, SourceObserver, SourceObserverError,
     diagnostics::{BudgetDiagnostics, DiagnosticCollector, EmergencyDiagnostics},
-    resolver::SchemaInput,
     session::{CompileBudget, ObjectState, SourceCatalog},
 };
 use input::BoundedSource;
@@ -105,7 +104,7 @@ struct LoadContext<'a, 'observer> {
 }
 
 struct LoadedSourceInput<'src> {
-    input: SchemaInput<'src>,
+    input: &'src mut dyn Read<SourceReadError>,
     source_id: SourceId,
     span: SourceSpan,
 }
@@ -176,8 +175,8 @@ fn resolver_call<'src, R: SchemaResolver + ?Sized>(
 pub(crate) struct SourceLoader;
 
 impl SourceLoader {
-    pub(crate) fn load<R: SchemaResolver + ?Sized>(
-        root: SchemaSource<'_>,
+    pub(crate) fn load<R: SchemaResolver + ?Sized, S: Read<SourceReadError>>(
+        root: SchemaSource<'_, S>,
         resolver: &mut R,
         budget: &mut CompileBudget,
         diagnostics: &mut DiagnosticCollector,
@@ -540,9 +539,9 @@ fn load_imports<R: SchemaResolver + ?Sized>(
     }
 }
 
-fn append_source(
+fn append_source<S: Read<SourceReadError>>(
     files: &mut ChargedVec<LoadedFile>,
-    source: SchemaSource<'_>,
+    source: SchemaSource<'_, S>,
     span: SourceSpan,
     budget: &mut CompileBudget,
     context: &mut LoadContext<'_, '_>,
@@ -554,7 +553,7 @@ fn append_source(
         return false;
     };
     let source_id = SourceId::new(id);
-    let (source_identity, input) = source.into_parts();
+    let (source_identity, mut input) = source.into_parts();
     if !register_source(files, source_identity, source_id, span, context) {
         return false;
     }
@@ -563,7 +562,7 @@ fn append_source(
         budget,
         context,
         LoadedSourceInput {
-            input,
+            input: &mut input,
             source_id,
             span,
         },

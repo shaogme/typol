@@ -167,7 +167,7 @@ map 节点使用 `entries` 数组，每项为 `{"key":"<字符串键>","value":<
 
 ## 7. 资源额度与失败
 
-`ConfigIr::serialize` 由 `typol` crate 的 `config-ir` feature 提供，接收并消费 `ConfigValue`。前置规范化或校验成功后才开始 JSON 编码；任一步失败都不返回部分 JSON。`ConfigIrOptions` 的默认值如下：
+`ConfigIr::serialize_to` 由 `typol` crate 的 `config-ir` feature 提供，会将 `ConfigValue` 写入调用方提供的 sink；`serialize` 是基于该 sink 接口的 `Vec<u8>` 便捷封装。前置规范化或校验成功后才开始 JSON 编码；sink 或输出额度错误可能留下已写入的前缀。`ConfigIrOptions` 的默认值如下：
 
 | 选项 | 默认值 | 作用 |
 | --- | ---: | --- |

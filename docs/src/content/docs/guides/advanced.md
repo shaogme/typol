@@ -152,14 +152,16 @@ let binding = loaded.bind_trusted::<ServiceConfig>(out.reborrow())?;
 ```rust
 use typol::WriteOptions;
 
-let text = binding.write(
+let mut text = String::new();
+binding.write(
     &config,
+    &mut text,
     WriteOptions::default().with_pretty(true),
     out,
 )?;
 ```
 
-The writer adds no final newline. Formatting whitespace counts toward the output byte limit, and a failed write returns no partial text. Output includes actual values from fields marked `@secret`. This changes the write API: migrate `write(value, out)` to `write(value, options, out)`; the previous `write_with_options` method is removed. `write_serde` follows the same signature when the `serde` feature is enabled. Lower-level `TypedSchema::serialize` and `serialize_serde` select pretty output through `CodecOptions::with_pretty`.
+The writer adds no final newline. Formatting whitespace counts toward the output byte limit. Conversion and complete Schema validation finish before the first output byte; a sink or output-limit failure can leave an already-written prefix. Output includes actual values from fields marked `@secret`. `BoundSchema::write` and the feature-gated `write_serde` accept a sink and `WriteOptions`; `write_to_string` and `write_serde_to_string` are available for buffered output. `TypedSchema::serialize` and `serialize_serde` use the same `WriteOptions`.
 
 The optional Serde bridge can read or write Serde types with the bound Schema in context. Enable both Typol's `serde` feature and Serde's derive feature:
 
@@ -206,7 +208,14 @@ fn export_ir(
     schema: &CompiledSchema,
     value: ConfigValue,
 ) -> Result<Vec<u8>, ConfigIrError> {
-    ConfigIr::serialize(schema, value, ConfigIrOptions::new().with_pretty(true))
+    let mut output = Vec::new();
+    ConfigIr::serialize_to(
+        schema,
+        value,
+        ConfigIrOptions::new().with_pretty(true),
+        &mut output,
+    )?;
+    Ok(output)
 }
 ```
 

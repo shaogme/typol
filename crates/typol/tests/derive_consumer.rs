@@ -51,7 +51,7 @@ fn real_consumers_cover_renaming_generics_shapes_and_compile_diagnostics() -> Te
 use std::collections::HashMap;
 use renamed_typol::{
     ConfigParseOptions, Environment, EnvironmentError, EnvironmentReadContext, Typol,
-    binding::{BindOptions, CodecOptions, ConversionLimits, TypedSchema},
+    binding::{BindOptions, WriteOptions, ConversionLimits, TypedSchema},
     config::ConfigParseRequest,
     core::SliceSource,
     opeo::{ErrSlot, OResult, Out},
@@ -149,7 +149,7 @@ fn main() {
     let schema = invoke(|out| compiler.compile(SchemaSource::from_str(b"root", "entry struct Root { value: [u8; 2] }"), &mut Resolver, None, out));
     let binding = invoke(|out| TypedSchema::<Root<u8, 2>>::bind(&schema, BindOptions::default(), out));
     let value = Root { value: [1, 2] };
-    let text = invoke(|out| binding.serialize(&value, CodecOptions::default(), out));
+    let text = invoke(|out| binding.serialize_to_string(&value, WriteOptions::default(), out));
     let mut input = SliceSource::new(text.as_bytes());
     let request = ConfigParseRequest::new(&mut input, "consumer", ConfigParseOptions::default());
     assert_eq!(invoke(|out| binding.deserialize(request, &mut Provider, ConversionLimits::default(), out)), value);
@@ -157,19 +157,19 @@ fn main() {
     let mutual = invoke(|out| compiler.compile(SchemaSource::from_str(b"mutual", "struct Left { right: [Right] } struct Right { left: [Left] } entry struct MutualRoot { value: Left }"), &mut Resolver, None, out));
     let binding = invoke(|out| TypedSchema::<MutualRoot>::bind(&mutual, BindOptions::default(), out));
     let value = MutualRoot { value: Left { right: vec![Right { left: vec![Left { right: vec![] }] }] } };
-    let text = invoke(|out| binding.serialize(&value, CodecOptions::default(), out));
+    let text = invoke(|out| binding.serialize_to_string(&value, WriteOptions::default(), out));
     let mut input = SliceSource::new(text.as_bytes());
     let request = ConfigParseRequest::new(&mut input, "consumer", ConfigParseOptions::default());
     assert_eq!(invoke(|out| binding.deserialize(request, &mut Provider, ConversionLimits::default(), out)), value);
     let depth_limits = ConversionLimits::new(100, 0).expect("zero conversion depth is valid");
-    let _depth_error = invoke_error(|out| binding.serialize(&value, CodecOptions::default().with_conversion(depth_limits), out));
+    let _depth_error = invoke_error(|out| binding.serialize_to_string(&value, WriteOptions::default().with_conversion(depth_limits), out));
     let node_limits = ConversionLimits::new(0, 128).expect("zero conversion nodes are valid");
-    let _node_error = invoke_error(|out| binding.serialize(&value, CodecOptions::default().with_conversion(node_limits), out));
+    let _node_error = invoke_error(|out| binding.serialize_to_string(&value, WriteOptions::default().with_conversion(node_limits), out));
     let compiler = invoke(|out| SchemaCompiler::new(SchemaCompileOptions::default(), out));
     let map_schema = invoke(|out| compiler.compile(SchemaSource::from_str(b"recursive-map", "struct MapNode { children: map<string, MapNode> } entry struct MapRoot { root: MapNode }"), &mut Resolver, None, out));
     let binding = invoke(|out| TypedSchema::<MapRoot>::bind(&map_schema, BindOptions::default(), out));
     let value = MapRoot { root: MapNode { children: HashMap::from([("child".to_owned(), MapNode { children: HashMap::new() })]) } };
-    let text = invoke(|out| binding.serialize(&value, CodecOptions::default(), out));
+    let text = invoke(|out| binding.serialize_to_string(&value, WriteOptions::default(), out));
     let mut input = SliceSource::new(text.as_bytes());
     let request = ConfigParseRequest::new(&mut input, "consumer", ConfigParseOptions::default());
     assert_eq!(invoke(|out| binding.deserialize(request, &mut Provider, ConversionLimits::default(), out)), value);
@@ -177,7 +177,7 @@ fn main() {
     let use_sites = invoke(|out| compiler.compile(SchemaSource::from_str(b"recursive-use-sites", "mod first { struct Shared { children: [second::Shared] } } mod second { struct Shared { children: [first::Shared] } } entry struct SharedRoot { value: first::Shared }"), &mut Resolver, None, out));
     let binding = invoke(|out| TypedSchema::<SharedRoot>::bind(&use_sites, BindOptions::default(), out));
     let value = SharedRoot { value: Shared { children: vec![Shared { children: vec![] }] } };
-    let text = invoke(|out| binding.serialize(&value, CodecOptions::default(), out));
+    let text = invoke(|out| binding.serialize_to_string(&value, WriteOptions::default(), out));
     let mut input = SliceSource::new(text.as_bytes());
     let request = ConfigParseRequest::new(&mut input, "consumer", ConfigParseOptions::default());
     assert_eq!(invoke(|out| binding.deserialize(request, &mut Provider, ConversionLimits::default(), out)), value);
@@ -189,12 +189,12 @@ fn main() {
     let compiler = invoke(|out| SchemaCompiler::new(SchemaCompileOptions::default(), out));
     let empty = invoke(|out| compiler.compile(SchemaSource::from_str(b"empty", "entry struct Empty {}"), &mut Resolver, None, out));
     let binding = invoke(|out| TypedSchema::<Empty>::bind(&empty, BindOptions::default(), out));
-    assert_eq!(invoke(|out| binding.serialize(&Empty {}, CodecOptions::default(), out)), "{}");
+    assert_eq!(invoke(|out| binding.serialize_to_string(&Empty {}, WriteOptions::default(), out)), "{}");
     let compiler = invoke(|out| SchemaCompiler::new(SchemaCompileOptions::default(), out));
     let renamed_empty = invoke(|out| compiler.compile(SchemaSource::from_str(b"renamed-empty", "entry struct RenamedEmpty {}"), &mut Resolver, None, out));
     let binding = invoke(|out| TypedSchema::<UnitEmpty>::bind(&renamed_empty, BindOptions::default(), out));
     let unit = UnitEmpty;
-    let text = invoke(|out| binding.serialize(&unit, CodecOptions::default(), out));
+    let text = invoke(|out| binding.serialize_to_string(&unit, WriteOptions::default(), out));
     assert_eq!(text, "{}");
     let mut input = SliceSource::new(text.as_bytes());
     let request = ConfigParseRequest::new(&mut input, "consumer", ConfigParseOptions::default());
@@ -210,7 +210,7 @@ fn main() {
         node: Recursive { children: vec![Recursive { children: vec![] }] },
         expression: RecursiveEnum::Add(vec![RecursiveEnum::Number(42)]),
     };
-    let text = invoke(|out| binding.serialize(&value, CodecOptions::default(), out));
+    let text = invoke(|out| binding.serialize_to_string(&value, WriteOptions::default(), out));
     let mut input = SliceSource::new(text.as_bytes());
     let request = ConfigParseRequest::new(&mut input, "consumer", ConfigParseOptions::default());
     assert_eq!(invoke(|out| binding.deserialize(request, &mut Provider, ConversionLimits::default(), out)), value);

@@ -25,7 +25,7 @@ This description is based on the current source. Config and Schema DSL specifica
 
 Configuration handling is shared across four layers:
 
-1. `typol-syntax` reads UTF-8 bytes from `ByteSource` on demand and emits tokens with source spans. It does not build a complete token array for configuration.
+1. `typol-syntax` reads UTF-8 bytes from `Read` on demand and emits tokens with source spans. It does not build a complete token array for configuration.
 2. `typol-config` reads token input against read-only views of `CompiledSchema` and directly builds an owned `ConfigValue`; it does not create a configuration AST.
 3. `typol-semantic` supplies read-only views for types, fields, variants, constraints, assertion expressions, environment authorization, and regex programs, as well as expression execution.
 4. `typol` combines parsing with Rust conversion, Serde, loading sessions, and optional Config IR export. `typol-std` supplies file input and process environment adapters.
@@ -53,11 +53,11 @@ For application-level setup with the facade in a `no_std + alloc` environment, s
 
 General callers use `ConfigParser::new(schema).parse(request, environment)`. Success returns `ValidatedConfigValue`, which certifies that value constraints and full-tree assertions passed. Callers can borrow its `ConfigValue`; `into_config_value()` consumes the validation marker when an unmarked owned value is required.
 
-`ConfigParseRequest` contains a readable `ByteSource`, display name, and `ConfigParseOptions`. Options combine shared `ResourceLimits`, `ConfigLimits`, execution/workspace `ExecutionLimits`, and lexical `StreamLimits`. The display name is diagnostic metadata, not part of the configuration input.
+`ConfigParseRequest` contains a readable `Read`, display name, and `ConfigParseOptions`. Options combine shared `ResourceLimits`, `ConfigLimits`, execution/workspace `ExecutionLimits`, and lexical `StreamLimits`. The display name is diagnostic metadata, not part of the configuration input.
 
 `ConfigValueProcessor::validate` and `ConfigValueProcessor::normalize` accept a `ConfigValidationRequest`. Its options configure shared resource limits, config limits, and execution limits, but no token stream. Validation and normalization do not read configuration input or an environment provider and have independent limits from text parsing.
 
-`TypolOptions` and `SchemaLoader::new(TypolOptions)` are shared by no_std and std builds. The shared `ConfigInput::text`, `ConfigInput::bytes`, and `named` methods feed the same parser; `display_name()` always returns a string and defaults to `"config"`. Shared `LoadedSchema::read_value(input, environment, out)` and `BoundSchema::read(input, environment, out)` calls explicitly receive an `Environment` provider. With `std`, `ConfigInput::file`, `ConfigInput::reader`, and `SchemaLoader::compile_file` adapt host inputs into that shared flow. To use process variables, callers construct `ProcessEnvironment` with their chosen `ProcessEnvironmentLimits` and pass it to those read methods.
+`TypolOptions` and `SchemaLoader::new(TypolOptions)` are shared by no_std and std builds. `LoadedSchema::read_value` and the `BoundSchema` read methods accept a generic `ReadRequest<R>`; the reader implements the same `typol_core::Read` contract used by the lexer. In-memory text can use `ReadRequest::from_text`, while no_std callers can pass a `SliceSource` or custom reader. All reads explicitly receive an `Environment` provider. With `std`, `read_file` opens configuration through `FileConfigInput`, and `read_io` adapts a standard I/O reader through `ReadSource`; `SchemaLoader::compile_file` adapts file schemas into the same compiler flow. To use process variables, callers construct `ProcessEnvironment` with their chosen `ProcessEnvironmentLimits` and pass it to those read methods.
 
 With `std`, the same `TypolOptions` also carries host limits. Configure file input limits with `with_file_input_limits`; file Schema, source name, and source name edit limits use `with_files`, `with_names`, and `with_name_edits`. Configuration and binding limits use `with_config_limits` and `with_binding_limits`. Access lower-level configuration policies from `typol::config` and host adapters from `typol::host`. File input limits cover configuration files and path bytes, process environment limits cover names and values on the `ProcessEnvironment` provider, Schema imports use `FileSchemaLimits`, and execution limits remain in Schema/Config options.
 
@@ -75,7 +75,7 @@ Normalization checks each value shape, field name, enum payload, and scalar targ
 
 ### 3.1 Input and root value
 
-The parser allocates a new `SourceId` for the configuration source, starts at `schema.entry()`, and confirms that the root type is a struct. The lexer reads through a fixed-size window from `ByteSource`; the token cursor caches the current event and at most one lookahead. Streaming input tracks line and column positions, while token spans use UTF-8 byte offsets.
+The parser allocates a new `SourceId` for the configuration source, starts at `schema.entry()`, and confirms that the root type is a struct. The lexer reads through a fixed-size window from `Read`; the token cursor caches the current event and at most one lookahead. Streaming input tracks line and column positions, while token spans use UTF-8 byte offsets.
 
 The root is parsed as a struct object. Once it is complete, the parser continues to EOF; any extra token makes the configuration invalid. Thus each call accepts one root object followed only by DSL whitespace and comments. Tokens are consumed into the value tree; no configuration AST is retained for callers.
 
@@ -191,7 +191,7 @@ Raw environment bytes are held only by the cache for one call and are not attach
 
 ## 9. Host integration
 
-`SchemaLoader` owns the compiled Schema and source names. File input uses `typol_std::FileConfigInput` and is read on demand by the lexer; reader input uses `ReadSource` to adapt `Read`. These adapters handle host I/O and bounded error categories, while `typol-config` implements syntax and Schema validation.
+`SchemaLoader` owns the compiled Schema and source names. File input uses `typol_std::FileConfigInput` and is read on demand by the lexer; standard I/O reader input uses `ReadSource` to adapt `std::io::Read` to `typol_core::Read`. These adapters handle host I/O and bounded error categories, while `typol-config` implements syntax and Schema validation.
 
 With the `config-ir` feature enabled, Rust callers can export Config IR v1 through `ConfigIr::serialize`; see the [Config IR specification](../config-ir/). The default mode fills defaults and performs full Schema validation. To skip constraint validation, callers must explicitly choose `AsProvided`. The facade handles type/value traversal, secret markers, deterministic ordering, output/sorting-workspace/depth limits, and serialization error categories. Output and sort-workspace failures are distinct. Maximum nesting depth is 128 and can be lowered but not raised. `typol-cli` has already validated values during configuration loading, so it encodes them as `AsProvided` to avoid repeating validation; it chooses the environment mode, loads the value, invokes the API, and writes the complete result to stdout. See the [CLI guide](../../guides/cli/) for command usage. `secret: true` still accompanies the actual value, which consumers must treat as sensitive.
 

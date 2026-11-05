@@ -10,7 +10,7 @@ use serde::{
     Serialize, Serializer,
     ser::{Error as SerError, SerializeSeq, SerializeStruct},
 };
-use typol_core::{ConfigValue, ValueEntries, ValueEntryView, ValueView};
+use typol_core::{ConfigValue, ValueEntries, ValueEntryView, ValueView, Write};
 use typol_model::BuiltinType;
 use typol_semantic::{CompiledSchema, FieldList, SchemaAccessError, TypeKind, TypeView};
 
@@ -103,18 +103,19 @@ struct Envelope<'a> {
 }
 
 impl ConfigIrSerializer {
-    pub(super) fn serialize(
+    pub(super) fn serialize_to(
         schema: &CompiledSchema,
         value: &ConfigValue,
         options: ConfigIrOptions,
-    ) -> Result<Vec<u8>, ConfigIrError> {
+        output: &mut dyn Write,
+    ) -> Result<(), ConfigIrError> {
         let entry = schema.entry();
         let root_type = schema_access(|out| entry.qualified_name(out))
             .map_err(|_| ConfigIrError::SchemaAccess)?
             .ok_or(ConfigIrError::SchemaAccess)?;
         let state = SerializationState::new(options.max_nesting_depth(), options.reject_secrets());
         let workspace = WorkspaceBudget::new(options.max_workspace_bytes());
-        let mut output = BoundedBuffer::new(options.max_output_bytes());
+        let mut output = BoundedBuffer::new(options.max_output_bytes(), output);
         let envelope = Envelope {
             root_type,
             ty: entry,
@@ -137,7 +138,7 @@ impl ConfigIrSerializer {
                 .take_failure()
                 .unwrap_or(ConfigIrError::SerializationFailed));
         }
-        Ok(output.into_bytes())
+        Ok(())
     }
 }
 

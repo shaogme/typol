@@ -1,7 +1,8 @@
+use alloc::{string::String, vec::Vec};
 use opeo::{OResult, Out};
 
 use crate::{BudgetError, DiagnosticCode, DiagnosticContext, SourceId, diagnostic_context};
-use core::{error::Error, fmt};
+use core::{error::Error, fmt, fmt::Write as FmtWrite, str};
 
 static SLICE_SOURCE_OFFSET: DiagnosticContext =
     diagnostic_context!("typol-core", "input", "slice-offset-out-of-bounds");
@@ -32,7 +33,7 @@ pub struct SourceReadError {
 }
 
 /// Sequential input writes only to nonempty buffers; short reads are not EOF, while zero bytes are permanent EOF.
-pub trait ByteSource<E = SourceReadError> {
+pub trait Read<E = SourceReadError> {
     fn read<'slot, 'borrow>(
         &mut self,
         output: &mut [u8],
@@ -40,6 +41,49 @@ pub trait ByteSource<E = SourceReadError> {
         offset: usize,
         out: Out<'slot, 'borrow, E>,
     ) -> OResult<'slot, usize>;
+}
+
+pub struct ReadRequest<'name, R> {
+    reader: R,
+    display_name: &'name str,
+}
+
+impl<'name, R> ReadRequest<'name, R> {
+    pub const fn new(reader: R, display_name: &'name str) -> Self {
+        Self {
+            reader,
+            display_name,
+        }
+    }
+
+    pub const fn named(mut self, display_name: &'name str) -> Self {
+        self.display_name = display_name;
+        self
+    }
+
+    pub const fn display_name(&self) -> &'name str {
+        self.display_name
+    }
+
+    pub const fn reader(&self) -> &R {
+        &self.reader
+    }
+
+    pub fn into_parts(self) -> (R, &'name str) {
+        (self.reader, self.display_name)
+    }
+}
+
+impl<E, R: Read<E> + ?Sized> Read<E> for &mut R {
+    fn read<'slot>(
+        &mut self,
+        output: &mut [u8],
+        source_id: SourceId,
+        offset: usize,
+        out: Out<'slot, '_, E>,
+    ) -> OResult<'slot, usize> {
+        (**self).read(output, source_id, offset, out)
+    }
 }
 
 impl SourceReadError {
@@ -140,6 +184,12 @@ pub struct SliceSource<'input> {
     offset: usize,
 }
 
+impl<'input> ReadRequest<'input, SliceSource<'input>> {
+    pub fn from_text(text: &'input str) -> Self {
+        Self::new(SliceSource::new(text.as_bytes()), "config")
+    }
+}
+
 impl<'input> SliceSource<'input> {
     pub const fn new(bytes: &'input [u8]) -> Self {
         Self { bytes, offset: 0 }
@@ -202,7 +252,7 @@ impl<'input> SliceSource<'input> {
     }
 }
 
-impl<E> ByteSource<E> for SliceSource<'_>
+impl<E> Read<E> for SliceSource<'_>
 where
     E: From<SourceReadError>,
 {
@@ -217,6 +267,63 @@ where
             E::from(error.with_input(source_id, offset))
         })?;
         Ok(count)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriteError {
+    AllocationFailed,
+    CapacityExceeded,
+    HostFailure,
+    InternalInvariantFailure,
+}
+
+/// Writes a complete byte slice or reports a stable failure category.
+pub trait Write {
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), WriteError>;
+}
+
+pub struct FmtWriteSink<'sink> {
+    writer: &'sink mut dyn FmtWrite,
+}
+
+impl<'sink> FmtWriteSink<'sink> {
+    pub const fn new(writer: &'sink mut dyn FmtWrite) -> Self {
+        Self { writer }
+    }
+}
+
+impl Write for FmtWriteSink<'_> {
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), WriteError> {
+        let text = str::from_utf8(bytes).map_err(|_| WriteError::InternalInvariantFailure)?;
+        self.writer
+            .write_str(text)
+            .map_err(|_| WriteError::HostFailure)
+    }
+}
+
+impl Write for Vec<u8> {
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), WriteError> {
+        self.len()
+            .checked_add(bytes.len())
+            .ok_or(WriteError::CapacityExceeded)?;
+        self.try_reserve(bytes.len())
+            .map_err(|_| WriteError::AllocationFailed)?;
+        self.extend_from_slice(bytes);
+        Ok(())
+    }
+}
+
+impl Write for String {
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), WriteError> {
+        let text = str::from_utf8(bytes).map_err(|_| WriteError::InternalInvariantFailure)?;
+        self.len()
+            .checked_add(text.len())
+            .ok_or(WriteError::CapacityExceeded)?;
+        self.try_reserve(text.len())
+            .map_err(|_| WriteError::AllocationFailed)?;
+        self.push_str(text);
+        Ok(())
     }
 }
 

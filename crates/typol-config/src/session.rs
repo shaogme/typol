@@ -16,7 +16,7 @@ use opeo::{ErrSlot, OResult, Out};
 use core::cell::RefCell;
 
 use typol_core::{
-    BudgetError, ByteSource, ConfigValue, Diagnostic, ExecutionBudget, SecretRange, SourceCapture,
+    BudgetError, ConfigValue, Diagnostic, ExecutionBudget, Read, SecretRange, SourceCapture,
     SourceId, SourceReadError, SourceSpan, SpanLocation,
 };
 use typol_policy::{RegexLimits, ValueLimits};
@@ -268,8 +268,8 @@ impl<'a> ConfigSession<'a> {
     }
 }
 
-pub(crate) struct TrackingInput<'input> {
-    source: &'input mut dyn ByteSource,
+pub(crate) struct TrackingInput<'input, R: Read + ?Sized = dyn Read> {
+    source: &'input mut R,
     failed: bool,
     fetched: usize,
     limit: usize,
@@ -277,8 +277,8 @@ pub(crate) struct TrackingInput<'input> {
     source_errors: ErrSlot<SourceReadError>,
 }
 
-impl<'input> TrackingInput<'input> {
-    pub(crate) fn new(source: &'input mut dyn ByteSource, limit: usize) -> Self {
+impl<'input, R: Read + ?Sized> TrackingInput<'input, R> {
+    pub(crate) fn new(source: &'input mut R, limit: usize) -> Self {
         Self {
             source,
             failed: false,
@@ -299,7 +299,7 @@ impl<'input> TrackingInput<'input> {
     }
 }
 
-impl ByteSource<Diagnostic> for TrackingInput<'_> {
+impl<R: Read + ?Sized> Read<Diagnostic> for TrackingInput<'_, R> {
     fn read<'slot, 'borrow>(
         &mut self,
         output: &mut [u8],

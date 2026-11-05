@@ -16,7 +16,7 @@ use typol::{
 
 #[cfg(any(not(feature = "std"), feature = "btree-map"))]
 use typol::{
-    ConfigInput, EmptyEnvironment, SchemaLoader, TypolError, TypolOptions, WriteOptions,
+    EmptyEnvironment, SchemaLoader, TypolError, TypolOptions, WriteOptions, io::ReadRequest,
     opeo::ErrSlot,
 };
 
@@ -130,7 +130,7 @@ fn ordered_map_decodes_and_writes_keys_in_order() {
         let binding = loaded.bind::<OrderedSettings>(out.reborrow())?;
         let mut environment = EmptyEnvironment;
         let config = binding.read(
-            ConfigInput::text("{values: {\"z\": 9, \"m\": 5, \"a\": 1}}"),
+            ReadRequest::from_text("{values: {\"z\": 9, \"m\": 5, \"a\": 1}}"),
             &mut environment,
             out.reborrow(),
         )?;
@@ -138,7 +138,7 @@ fn ordered_map_decodes_and_writes_keys_in_order() {
             config.values.iter().map(|(key, _)| key).collect::<Vec<_>>(),
             ["a", "m", "z"]
         );
-        let written = binding.write(&config, WriteOptions::default(), out.reborrow())?;
+        let written = binding.write_to_string(&config, WriteOptions::default(), out.reborrow())?;
         assert_eq!(written, "{values: {\"a\": 1, \"m\": 5, \"z\": 9}}");
         let recursive = SchemaLoader::new(TypolOptions::default()).compile_text(
             b"recursive-ordered-map-test",
@@ -177,12 +177,12 @@ fn btree_map_binds_reads_and_writes_in_key_order() {
         let binding = loaded.bind::<BTreeSettings>(out.reborrow())?;
         let mut environment = EmptyEnvironment;
         let config = binding.read(
-            ConfigInput::text("{values: {\"z\": 9, \"a\": 1}}"),
+            ReadRequest::from_text("{values: {\"z\": 9, \"a\": 1}}"),
             &mut environment,
             out.reborrow(),
         )?;
         assert_eq!(config.values.get("a"), Some(&1));
-        let written = binding.write(&config, WriteOptions::default(), out.reborrow())?;
+        let written = binding.write_to_string(&config, WriteOptions::default(), out.reborrow())?;
         assert_eq!(written, "{values: {\"a\": 1, \"z\": 9}}");
 
         let recursive = SchemaLoader::new(TypolOptions::default()).compile_text(
@@ -209,12 +209,12 @@ fn hashbrown_map_binds_without_enabling_std() {
         let binding = loaded.bind::<HashbrownSettings>(out.reborrow())?;
         let mut environment = EmptyEnvironment;
         let config = binding.read(
-            ConfigInput::text("{values: {\"z\": 9, \"a\": 1}}"),
+            ReadRequest::from_text("{values: {\"z\": 9, \"a\": 1}}"),
             &mut environment,
             out.reborrow(),
         )?;
         assert_eq!(config.values.get("a"), Some(&1));
-        let written = binding.write(&config, WriteOptions::default(), out.reborrow())?;
+        let written = binding.write_to_string(&config, WriteOptions::default(), out.reborrow())?;
         assert_eq!(written, "{values: {\"a\": 1, \"z\": 9}}");
         let mut alternate_values = HashMap::new();
         alternate_values.insert(String::from("a"), 1);
@@ -223,7 +223,7 @@ fn hashbrown_map_binds_without_enabling_std() {
             values: alternate_values,
         };
         let alternate_written =
-            binding.write(&alternate, WriteOptions::default(), out.reborrow())?;
+            binding.write_to_string(&alternate, WriteOptions::default(), out.reborrow())?;
         assert_eq!(written, alternate_written);
         let recursive = SchemaLoader::new(TypolOptions::default()).compile_text(
             b"recursive-hashbrown-map-test",
@@ -265,7 +265,7 @@ fn in_memory_loading_and_binding_work_in_a_no_std_consumer() {
         let binding = loaded.bind::<Service>(out.reborrow())?;
         let mut environment = EmptyEnvironment;
         let config = binding.read(
-            ConfigInput::text("{name: \"api\", enabled: true, ports: [8080]}"),
+            ReadRequest::from_text("{name: \"api\", enabled: true, ports: [8080]}"),
             &mut environment,
             out,
         )?;
@@ -275,7 +275,11 @@ fn in_memory_loading_and_binding_work_in_a_no_std_consumer() {
         let mut parse_errors = ErrSlot::<TypolError>::new();
         let caught = parse_errors
             .try_call(|error_out| {
-                loaded.read_value(ConfigInput::text("{name: }"), &mut environment, error_out)
+                loaded.read_value(
+                    ReadRequest::from_text("{name: }"),
+                    &mut environment,
+                    error_out,
+                )
             })
             .err()
             .expect("invalid input should fail");
@@ -301,7 +305,7 @@ fn config_ir_serializes_in_memory_values_without_std() {
         let mut environment = EmptyEnvironment;
         let value = loaded
             .read_value(
-                ConfigInput::text("{name: \"api\", enabled: true, ports: [8080]}"),
+                ReadRequest::from_text("{name: \"api\", enabled: true, ports: [8080]}"),
                 &mut environment,
                 out.reborrow(),
             )?

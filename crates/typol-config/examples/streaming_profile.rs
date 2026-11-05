@@ -11,8 +11,7 @@ use typol_config::{
     opeo::{ErrSlot, OResult, Out},
 };
 use typol_core::{
-    BudgetError, ByteSource, ExecutionBudget, SliceSource, SourceId, SourceReadError,
-    SourceReadErrorKind,
+    BudgetError, ExecutionBudget, Read, SliceSource, SourceId, SourceReadError, SourceReadErrorKind,
 };
 use typol_schema::{
     ResolverError, SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaResolveRequest,
@@ -138,7 +137,7 @@ struct ObservedInput<'a> {
     calls: &'a Cell<usize>,
 }
 
-impl ByteSource for ObservedInput<'_> {
+impl Read for ObservedInput<'_> {
     fn read<'slot>(
         &mut self,
         output: &mut [u8],

@@ -1,6 +1,6 @@
 use typol_core::{
-    BudgetError, ByteSource, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits,
-    SliceSource, SourceId,
+    BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read, SliceSource,
+    SourceId,
 };
 use typol_syntax::{InputConfig, LexEvent, StreamLimits, SyntaxLimits, TokenCursor, TokenKind};
 use typol_test_support::TestSlot;
@@ -60,7 +60,7 @@ struct TestCursor<'source> {
 impl<'source> TestCursor<'source> {
     fn new(
         source_id: SourceId,
-        source: &'source mut dyn ByteSource<Diagnostic>,
+        source: &'source mut dyn Read<Diagnostic>,
         limits: &SyntaxLimits,
         stream: StreamLimits,
         execution: &ExecutionBudget,

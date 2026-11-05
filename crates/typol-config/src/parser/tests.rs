@@ -24,7 +24,7 @@ use crate::{
 use alloc::{format, vec, vec::Vec};
 use opeo::{OResult, Out};
 use typol_core::{
-    ByteSource, ConfigValue, Diagnostic, DiagnosticCode, ExecutionLimits, SliceSource, ValueKind,
+    ConfigValue, Diagnostic, DiagnosticCode, ExecutionLimits, Read, SliceSource, ValueKind,
     ValueSource,
 };
 use typol_policy::ResourceLimits;
@@ -758,7 +758,7 @@ fn parse_local_value<'schema>(
 }
 
 fn config_request<'a>(
-    source: (&'a mut impl ByteSource, &'a str),
+    source: (&'a mut impl Read, &'a str),
     limits: impl Into<ParserLimits>,
 ) -> ConfigParseRequest<'a> {
     let limits = limits.into();
@@ -827,7 +827,7 @@ impl ParserTestSupport {
     }
 
     pub fn config_request<'a>(
-        source: (&'a mut impl ByteSource, &'a str),
+        source: (&'a mut impl Read, &'a str),
         limits: impl Into<ParserLimits>,
     ) -> ConfigParseRequest<'a> {
         config_request(source, limits)

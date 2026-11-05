@@ -7,9 +7,9 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{
-    AllocationError, BudgetError, ByteSource, ConfigValue, DiagnosticCode, ExcerptLimits,
-    ExecutionBudget, ExecutionLimits, LineIndex, LocationError, SliceSource, SourceId,
-    SourceReadError, SourceReadErrorKind, ValueKind, ValuePayloadView,
+    AllocationError, BudgetError, ConfigValue, DiagnosticCode, ExcerptLimits, ExecutionBudget,
+    ExecutionLimits, LineIndex, LocationError, Read, SliceSource, SourceId, SourceReadError,
+    SourceReadErrorKind, ValueKind, ValuePayloadView,
 };
 use typol_schema::{SchemaCompileOptions, SchemaSource};
 use typol_semantic::CompiledSchema;
@@ -56,7 +56,7 @@ impl<'a> Source<'a> {
     }
 }
 
-impl ByteSource for Source<'_> {
+impl Read for Source<'_> {
     fn read<'slot, 'borrow>(
         &mut self,
         output: &mut [u8],
@@ -128,7 +128,7 @@ impl Environment for Provider {
 
 fn run(
     schema: &CompiledSchema,
-    source: &mut dyn ByteSource,
+    source: &mut dyn Read,
     chunk: usize,
 ) -> TestResult<TestOpeoOutcome<ConfigValue, ConfigParseErrors>> {
     let stream = StreamLimits::try_new(chunk, 1_048_576).test_value()?;

@@ -9,13 +9,13 @@ use opeo::{OResult, Out, ResultOutExt};
 use std::{
     fmt,
     fs::{File, Metadata, OpenOptions},
-    io::{ErrorKind, Read},
+    io::{ErrorKind, Read as IoRead, Write as IoWrite},
     path::Path,
 };
 
 use typol_core::{
-    ByteSource, DiagnosticContext, ExecutionBudget, SourceId, SourceReadError, SourceReadErrorKind,
-    diagnostic_context,
+    DiagnosticContext, ExecutionBudget, Read as SourceRead, SourceId, SourceReadError,
+    SourceReadErrorKind, Write, WriteError, diagnostic_context,
 };
 
 #[cfg(target_os = "linux")]
@@ -342,7 +342,7 @@ impl FileSchemaInput {
     }
 }
 
-impl ByteSource for FileSchemaInput {
+impl SourceRead for FileSchemaInput {
     fn read<'slot>(
         &mut self,
         output: &mut [u8],
@@ -399,14 +399,14 @@ impl ByteSource for FileSchemaInput {
 
 /// No cache is added; each interrupted-read retry is charged, and other native errors map only to finite categories.
 pub struct ReadSource<'input> {
-    reader: &'input mut dyn Read,
+    reader: &'input mut dyn IoRead,
     budget: ExecutionBudget,
     finished: bool,
 }
 
 impl<'input> ReadSource<'input> {
     pub fn new<'slot>(
-        reader: &'input mut dyn Read,
+        reader: &'input mut dyn IoRead,
         budget: &ExecutionBudget,
         mut out: Out<'slot, '_, SourceReadError>,
     ) -> OResult<'slot, Self> {
@@ -419,7 +419,7 @@ impl<'input> ReadSource<'input> {
     }
 }
 
-impl ByteSource for ReadSource<'_> {
+impl SourceRead for ReadSource<'_> {
     fn read<'slot>(
         &mut self,
         output: &mut [u8],
@@ -476,6 +476,35 @@ impl ByteSource for ReadSource<'_> {
 impl fmt::Debug for ReadSource<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("ReadSource").finish_non_exhaustive()
+    }
+}
+
+pub struct IoWriteSink<'sink> {
+    writer: &'sink mut dyn IoWrite,
+}
+
+impl<'sink> IoWriteSink<'sink> {
+    pub const fn new(writer: &'sink mut dyn IoWrite) -> Self {
+        Self { writer }
+    }
+}
+
+impl Write for IoWriteSink<'_> {
+    fn write_all(&mut self, mut bytes: &[u8]) -> Result<(), WriteError> {
+        while !bytes.is_empty() {
+            match self.writer.write(bytes) {
+                Ok(0) => return Err(WriteError::HostFailure),
+                Ok(count) if count <= bytes.len() => {
+                    bytes = bytes
+                        .get(count..)
+                        .ok_or(WriteError::InternalInvariantFailure)?;
+                }
+                Ok(_) => return Err(WriteError::InternalInvariantFailure),
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(_) => return Err(WriteError::HostFailure),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -540,7 +569,7 @@ impl FileConfigInput {
     }
 }
 
-impl ByteSource for FileConfigInput {
+impl SourceRead for FileConfigInput {
     fn read<'slot>(
         &mut self,
         output: &mut [u8],

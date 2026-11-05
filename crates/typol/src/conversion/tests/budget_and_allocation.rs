@@ -4,7 +4,7 @@ use crate::{
     conversion::{Conversion, ConvertedValue, OrderedMap, Sourced},
     descriptor::Typol,
     diagnostics::CodecErrors,
-    options::{BindOptions, CodecOptions, ConversionLimits, MAX_CONVERSION_DEPTH},
+    options::{BindOptions, ConversionLimits, MAX_CONVERSION_DEPTH, WriteOptions},
     session::SessionBudget,
     test_support::{TestOpeo, TestOpeoOutcome, TestValues},
 };
@@ -267,7 +267,7 @@ fn binding_tree_and_hashmap_target_allocations_are_recoverable_and_leak_free() -
             None => return Ok(()),
         };
         let session =
-            match TestOpeo::outcome(|out| SessionBudget::codec(CodecOptions::default(), out)) {
+            match TestOpeo::outcome(|out| SessionBudget::codec(WriteOptions::default(), out)) {
                 TestOpeoOutcome::Value(session) => session,
                 TestOpeoOutcome::Error(BudgetError::Allocation) => return Ok(()),
                 TestOpeoOutcome::Error(error) => {
@@ -316,7 +316,7 @@ fn binding_tree_and_hashmap_target_allocations_are_recoverable_and_leak_free() -
             None => return Ok(()),
         };
         let session =
-            match TestOpeo::outcome(|out| SessionBudget::codec(CodecOptions::default(), out)) {
+            match TestOpeo::outcome(|out| SessionBudget::codec(WriteOptions::default(), out)) {
                 TestOpeoOutcome::Value(session) => session,
                 TestOpeoOutcome::Error(BudgetError::Allocation) => return Ok(()),
                 TestOpeoOutcome::Error(error) => {

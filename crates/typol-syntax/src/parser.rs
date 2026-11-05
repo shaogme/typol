@@ -20,7 +20,7 @@ use crate::{
 use core::fmt::{Debug, Formatter, Result as FmtResult};
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    ByteSource, ChargedVec, Diagnostic, ExecutionBudget, SliceSource, SourceId, SourceLocation,
+    ChargedVec, Diagnostic, ExecutionBudget, Read, SliceSource, SourceId, SourceLocation,
     SourceSpan, Span, diagnostic_context,
 };
 
@@ -152,7 +152,7 @@ enum ParseAttempt<T> {
 
 struct ParseRequest<'src, 'options, 'budget> {
     source_id: SourceId,
-    source: &'src mut dyn ByteSource<Diagnostic>,
+    source: &'src mut dyn Read<Diagnostic>,
     options: &'options SchemaParseOptions,
     budget: &'budget ExecutionBudget,
 }
@@ -173,7 +173,7 @@ pub struct SchemaParser;
 impl SchemaParser {
     pub fn parse<'slot>(
         source_id: SourceId,
-        source: &mut dyn ByteSource<Diagnostic>,
+        source: &mut dyn Read<Diagnostic>,
         options: &SchemaParseOptions,
         budget: &ExecutionBudget,
         out: Out<'slot, '_, SyntaxErrors>,
@@ -192,7 +192,7 @@ impl SchemaParser {
 
     pub fn parse_with_positions<'slot>(
         source_id: SourceId,
-        source: &mut dyn ByteSource<Diagnostic>,
+        source: &mut dyn Read<Diagnostic>,
         options: &SchemaParseOptions,
         budget: &ExecutionBudget,
         out: Out<'slot, '_, SyntaxErrors>,

@@ -2,7 +2,7 @@
 mod schema_support;
 
 use std::{format, string::String};
-use typol_core::{ExecutionBudget, ExecutionLimits, SourceId, SourceSpan};
+use typol_core::{ExecutionBudget, ExecutionLimits, SliceSource, SourceId, SourceSpan};
 use typol_policy::{RegexLimits, ValueLimits};
 use typol_schema::{
     ResolverError, SchemaCompileOptions, SchemaLimits, SchemaResolveRequest, SchemaResolver,
@@ -39,7 +39,10 @@ impl SourceObserver for Observer {
     }
 }
 
-struct Sources;
+struct Sources {
+    broken_source: SliceSource<'static>,
+    good_source: SliceSource<'static>,
+}
 
 impl SchemaResolver for Sources {
     fn resolve<'src, 'slot>(
@@ -48,11 +51,17 @@ impl SchemaResolver for Sources {
         out: Out<'slot, '_, ResolverError>,
     ) -> OResult<'slot, SchemaSource<'src>> {
         match request.module_name {
-            "broken" => Ok(SchemaSource::from_str(b"broken", "struct")),
-            "good" | "duplicate" => Ok(SchemaSource::from_str(
-                b"same",
-                "struct Item { name: string }",
-            )),
+            "broken" => {
+                self.broken_source = SliceSource::new(b"struct");
+                Ok(SchemaSource::from_source(
+                    b"broken",
+                    &mut self.broken_source,
+                ))
+            }
+            "good" | "duplicate" => {
+                self.good_source = SliceSource::new(b"struct Item { name: string }");
+                Ok(SchemaSource::from_source(b"same", &mut self.good_source))
+            }
             _ => Err(out.fail(ResolverError::NotFound)),
         }
     }
@@ -349,6 +358,7 @@ fn refinement_summary_keeps_source_order_secret_and_host_metadata_separate() -> 
 struct ReusedSource {
     text: String,
     identity: String,
+    source: OwnedReadSource,
 }
 
 impl SchemaResolver for ReusedSource {
@@ -366,7 +376,11 @@ impl SchemaResolver for ReusedSource {
             "second" => "struct Item { name: string }",
             _ => return Err(out.fail(ResolverError::NotFound)),
         });
-        Ok(SchemaSource::from_str(self.identity.as_bytes(), &self.text))
+        self.source.replace(&self.text);
+        Ok(SchemaSource::from_source(
+            self.identity.as_bytes(),
+            &mut self.source,
+        ))
     }
 }
 
@@ -379,6 +393,7 @@ fn frozen_model_owns_data_after_resolver_buffers_and_root_are_destroyed() -> Tes
         let mut resolver = ReusedSource {
             text: String::new(),
             identity: String::new(),
+            source: OwnedReadSource::new(""),
         };
         schema_support::SchemaCompileTestSupport::run(
             SchemaCompileOptions::new(SchemaLimits::default()),
@@ -535,7 +550,10 @@ fn observer_receives_actual_ids_before_parsing_and_skips_duplicate_identities() 
             b"root",
             "extern mod broken; extern mod good; extern mod duplicate; entry struct Root { item: good::Item }",
         ),
-        &mut Sources,
+        &mut Sources {
+            broken_source: SliceSource::new(b""),
+            good_source: SliceSource::new(b""),
+        },
         Some(&mut observer),
     )
     .test_error()?;
@@ -564,7 +582,10 @@ fn observer_receives_actual_ids_before_parsing_and_skips_duplicate_identities() 
     let errors = schema_support::SchemaCompileTestSupport::run(
         SchemaCompileOptions::new(SchemaLimits::default()),
         SchemaSource::from_str(b"root", "struct"),
-        &mut Sources,
+        &mut Sources {
+            broken_source: SliceSource::new(b""),
+            good_source: SliceSource::new(b""),
+        },
         Some(&mut observer),
     )
     .test_error()?;
@@ -577,7 +598,10 @@ fn observer_receives_actual_ids_before_parsing_and_skips_duplicate_identities() 
             b"root",
             "extern mod good; entry struct Root { item: good::Item }",
         ),
-        &mut Sources,
+        &mut Sources {
+            broken_source: SliceSource::new(b""),
+            good_source: SliceSource::new(b""),
+        },
         Some(&mut observer),
     )
     .test_value()?;

@@ -14,10 +14,10 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{
-    AllocationError, BudgetError, ByteSource, ConfigValue, Diagnostic, DiagnosticCode,
-    ExcerptLimits, ExcerptStatus, ExecutionBudget, ExecutionLimits, InstancePath, LineIndex,
-    LocatedSpan, LocationError, SliceSource, SourceCapture, SourceExcerptSet, SourceId, SourceSpan,
-    Span, SpanError, SpanLocation, ValueError,
+    AllocationError, BudgetError, ConfigValue, Diagnostic, DiagnosticCode, ExcerptLimits,
+    ExcerptStatus, ExecutionBudget, ExecutionLimits, InstancePath, LineIndex, LocatedSpan,
+    LocationError, Read, SliceSource, SourceCapture, SourceExcerptSet, SourceId, SourceSpan, Span,
+    SpanError, SpanLocation, ValueError,
 };
 use typol_policy::ResourceLimits;
 use typol_schema::{SchemaCompileOptions, SchemaSource};
@@ -936,7 +936,7 @@ fn diagnostic_growth_oom_and_inline_terminal_need_no_further_allocation() -> Tes
 }
 
 fn config_request<'a>(
-    source: (&'a mut impl ByteSource, &'a str),
+    source: (&'a mut impl Read, &'a str),
     limits: impl Into<TestLimits>,
 ) -> ConfigParseRequest<'a> {
     let limits = limits.into();

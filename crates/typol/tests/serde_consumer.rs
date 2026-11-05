@@ -31,7 +31,7 @@ impl Consumer {
             ", features = [\"std\"]"
         };
         write(self.root.join("Cargo.toml"), format!(
-            "[package]\nname = \"serde-consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\nrenamed_typol = {{ package = \"typol\", path = {facade:?}, default-features = false{features} }}\ntypol_test_support = {{ package = \"typol-test-support\", path = {support:?} }}\nserde = {{ version = \"=1.0.228\", default-features = false, features = [\"std\", \"derive\"] }}\n",
+            "[package]\nname = \"serde-consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[features]\nserde = []\n[dependencies]\nrenamed_typol = {{ package = \"typol\", path = {facade:?}, default-features = false{features} }}\ntypol_test_support = {{ package = \"typol-test-support\", path = {support:?} }}\nserde = {{ version = \"=1.0.228\", default-features = false, features = [\"std\", \"derive\"] }}\n",
         )).test_value()?;
         copy(
             facade.join("../../Cargo.lock"),
@@ -43,8 +43,17 @@ impl Consumer {
             include_str!("support/serde_consumer.rs"),
         )
         .test_value()?;
-        let output = Command::new(var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-            .arg(if feature { "run" } else { "check" })
+        copy(
+            facade.join("tests/support/serde_read_input.rs"),
+            self.root.join("src/read_input.rs"),
+        )
+        .test_value()?;
+        let mut command = Command::new(var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+        command.arg(if feature { "run" } else { "check" });
+        if feature {
+            command.args(["--features", "serde"]);
+        }
+        let output = command
             .args(["--offline", "--message-format=json"])
             .current_dir(&self.root)
             .env("CARGO_TARGET_DIR", self.root.join("target"))

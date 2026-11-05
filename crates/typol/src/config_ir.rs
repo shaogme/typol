@@ -7,7 +7,7 @@ pub use typol_config::{
     ConfigValidationOptions, ConfigValidationRequest, ConfigValueErrors, ConfigValueProcessor,
     NormalizedConfigValue, ValidatedConfigValue,
 };
-use typol_core::ConfigValue;
+use typol_core::{ConfigValue, Write};
 use typol_semantic::CompiledSchema;
 
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 16_777_216;
@@ -94,17 +94,39 @@ impl ConfigIr {
         value: ConfigValue,
         options: ConfigIrOptions,
     ) -> Result<Vec<u8>, ConfigIrError> {
+        let mut output = Vec::new();
+        Self::serialize_to(schema, value, options, &mut output)?;
+        Ok(output)
+    }
+
+    /// Process an owned configuration value and stream Config IR v1 to `output`.
+    pub fn serialize_to(
+        schema: &CompiledSchema,
+        value: ConfigValue,
+        options: ConfigIrOptions,
+        output: &mut dyn Write,
+    ) -> Result<(), ConfigIrError> {
         match options.value_mode() {
             ConfigIrValueMode::AsProvided => {
-                serializer::ConfigIrSerializer::serialize(schema, &value, options)
+                serializer::ConfigIrSerializer::serialize_to(schema, &value, options, output)
             }
             ConfigIrValueMode::WithDefaults => {
                 let value = Self::normalize(schema, value, options.validation_options())?;
-                serializer::ConfigIrSerializer::serialize(schema, value.as_config_value(), options)
+                serializer::ConfigIrSerializer::serialize_to(
+                    schema,
+                    value.as_config_value(),
+                    options,
+                    output,
+                )
             }
             ConfigIrValueMode::Validated => {
                 let value = Self::validate(schema, value, options.validation_options())?;
-                serializer::ConfigIrSerializer::serialize(schema, value.as_config_value(), options)
+                serializer::ConfigIrSerializer::serialize_to(
+                    schema,
+                    value.as_config_value(),
+                    options,
+                    output,
+                )
             }
         }
     }

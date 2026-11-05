@@ -5,7 +5,7 @@ use value_support::ValueSupport;
 
 use typol::{
     ConfigParseOptions, Environment, EnvironmentError, EnvironmentReadContext, Typol,
-    binding::{BindOptions, CodecOptions, ConversionLimits, TypedSchema},
+    binding::{BindOptions, ConversionLimits, TypedSchema, WriteOptions},
     config::{ConfigParseRequest, ConfigParser},
     core::{SliceSource, ValueKind, ValueSource},
     host::{DisplayOptions, SafeValueFormatter},
@@ -92,7 +92,8 @@ fn real_codec_preserves_secrets_while_schema_display_hides_the_same_inputs() -> 
             out,
         )
     })?;
-    let encoded = TestOpeo::value(|out| binding.serialize(&model, CodecOptions::default(), out))?;
+    let encoded =
+        TestOpeo::value(|out| binding.serialize_to_string(&model, WriteOptions::default(), out))?;
     for sentinel in [
         "PRIVATE-LITERAL",
         "PRIVATE-ENV",

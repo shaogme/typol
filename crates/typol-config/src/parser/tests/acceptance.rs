@@ -512,7 +512,10 @@ fn copied_defaults_own_every_shape_and_survive_schema_and_source_drop() -> TestR
     Ok(())
 }
 
-struct Common;
+#[derive(Default)]
+struct Common {
+    source: OwnedReadSource,
+}
 
 impl SchemaResolver for Common {
     fn resolve<'a, 'slot, 'borrow>(
@@ -522,10 +525,9 @@ impl SchemaResolver for Common {
     ) -> OResult<'slot, SchemaSource<'a>> {
         let name = request.module_name;
         if name == "common" {
-            Ok(SchemaSource::from_str(
-                b"common",
-                include_str!("../../../../../examples/config/common.tschem"),
-            ))
+            let text = include_str!("../../../../../examples/config/common.tschem");
+            self.source.replace(text);
+            Ok(SchemaSource::from_source(b"common", &mut self.source))
         } else {
             Err(out.fail(ResolverError::NotFound))
         }
@@ -596,7 +598,7 @@ fn repository_examples_pass_the_complete_private_semantic_pipeline() -> TestResu
                     SchemaCompiler::new(SchemaCompileOptions::default(), out.reborrow())?;
                 compiler.compile(
                     SchemaSource::from_str(b"root", example.schema),
-                    &mut Common,
+                    &mut Common::default(),
                     None,
                     out.reborrow(),
                 )
@@ -668,7 +670,7 @@ fn newline_comments_unicode_columns_and_two_source_routing_share_core_rules() ->
                     b"root",
                     "extern mod common; entry struct Root { value: u8, }",
                 ),
-                &mut Common,
+                &mut Common::default(),
                 None,
                 out.reborrow(),
             )

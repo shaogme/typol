@@ -281,23 +281,14 @@ impl Default for BindOptions {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Controls validation, conversion, and output limits for typed configuration serialization.
-///
-/// Compact output is the default. Call [`CodecOptions::with_pretty`] to request multi-line text.
-pub struct CodecOptions {
-    validation: ConfigValidationOptions,
-    conversion: ConversionLimits,
-    max_output_bytes: usize,
-    pretty: bool,
-}
-
 /// Controls validated configuration text written by a `BoundSchema`.
 ///
 /// Compact output is the default. Conversion limits default to the limits of the loaded schema
 /// when these options are passed to `BoundSchema::write` or `BoundSchema::write_serde`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WriteOptions {
+    validation: ConfigValidationOptions,
+    validation_overridden: bool,
     max_output_bytes: usize,
     conversion: ConversionLimits,
     conversion_overridden: bool,
@@ -306,8 +297,10 @@ pub struct WriteOptions {
 
 impl WriteOptions {
     /// Creates writer options with the provided output byte limit and compact formatting.
-    pub const fn new(max_output_bytes: usize) -> Self {
+    pub fn new(max_output_bytes: usize) -> Self {
         Self {
+            validation: ConfigValidationOptions::default(),
+            validation_overridden: false,
             max_output_bytes,
             conversion: ConversionLimits {
                 nodes: 100_000,
@@ -322,8 +315,16 @@ impl WriteOptions {
         self.max_output_bytes
     }
 
+    pub const fn validation(self) -> ConfigValidationOptions {
+        self.validation
+    }
+
     /// Returns the configured conversion limits before applying a `BoundSchema` fallback.
     pub const fn conversion_limits(self) -> ConversionLimits {
+        self.conversion
+    }
+
+    pub const fn conversion(self) -> ConversionLimits {
         self.conversion
     }
 
@@ -335,6 +336,21 @@ impl WriteOptions {
     pub const fn with_conversion_limits(mut self, conversion: ConversionLimits) -> Self {
         self.conversion = conversion;
         self.conversion_overridden = true;
+        self
+    }
+
+    pub const fn with_conversion(self, conversion: ConversionLimits) -> Self {
+        self.with_conversion_limits(conversion)
+    }
+
+    pub const fn with_max_output_bytes(mut self, max_output_bytes: usize) -> Self {
+        self.max_output_bytes = max_output_bytes;
+        self
+    }
+
+    pub const fn with_validation(mut self, validation: ConfigValidationOptions) -> Self {
+        self.validation = validation;
+        self.validation_overridden = true;
         self
     }
 
@@ -351,75 +367,22 @@ impl WriteOptions {
             fallback
         }
     }
+
+    pub(crate) const fn validation_or(
+        self,
+        fallback: ConfigValidationOptions,
+    ) -> ConfigValidationOptions {
+        if self.validation_overridden {
+            self.validation
+        } else {
+            fallback
+        }
+    }
 }
 
 impl Default for WriteOptions {
     fn default() -> Self {
         Self::new(1_048_576)
-    }
-}
-
-impl CodecOptions {
-    /// Creates codec options with compact formatting.
-    pub const fn new(
-        validation: ConfigValidationOptions,
-        conversion: ConversionLimits,
-        max_output_bytes: usize,
-    ) -> Self {
-        Self {
-            validation,
-            conversion,
-            max_output_bytes,
-            pretty: false,
-        }
-    }
-
-    pub const fn validation(self) -> ConfigValidationOptions {
-        self.validation
-    }
-
-    pub const fn conversion(self) -> ConversionLimits {
-        self.conversion
-    }
-
-    pub const fn max_output_bytes(self) -> usize {
-        self.max_output_bytes
-    }
-
-    /// Returns whether the encoder uses multi-line output with two-space indentation.
-    pub const fn pretty(self) -> bool {
-        self.pretty
-    }
-
-    pub const fn with_validation(mut self, validation: ConfigValidationOptions) -> Self {
-        self.validation = validation;
-        self
-    }
-
-    pub const fn with_conversion(mut self, conversion: ConversionLimits) -> Self {
-        self.conversion = conversion;
-        self
-    }
-
-    pub const fn with_max_output_bytes(mut self, max_output_bytes: usize) -> Self {
-        self.max_output_bytes = max_output_bytes;
-        self
-    }
-
-    /// Selects compact or multi-line configuration text output.
-    pub const fn with_pretty(mut self, pretty: bool) -> Self {
-        self.pretty = pretty;
-        self
-    }
-}
-
-impl Default for CodecOptions {
-    fn default() -> Self {
-        Self::new(
-            ConfigValidationOptions::default(),
-            ConversionLimits::default(),
-            1_048_576,
-        )
     }
 }
 

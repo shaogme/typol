@@ -15,13 +15,13 @@ use crate::{
     descriptor::{BudgetedTypol, DescribeContext, DescriptorProvider, Typol},
     diagnostics::{CodecErrors, CodecStage, Failure},
     loading::BoundRead,
-    options::{BindOptions, CodecOptions, ConversionLimits},
+    options::{BindOptions, ConversionLimits, WriteOptions},
     session::SessionBudget,
 };
 use core::{any::TypeId, cmp::Ordering, marker::PhantomData, ops::Deref};
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 use typol_config::{ConfigParseRequest, Environment};
-use typol_core::{ChargedVec, DiagnosticContext, ExecutionBudget, diagnostic_context};
+use typol_core::{ChargedVec, DiagnosticContext, ExecutionBudget, Read, Write, diagnostic_context};
 use typol_semantic::{CompiledSchema, FieldView, TypeView, VariantView};
 
 #[cfg(feature = "serde")]
@@ -133,8 +133,8 @@ pub(crate) struct TypeBinding<'schema> {
     pub(crate) variants: ChargedVec<VariantBinding<'schema>>,
 }
 
-pub(crate) struct DeserializeRequest<'request, 'environment, 'budget> {
-    pub(crate) request: ConfigParseRequest<'request>,
+pub(crate) struct DeserializeRequest<'request, 'environment, 'budget, R: Read + ?Sized> {
+    pub(crate) request: ConfigParseRequest<'request, R>,
     pub(crate) environment: &'environment mut dyn Environment,
     pub(crate) limits: ConversionLimits,
     pub(crate) budget: &'budget ExecutionBudget,
@@ -337,24 +337,45 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
 
     /// Converts and fully validates the actual value before emitting deterministic configuration text.
     ///
-    /// `CodecOptions::with_pretty` selects multi-line output; compact text remains the default.
+    /// `WriteOptions::with_pretty` selects multi-line output; compact text remains the default.
     /// Conversion diagnostics follow the bound Schema `@secret` boundary before storage.
+    pub fn serialize_to_string<'slot>(
+        &self,
+        value: &T,
+        options: WriteOptions,
+        out: Out<'slot, '_, CodecErrors>,
+    ) -> OResult<'slot, String> {
+        let mut output = String::new();
+        self.serialize(
+            value,
+            &mut output,
+            WriteOptions::new(options.max_output_bytes())
+                .with_validation(options.validation())
+                .with_conversion_limits(options.conversion())
+                .with_pretty(options.pretty()),
+            out,
+        )?;
+        Ok(output)
+    }
+
     pub fn serialize<'slot>(
         &self,
         value: &T,
-        options: CodecOptions,
+        output: &mut dyn Write,
+        options: WriteOptions,
         mut out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, String> {
+    ) -> OResult<'slot, ()> {
+        let codec_options = options;
         let mut session = SessionBudget::codec_from_budget(
             CodecStage::Conversion,
-            |budget_out| SessionBudget::codec(options, budget_out),
+            |budget_out| SessionBudget::codec(codec_options, budget_out),
             out.reborrow(),
         )?;
         let value = SchemaCompleteValue::rust(Conversion::encode(
             self,
             value,
             &session,
-            options.conversion(),
+            options.conversion_limits(),
             out.reborrow(),
         )?);
         let mut validated = ValidatedValue::validate(
@@ -364,14 +385,14 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
             &mut session,
             out.reborrow(),
         )?;
-        validated.encode(options.pretty(), out.reborrow())
+        validated.encode(output, options.pretty(), out.reborrow())
     }
 
     /// Parsing and final Rust construction share the request execution budget.
     /// Conversion diagnostics follow the bound Schema `@secret` boundary before storage.
-    pub fn deserialize<'slot>(
+    pub fn deserialize<'slot, R: Read + ?Sized>(
         &self,
-        request: ConfigParseRequest<'_>,
+        request: ConfigParseRequest<'_, R>,
         environment: &mut dyn Environment,
         limits: ConversionLimits,
         mut out: Out<'slot, '_, CodecErrors>,
@@ -397,9 +418,9 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
         )
     }
 
-    pub(crate) fn deserialize_with_value_and_budget<'slot>(
+    pub(crate) fn deserialize_with_value_and_budget<'slot, R: Read + ?Sized>(
         &self,
-        request: DeserializeRequest<'_, '_, '_>,
+        request: DeserializeRequest<'_, '_, '_, R>,
         mut out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, BoundRead<T>> {
         let DeserializeRequest {
@@ -431,9 +452,9 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
     }
 
     #[cfg(feature = "serde")]
-    pub(crate) fn deserialize_serde_with_budget<'slot>(
+    pub(crate) fn deserialize_serde_with_budget<'slot, R: Read + ?Sized>(
         &self,
-        request: DeserializeRequest<'_, '_, '_>,
+        request: DeserializeRequest<'_, '_, '_, R>,
         mut out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, T>
     where
@@ -472,30 +493,55 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
 
     /// Processes Serde events under the current binding’s Schema and emits configuration text after full validation.
     ///
-    /// `CodecOptions::with_pretty` selects multi-line output; compact text remains the default.
+    /// `WriteOptions::with_pretty` selects multi-line output; compact text remains the default.
     /// Serde and Typol effective names must match. Omitted fields are filled using Schema defaults or `none`; this does not guarantee reconstruction of the original Rust value.
     /// Actual output retains secret values and must not be used as a security log.
     /// Ordinary Serde trait calls without context do not guarantee Schema validation.
     #[cfg(feature = "serde")]
-    pub fn serialize_serde<'slot>(
+    pub fn serialize_serde_to_string<'slot>(
         &self,
         value: &T,
-        options: CodecOptions,
-        mut out: Out<'slot, '_, CodecErrors>,
+        options: WriteOptions,
+        out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, String>
     where
         T: Serialize,
     {
+        let mut output = String::new();
+        self.serialize_serde(
+            value,
+            &mut output,
+            WriteOptions::new(options.max_output_bytes())
+                .with_validation(options.validation())
+                .with_conversion_limits(options.conversion())
+                .with_pretty(options.pretty()),
+            out,
+        )?;
+        Ok(output)
+    }
+
+    #[cfg(feature = "serde")]
+    pub fn serialize_serde<'slot>(
+        &self,
+        value: &T,
+        output: &mut dyn Write,
+        options: WriteOptions,
+        mut out: Out<'slot, '_, CodecErrors>,
+    ) -> OResult<'slot, ()>
+    where
+        T: Serialize,
+    {
+        let codec_options = options;
         let mut session = SessionBudget::codec_from_budget(
             CodecStage::Conversion,
-            |budget_out| SessionBudget::codec(options, budget_out),
+            |budget_out| SessionBudget::codec(codec_options, budget_out),
             out.reborrow(),
         )?;
         let value = SchemaCompleteValue::serde(Serde::encode(
             self,
             value,
             &session,
-            options.conversion(),
+            options.conversion_limits(),
             out.reborrow(),
         )?);
         let mut validated = ValidatedValue::validate(
@@ -505,7 +551,7 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
             &mut session,
             out.reborrow(),
         )?;
-        validated.encode(options.pretty(), out.reborrow())
+        validated.encode(output, options.pretty(), out.reborrow())
     }
 
     /// Parses and validates the complete configuration before constructing the owned Serde target.
@@ -513,9 +559,9 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
     /// Parsing, bridge event access, and library-controlled target text share the request budget; complete fields are provided, so Serde defaults do not replace Schema values.
     /// A caller-provided `Deserialize` implementation is a trust boundary: the library guarantees only that its input passed Schema validation. It cannot bound that implementation's internal work, blocking, or ordinary Rust allocations, and does not validate its arbitrary return value. `ConversionLimits` and the request budget do not constrain that user code.
     #[cfg(feature = "serde")]
-    pub fn deserialize_serde<'slot>(
+    pub fn deserialize_serde<'slot, R: Read + ?Sized>(
         &self,
-        request: ConfigParseRequest<'_>,
+        request: ConfigParseRequest<'_, R>,
         environment: &mut dyn Environment,
         limits: ConversionLimits,
         mut out: Out<'slot, '_, CodecErrors>,

@@ -12,9 +12,9 @@ use alloc::{format, string::String, vec::Vec};
 use core::mem::size_of;
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    AllocationError, BudgetError, ByteSource, ChargedVec, Diagnostic, DiagnosticCode,
-    DiagnosticMessage, ExecutionBudget, ExecutionLimits, InstancePath, LineIndex, LocatedSpan,
-    LocationError, PathSegment, SliceSource, SourceId, Span, SpanError, SpanLocation,
+    AllocationError, BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticMessage,
+    ExecutionBudget, ExecutionLimits, InstancePath, LineIndex, LocatedSpan, LocationError,
+    PathSegment, Read, SliceSource, SourceId, Span, SpanError, SpanLocation,
 };
 use typol_policy::ResourceLimits;
 use typol_semantic::{ConstraintKind, TypeKind};
@@ -716,7 +716,7 @@ fn finish_does_not_repeat_secret_path_redaction() -> TestResult<()> {
 }
 
 fn config_request<'a>(
-    source: (&'a mut impl ByteSource, &'a str),
+    source: (&'a mut impl Read, &'a str),
     limits: &ConfigLimits,
 ) -> ConfigParseRequest<'a> {
     ConfigParseRequest::new(

@@ -6,7 +6,7 @@ Typol is a schema-driven configuration library for Rust. It compiles `.tschem` s
 
 The workspace requires Rust 1.85 or newer. The examples below use the `typol` facade crate; the lower-level crates can also be used independently.
 
-The facade defaults to `no_std` and uses `alloc` for owned values. Its in-memory loader accepts Schema text or a resolver, and configuration reads take text or a caller-provided `ByteSource` plus an explicit `Environment` provider. The `OrderedMap<T>` binding works without `std`; opt into `btree-map` for `alloc::collections::BTreeMap<String, T>`, or opt into `hashbrown` and depend directly on `hashbrown` for `hashbrown::HashMap<String, T>`. The BTreeMap feature does not make node allocation failures recoverable, and its target-storage budget is an estimate. The `serde` and `config-ir` features remain available without `std`; Config IR serialization returns an `alloc`-backed `Vec<u8>`. Enable `std` for file and reader inputs, process environment access, and host diagnostic rendering.
+The facade defaults to `no_std` and uses `alloc` for owned values. Configuration sources implement `typol::io::Read`; `LoadedSchema::read_value` and `BoundSchema::read` accept a `ReadRequest` plus an explicit `Environment`. Encoders write to `typol::io::Write` sinks, so callers choose their own destination. The `String` and `Vec<u8>` helpers remain convenient for buffered output. The `OrderedMap<T>` binding works without `std`; opt into `btree-map` for `alloc::collections::BTreeMap<String, T>`, or opt into `hashbrown` and depend directly on `hashbrown` for `hashbrown::HashMap<String, T>`. The BTreeMap feature does not make node allocation failures recoverable, and its target-storage budget is an estimate. The `serde` and `config-ir` features remain available without `std`. Enable `std` for file and reader adapters, process environment access, and host diagnostic rendering.
 
 Enable `btree-map` explicitly; it does not enable `std`:
 
@@ -27,7 +27,8 @@ typol = { version = "0.1", features = ["std"] }
 
 ```rust
 use typol::{
-    opeo::ErrSlot, ConfigInput, EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
+    io::{ReadRequest, SliceSource}, opeo::ErrSlot, EmptyEnvironment, SchemaLoader, Typol,
+    TypolError, TypolOptions,
 };
 
 #[derive(Debug, PartialEq, Typol)]
@@ -56,13 +57,11 @@ entry struct ServiceConfig {
     )?;
     let binding = loaded.bind::<ServiceConfig>(out.reborrow())?;
     let mut environment = EmptyEnvironment;
-    let config = binding.read(
-        ConfigInput::text(
-            r#"{ name: "edge", tags: ["api"], endpoint: env("APP_ENDPOINT") }"#,
-        ),
-        &mut environment,
-        out,
-    )?;
+    let mut source = SliceSource::new(
+        r#"{ name: "edge", tags: ["api"], endpoint: env("APP_ENDPOINT") }"#.as_bytes(),
+    );
+    let request = ReadRequest::new(&mut source, "readme config");
+    let config = binding.read(request, &mut environment, out)?;
 
     assert_eq!(
         config,
@@ -111,14 +110,16 @@ Pass `WriteOptions` directly to the bound writer. Compact output remains the def
 ```rust
 use typol::WriteOptions;
 
-let text = binding.write(
+let mut text = String::new();
+binding.write(
     &config,
+    &mut text,
     WriteOptions::default().with_pretty(true),
     out,
 )?;
 ```
 
-The options argument is now part of `BoundSchema::write` and `BoundSchema::write_serde`; migrate calls from `write(value, out)` to `write(value, options, out)`. The old `write_with_options` and `write_serde_with_options` methods are removed. `TypedSchema::serialize` and `serialize_serde` use `CodecOptions::with_pretty` for the same format choice. Formatting whitespace counts toward the output limit, and no partial text is returned on failure. Serialization retains actual `@secret` values.
+`BoundSchema::write` and `write_serde` write to a caller-provided sink and return `()`. Use `write_to_string` or `write_serde_to_string` when a buffered `String` is useful. `TypedSchema::serialize` and `serialize_serde` use the same `WriteOptions`. Formatting whitespace counts toward the output limit. Sink failures can leave an already-written prefix; conversion and complete Schema validation finish before the first byte is written. Serialization retains actual `@secret` values.
 
 ## Handwritten `Typol` implementations
 

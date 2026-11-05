@@ -1,8 +1,8 @@
 use opeo::{OResult, Out, ResultOutExt};
 use std::cell::Cell;
 use typol_core::{
-    AllocationError, BudgetError, ByteSource, Diagnostic, DiagnosticCode, DiagnosticContext,
-    ExecutionBudget, ExecutionLimits, LineIndex, LocatedSpan, LocationError, SliceSource, SourceId,
+    AllocationError, BudgetError, Diagnostic, DiagnosticCode, DiagnosticContext, ExecutionBudget,
+    ExecutionLimits, LineIndex, LocatedSpan, LocationError, Read, SliceSource, SourceId,
     SourceReadError, SourceReadErrorKind, diagnostic_context,
 };
 use typol_syntax::{
@@ -18,7 +18,7 @@ struct TestCursor<'source> {
 impl<'source> TestCursor<'source> {
     fn new(
         source_id: SourceId,
-        source: &'source mut dyn ByteSource<Diagnostic>,
+        source: &'source mut dyn Read<Diagnostic>,
         limits: &SyntaxLimits,
         stream: StreamLimits,
         execution: &ExecutionBudget,
@@ -65,7 +65,7 @@ struct FailingSource {
     error: SourceReadError,
 }
 
-impl ByteSource<Diagnostic> for FailingSource {
+impl Read<Diagnostic> for FailingSource {
     fn read<'slot, 'borrow>(
         &mut self,
         _output: &mut [u8],
@@ -87,7 +87,7 @@ impl ByteSource<Diagnostic> for FailingSource {
     }
 }
 
-impl ByteSource<Diagnostic> for ShortSource<'_> {
+impl Read<Diagnostic> for ShortSource<'_> {
     fn read<'slot>(
         &mut self,
         output: &mut [u8],
@@ -183,7 +183,7 @@ fn execution_budget(steps: usize, bytes: usize) -> TestResult<ExecutionBudget> {
         .map_err(|_| TestFailure)
 }
 
-fn tokens(source: &mut dyn ByteSource<Diagnostic>, chunk: usize) -> TestResult<Vec<TokenSnapshot>> {
+fn tokens(source: &mut dyn Read<Diagnostic>, chunk: usize) -> TestResult<Vec<TokenSnapshot>> {
     let budget = execution_budget(16_777_216, 67_108_864)?;
     let mut cursor = TestCursor::new(
         SourceId::new(1),

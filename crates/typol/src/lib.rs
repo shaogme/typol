@@ -13,7 +13,8 @@
 //!
 //! ```
 //! use typol::{
-//!     ConfigInput, EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
+//!     EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
+//!     io::{ReadRequest, SliceSource},
 //!     opeo::ErrSlot,
 //! };
 //!
@@ -32,7 +33,8 @@
 //!         )?;
 //!         let binding = loaded.bind::<ServiceConfig>(out.reborrow())?;
 //!         let mut environment = EmptyEnvironment;
-//!         binding.read(ConfigInput::text("{}"), &mut environment, out)
+//!         let source = SliceSource::new(b"{}");
+//!         binding.read(ReadRequest::new(source, "config"), &mut environment, out)
 //!     }) {
 //!         Ok(config) => Ok(config),
 //!         Err(caught) => Err(caught.take()),
@@ -62,8 +64,8 @@
 //!
 //! A `no_std` application needs an allocator for owned values. The library does not provide a
 //! platform runtime or global allocator. Without `std`, supply schema sources through
-//! [`SchemaLoader::compile_text`] or a [`SchemaResolver`], provide configuration through
-//! [`ConfigInput::text`] or [`ConfigInput::bytes`], and pass an [`Environment`] implementation to
+//! [`SchemaLoader::compile_text`] or a [`SchemaResolver`], provide configuration through a
+//! [`io::ReadRequest`] containing a [`Read`] source, and pass an [`Environment`] implementation to
 //! each read. [`EmptyEnvironment`] is provided for reads that should not consult an external
 //! source. BTree map target-storage charges estimate logical `(String, T)` entries and key text;
 //! they do not bound actual tree-node or allocator overhead.
@@ -149,8 +151,7 @@ pub(crate) use self::tests::AllocationScope;
 pub use conversion::{OrderedMap, Sourced};
 pub use error::{TypolError, TypolStage};
 pub use loading::{
-    BoundRead, BoundSchema, ConfigInput, LoadedSchema, SchemaLoader, SourceNames,
-    TrustedBoundSchema,
+    BoundRead, BoundSchema, LoadedSchema, SchemaLoader, SourceNames, TrustedBoundSchema,
 };
 pub use opeo;
 pub use options::{ConversionLimitError, TypolOptions, WriteOptions};
@@ -159,13 +160,13 @@ pub use typol_config::{
     ConfigValidationOptions, ConfigValueProcessor, EmptyEnvironment, Environment, EnvironmentError,
     EnvironmentReadContext, NormalizedConfigValue, ValidatedConfigValue,
 };
-pub use typol_core::{ByteSource, ConfigValue, ExecutionBudget, ExecutionLimits, SliceSource};
+pub use typol_core::{ConfigValue, ExecutionBudget, ExecutionLimits, Read, SliceSource};
+
+pub use api::{binding, config, core, model, policy, schema, semantic};
 pub use typol_macros::Typol;
 pub use typol_schema::{
     SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaResolver, SchemaSource,
 };
-
-pub use api::{binding, config, core, model, policy, schema, semantic};
 
 #[cfg(feature = "std")]
 pub use api::host;
@@ -179,12 +180,18 @@ pub use config_ir::{
     ConfigValueErrors,
 };
 
+pub mod io {
+    pub use typol_core::{FmtWriteSink, Read, ReadRequest, SliceSource, Write, WriteError};
+
+    #[cfg(feature = "std")]
+    pub use typol_std::IoWriteSink;
+}
+
 #[cfg(feature = "std")]
 pub mod std_support {
     pub use crate::host::*;
     pub use crate::{
-        BoundSchema, ConfigInput, LoadedSchema, SchemaLoader, TrustedBoundSchema, TypolError,
-        TypolStage,
+        BoundSchema, LoadedSchema, SchemaLoader, TrustedBoundSchema, TypolError, TypolStage,
     };
 }
 

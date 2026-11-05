@@ -1,8 +1,8 @@
 use core::ops::{Deref, DerefMut};
 use opeo::{OResult, Out};
 use typol_core::{
-    ByteSource, Diagnostic, DiagnosticContext, ExcerptLimits, ExecutionLimits, LocatedSpan,
-    SliceSource, SourceId, SourceReadError, SourceSpan, Span, diagnostic_context,
+    Diagnostic, DiagnosticContext, ExcerptLimits, ExecutionLimits, LocatedSpan, Read, SliceSource,
+    SourceId, SourceReadError, SourceSpan, Span, diagnostic_context,
 };
 use typol_policy::{RegexLimits, ResourceLimits, ValueLimits};
 use typol_syntax::{StreamLimits, SyntaxLimits};
@@ -15,34 +15,65 @@ const TYPE_DECLARATION_DEPTH_OVERHEAD: usize = 5;
 static SCHEMA_SOURCE_READ_FAILURE: DiagnosticContext =
     diagnostic_context!("typol-schema", "source-input", "source-read-failed");
 
-pub(crate) enum SchemaInput<'src> {
-    Stream(&'src mut dyn ByteSource<SourceReadError>),
-    Text(SliceSource<'src>),
+/// A single-consumption Schema byte source with an opaque identity.
+///
+/// Identity is compared exactly within this load graph and is not stored in compiled output.
+pub struct SchemaSource<'src, R: Read<SourceReadError> = &'src mut dyn Read<SourceReadError>> {
+    identity: &'src [u8],
+    input: R,
+    known_len: Option<usize>,
+    context: Option<&'src SchemaCompileContext>,
 }
 
-impl ByteSource<SourceReadError> for SchemaInput<'_> {
-    fn read<'slot>(
-        &mut self,
-        output: &mut [u8],
-        source_id: SourceId,
-        offset: usize,
-        out: Out<'slot, '_, SourceReadError>,
-    ) -> OResult<'slot, usize> {
-        match self {
-            Self::Stream(source) => source.read(output, source_id, offset, out),
-            Self::Text(source) => source.read(output, source_id, offset, out),
+impl<'src, R: Read<SourceReadError> + ?Sized> SchemaSource<'src, &'src mut R> {
+    pub fn from_source(identity: &'src [u8], input: &'src mut R) -> Self {
+        Self {
+            identity,
+            input,
+            known_len: None,
+            context: None,
+        }
+    }
+
+    pub fn from_source_in_context(
+        identity: &'src [u8],
+        input: &'src mut R,
+        context: &'src SchemaCompileContext,
+    ) -> Self {
+        Self {
+            identity,
+            input,
+            known_len: None,
+            context: Some(context),
         }
     }
 }
 
-impl SchemaInput<'_> {
-    fn known_len(&self) -> Option<usize> {
-        match self {
-            Self::Stream(_) => None,
-            Self::Text(source) => Some(source.total_bytes()),
+impl<'src> SchemaSource<'src, SliceSource<'src>> {
+    pub fn from_str(identity: &'src [u8], text: &'src str) -> Self {
+        Self {
+            identity,
+            input: SliceSource::new(text.as_bytes()),
+            known_len: Some(text.len()),
+            context: None,
         }
     }
 
+    pub fn in_context(
+        identity: &'src [u8],
+        text: &'src str,
+        context: &'src SchemaCompileContext,
+    ) -> Self {
+        Self {
+            identity,
+            input: SliceSource::new(text.as_bytes()),
+            known_len: Some(text.len()),
+            context: Some(context),
+        }
+    }
+}
+
+impl<'src> SchemaSource<'src> {
     pub(crate) fn source_read_diagnostic(
         error: SourceReadError,
         source_id: SourceId,
@@ -60,57 +91,9 @@ impl SchemaInput<'_> {
     }
 }
 
-/// A single-consumption Schema byte source with an opaque identity.
-///
-/// Identity is compared exactly within this load graph and is not stored in compiled output.
-pub struct SchemaSource<'src> {
-    identity: &'src [u8],
-    input: SchemaInput<'src>,
-    context: Option<&'src SchemaCompileContext>,
-}
-
-impl<'src> SchemaSource<'src> {
-    pub fn from_source(
-        identity: &'src [u8],
-        input: &'src mut dyn ByteSource<SourceReadError>,
-    ) -> Self {
-        Self {
-            identity,
-            input: SchemaInput::Stream(input),
-            context: None,
-        }
-    }
-
-    pub fn from_str(identity: &'src [u8], text: &'src str) -> Self {
-        Self {
-            identity,
-            input: SchemaInput::Text(SliceSource::new(text.as_bytes())),
-            context: None,
-        }
-    }
-
-    pub fn in_context(
-        identity: &'src [u8],
-        text: &'src str,
-        context: &'src SchemaCompileContext,
-    ) -> Self {
-        Self {
-            identity,
-            input: SchemaInput::Text(SliceSource::new(text.as_bytes())),
-            context: Some(context),
-        }
-    }
-
-    pub fn from_source_in_context(
-        identity: &'src [u8],
-        input: &'src mut dyn ByteSource<SourceReadError>,
-        context: &'src SchemaCompileContext,
-    ) -> Self {
-        Self {
-            identity,
-            input: SchemaInput::Stream(input),
-            context: Some(context),
-        }
+impl<'src, R: Read<SourceReadError>> SchemaSource<'src, R> {
+    pub(crate) const fn known_len(&self) -> Option<usize> {
+        self.known_len
     }
 
     pub(crate) fn matches_context(&self, context: &SchemaCompileContext) -> bool {
@@ -118,15 +101,11 @@ impl<'src> SchemaSource<'src> {
             .is_none_or(|source| source.same_session(context))
     }
 
-    pub(crate) fn known_len(&self) -> Option<usize> {
-        self.input.known_len()
-    }
-
     pub(crate) const fn identity(&self) -> &'src [u8] {
         self.identity
     }
 
-    pub(crate) fn into_parts(self) -> (&'src [u8], SchemaInput<'src>) {
+    pub(crate) fn into_parts(self) -> (&'src [u8], R) {
         (self.identity, self.input)
     }
 }

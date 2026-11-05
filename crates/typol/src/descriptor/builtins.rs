@@ -1,4 +1,4 @@
-use super::{DescribeContext, DescriptorProvider, MapContainer, TypeDescriptor, TypeShape};
+use super::{DescribeContext, DescriptorProvider, TypeDescriptor, TypeShape};
 use crate::{
     conversion::{ContainerConversions, ConversionContext, ConversionValue},
     diagnostics::{CodecErrors, ConversionDiagnosticInput, ConversionErrorKind},
@@ -9,6 +9,9 @@ use core::mem::size_of;
 use opeo::{OResult, Out};
 use typol_core::ValueId;
 use typol_model::BuiltinType;
+
+#[cfg(any(feature = "btree-map", feature = "hashbrown", feature = "std"))]
+use super::MapContainer;
 
 #[cfg(feature = "btree-map")]
 use alloc::collections::BTreeMap;

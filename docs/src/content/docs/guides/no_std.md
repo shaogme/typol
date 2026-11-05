@@ -27,7 +27,7 @@ typol = { version = "0.1", default-features = false }
 
 The facade remains `no_std` internally when the `std` feature is enabled; `std` adds host adapters to the API. A `no_std` executable must also provide its platform runtime and global allocator. Typol does not provide either.
 
-With `config-ir`, callers can serialize an in-memory `ConfigValue` without `std`. The result is an owned `alloc::vec::Vec<u8>`:
+With `config-ir`, callers can serialize an in-memory `ConfigValue` without `std` by writing to any `typol::io::Write` sink:
 
 ```rust
 #![no_std]
@@ -44,7 +44,9 @@ fn export_ir(
     schema: &CompiledSchema,
     value: ConfigValue,
 ) -> Result<Vec<u8>, ConfigIrError> {
-    ConfigIr::serialize(schema, value, ConfigIrOptions::default())
+    let mut output = Vec::new();
+    ConfigIr::serialize_to(schema, value, ConfigIrOptions::default(), &mut output)?;
+    Ok(output)
 }
 ```
 
@@ -61,7 +63,8 @@ extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
 use typol::{
-    ConfigInput, EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
+    EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
+    io::{ReadRequest, SliceSource},
     opeo::{ErrSlot, OResult, Out},
 };
 
@@ -88,7 +91,8 @@ fn read_config<'slot>(out: Out<'slot, '_, TypolError>) -> OResult<'slot, Service
     )?;
     let binding = loaded.bind::<ServiceConfig>(out.reborrow())?;
     let mut environment = EmptyEnvironment;
-    binding.read(ConfigInput::text(CONFIG_TEXT), &mut environment, out)
+    let source = SliceSource::new(CONFIG_TEXT.as_bytes());
+    binding.read(ReadRequest::new(source, "embedded-config"), &mut environment, out)
 }
 
 fn load_service() -> Result<ServiceConfig, TypolError> {
@@ -107,10 +111,10 @@ The caller supplies the OPEO error context (`Out`). `load_service` uses `opeo::E
 The in-memory APIs keep host access in the application:
 
 - `SchemaLoader::compile_text` compiles a Schema that has no `extern mod` imports. To resolve imports from memory or packaged resources, implement `SchemaResolver` and pass it to `SchemaLoader::compile_with_resolver`. The resolver decides how those sources are obtained; Typol does not open files in this path.
-- `ConfigInput::text` reads a string, and `ConfigInput::bytes` reads through a caller-provided `ByteSource`. Both `LoadedSchema::read_value` and `BoundSchema::read` receive an explicit `Environment` provider.
+- `ReadRequest` carries a caller-provided `Read` source and its display name. `SliceSource` adapts text or byte slices; `LoadedSchema::read_value` and `BoundSchema::read` receive an explicit `Environment` provider.
 - `EmptyEnvironment` is suitable when the configuration does not need environment expressions. For `@env` expressions, implement `Environment` to read from the application's chosen source. The no_std build does not read process variables automatically.
 
-With `std`, the same loader and read methods can also use `compile_file`, `ConfigInput::file`, `ConfigInput::reader`, and `ProcessEnvironment`. The [Config implementation](../../specification/config-implementation/) documents the shared and host-specific inputs.
+With `std`, the same loader can also use `compile_file`, `FileConfigInput`, `ReadSource`, and `ProcessEnvironment`. The [Config implementation](../../specification/config-implementation/) documents the shared and host-specific inputs.
 
 ## Account for collection bindings
 

@@ -59,13 +59,19 @@ fn parsed_config(
 }
 
 fn encoded_with_pretty(validated: &mut ValidatedValue<'_, '_>) -> TestResult<String> {
-    TestOpeo::value(|out| validated.encode(true, out))
+    let mut output = String::new();
+    TestOpeo::value(|out| validated.encode(&mut output, true, out))?;
+    Ok(output)
 }
 
 fn encode_outcome_with_pretty(
     validated: &mut ValidatedValue<'_, '_>,
 ) -> TestOpeoOutcome<String, CodecErrors> {
-    TestOpeo::outcome(|out| validated.encode(true, out))
+    let mut output = String::new();
+    match TestOpeo::outcome(|out| validated.encode(&mut output, true, out)) {
+        TestOpeoOutcome::Value(()) => TestOpeoOutcome::Value(output),
+        TestOpeoOutcome::Error(error) => TestOpeoOutcome::Error(error),
+    }
 }
 
 #[test]

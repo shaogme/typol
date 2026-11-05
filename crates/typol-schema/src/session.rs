@@ -2,8 +2,8 @@ use opeo::{OResult, Out, ResultOutExt};
 use typol_semantic::SourceLookup;
 
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, SourceId, SourceSpan,
-    Span,
+    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, Read, SourceId,
+    SourceReadError, SourceSpan, Span,
 };
 
 use crate::{
@@ -90,8 +90,8 @@ impl CompileSession {
         }
     }
 
-    pub(crate) fn load<'slot, R: SchemaResolver + ?Sized>(
-        root: SchemaSource<'_>,
+    pub(crate) fn load<'slot, R: SchemaResolver + ?Sized, S: Read<SourceReadError>>(
+        root: SchemaSource<'_, S>,
         resolver: &mut R,
         context: &SchemaCompileContext,
         observer: Option<&mut dyn SourceObserver>,

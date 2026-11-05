@@ -1,6 +1,6 @@
 use typol_core::{
-    BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId, Span,
-    SpanError,
+    BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read, SourceId,
+    SourceReadError, Span, SpanError,
 };
 use typol_schema::{
     LocationFailure, LocationStatus, ResolverError, SchemaCompileContext,
@@ -116,9 +116,9 @@ impl SchemaCompileTestSupport {
         )
     }
 
-    pub(super) fn run<R: SchemaResolver + ?Sized>(
+    pub(super) fn run<R: SchemaResolver + ?Sized, S: Read<SourceReadError>>(
         options: SchemaCompileOptions,
-        source: SchemaSource<'_>,
+        source: SchemaSource<'_, S>,
         resolver: &mut R,
         observer: Option<&mut dyn SourceObserver>,
     ) -> TestOpeoOutcome<CompiledSchema, SchemaCompileErrors> {
@@ -129,16 +129,16 @@ impl SchemaCompileTestSupport {
         })
     }
 
-    pub(super) fn run_without_imports(
+    pub(super) fn run_without_imports<S: Read<SourceReadError>>(
         options: SchemaCompileOptions,
-        source: SchemaSource<'_>,
+        source: SchemaSource<'_, S>,
     ) -> TestOpeoOutcome<CompiledSchema, SchemaCompileErrors> {
         Self::run(options, source, &mut NoImports, None)
     }
 
-    pub(super) fn run_with_context<R: SchemaResolver + ?Sized>(
+    pub(super) fn run_with_context<R: SchemaResolver + ?Sized, S: Read<SourceReadError>>(
         options: SchemaCompileOptions,
-        source: SchemaSource<'_>,
+        source: SchemaSource<'_, S>,
         resolver: &mut R,
     ) -> TestOpeoOutcome<CompileRun, SchemaCompileErrors> {
         let compiler = match Self::run_compiler(options) {

@@ -50,6 +50,11 @@ impl Consumer {
             include_str!("support/fixture_consumer.rs"),
         )
         .test_value()?;
+        copy(
+            facade.join("tests/support/read_input.rs"),
+            self.root.join("src/read_input.rs"),
+        )
+        .test_value()?;
         let mut command = Command::new(var_os("CARGO").unwrap_or_else(|| "cargo".into()));
         command
             .arg("run")

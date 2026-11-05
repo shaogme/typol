@@ -6,10 +6,10 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{
-    AllocationError, BudgetError, ByteSource, Diagnostic, DiagnosticCode, ExcerptLimits,
-    ExcerptStatus, ExecutionBudget, ExecutionLimits, LineIndex, LocatedSpan, LocationError,
-    SliceSource, SourceCapture, SourceExcerptSet, SourceId, SourceReadError, SourceReadErrorKind,
-    SourceSpan, Span, SpanError, SpanLocation,
+    AllocationError, BudgetError, Diagnostic, DiagnosticCode, ExcerptLimits, ExcerptStatus,
+    ExecutionBudget, ExecutionLimits, LineIndex, LocatedSpan, LocationError, Read, SliceSource,
+    SourceCapture, SourceExcerptSet, SourceId, SourceReadError, SourceReadErrorKind, SourceSpan,
+    Span, SpanError, SpanLocation,
 };
 use typol_policy::ResourceLimits;
 use typol_schema::{SchemaCompileOptions, SchemaSource};
@@ -266,7 +266,7 @@ struct Chunks<'a> {
     fail: bool,
 }
 
-impl ByteSource for Chunks<'_> {
+impl Read for Chunks<'_> {
     fn read<'slot, 'borrow>(
         &mut self,
         output: &mut [u8],

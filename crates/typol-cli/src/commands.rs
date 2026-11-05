@@ -5,9 +5,9 @@ use std::{
     process::ExitCode,
 };
 use typol::{
-    ConfigInput, ConfigIr, ConfigIrErrorKind, ConfigIrOptions, ConfigIrValueMode, ConfigValue,
-    EmptyEnvironment, LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader,
-    TypolError, TypolOptions,
+    ConfigIr, ConfigIrErrorKind, ConfigIrOptions, ConfigIrValueMode, ConfigValue, EmptyEnvironment,
+    LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader, TypolError,
+    TypolOptions,
     host::{DiagnosticRenderError, RenderOptions},
     opeo::ErrSlot,
 };
@@ -182,13 +182,8 @@ impl Commands {
     fn load_inherited(loaded: &LoadedSchema, request: &ConfigRequest) -> LoadResult<ConfigValue> {
         let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
         let mut errors = ErrSlot::<TypolError>::new();
-        match errors.try_call(|out| {
-            loaded.read_value(
-                ConfigInput::file(request.config_path()),
-                &mut environment,
-                out,
-            )
-        }) {
+        match errors.try_call(|out| loaded.read_file(request.config_path(), &mut environment, out))
+        {
             Ok(value) => Ok(value.into_config_value()),
             Err(caught) => Err(Box::new(caught.take())),
         }
@@ -197,13 +192,8 @@ impl Commands {
     fn load_empty(loaded: &LoadedSchema, request: &ConfigRequest) -> LoadResult<ConfigValue> {
         let mut environment = EmptyEnvironment;
         let mut errors = ErrSlot::<TypolError>::new();
-        match errors.try_call(|out| {
-            loaded.read_value(
-                ConfigInput::file(request.config_path()),
-                &mut environment,
-                out,
-            )
-        }) {
+        match errors.try_call(|out| loaded.read_file(request.config_path(), &mut environment, out))
+        {
             Ok(value) => Ok(value.into_config_value()),
             Err(caught) => Err(Box::new(caught.take())),
         }

@@ -8,8 +8,8 @@ use std::{
     ptr::null_mut,
 };
 use typol::{
-    ConfigInput, ConfigParseOptions, Environment, EnvironmentError, EnvironmentReadContext,
-    LoadedSchema, SchemaLoader, Typol, TypolError, TypolOptions,
+    ConfigParseOptions, Environment, EnvironmentError, EnvironmentReadContext, LoadedSchema,
+    SchemaLoader, Typol, TypolError, TypolOptions,
     binding::BudgetedTypol,
     core::{DiagnosticCode, ExecutionLimits},
     host::HostErrorKind,
@@ -169,7 +169,7 @@ fn read_typed_with_environment<'slot, T: BudgetedTypol>(
 ) -> OResult<'slot, T> {
     loaded
         .bind::<T>(out.reborrow())?
-        .read(ConfigInput::file(path), environment, out)
+        .read_file(path, environment, out)
 }
 
 fn allocation_code(errors: &TypolError) -> bool {
@@ -329,11 +329,7 @@ fn loading_allocation_failures_preserve_errors_and_release_payloads() -> TestRes
                 }))
             } else {
                 unit_outcome(TestOpeo::outcome(|out| {
-                    limited.read_value(
-                        ConfigInput::file(Path::new("/must-not-read.tconf")),
-                        &mut Empty,
-                        out,
-                    )
+                    limited.read_file(Path::new("/must-not-read.tconf"), &mut Empty, out)
                 }))
             }
         };

@@ -9,15 +9,14 @@ use crate::{
     diagnostics::{CodecErrors, CodecStage},
     session::SessionBudget,
 };
-use alloc::string::String;
 use core::fmt;
-use encoder::Encoder;
+use encoder::{Encoder, EncoderOutput};
 use opeo::{OResult, Out};
 use typol_config::{
     ConfigParseRequest, ConfigParser, ConfigValidationOptions, ConfigValidationRequest,
     ConfigValueProcessor, Environment, ValidatedConfigValue,
 };
-use typol_core::ConfigValue;
+use typol_core::{ConfigValue, Read, Write};
 use typol_semantic::{CompiledSchema, TypeKind};
 
 #[cfg(feature = "serde")]
@@ -88,9 +87,9 @@ impl ValidatedValue<'_, '_> {
         })
     }
 
-    pub(crate) fn parse_value<'slot>(
+    pub(crate) fn parse_value<'slot, R: Read + ?Sized>(
         schema: &CompiledSchema,
-        request: ConfigParseRequest<'_>,
+        request: ConfigParseRequest<'_, R>,
         environment: &mut dyn Environment,
         session: &SessionBudget,
         mut out: Out<'slot, '_, CodecErrors>,
@@ -116,9 +115,10 @@ impl ValidatedValue<'_, '_> {
 
     pub(crate) fn encode<'slot>(
         &mut self,
+        output: &mut dyn Write,
         pretty: bool,
         mut out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, String> {
+    ) -> OResult<'slot, ()> {
         let entry = self.schema.entry();
         let kind = self.session.schema_codec(
             CodecStage::Encoding,
@@ -132,7 +132,10 @@ impl ValidatedValue<'_, '_> {
             entry,
             self.value.as_config_value(),
             self.session,
-            pretty,
+            EncoderOutput {
+                sink: output,
+                pretty,
+            },
             out.reborrow(),
         )
     }
@@ -148,9 +151,9 @@ impl fmt::Debug for ValidatedValue<'_, '_> {
 
 #[cfg(all(test, feature = "std"))]
 impl<'schema, 'call> ValidatedValue<'schema, 'call> {
-    pub(crate) fn parse<'slot>(
+    pub(crate) fn parse<'slot, R: Read + ?Sized>(
         schema: &'schema CompiledSchema,
-        request: ConfigParseRequest<'_>,
+        request: ConfigParseRequest<'_, R>,
         environment: &mut dyn Environment,
         session: &'call mut SessionBudget,
         mut out: Out<'slot, '_, ConfigParseErrors>,

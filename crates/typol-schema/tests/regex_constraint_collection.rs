@@ -9,7 +9,10 @@ use typol_schema::{
 };
 use typol_test_support::*;
 
-struct Imports;
+#[derive(Default)]
+struct Imports {
+    source: OwnedReadSource,
+}
 
 impl SchemaResolver for Imports {
     fn resolve<'src, 'slot>(
@@ -19,10 +22,12 @@ impl SchemaResolver for Imports {
     ) -> OResult<'slot, SchemaSource<'src>> {
         let module = request.module_name;
         match module {
-            "events" => Ok(SchemaSource::from_str(
-                b"events",
-                r#"enum Event { Named(string @regex("^name$")), Detail { code: string @regex("[0-9]+"), }, }"#,
-            )),
+            "events" => {
+                self.source.replace(
+                    r#"enum Event { Named(string @regex("^name$")), Detail { code: string @regex("[0-9]+"), }, }"#,
+                );
+                Ok(SchemaSource::from_source(b"events", &mut self.source))
+            }
             _ => Err(out.fail(ResolverError::NotFound)),
         }
     }
@@ -34,7 +39,7 @@ fn collects_constraints_across_files_aliases_modules_and_enum_payloads() -> Test
     let schema = schema_support::SchemaCompileTestSupport::run(
         SchemaCompileOptions::new(SchemaLimits::default()),
         SchemaSource::from_str(b"root", source),
-        &mut Imports,
+        &mut Imports::default(),
         None,
     )
     .test_value()?;
@@ -75,7 +80,7 @@ fn aggregate_regex_limits_include_imported_schema_programs() -> TestResult {
     let baseline = schema_support::SchemaCompileTestSupport::run(
         SchemaCompileOptions::new(defaults),
         SchemaSource::from_str(b"root", source),
-        &mut Imports,
+        &mut Imports::default(),
         None,
     )
     .test_value()?;
@@ -86,7 +91,7 @@ fn aggregate_regex_limits_include_imported_schema_programs() -> TestResult {
     let errors = schema_support::SchemaCompileTestSupport::run(
         SchemaCompileOptions::new(limits),
         SchemaSource::from_str(b"root", source),
-        &mut Imports,
+        &mut Imports::default(),
         None,
     )
     .test_error()?;
@@ -104,7 +109,7 @@ fn schema_without_regex_has_no_programs() -> TestResult {
     let schema = schema_support::SchemaCompileTestSupport::run(
         SchemaCompileOptions::new(SchemaLimits::default()),
         SchemaSource::from_str(b"root", "entry struct Root {}"),
-        &mut Imports,
+        &mut Imports::default(),
         None,
     )
     .test_value()?;
@@ -121,7 +126,7 @@ fn regex_on_resolved_non_string_alias_is_rejected() -> TestResult {
             b"root",
             "type Flag = bool; entry struct Root { value: Flag @regex(\"x\") }",
         ),
-        &mut Imports,
+        &mut Imports::default(),
         None,
     )
     .test_error()?;

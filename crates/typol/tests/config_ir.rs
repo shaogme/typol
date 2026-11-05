@@ -14,7 +14,7 @@ use std::{
 
 use serde_json::{Value, from_slice};
 use typol::{
-    ConfigInput, ConfigIr, ConfigIrError, ConfigIrErrorKind, ConfigIrOptions, ConfigIrValueMode,
+    ConfigIr, ConfigIrError, ConfigIrErrorKind, ConfigIrOptions, ConfigIrValueMode,
     ConfigValidationOptions, ConfigValue, ConfigValueErrors, EmptyEnvironment, Environment,
     EnvironmentError, EnvironmentReadContext, LoadedSchema, SchemaLoader, TypolOptions,
     config::ConfigLimits,
@@ -164,10 +164,7 @@ fn load_config(
     path: &Path,
     environment: &mut dyn Environment,
 ) -> Result<ConfigValue, Box<dyn Error>> {
-    Ok(
-        capture(|out| loaded.read_value(ConfigInput::file(path), environment, out))?
-            .into_config_value(),
-    )
+    Ok(capture(|out| loaded.read_file(path, environment, out))?.into_config_value())
 }
 
 fn field_value<'a>(fields: &'a [Value], name: &str) -> Option<&'a Value> {
@@ -187,7 +184,9 @@ fn export_fixture(
     let base = example(example_directory);
     let loaded = load(&base.join(schema_name))?;
     let config = load_config(&loaded, &base.join(config_name), environment)?;
-    Ok(ConfigIr::serialize(loaded.schema(), config, options)?)
+    let mut output = Vec::new();
+    ConfigIr::serialize_to(loaded.schema(), config, options, &mut output)?;
+    Ok(output)
 }
 
 impl Environment for FixtureEnvironment {
@@ -693,7 +692,8 @@ fn empty_map_keys_survive_default_normalization_and_ir_serialization() -> Result
 }
 
 #[test]
-fn byte_and_workspace_limits_fail_without_returning_partial_json() -> Result<(), Box<dyn Error>> {
+fn byte_and_workspace_limits_preserve_buffer_and_sink_failure_semantics()
+-> Result<(), Box<dyn Error>> {
     ensure_equal(
         ConfigIrOptions::default()
             .try_with_max_nesting_depth(128)?
@@ -750,6 +750,23 @@ fn byte_and_workspace_limits_fail_without_returning_partial_json() -> Result<(),
             Err(error) if error.kind() == ConfigIrErrorKind::OutputLimitExceeded
         ),
         "output overflow should return a limit error",
+    )?;
+    let mut sink = Vec::new();
+    ensure(
+        matches!(
+            ConfigIr::serialize_to(
+                loaded.schema(),
+                load_config(&loaded, &example("cli/cli_demo.tconf"), &mut environment)?,
+                ConfigIrOptions::default().with_max_output_bytes(baseline.len() - 1),
+                &mut sink,
+            ),
+            Err(error) if error.kind() == ConfigIrErrorKind::OutputLimitExceeded
+        ),
+        "sink output overflow should return a limit error",
+    )?;
+    ensure(
+        !sink.is_empty() && baseline.starts_with(&sink),
+        "streamed sink failure should retain only a prefix of the encoded document",
     )?;
     ensure(
         matches!(

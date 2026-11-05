@@ -11,11 +11,11 @@ use std::{
     process::{Command, id},
 };
 use typol::{
-    BoundSchema, ConfigInput, Environment, EnvironmentError, EnvironmentReadContext, LoadedSchema,
+    BoundSchema, Environment, EnvironmentError, EnvironmentReadContext, LoadedSchema,
     ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader, Typol, TypolError, TypolOptions,
     TypolStage, ValidatedConfigValue,
     binding::{
-        BindOptions, BudgetedTypol, CodecErrors, CodecOptions, TypedSchema, Typol as TypolTrait,
+        BindOptions, BudgetedTypol, CodecErrors, TypedSchema, Typol as TypolTrait, WriteOptions,
     },
     core::{DiagnosticCode, ValueSource},
     host::{
@@ -32,7 +32,7 @@ use typol_test_support::{
 trait BoundProcessEnvironmentTestExt<T: TypolTrait> {
     fn read_with_process_environment<'slot>(
         &self,
-        input: ConfigInput<'_>,
+        path: &Path,
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, T>;
 }
@@ -40,18 +40,18 @@ trait BoundProcessEnvironmentTestExt<T: TypolTrait> {
 impl<T: TypolTrait> BoundProcessEnvironmentTestExt<T> for BoundSchema<'_, T> {
     fn read_with_process_environment<'slot>(
         &self,
-        input: ConfigInput<'_>,
+        path: &Path,
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, T> {
         let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
-        self.read(input, &mut environment, out)
+        self.read_file(path, &mut environment, out)
     }
 }
 
 trait LoadedProcessEnvironmentTestExt {
     fn read_value_with_process_environment<'slot>(
         &self,
-        input: ConfigInput<'_>,
+        path: &Path,
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, ValidatedConfigValue>;
 }
@@ -59,11 +59,11 @@ trait LoadedProcessEnvironmentTestExt {
 impl LoadedProcessEnvironmentTestExt for LoadedSchema {
     fn read_value_with_process_environment<'slot>(
         &self,
-        input: ConfigInput<'_>,
+        path: &Path,
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, ValidatedConfigValue> {
         let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
-        self.read_value(input, &mut environment, out)
+        self.read_file(path, &mut environment, out)
     }
 }
 
@@ -75,23 +75,23 @@ fn load_value<T>(
 
 fn read_typed<'slot, T: BudgetedTypol>(
     schema: &LoadedSchema,
-    input: ConfigInput<'_>,
+    path: &Path,
     mut out: Out<'slot, '_, TypolError>,
 ) -> OResult<'slot, T> {
     schema
         .bind::<T>(out.reborrow())?
-        .read_with_process_environment(input, out)
+        .read_with_process_environment(path, out)
 }
 
 fn read_typed_with_environment<'slot, T: BudgetedTypol>(
     schema: &LoadedSchema,
-    input: ConfigInput<'_>,
+    path: &Path,
     environment: &mut dyn Environment,
     mut out: Out<'slot, '_, TypolError>,
 ) -> OResult<'slot, T> {
     schema
         .bind::<T>(out.reborrow())?
-        .read(input, environment, out)
+        .read_file(path, environment, out)
 }
 
 fn load_error<T>(
@@ -287,10 +287,8 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
     ))?;
     let loader = SchemaLoader::new(TypolOptions::default());
     let loaded = load_value(|out| loader.compile_file(&schema_path, out))?;
-    let value = load_value(|out| read_typed::<Root>(&loaded, ConfigInput::file(&config), out))?;
-    let dynamic = load_value(|out| {
-        loaded.read_value_with_process_environment(ConfigInput::file(&config), out)
-    })?;
+    let value = load_value(|out| read_typed::<Root>(&loaded, &config, out))?;
+    let dynamic = load_value(|out| loaded.read_value_with_process_environment(&config, out))?;
     let display = display_value(|out| {
         SafeValueFormatter::format(
             loaded.schema(),
@@ -305,19 +303,15 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
     }
     let binding =
         codec_value(|out| TypedSchema::<Root>::bind(loaded.schema(), BindOptions::default(), out))?;
-    let encoded = codec_value(|out| binding.serialize(&value, CodecOptions::default(), out))?;
+    let encoded =
+        codec_value(|out| binding.serialize_to_string(&value, WriteOptions::default(), out))?;
     for secret in SENTINELS.iter().take(4) {
         assert!(encoded.contains(secret));
     }
     let frozen = directory.put("frozen.tconf", &encoded)?;
     assert_eq!(
         value,
-        load_value(|out| read_typed_with_environment::<Root>(
-            &loaded,
-            ConfigInput::file(&frozen),
-            &mut Denied,
-            out,
-        ))?
+        load_value(|out| read_typed_with_environment::<Root>(&loaded, &frozen, &mut Denied, out,))?
     );
     let rust_sentinels = [sentinel(4)?, sentinel(1)?, sentinel(2)?, sentinel(3)?];
     let rust = TestOpeo::value(|out| {
@@ -363,7 +357,8 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
     );
     let mut invalid = value;
     invalid.literal = sentinel(4)?.repeat(10);
-    let errors = codec_error(|out| binding.serialize(&invalid, CodecOptions::default(), out))?;
+    let errors =
+        codec_error(|out| binding.serialize_to_string(&invalid, WriteOptions::default(), out))?;
     assert!(!format!("{errors:?}{errors}{:?}", errors.diagnostics()).contains(sentinel(4)?));
     let rendered = TestOpeo::call(|out| {
         DiagnosticRenderer::render(
@@ -412,11 +407,9 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
         let mut provider = Bytes(bytes);
         // A missing fallback must be reported as `None` by the real process provider.
         let errors = if bytes.is_empty() {
-            load_error(|out| {
-                loaded.read_value_with_process_environment(ConfigInput::file(&config), out)
-            })?
+            load_error(|out| loaded.read_value_with_process_environment(&config, out))?
         } else {
-            load_error(|out| loaded.read_value(ConfigInput::file(&config), &mut provider, out))?
+            load_error(|out| loaded.read_file(&config, &mut provider, out))?
         };
         safe_errors(&errors)?;
     }
@@ -429,10 +422,8 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
         let text = format!("{{{other}{field}: \"{}\"}}", sentinel(0)?.repeat(10));
         write(&config, text).test_value()?;
         for errors in [
-            load_error(|out| {
-                loaded.read_value_with_process_environment(ConfigInput::file(&config), out)
-            })?,
-            load_error(|out| read_typed::<Root>(&loaded, ConfigInput::file(&config), out))?,
+            load_error(|out| loaded.read_value_with_process_environment(&config, out))?,
+            load_error(|out| read_typed::<Root>(&loaded, &config, out))?,
         ] {
             safe_errors(&errors)?;
             assert!(
@@ -454,16 +445,9 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
         EnvironmentError::AllocationFailed,
     ] {
         for errors in [
+            load_error(|out| loaded.read_file(&config, &mut Fault(fault), out))?,
             load_error(|out| {
-                loaded.read_value(ConfigInput::file(&config), &mut Fault(fault), out)
-            })?,
-            load_error(|out| {
-                read_typed_with_environment::<Root>(
-                    &loaded,
-                    ConfigInput::file(&config),
-                    &mut Fault(fault),
-                    out,
-                )
+                read_typed_with_environment::<Root>(&loaded, &config, &mut Fault(fault), out)
             })?,
         ] {
             safe_errors(&errors)?;
@@ -471,9 +455,8 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
         }
     }
     write(&config, [0xff]).test_value()?;
-    let errors = load_error(|out| {
-        read_typed_with_environment::<Root>(&loaded, ConfigInput::file(&config), &mut Denied, out)
-    })?;
+    let errors =
+        load_error(|out| read_typed_with_environment::<Root>(&loaded, &config, &mut Denied, out))?;
     assert_eq!(errors.stage(), TypolStage::Decoding);
     assert!(errors.host_error().is_none());
     assert_eq!(
@@ -488,9 +471,8 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
     safe_errors(&errors)?;
 
     write(&config, vec![b' '; 1_048_577]).test_value()?;
-    let errors = load_error(|out| {
-        read_typed_with_environment::<Root>(&loaded, ConfigInput::file(&config), &mut Denied, out)
-    })?;
+    let errors =
+        load_error(|out| read_typed_with_environment::<Root>(&loaded, &config, &mut Denied, out))?;
     assert_eq!(errors.stage(), TypolStage::ConfigRead);
     assert_eq!(
         errors.host_error().test_value()?.kind(),
@@ -498,12 +480,7 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
     );
     safe_errors(&errors)?;
     let errors = load_error(|out| {
-        read_typed_with_environment::<Root>(
-            &loaded,
-            ConfigInput::file(&directory.path),
-            &mut Denied,
-            out,
-        )
+        read_typed_with_environment::<Root>(&loaded, &directory.path, &mut Denied, out)
     })?;
     assert_eq!(
         errors.host_error().test_value()?.kind(),

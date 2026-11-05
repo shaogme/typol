@@ -19,7 +19,7 @@ use self::{
 };
 use crate::{FileSchemaLimits, HostError, HostErrorKind, HostFailureStep, HostOperation};
 
-pub use input::{FileConfigInput, ReadSource};
+pub use input::{FileConfigInput, IoWriteSink, ReadSource};
 
 struct SelectedFile {
     path: NativePath,

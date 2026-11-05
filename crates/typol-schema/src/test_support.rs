@@ -1,7 +1,8 @@
 use alloc::format;
 use core::{fmt::Debug, ops::Deref};
 use typol_core::{
-    AllocationError, BudgetError, Diagnostic, LocationError as CoreLocationError, SpanError,
+    AllocationError, BudgetError, Diagnostic, LocationError as CoreLocationError, Read,
+    SourceReadError, SpanError,
 };
 use typol_semantic::CompiledSchema;
 use typol_test_support::{
@@ -154,9 +155,9 @@ impl TestOperation {
 pub(crate) struct SchemaCompileTestSupport;
 
 impl SchemaCompileTestSupport {
-    pub(crate) fn run<R: SchemaResolver + ?Sized>(
+    pub(crate) fn run<R: SchemaResolver + ?Sized, S: Read<SourceReadError>>(
         options: SchemaCompileOptions,
-        source: SchemaSource<'_>,
+        source: SchemaSource<'_, S>,
         resolver: &mut R,
         observer: Option<&mut dyn SourceObserver>,
     ) -> SchemaCompileResult<CompiledSchema> {

@@ -16,7 +16,7 @@ use crate::{
 use ::opeo::{ErrSlot, OResult, Out};
 use core::cell::RefCell;
 use typol_core::{
-    BudgetError, ConfigValue, Diagnostic, DiagnosticContext, ExcerptLimits, ExecutionBudget,
+    BudgetError, ConfigValue, Diagnostic, DiagnosticContext, ExcerptLimits, ExecutionBudget, Read,
     SourceCapture, SourceId, diagnostic_context,
 };
 use typol_semantic::CompiledSchema;
@@ -36,9 +36,9 @@ pub struct ConfigDiagnosticRedactor<'schema> {
     schema: &'schema CompiledSchema,
 }
 
-struct ParseSourceRequest<'schema, 'input, 'environment, 'budget> {
+struct ParseSourceRequest<'schema, 'input, 'environment, 'budget, R: Read + ?Sized> {
     schema: &'schema CompiledSchema,
-    parts: RequestParts<'input>,
+    parts: RequestParts<'input, R>,
     environment: &'environment mut dyn Environment,
     budget: &'budget ExecutionBudget,
     source_id: SourceId,
@@ -53,9 +53,9 @@ struct ParseFailureRequest<'schema, 'budget> {
     input_failed: bool,
 }
 
-struct ParserSetupRequest<'schema, 'source, 'limits, 'input, 'name> {
+struct ParserSetupRequest<'schema, 'source, 'limits, 'input, 'name, R: Read + ?Sized> {
     schema: &'schema CompiledSchema,
-    source: &'source mut TrackingInput<'input>,
+    source: &'source mut TrackingInput<'input, R>,
     limits: &'limits ConfigLimits,
     session: ConfigSession<'limits>,
     source_name: &'name str,
@@ -67,9 +67,9 @@ impl<'schema> ConfigParser<'schema> {
     }
 
     /// Parse and fully validate configuration against this compiled Schema.
-    pub fn parse<'slot>(
+    pub fn parse<'slot, R: Read + ?Sized>(
         &self,
-        request: ConfigParseRequest<'_>,
+        request: ConfigParseRequest<'_, R>,
         environment: &mut dyn Environment,
         out: Out<'slot, '_, ConfigParseErrors>,
     ) -> OResult<'slot, ValidatedConfigValue> {
@@ -77,9 +77,9 @@ impl<'schema> ConfigParser<'schema> {
     }
 
     /// Parse configuration while sharing the caller's execution budget.
-    pub fn parse_with_budget<'slot>(
+    pub fn parse_with_budget<'slot, R: Read + ?Sized>(
         &self,
-        request: ConfigParseRequest<'_>,
+        request: ConfigParseRequest<'_, R>,
         environment: &mut dyn Environment,
         budget: &ExecutionBudget,
         out: Out<'slot, '_, ConfigParseErrors>,
@@ -179,8 +179,8 @@ static CONFIG_VALUE_NORMALIZATION_BUDGET_MISMATCH: DiagnosticContext = diagnosti
     "execution-budget-does-not-match-options",
 );
 
-fn parse_source<'slot>(
-    request: ParseSourceRequest<'_, '_, '_, '_>,
+fn parse_source<'slot, R: Read + ?Sized>(
+    request: ParseSourceRequest<'_, '_, '_, '_, R>,
     mut out: Out<'slot, '_, ConfigParseErrors>,
 ) -> OResult<'slot, ValidatedConfigValue> {
     let ParseSourceRequest {
@@ -231,8 +231,8 @@ fn parse_source<'slot>(
     }
 }
 
-fn prepare_parser<'schema, 'source, 'limits, 'input, 'name, 'slot>(
-    request: ParserSetupRequest<'schema, 'source, 'limits, 'input, 'name>,
+fn prepare_parser<'schema, 'source, 'limits, 'input, 'name, 'slot, R: Read + ?Sized>(
+    request: ParserSetupRequest<'schema, 'source, 'limits, 'input, 'name, R>,
     parser_slot: &mut Option<Parser<'schema, 'source, 'limits>>,
     mut out: Out<'slot, '_, ConfigParseErrors>,
 ) -> OResult<'slot, ()> {
@@ -277,9 +277,9 @@ fn finish_parse_failure<'slot>(
 /// Parse and fully validate configuration against a compiled Schema.
 ///
 /// The result carries a validation marker; call `into_config_value()` to consume it.
-fn parse_for_schema<'slot>(
+fn parse_for_schema<'slot, R: Read + ?Sized>(
     schema: &CompiledSchema,
-    request: ConfigParseRequest<'_>,
+    request: ConfigParseRequest<'_, R>,
     environment: &mut dyn Environment,
     mut out: Out<'slot, '_, ConfigParseErrors>,
 ) -> OResult<'slot, ValidatedConfigValue> {
@@ -300,9 +300,9 @@ fn parse_for_schema<'slot>(
 }
 
 /// Internal session seam that reuses the call budget to fully parse and validate configuration.
-fn parse_for_schema_with_budget<'slot>(
+fn parse_for_schema_with_budget<'slot, R: Read + ?Sized>(
     schema: &CompiledSchema,
-    request: ConfigParseRequest<'_>,
+    request: ConfigParseRequest<'_, R>,
     environment: &mut dyn Environment,
     budget: &ExecutionBudget,
     mut out: Out<'slot, '_, ConfigParseErrors>,
@@ -531,9 +531,9 @@ fn validate_complete_for_schema_with_budget<'slot, 'borrow>(
     }
 }
 
-fn check_source<'slot, 'borrow>(
+fn check_source<'slot, 'borrow, R: Read + ?Sized>(
     schema: &CompiledSchema,
-    request: &ConfigParseRequest<'_>,
+    request: &ConfigParseRequest<'_, R>,
     out: Out<'slot, 'borrow, ConfigParseErrors>,
 ) -> OResult<'slot, ()> {
     let options = request.options();

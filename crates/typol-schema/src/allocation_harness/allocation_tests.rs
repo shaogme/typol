@@ -27,7 +27,7 @@ use std::{
 };
 use typol_core::{
     BudgetError, DiagnosticCode, ExcerptLimits, ExcerptStatus, ExecutionBudget, ExecutionLimits,
-    SourceId, SourceSpan, Span,
+    SliceSource, SourceId, SourceSpan, Span,
 };
 use typol_regex::{Regex, RegexCompiler};
 use typol_test_support::*;
@@ -380,7 +380,10 @@ fn iterative_schema_passes_fail_atomically_and_release_all_tracked_storage() -> 
     Ok(())
 }
 
-struct ImportResolver;
+struct ImportResolver {
+    child_source: SliceSource<'static>,
+    broken_source: SliceSource<'static>,
+}
 
 struct ExcerptAllocationOutcome {
     state: AllocationState,
@@ -406,11 +409,17 @@ impl SchemaResolver for ImportResolver {
     ) -> OResult<'slot, SchemaSource<'src>> {
         let module = request.module_name;
         match module {
-            "child" => Ok(SchemaSource::from_str(
-                b"child",
-                "struct Child { text: string = \"value\" }",
-            )),
-            "broken" => Ok(SchemaSource::from_str(b"broken", "struct Broken {")),
+            "child" => {
+                self.child_source = SliceSource::new(b"struct Child { text: string = \"value\" }");
+                Ok(SchemaSource::from_source(b"child", &mut self.child_source))
+            }
+            "broken" => {
+                self.broken_source = SliceSource::new(b"struct Broken {");
+                Ok(SchemaSource::from_source(
+                    b"broken",
+                    &mut self.broken_source,
+                ))
+            }
             _ => Err(out.fail(ResolverError::NotFound)),
         }
     }
@@ -431,7 +440,10 @@ fn probe_excerpt_allocation(
     let result = SchemaCompileTestSupport::run(
         SchemaCompileOptions::new(limits),
         SchemaSource::from_str(b"root", source),
-        &mut ImportResolver,
+        &mut ImportResolver {
+            child_source: SliceSource::new(b""),
+            broken_source: SliceSource::new(b""),
+        },
         None,
     );
     let succeeded = result.is_ok();
@@ -569,7 +581,10 @@ fn public_compile_allocation_failures_are_nonempty_and_release_returned_storage(
             let result = SchemaCompileTestSupport::run(
                 SchemaCompileOptions::new(limits),
                 SchemaSource::from_str(b"root", source),
-                &mut ImportResolver,
+                &mut ImportResolver {
+                    child_source: SliceSource::new(b""),
+                    broken_source: SliceSource::new(b""),
+                },
                 None,
             );
             let succeeded = result.is_ok();

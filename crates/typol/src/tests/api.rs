@@ -4,7 +4,7 @@ use crate::{
     conversion::{ConversionContext, ConversionValue},
     descriptor::{DescribeContext, DescriptorProvider, TypeDescriptor, Typol},
     diagnostics::CodecErrors,
-    options::{BindOptions, CodecOptions, ConversionLimits},
+    options::{BindOptions, ConversionLimits, WriteOptions},
     test_support::{TestOpeo, TestOpeoOutcome},
 };
 use opeo::{OResult, Out};
@@ -83,7 +83,7 @@ fn public_pipeline_allocations_fail_atomically_without_error_wrapper_allocations
     })?;
     TestAssertions::assert_atomic_allocations(|| {
         allocation_result(TestOpeo::outcome(|out| {
-            binding.serialize(&value, CodecOptions::default(), out)
+            binding.serialize_to_string(&value, WriteOptions::default(), out)
         }))
     })?;
     TestAssertions::assert_atomic_allocations(|| {
@@ -106,7 +106,7 @@ fn public_pipeline_allocations_fail_atomically_without_error_wrapper_allocations
     let invalid = Application { values: vec![] };
     TestAssertions::assert_atomic_allocations(|| {
         validation_result(TestOpeo::outcome(|out| {
-            binding.serialize(&invalid, CodecOptions::default(), out)
+            binding.serialize_to_string(&invalid, WriteOptions::default(), out)
         }))
     })?;
     TestAssertions::assert_atomic_allocations(|| {

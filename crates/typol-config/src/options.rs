@@ -1,6 +1,6 @@
 use core::fmt;
 use opeo::{OResult, Out};
-use typol_core::{BudgetError, ByteSource, ExecutionBudget, ExecutionLimits};
+use typol_core::{BudgetError, ExecutionBudget, ExecutionLimits, Read};
 use typol_policy::{ResourceLimits, ValueLimits};
 use typol_syntax::{InputLimits, StreamLimits};
 
@@ -268,21 +268,21 @@ impl Default for ConfigValidationOptions {
     }
 }
 
-pub struct ConfigParseRequest<'input> {
-    input: &'input mut dyn ByteSource,
+pub struct ConfigParseRequest<'input, R: Read + ?Sized = dyn Read + 'input> {
+    input: &'input mut R,
     display_name: &'input str,
     options: ConfigParseOptions,
 }
 
-pub(crate) struct RequestParts<'input> {
-    pub(crate) input: &'input mut dyn ByteSource,
+pub(crate) struct RequestParts<'input, R: Read + ?Sized = dyn Read + 'input> {
+    pub(crate) input: &'input mut R,
     pub(crate) display_name: &'input str,
     pub(crate) options: ConfigParseOptions,
 }
 
-impl<'input> ConfigParseRequest<'input> {
+impl<'input, R: Read + ?Sized> ConfigParseRequest<'input, R> {
     pub fn new(
-        input: &'input mut dyn ByteSource,
+        input: &'input mut R,
         display_name: &'input str,
         options: ConfigParseOptions,
     ) -> Self {
@@ -301,7 +301,7 @@ impl<'input> ConfigParseRequest<'input> {
         self.display_name
     }
 
-    pub(crate) fn into_parts(self) -> RequestParts<'input> {
+    pub(crate) fn into_parts(self) -> RequestParts<'input, R> {
         RequestParts {
             input: self.input,
             display_name: self.display_name,
@@ -310,7 +310,7 @@ impl<'input> ConfigParseRequest<'input> {
     }
 }
 
-impl fmt::Debug for ConfigParseRequest<'_> {
+impl<R: Read + ?Sized> fmt::Debug for ConfigParseRequest<'_, R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ConfigParseRequest")

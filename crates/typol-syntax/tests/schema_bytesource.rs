@@ -1,6 +1,6 @@
 use typol_core::{
-    BudgetError, ByteSource, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits,
-    SliceSource, SourceId, SourceReadError, SourceReadErrorKind, SourceSpan,
+    BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read, SliceSource,
+    SourceId, SourceReadError, SourceReadErrorKind, SourceSpan,
 };
 use typol_syntax::{
     AstAccessError, SchemaAst, SchemaParseOptions, SchemaParser, StreamLimits, SyntaxErrors,
@@ -86,7 +86,7 @@ struct DiagnosticSummary {
     span: SourceSpan,
 }
 
-impl ByteSource<Diagnostic> for ShortReader<'_> {
+impl Read<Diagnostic> for ShortReader<'_> {
     fn read<'slot, 'borrow>(
         &mut self,
         output: &mut [u8],
@@ -120,7 +120,7 @@ impl ByteSource<Diagnostic> for ShortReader<'_> {
     }
 }
 
-impl ByteSource<Diagnostic> for FailingReader<'_> {
+impl Read<Diagnostic> for FailingReader<'_> {
     fn read<'slot, 'borrow>(
         &mut self,
         output: &mut [u8],
@@ -163,7 +163,7 @@ fn execution_budget(steps: usize) -> TestResult<ExecutionBudget> {
 }
 
 fn parse_bytes(
-    source: &mut dyn ByteSource<Diagnostic>,
+    source: &mut dyn Read<Diagnostic>,
     limits: &SyntaxLimits,
     steps: usize,
 ) -> TestResult<Result<SchemaAst, SyntaxErrors>> {

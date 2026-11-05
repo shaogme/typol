@@ -6,8 +6,8 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{
-    BudgetError, ByteSource, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits,
-    InstancePath, SliceSource, SourceSpan, ValueKind, ValueSource, ValueView,
+    BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, InstancePath, Read,
+    SliceSource, SourceSpan, ValueKind, ValueSource, ValueView,
 };
 use typol_policy::ResourceLimits;
 use typol_schema::{SchemaCompileOptions, SchemaSource};
@@ -631,7 +631,7 @@ fn schema_label_locations_survive_schema_drop() -> TestResult<()> {
 }
 
 fn config_request<'a>(
-    source: (&'a mut impl ByteSource, &'a str),
+    source: (&'a mut impl Read, &'a str),
     limits: impl Into<TestLimits>,
 ) -> ConfigParseRequest<'a> {
     let limits = limits.into();

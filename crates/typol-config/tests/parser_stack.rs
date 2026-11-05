@@ -12,8 +12,7 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{
-    ByteSource, DiagnosticCode, ExecutionLimits, SliceSource, ValueKind, ValuePayloadView,
-    ValueView,
+    DiagnosticCode, ExecutionLimits, Read, SliceSource, ValueKind, ValuePayloadView, ValueView,
 };
 use typol_policy::ResourceLimits;
 use typol_schema::{SchemaCompileOptions, SchemaLimits, SchemaSource};
@@ -390,7 +389,7 @@ fn explicit_container_depth_and_node_limits_accept_exact_boundaries() -> TestRes
 }
 
 fn config_request<'a>(
-    source: (&'a mut impl ByteSource, &'a str),
+    source: (&'a mut impl Read, &'a str),
     limits: &ConfigLimits,
 ) -> ConfigParseRequest<'a> {
     ConfigParseRequest::new(

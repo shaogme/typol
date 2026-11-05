@@ -11,8 +11,8 @@ use crate::{
 use core::{cell::RefCell, mem::replace};
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ByteSource, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, InstancePath,
-    LocatedSpan, SourceId, ValueError, ValueSource,
+    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, InstancePath,
+    LocatedSpan, Read, SourceId, ValueError, ValueSource,
 };
 use typol_semantic::{
     CompiledSchema, ConstraintList, FieldView, SchemaAccessError, TypeView, VariantView,
@@ -55,7 +55,7 @@ pub(super) struct ParserControl;
 
 pub(super) struct ParserControlRequest<'schema, 'source, 'limits> {
     pub(super) schema: &'schema CompiledSchema,
-    pub(super) source: &'source mut dyn ByteSource<Diagnostic>,
+    pub(super) source: &'source mut dyn Read<Diagnostic>,
     pub(super) source_id: SourceId,
     pub(super) limits: &'limits ConfigLimits,
     pub(super) session: ConfigSession<'limits>,

@@ -1,14 +1,15 @@
 use std::{any::TypeId, collections::HashMap, error::Error};
 use typol::{
-    ConfigInput, ConfigParseOptions, EmptyEnvironment, SchemaLoader, Typol, TypolOptions,
-    TypolStage, WriteOptions,
+    ConfigParseOptions, EmptyEnvironment, SchemaLoader, Typol, TypolOptions, TypolStage,
+    WriteOptions,
     binding::{
-        BindOptions, CodecErrors, CodecOptions, CodecStage, ConversionContext, ConversionLimits,
-        ConversionValue, DescribeContext, DescriptorNode, DescriptorProvider, TypeDescriptor,
-        TypeShape, TypedSchema, Typol as TypolTrait,
+        BindOptions, CodecErrors, CodecStage, ConversionContext, ConversionLimits, ConversionValue,
+        DescribeContext, DescriptorNode, DescriptorProvider, TypeDescriptor, TypeShape,
+        TypedSchema, Typol as TypolTrait,
     },
     config::ConfigParseRequest,
     core::{DiagnosticCode, SliceSource, ValueId, ValueSource},
+    io::ReadRequest,
     opeo::{OResult, Out},
     schema::{
         ResolverError, SchemaCompileOptions, SchemaCompiler, SchemaResolveRequest, SchemaResolver,
@@ -253,12 +254,12 @@ fn handwritten_conversion_cannot_forge_validation_or_default_provenance() -> Tes
     })?;
     assert_eq!(
         TestOpeo::value(|out| {
-            binding.serialize(&Manual { value: 2 }, CodecOptions::default(), out)
+            binding.serialize_to_string(&Manual { value: 2 }, WriteOptions::default(), out)
         })?,
         "{value: 2}"
     );
     let errors = TestOpeo::error(|out| {
-        binding.serialize(&Manual { value: 9 }, CodecOptions::default(), out)
+        binding.serialize_to_string(&Manual { value: 9 }, WriteOptions::default(), out)
     })?;
     assert_eq!(errors.stage(), CodecStage::Validation);
     assert_eq!(
@@ -300,13 +301,13 @@ fn facade_trusted_binding_reads_and_writes_handwritten_types() -> TestResult {
     let binding = TestOpeo::value(|out| loaded.bind_trusted::<Manual>(out))?;
     assert_eq!(
         TestOpeo::value(|out| {
-            binding.write(&Manual { value: 5 }, WriteOptions::default(), out)
+            binding.write_to_string(&Manual { value: 5 }, WriteOptions::default(), out)
         })?,
         "{value: 5}"
     );
     let mut environment = EmptyEnvironment;
     let value = TestOpeo::value(|out| {
-        binding.read(ConfigInput::text("{value: 5}"), &mut environment, out)
+        binding.read(ReadRequest::from_text("{value: 5}"), &mut environment, out)
     })?;
     assert_eq!(value.value, 5);
 
@@ -338,7 +339,8 @@ fn derived_parent_with_handwritten_child_keeps_trusted_path() -> TestResult {
     let value = DerivedWithManual {
         child: Manual { value: 17 },
     };
-    let encoded = TestOpeo::value(|out| binding.serialize(&value, CodecOptions::default(), out))?;
+    let encoded =
+        TestOpeo::value(|out| binding.serialize_to_string(&value, WriteOptions::default(), out))?;
     assert_eq!(encoded, "{child: {value: 17}}");
     let mut source = SliceSource::new(encoded.as_bytes());
     let request =
@@ -382,9 +384,9 @@ fn handwritten_conversion_nodes_are_counted_without_manual_accounting() -> TestR
         TypedSchema::<Manual>::bind_trusted(&schema, BindOptions::default(), out)
     })?;
     let limits = ConversionLimits::new(2, 128).test_value()?;
-    let options = CodecOptions::default().with_conversion(limits);
+    let options = WriteOptions::default().with_conversion(limits);
     assert_eq!(
-        TestOpeo::value(|out| { binding.serialize(&Manual { value: 7 }, options, out) })?,
+        TestOpeo::value(|out| { binding.serialize_to_string(&Manual { value: 7 }, options, out) })?,
         "{value: 7}"
     );
     let mut source = SliceSource::new(b"{value: 7}");
@@ -398,8 +400,10 @@ fn handwritten_conversion_nodes_are_counted_without_manual_accounting() -> TestR
     );
 
     let zero_limits = ConversionLimits::new(0, 128).test_value()?;
-    let zero_options = CodecOptions::default().with_conversion(zero_limits);
-    let errors = TestOpeo::error(|out| binding.serialize(&Manual { value: 7 }, zero_options, out))?;
+    let zero_options = WriteOptions::default().with_conversion(zero_limits);
+    let errors = TestOpeo::error(|out| {
+        binding.serialize_to_string(&Manual { value: 7 }, zero_options, out)
+    })?;
     assert_eq!(errors.stage(), CodecStage::Conversion);
     let mut source = SliceSource::new(b"{value: 7}");
     let request = ConfigParseRequest::new(&mut source, "manual", ConfigParseOptions::default());
@@ -412,8 +416,9 @@ fn handwritten_conversion_nodes_are_counted_without_manual_accounting() -> TestR
     let binding = TestOpeo::value(|out| {
         TypedSchema::<NodeForge>::bind_trusted(&schema, BindOptions::default(), out)
     })?;
-    let options = CodecOptions::default().with_conversion(limits);
-    let errors = TestOpeo::error(|out| binding.serialize(&NodeForge { value: 7 }, options, out))?;
+    let options = WriteOptions::default().with_conversion(limits);
+    let errors =
+        TestOpeo::error(|out| binding.serialize_to_string(&NodeForge { value: 7 }, options, out))?;
     assert_eq!(errors.stage(), CodecStage::Conversion);
 
     let mut source = SliceSource::new(b"{value: 7}");
@@ -438,8 +443,8 @@ fn derive_collections_enum_payloads_and_map_keys_share_exact_node_limits() -> Te
         entries: HashMap::from([("key".to_owned(), 6)]),
     };
     let exact_limits = ConversionLimits::new(10, 128).test_value()?;
-    let exact_options = CodecOptions::default().with_conversion(exact_limits);
-    let encoded = TestOpeo::value(|out| binding.serialize(&value, exact_options, out))?;
+    let exact_options = WriteOptions::default().with_conversion(exact_limits);
+    let encoded = TestOpeo::value(|out| binding.serialize_to_string(&value, exact_options, out))?;
     let mut source = SliceSource::new(encoded.as_bytes());
     let request = ConfigParseRequest::new(&mut source, "derived", ConfigParseOptions::default());
     assert_eq!(
@@ -450,8 +455,8 @@ fn derive_collections_enum_payloads_and_map_keys_share_exact_node_limits() -> Te
     );
 
     let below_limits = ConversionLimits::new(9, 128).test_value()?;
-    let below_options = CodecOptions::default().with_conversion(below_limits);
-    let errors = TestOpeo::error(|out| binding.serialize(&value, below_options, out))?;
+    let below_options = WriteOptions::default().with_conversion(below_limits);
+    let errors = TestOpeo::error(|out| binding.serialize_to_string(&value, below_options, out))?;
     assert_eq!(errors.stage(), CodecStage::Conversion);
     let mut source = SliceSource::new(encoded.as_bytes());
     let request = ConfigParseRequest::new(&mut source, "derived", ConfigParseOptions::default());

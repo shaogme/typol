@@ -78,6 +78,7 @@ struct MemoryResolver {
     requests: Vec<Request>,
     selected: Vec<String>,
     error: Option<(String, ResolverError)>,
+    source: OwnedReadSource,
 }
 
 impl MemoryResolver {
@@ -87,6 +88,7 @@ impl MemoryResolver {
             requests: Vec::new(),
             selected: Vec::new(),
             error: None,
+            source: OwnedReadSource::default(),
         }
     }
 
@@ -180,9 +182,10 @@ impl SchemaResolver for MemoryResolver {
             return Err(out.fail(ResolverError::ResourceLimitExceeded));
         }
         self.selected.push(source.path.clone());
-        Ok(SchemaSource::from_str(
+        self.source.replace(source.text);
+        Ok(SchemaSource::from_source(
             source.identity.as_bytes(),
-            source.text,
+            &mut self.source,
         ))
     }
 }

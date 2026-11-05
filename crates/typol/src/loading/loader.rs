@@ -1,5 +1,6 @@
 use crate::{TypolError, TypolOptions, loading::LoadedSchema};
 use opeo::{ErrSlot, OResult, Out};
+use typol_core::{Read, SliceSource, SourceReadError};
 use typol_schema::{SchemaCompiler, SchemaResolver, SchemaSource};
 
 #[cfg(not(feature = "std"))]
@@ -9,7 +10,7 @@ use crate::{TypolStage, error::ErrorSlot};
 #[cfg(feature = "std")]
 use std::{fmt, path::Path};
 #[cfg(feature = "std")]
-use typol_core::{ExecutionBudget, SourceReadError};
+use typol_core::ExecutionBudget;
 #[cfg(feature = "std")]
 use typol_std::{
     FileSchemaCompileOptions, FileSchemaCompiler, HostError, HostOperation,
@@ -45,18 +46,18 @@ pub struct SchemaLoader {
 }
 
 #[cfg(feature = "std")]
-struct CompileRequest<'root, 'resolver> {
+struct CompileRequest<'root, 'resolver, S: Read<SourceReadError>> {
     compiler: SchemaCompiler,
-    root: SchemaSource<'root>,
+    root: SchemaSource<'root, S>,
     resolver: &'resolver mut dyn SchemaResolver,
     names: HostSourceNames,
 }
 
 #[cfg(feature = "std")]
-impl<'root, 'resolver> CompileRequest<'root, 'resolver> {
+impl<'root, 'resolver, S: Read<SourceReadError>> CompileRequest<'root, 'resolver, S> {
     fn new(
         compiler: SchemaCompiler,
-        root: SchemaSource<'root>,
+        root: SchemaSource<'root, S>,
         resolver: &'resolver mut dyn SchemaResolver,
         names: HostSourceNames,
     ) -> Self {
@@ -106,13 +107,14 @@ impl SchemaLoader {
         text: &str,
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, LoadedSchema> {
-        self.compile_text_inner(SchemaSource::from_str(name, text), out)
+        let mut source = SliceSource::new(text.as_bytes());
+        self.compile_text_inner(SchemaSource::from_source(name, &mut source), out)
     }
 
     #[cfg(feature = "std")]
-    pub fn compile_with_resolver<'slot>(
+    pub fn compile_with_resolver<'slot, S: Read<SourceReadError>>(
         &self,
-        root: SchemaSource<'_>,
+        root: SchemaSource<'_, S>,
         resolver: &mut dyn SchemaResolver,
         mut out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, LoadedSchema> {
@@ -138,9 +140,9 @@ impl SchemaLoader {
     }
 
     #[cfg(feature = "std")]
-    fn compile_resolved<'slot>(
+    fn compile_resolved<'slot, S: Read<SourceReadError>>(
         &self,
-        request: CompileRequest<'_, '_>,
+        request: CompileRequest<'_, '_, S>,
         mut out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, LoadedSchema> {
         let CompileRequest {
@@ -165,9 +167,9 @@ impl SchemaLoader {
     }
 
     #[cfg(feature = "std")]
-    fn compile_text_inner<'slot>(
+    fn compile_text_inner<'slot, S: Read<SourceReadError>>(
         &self,
-        root: SchemaSource<'_>,
+        root: SchemaSource<'_, S>,
         mut out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, LoadedSchema> {
         let compiler = LoadSupport::capture(
@@ -225,10 +227,11 @@ impl SchemaLoader {
             out.reborrow(),
         )?;
         let mut names = SourceNames::default();
+        let mut source = SliceSource::new(text.as_bytes());
         let schema = LoadSupport::capture(
             |schema_out| {
                 compiler.compile_without_imports_with_observer(
-                    SchemaSource::from_str(name, text),
+                    SchemaSource::from_source(name, &mut source),
                     &mut names,
                     schema_out,
                 )
@@ -239,9 +242,9 @@ impl SchemaLoader {
         Ok(LoadedSchema::from_memory(schema, names, self.options))
     }
 
-    pub fn compile_with_resolver<'slot>(
+    pub fn compile_with_resolver<'slot, S: Read<SourceReadError>>(
         &self,
-        root: SchemaSource<'_>,
+        root: SchemaSource<'_, S>,
         resolver: &mut dyn SchemaResolver,
         mut out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, LoadedSchema> {

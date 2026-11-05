@@ -7,12 +7,12 @@ mod tests;
 
 pub use bound::{BoundRead, BoundSchema, TrustedBoundSchema};
 pub use config::LoadedSchema;
-pub(crate) use config::{ConfigInputOperation, ConfigInputStrategy, ConfigSourceRequest};
+pub(crate) use config::{ConfigSourceRequest, ReadStrategy};
 pub use loader::SchemaLoader;
 
 use core::fmt::{Debug, Formatter, Result};
 use opeo::{OResult, Out};
-use typol_core::{ByteSource, SourceId};
+use typol_core::SourceId;
 
 #[cfg(feature = "std")]
 use crate::error::ErrorSlot;
@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 #[cfg(not(feature = "std"))]
 use core::str::from_utf8;
 #[cfg(feature = "std")]
-use std::{io::Read, path::Path};
+use std::path::Path;
 #[cfg(not(feature = "std"))]
 use typol_schema::{SourceLoadedRequest, SourceObserver, SourceObserverError};
 #[cfg(feature = "std")]
@@ -31,23 +31,15 @@ use typol_std::{
 };
 
 #[cfg(feature = "std")]
+pub(crate) struct FileReadRequest<'a> {
+    pub(crate) path: &'a Path,
+    pub(crate) display_name: &'a str,
+}
+
+#[cfg(feature = "std")]
 pub(crate) struct PreparedConfig {
     pub(crate) source: FileConfigInput,
     pub(crate) slot: ErrorSlot,
-}
-
-pub(crate) enum ConfigInputKind<'input> {
-    #[cfg(feature = "std")]
-    File(&'input Path),
-    Text(&'input str),
-    Bytes(&'input mut dyn ByteSource),
-    #[cfg(feature = "std")]
-    Reader(&'input mut dyn Read),
-}
-
-pub struct ConfigInput<'input> {
-    source: ConfigInputKind<'input>,
-    display_name: Option<&'input str>,
 }
 
 #[cfg(not(feature = "std"))]
@@ -65,88 +57,6 @@ pub struct SourceNames {
 #[derive(Default)]
 pub struct SourceNames {
     entries: Vec<SourceName>,
-}
-
-/// The host controls reader termination and timeouts.
-#[cfg(feature = "std")]
-pub struct ReaderLoadRequest<'input> {
-    reader: &'input mut dyn Read,
-    display_name: &'input str,
-}
-
-#[cfg(feature = "std")]
-impl<'input> ReaderLoadRequest<'input> {
-    pub fn new(reader: &'input mut dyn Read, display_name: &'input str) -> Self {
-        Self {
-            reader,
-            display_name,
-        }
-    }
-
-    pub(crate) fn into_parts(self) -> (&'input mut dyn Read, &'input str) {
-        (self.reader, self.display_name)
-    }
-
-    pub const fn display_name(&self) -> &'input str {
-        self.display_name
-    }
-}
-
-impl<'input> ConfigInput<'input> {
-    #[cfg(feature = "std")]
-    pub fn file(path: &'input Path) -> Self {
-        Self {
-            source: ConfigInputKind::File(path),
-            display_name: None,
-        }
-    }
-
-    pub fn text(text: &'input str) -> Self {
-        Self {
-            source: ConfigInputKind::Text(text),
-            display_name: None,
-        }
-    }
-
-    pub fn bytes(source: &'input mut dyn ByteSource) -> Self {
-        Self {
-            source: ConfigInputKind::Bytes(source),
-            display_name: None,
-        }
-    }
-
-    #[cfg(feature = "std")]
-    pub fn reader(reader: &'input mut dyn Read) -> Self {
-        Self {
-            source: ConfigInputKind::Reader(reader),
-            display_name: None,
-        }
-    }
-
-    pub const fn named(mut self, display_name: &'input str) -> Self {
-        self.display_name = Some(display_name);
-        self
-    }
-
-    pub const fn display_name(&self) -> &'input str {
-        match self.display_name {
-            Some(name) => name,
-            None => "config",
-        }
-    }
-
-    pub(crate) fn into_parts(self) -> (ConfigInputKind<'input>, &'input str) {
-        (self.source, self.display_name.unwrap_or("config"))
-    }
-}
-
-#[cfg(feature = "std")]
-impl Debug for ReaderLoadRequest<'_> {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
-        formatter
-            .debug_struct("ReaderLoadRequest")
-            .finish_non_exhaustive()
-    }
 }
 
 #[cfg(feature = "std")]

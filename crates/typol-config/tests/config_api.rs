@@ -7,8 +7,8 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{
-    ByteSource, DiagnosticCode, ExecutionLimits, SliceSource, SourceId, SourceSpan, Span,
-    ValueKind, ValueSource, ValueView,
+    DiagnosticCode, ExecutionLimits, Read, SliceSource, SourceId, SourceSpan, Span, ValueKind,
+    ValueSource, ValueView,
 };
 use typol_i18n::{Language, Translator};
 use typol_policy::ResourceLimits;
@@ -490,7 +490,7 @@ entry struct Root { child: Child = {}, limit: u8 }"#;
 }
 
 fn config_request<'a>(
-    source: (&'a mut impl ByteSource, &'a str),
+    source: (&'a mut impl Read, &'a str),
     limits: &ConfigLimits,
 ) -> ConfigParseRequest<'a> {
     ConfigParseRequest::new(

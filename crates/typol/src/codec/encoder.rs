@@ -6,11 +6,10 @@ use crate::{
         EnumPayloadValue, FieldIndexError, NAMED_ENTRY_NAME_MISSING, ValueNode, ValueNodeKind,
     },
 };
-use alloc::string::String;
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
-    ChargedVec, ConfigValue, DiagnosticContext, ValueEntries, ValueEntryView, ValueView,
-    diagnostic_context,
+    ChargedVec, ConfigValue, DiagnosticContext, ValueEntries, ValueEntryView, ValueView, Write,
+    WriteError, diagnostic_context,
 };
 use typol_semantic::{FieldList, TypeView};
 
@@ -56,8 +55,13 @@ enum Frame<'schema, 'value> {
 
 pub(super) struct Encoder<'call> {
     session: &'call mut SessionBudget,
-    output: ChargedVec<u8>,
+    output: &'call mut dyn Write,
     pretty: bool,
+}
+
+pub(super) struct EncoderOutput<'output> {
+    pub(super) sink: &'output mut dyn Write,
+    pub(super) pretty: bool,
 }
 
 impl<'call> Encoder<'call> {
@@ -69,23 +73,18 @@ impl<'call> Encoder<'call> {
         ty: TypeView<'_>,
         value: &ConfigValue,
         session: &'call mut SessionBudget,
-        pretty: bool,
+        output: EncoderOutput<'call>,
         mut out: Out<'slot, '_, CodecErrors>,
-    ) -> OResult<'slot, String> {
+    ) -> OResult<'slot, ()> {
         let mut frames = session.budget_codec(
-            CodecStage::Encoding,
-            |budget_out| session.workspace(budget_out),
-            out.reborrow(),
-        )?;
-        let output = session.budget_codec(
             CodecStage::Encoding,
             |budget_out| session.workspace(budget_out),
             out.reborrow(),
         )?;
         let mut encoder = Self {
             session,
-            output,
-            pretty,
+            output: output.sink,
+            pretty: output.pretty,
         };
         push(
             encoder.session,
@@ -106,21 +105,7 @@ impl<'call> Encoder<'call> {
             encoder.frame(frame, &mut frames, out.reborrow())?;
         }
         drop(frames);
-        // The complete UTF-8 fragment is written before handing off the underlying Vec, with no further allocation or output copy.
-        encoder.session.budget_codec(
-            CodecStage::Encoding,
-            |budget_out| {
-                encoder
-                    .session
-                    .execution()
-                    .consume(encoder.output.len(), budget_out)
-            },
-            out.reborrow(),
-        )?;
-        let output = String::from_utf8(encoder.output.into_unmetered_vec())
-            .map_err(|_| encoding_error(Failure::internal(ENCODER_INVARIANT)))
-            .store_err_into(out.reborrow())?;
-        Ok(output)
+        Ok(())
     }
 
     fn write<'slot>(
@@ -129,19 +114,11 @@ impl<'call> Encoder<'call> {
         mut out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, ()> {
         self.session.output_codec(text.len(), out.reborrow())?;
-        self.session.budget_codec(
-            CodecStage::Encoding,
-            |budget_out| self.output.try_reserve(text.len(), budget_out),
-            out.reborrow(),
-        )?;
-        for byte in text.bytes() {
-            self.session.budget_codec(
-                CodecStage::Encoding,
-                |budget_out| self.output.try_push(byte, budget_out),
-                out.reborrow(),
-            )?;
-        }
-        Ok(())
+        self.output
+            .write_all(text.as_bytes())
+            .map_err(write_failure)
+            .map_err(encoding_error)
+            .store_err_into(out)
     }
 
     fn line_indent<'slot>(
@@ -712,6 +689,15 @@ impl<'call> Encoder<'call> {
             )?;
         }
         Ok(entries)
+    }
+}
+
+fn write_failure(error: WriteError) -> Failure {
+    match error {
+        WriteError::AllocationFailed => Failure::Allocation,
+        WriteError::CapacityExceeded => Failure::Capacity,
+        WriteError::HostFailure => Failure::Encoding,
+        WriteError::InternalInvariantFailure => Failure::internal(ENCODER_INVARIANT),
     }
 }
 

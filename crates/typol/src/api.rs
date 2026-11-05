@@ -14,10 +14,10 @@ pub mod binding {
             MapContainer, TypeDescriptor, TypeShape, Typol, VariantShape,
         },
         diagnostics::{CodecErrors, CodecStage, ConversionErrorKind},
-        loading::{BoundRead, BoundSchema, ConfigInput, LoadedSchema, TrustedBoundSchema},
+        loading::{BoundRead, BoundSchema, LoadedSchema, TrustedBoundSchema},
         options::{
-            BindOptions, BindingLimitError, BindingLimits, CodecOptions, ConversionLimitError,
-            ConversionLimits, MAX_CONVERSION_DEPTH,
+            BindOptions, BindingLimitError, BindingLimits, ConversionLimitError, ConversionLimits,
+            MAX_CONVERSION_DEPTH, WriteOptions,
         },
     };
 }
@@ -35,11 +35,11 @@ pub mod config {
 
 pub mod core {
     pub use typol_core::{
-        AllocationError, BudgetError, ByteSource, ChargedString, ChargedVec, ConfigValue,
-        ConfigValueBuilder, Diagnostic, DiagnosticCode, DiagnosticContext as ErrorContext,
-        ExecutionBudget, ExecutionLimits, LocatedSpan, NamedValue, NamedValueEntryView,
-        SliceSource, SourceId, SourceReadError, SourceSpan, ValueEntries, ValueEntryView,
-        ValueError, ValueId, ValueKind, ValuePayload, ValuePayloadView, ValueSource, ValueView,
+        AllocationError, BudgetError, ChargedString, ChargedVec, ConfigValue, ConfigValueBuilder,
+        Diagnostic, DiagnosticCode, DiagnosticContext as ErrorContext, ExecutionBudget,
+        ExecutionLimits, LocatedSpan, NamedValue, NamedValueEntryView, Read, SliceSource, SourceId,
+        SourceReadError, SourceSpan, ValueEntries, ValueEntryView, ValueError, ValueId, ValueKind,
+        ValuePayload, ValuePayloadView, ValueSource, ValueView,
     };
 
     pub use crate::loading::SourceNames;
@@ -55,7 +55,6 @@ pub mod policy {
 
 #[cfg(feature = "std")]
 pub mod host {
-    pub use crate::loading::{ConfigInput, ReaderLoadRequest};
     pub use typol_i18n::{Language, Translator};
     pub use typol_std::{
         DiagnosticContext, DiagnosticRenderError, DiagnosticRenderer, DiagnosticReport,

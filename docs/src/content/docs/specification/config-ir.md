@@ -167,7 +167,7 @@ Arrays keep their order, struct fields follow Schema declaration order, and map 
 
 ## 7. Resource limits and failures
 
-`ConfigIr::serialize` is provided by the `config-ir` feature of the `typol` crate and consumes a `ConfigValue`. JSON encoding begins only after any requested normalization or validation succeeds. A failure at any stage returns no partial JSON. Defaults in `ConfigIrOptions` are:
+`ConfigIr::serialize_to` is provided by the `config-ir` feature of the `typol` crate and writes a `ConfigValue` to a caller-provided sink; `serialize` is a `Vec<u8>` convenience wrapper over that sink API. JSON encoding begins only after any requested normalization or validation succeeds. A sink or output-limit failure can leave an already-written prefix. Defaults in `ConfigIrOptions` are:
 
 | Option | Default | Purpose |
 | --- | ---: | --- |

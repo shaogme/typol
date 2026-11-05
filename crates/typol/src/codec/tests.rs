@@ -114,11 +114,14 @@ fn parsed_config(
 }
 
 fn encoded(validated: &mut ValidatedValue<'_, '_>) -> TestResult<String> {
-    TestOpeo::value(|out| validated.encode(false, out))
+    let mut output = String::new();
+    TestOpeo::value(|out| validated.encode(&mut output, false, out))?;
+    Ok(output)
 }
 
 fn encode_error(validated: &mut ValidatedValue<'_, '_>) -> TestResult<CodecErrors> {
-    TestOpeo::error(|out| validated.encode(false, out))
+    let mut output = String::new();
+    TestOpeo::error(|out| validated.encode(&mut output, false, out))
 }
 
 fn encode_outcome(validated: &mut ValidatedValue<'_, '_>) -> TestOpeoOutcome<String, CodecErrors> {
@@ -129,7 +132,11 @@ fn encode_outcome_with_pretty(
     validated: &mut ValidatedValue<'_, '_>,
     pretty: bool,
 ) -> TestOpeoOutcome<String, CodecErrors> {
-    TestOpeo::outcome(|out| validated.encode(pretty, out))
+    let mut output = String::new();
+    match TestOpeo::outcome(|out| validated.encode(&mut output, pretty, out)) {
+        TestOpeoOutcome::Value(()) => TestOpeoOutcome::Value(output),
+        TestOpeoOutcome::Error(error) => TestOpeoOutcome::Error(error),
+    }
 }
 
 fn allocation_encode(outcome: TestOpeoOutcome<String, CodecErrors>) -> TestResult {

@@ -1,6 +1,6 @@
 use crate::{
     diagnostics::{CodecErrors, CodecStage, Failure},
-    options::{BindOptions, CodecOptions},
+    options::{BindOptions, WriteOptions},
 };
 use alloc::string::String;
 use core::{cell::RefCell, cmp::Ordering, fmt};
@@ -81,7 +81,7 @@ impl SessionBudget {
     }
 
     pub(crate) fn codec<'slot>(
-        options: CodecOptions,
+        options: WriteOptions,
         mut out: Out<'slot, '_, BudgetError>,
     ) -> OResult<'slot, Self> {
         let session = Self::new(

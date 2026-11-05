@@ -6,7 +6,7 @@ Typol 是面向 Rust 的 Schema 驱动配置库。它编译 `.tschem` Schema，�
 
 工作区要求 Rust 1.85 或更高版本。以下示例使用 `typol` facade crate；底层 crate 也可以独立使用。
 
-Facade 默认使用 `no_std`，拥有型值使用 `alloc`。内存加载器接受 Schema 文本或 resolver；配置读取接受文本或调用方提供的 `ByteSource`，并要求显式传入 `Environment` provider。`OrderedMap<T>` 绑定无需 `std`；启用 `btree-map` 后可绑定 `alloc::collections::BTreeMap<String, T>`，启用 `hashbrown` 并直接依赖 `hashbrown` 后可绑定 `hashbrown::HashMap<String, T>`。BTreeMap 节点分配失败不能恢复为结构化错误，其目标存储预算只是估算。`serde` 和 `config-ir` feature 均可在不启用 `std` 时使用；Config IR 序列化返回由 `alloc` 支持的 `Vec<u8>`。启用 `std` 后可使用文件和 reader 输入、进程环境访问及宿主诊断渲染。
+Facade 默认使用 `no_std`，拥有型值使用 `alloc`。配置来源实现 `typol::io::Read`；`LoadedSchema::read_value` 和 `BoundSchema::read` 接收 `ReadRequest`，并显式传入 `Environment`。编码器写入 `typol::io::Write` sink，由调用方选择目标。需要缓冲输出时可使用 `String` 和 `Vec<u8>` helper。`OrderedMap<T>` 绑定无需 `std`；启用 `btree-map` 后可绑定 `alloc::collections::BTreeMap<String, T>`，启用 `hashbrown` 并直接依赖 `hashbrown` 后可绑定 `hashbrown::HashMap<String, T>`。BTreeMap 节点分配失败不能恢复为结构化错误，其目标存储预算只是估算。`serde` 和 `config-ir` feature 均可在不启用 `std` 时使用。启用 `std` 后可使用文件和 reader adapter、进程环境访问及宿主诊断渲染。
 
 显式启用 `btree-map` 即可使用 BTreeMap 绑定；该 feature 不会启用 `std`：
 
@@ -27,7 +27,8 @@ typol = { version = "0.1", features = ["std"] }
 
 ```rust
 use typol::{
-    opeo::ErrSlot, ConfigInput, EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
+    io::{ReadRequest, SliceSource}, opeo::ErrSlot, EmptyEnvironment, SchemaLoader, Typol,
+    TypolError, TypolOptions,
 };
 
 #[derive(Debug, PartialEq, Typol)]
@@ -56,13 +57,11 @@ entry struct ServiceConfig {
     )?;
     let binding = loaded.bind::<ServiceConfig>(out.reborrow())?;
     let mut environment = EmptyEnvironment;
-    let config = binding.read(
-        ConfigInput::text(
-            r#"{ name: "edge", tags: ["api"], endpoint: env("APP_ENDPOINT") }"#,
-        ),
-        &mut environment,
-        out,
-    )?;
+    let mut source = SliceSource::new(
+        r#"{ name: "edge", tags: ["api"], endpoint: env("APP_ENDPOINT") }"#.as_bytes(),
+    );
+    let request = ReadRequest::new(&mut source, "readme config");
+    let config = binding.read(request, &mut environment, out)?;
 
     assert_eq!(
         config,
@@ -111,14 +110,16 @@ struct Node {
 ```rust
 use typol::WriteOptions;
 
-let text = binding.write(
+let mut text = String::new();
+binding.write(
     &config,
+    &mut text,
     WriteOptions::default().with_pretty(true),
     out,
 )?;
 ```
 
-`BoundSchema::write` 和 `BoundSchema::write_serde` 现在都要求显式传入选项；请将 `write(value, out)` 迁移为 `write(value, options, out)`。旧的 `write_with_options` 和 `write_serde_with_options` 方法已移除。`TypedSchema::serialize` 和 `serialize_serde` 使用 `CodecOptions::with_pretty` 选择相同格式。格式空白也计入输出字节额度，失败时不会返回部分文本。序列化结果仍包含 `@secret` 的实际值。
+`BoundSchema::write` 和 `write_serde` 写入调用方提供的 sink 并返回 `()`。需要缓冲为 `String` 时使用 `write_to_string` 或 `write_serde_to_string`。`TypedSchema::serialize` 和 `serialize_serde` 使用相同的 `WriteOptions`。格式空白也计入输出字节额度；sink 失败时可能已经写入前缀，转换和完整 Schema 校验会在首字节写入前完成。序列化结果仍包含 `@secret` 的实际值。
 
 ## 手写 `Typol` 实现
 

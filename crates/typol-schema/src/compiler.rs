@@ -1,5 +1,5 @@
 use opeo::{ErrSlot, OResult, Out};
-use typol_core::{BudgetError, ExecutionBudget};
+use typol_core::{BudgetError, ExecutionBudget, Read, SourceReadError};
 use typol_semantic::CompiledSchema;
 
 use crate::{
@@ -134,9 +134,9 @@ impl SchemaCompiler {
     }
 
     /// Compiles an in-memory source without importing other Schemas.
-    pub fn compile_without_imports<'slot>(
+    pub fn compile_without_imports<'slot, S: Read<SourceReadError>>(
         self,
-        root: SchemaSource<'_>,
+        root: SchemaSource<'_, S>,
         mut out: Out<'slot, '_, SchemaCompileErrors>,
     ) -> OResult<'slot, CompiledSchema> {
         let mut resolver = NoImports;
@@ -145,9 +145,9 @@ impl SchemaCompiler {
     }
 
     /// Compiles an in-memory source without importing other Schemas and registers the names of sources read.
-    pub fn compile_without_imports_with_observer<'slot>(
+    pub fn compile_without_imports_with_observer<'slot, S: Read<SourceReadError>>(
         self,
-        root: SchemaSource<'_>,
+        root: SchemaSource<'_, S>,
         observer: &mut dyn SourceObserver,
         mut out: Out<'slot, '_, SchemaCompileErrors>,
     ) -> OResult<'slot, CompiledSchema> {
@@ -156,9 +156,9 @@ impl SchemaCompiler {
         Ok(schema)
     }
 
-    pub fn compile<'slot, R: SchemaResolver + ?Sized>(
+    pub fn compile<'slot, R: SchemaResolver + ?Sized, S: Read<SourceReadError>>(
         self,
-        root: SchemaSource<'_>,
+        root: SchemaSource<'_, S>,
         resolver: &mut R,
         observer: Option<&mut dyn SourceObserver>,
         mut out: Out<'slot, '_, SchemaCompileErrors>,
@@ -167,9 +167,9 @@ impl SchemaCompiler {
         Ok(schema)
     }
 
-    fn compile_inner<'slot, R: SchemaResolver + ?Sized>(
+    fn compile_inner<'slot, R: SchemaResolver + ?Sized, S: Read<SourceReadError>>(
         self,
-        root: SchemaSource<'_>,
+        root: SchemaSource<'_, S>,
         resolver: &mut R,
         observer: Option<&mut dyn SourceObserver>,
         mut out: Out<'slot, '_, SchemaCompileErrors>,

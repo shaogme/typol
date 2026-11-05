@@ -7,7 +7,7 @@ use typol_test_support::{
 
 use typol::{
     ConfigParseOptions, Environment, EnvironmentError, EnvironmentReadContext, Typol,
-    binding::{BindOptions, CodecOptions, CodecStage, ConversionLimits, TypedSchema},
+    binding::{BindOptions, CodecStage, ConversionLimits, TypedSchema, WriteOptions},
     config::{ConfigParseErrors, ConfigParseRequest},
     host::{DiagnosticContext, DiagnosticRenderer, Language, RenderOptions, Translator},
     opeo::{OResult, Out},
@@ -139,11 +139,11 @@ fn rust_value_diagnostics_keep_schema_labels_without_fabricated_primary() -> Tes
         let binding =
             TestOpeo::value(|out| TypedSchema::<Root>::bind(&schema, BindOptions::default(), out))?;
         TestOpeo::error(|out| {
-            binding.serialize(
+            binding.serialize_to_string(
                 &Root {
                     value: "PRIVATE-RUST-SENTINEL".into(),
                 },
-                CodecOptions::default(),
+                WriteOptions::default(),
                 out,
             )
         })?

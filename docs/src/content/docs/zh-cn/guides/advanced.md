@@ -152,14 +152,16 @@ let binding = loaded.bind_trusted::<ServiceConfig>(out.reborrow())?;
 ```rust
 use typol::WriteOptions;
 
-let text = binding.write(
+let mut text = String::new();
+binding.write(
     &config,
+    &mut text,
     WriteOptions::default().with_pretty(true),
     out,
 )?;
 ```
 
-输出末尾不会追加换行。格式空白也计入输出字节额度；写入失败时不会返回部分文本。标记为 `@secret` 的字段仍会输出实际值。写入 API 已变更：请将 `write(value, out)` 迁移为 `write(value, options, out)`；旧的 `write_with_options` 方法已移除。启用 `serde` feature 后，`write_serde` 采用相同签名。较低层的 `TypedSchema::serialize` 和 `serialize_serde` 通过 `CodecOptions::with_pretty` 选择 pretty 格式。
+输出末尾不会追加换行。格式空白也计入输出字节额度。转换和完整 Schema 校验会在首字节写入前完成；sink 或输出额度失败时可能留下已写入的前缀。标记为 `@secret` 的字段仍会输出实际值。`BoundSchema::write` 和启用 feature 后的 `write_serde` 接收 sink 与 `WriteOptions`；需要缓冲结果时可使用 `write_to_string` 和 `write_serde_to_string`。`TypedSchema::serialize` 和 `serialize_serde` 使用同一 `WriteOptions`。
 
 可选的 Serde 桥接能在绑定 Schema 的上下文中读取或写入 Serde 类型。启用 Typol 的 `serde` feature 和 Serde 的 derive feature：
 
@@ -204,7 +206,14 @@ fn export_ir(
     schema: &CompiledSchema,
     value: ConfigValue,
 ) -> Result<Vec<u8>, ConfigIrError> {
-    ConfigIr::serialize(schema, value, ConfigIrOptions::new().with_pretty(true))
+    let mut output = Vec::new();
+    ConfigIr::serialize_to(
+        schema,
+        value,
+        ConfigIrOptions::new().with_pretty(true),
+        &mut output,
+    )?;
+    Ok(output)
 }
 ```
 

@@ -2,9 +2,9 @@ use crate::error::SyntaxDiagnostic;
 use core::{cell::Cell, error::Error, fmt, num::NonZeroUsize, str::from_utf8};
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
-    BudgetError, ByteSource, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext,
-    ExecutionBudget, LocatedSpan, SourceId, SourceLocation, SourceReadError, SourceReadErrorKind,
-    SourceSpan, Span, SpanLocation, diagnostic_context,
+    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, ExecutionBudget,
+    LocatedSpan, Read, SourceId, SourceLocation, SourceReadError, SourceReadErrorKind, SourceSpan,
+    Span, SpanLocation, diagnostic_context,
 };
 
 /// Source and string ceilings for byte-stream lexing.
@@ -180,7 +180,7 @@ pub struct InputConfig<'input, 'config> {
     /// Stable ID of the input source.
     pub source_id: SourceId,
     /// Input object that provides the byte stream.
-    pub source: &'input mut dyn ByteSource<Diagnostic>,
+    pub source: &'input mut dyn Read<Diagnostic>,
     /// Resource ceilings for input bytes and strings.
     pub resources: &'config InputLimits,
     /// Input-window and token-size limits.
@@ -190,7 +190,7 @@ pub struct InputConfig<'input, 'config> {
 }
 
 pub(crate) struct Input<'input> {
-    source: &'input mut dyn ByteSource<Diagnostic>,
+    source: &'input mut dyn Read<Diagnostic>,
     window: ChargedVec<u8>,
     index: usize,
     length: usize,
@@ -648,7 +648,7 @@ mod tests {
     use super::{Input, InputConfig, InputLimits, StreamLimits};
     use opeo::{ErrSlot, OResult, Out};
     use typol_core::{
-        BudgetError, ByteSource, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits,
+        BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read,
         SliceSource, SourceId,
     };
 
@@ -677,7 +677,7 @@ mod tests {
             Err(_) => return Err(TestFailure),
         };
         let mut source = SliceSource::new("🦀".as_bytes());
-        let source: &mut dyn ByteSource<Diagnostic> = &mut source;
+        let source: &mut dyn Read<Diagnostic> = &mut source;
         let mut errors = ErrSlot::<Diagnostic>::new();
         let mut input = call(&mut errors, |out| {
             Input::new(

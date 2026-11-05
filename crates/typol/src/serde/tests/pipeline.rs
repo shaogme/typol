@@ -5,7 +5,7 @@ use crate::{
     conversion::{ConversionContext, ConversionValue},
     descriptor::{DescribeContext, DescriptorProvider, TypeDescriptor, Typol},
     diagnostics::{CodecErrors, CodecStage},
-    options::{BindOptions, CodecOptions, ConversionLimits},
+    options::{BindOptions, ConversionLimits, WriteOptions},
     serde::Serde,
 };
 use opeo::{OResult, Out};
@@ -141,7 +141,7 @@ fn public_serde_pipeline_allocations_fail_atomically() -> TestResult {
     };
     TestAssertions::assert_atomic_allocations(|| {
         drop(Support::allocation_codec_value(|out| {
-            binding.serialize_serde(&input, CodecOptions::default(), out)
+            binding.serialize_serde_to_string(&input, WriteOptions::default(), out)
         })?);
         Ok(())
     })?;
@@ -164,7 +164,7 @@ fn public_serde_pipeline_allocations_fail_atomically() -> TestResult {
         value: String::new(),
     };
     let errors = Support::codec_error(|out| {
-        binding.serialize_serde(&invalid, CodecOptions::default(), out)
+        binding.serialize_serde_to_string(&invalid, WriteOptions::default(), out)
     })?;
     assert_eq!(
         errors
@@ -177,7 +177,7 @@ fn public_serde_pipeline_allocations_fail_atomically() -> TestResult {
     );
     TestAssertions::assert_atomic_allocations(|| {
         let errors = Support::codec_error(|out| {
-            binding.serialize_serde(&invalid, CodecOptions::default(), out)
+            binding.serialize_serde_to_string(&invalid, WriteOptions::default(), out)
         })?;
         if errors.diagnostics().last().is_some_and(|diagnostic| {
             let code = diagnostic.code().get();
@@ -245,21 +245,20 @@ fn public_serde_validation_cannot_reset_conversion_balance() -> TestResult {
     drop(Support::codec_value(|out| {
         Serde::encode(&binding, &input, &call, ConversionLimits::default(), out)
     })?);
-    let defaults = CodecOptions::default();
+    let defaults = WriteOptions::default();
     let validation = defaults.validation();
-    let options = CodecOptions::new(
-        ConfigValidationOptions::new(
+    let options = WriteOptions::new(defaults.max_output_bytes())
+        .with_validation(ConfigValidationOptions::new(
             *validation.resources(),
             *validation.config(),
             ExecutionLimits::new(
                 call.execution().steps(),
                 validation.execution().max_workspace_bytes(),
             ),
-        ),
-        defaults.conversion(),
-        defaults.max_output_bytes(),
-    );
-    let errors = Support::codec_error(|out| binding.serialize_serde(&input, options, out))?;
+        ))
+        .with_conversion_limits(defaults.conversion_limits());
+    let errors =
+        Support::codec_error(|out| binding.serialize_serde_to_string(&input, options, out))?;
     assert_eq!(errors.stage(), CodecStage::Validation);
     assert_eq!(Support::code(errors)?, 1);
 

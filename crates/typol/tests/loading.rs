@@ -8,18 +8,22 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 use typol::{
-    BoundSchema, ConfigInput, ConfigParseOptions, Environment, EnvironmentError,
-    EnvironmentReadContext, LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits,
-    SchemaLoader, Typol, TypolError, TypolOptions, TypolStage, ValidatedConfigValue, WriteOptions,
+    BoundSchema, ConfigParseOptions, Environment, EnvironmentError, EnvironmentReadContext,
+    LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader, Typol, TypolError,
+    TypolOptions, TypolStage, ValidatedConfigValue, WriteOptions,
     binding::{
         BindOptions, CodecStage, ConversionLimits, MAX_CONVERSION_DEPTH, Typol as TypolTrait,
     },
-    config::{ConfigFailureStage, ConfigParseErrors, ConfigParseRequest, ConfigParser},
-    core::{BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId},
+    config::{
+        ConfigFailureStage, ConfigLimits, ConfigParseErrors, ConfigParseRequest, ConfigParser,
+        ConfigValidationOptions,
+    },
+    core::{BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, SliceSource, SourceId},
     host::{
         FileConfigInput, FileSchemaCompileErrors, HostError, HostErrorKind, HostOperation,
         Language, RenderOptions, SourceNameEditOptions, SourceNameLimits, Translator,
     },
+    io::ReadRequest,
     opeo::{OResult, Out},
     schema::{
         ResolverError, SchemaCompileContextFailure, SchemaCompileErrors, SchemaCompileOptions,
@@ -32,40 +36,138 @@ use typol_test_support::{
 };
 
 trait BoundProcessEnvironmentTestExt<T: TypolTrait> {
-    fn read_with_process_environment<'slot>(
+    fn read_with_process_environment<'slot, R: typol::io::Read>(
         &self,
-        input: ConfigInput<'_>,
+        input: ReadRequest<'_, R>,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, T>;
+
+    fn read_file_with_process_environment<'slot>(
+        &self,
+        path: &Path,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, T>;
+
+    fn read_file_named_with_process_environment<'slot>(
+        &self,
+        path: &Path,
+        display_name: &str,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, T>;
+
+    fn read_io_with_process_environment<'slot>(
+        &self,
+        reader: &mut dyn Read,
+        display_name: &str,
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, T>;
 }
 
 impl<T: TypolTrait> BoundProcessEnvironmentTestExt<T> for BoundSchema<'_, T> {
-    fn read_with_process_environment<'slot>(
+    fn read_with_process_environment<'slot, R: typol::io::Read>(
         &self,
-        input: ConfigInput<'_>,
+        input: ReadRequest<'_, R>,
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, T> {
         let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
         self.read(input, &mut environment, out)
     }
+
+    fn read_file_with_process_environment<'slot>(
+        &self,
+        path: &Path,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, T> {
+        let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
+        self.read_file(path, &mut environment, out)
+    }
+
+    fn read_file_named_with_process_environment<'slot>(
+        &self,
+        path: &Path,
+        display_name: &str,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, T> {
+        let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
+        self.read_file_named(path, display_name, &mut environment, out)
+    }
+
+    fn read_io_with_process_environment<'slot>(
+        &self,
+        reader: &mut dyn Read,
+        display_name: &str,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, T> {
+        let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
+        self.read_io(reader, display_name, &mut environment, out)
+    }
 }
 
 trait LoadedProcessEnvironmentTestExt {
-    fn read_value_with_process_environment<'slot>(
+    fn read_value_with_process_environment<'slot, R: typol::io::Read>(
         &self,
-        input: ConfigInput<'_>,
+        input: ReadRequest<'_, R>,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, ValidatedConfigValue>;
+
+    fn read_file_with_process_environment<'slot>(
+        &self,
+        path: &Path,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, ValidatedConfigValue>;
+
+    fn read_file_named_with_process_environment<'slot>(
+        &self,
+        path: &Path,
+        display_name: &str,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, ValidatedConfigValue>;
+
+    fn read_io_with_process_environment<'slot>(
+        &self,
+        reader: &mut dyn Read,
+        display_name: &str,
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, ValidatedConfigValue>;
 }
 
 impl LoadedProcessEnvironmentTestExt for LoadedSchema {
-    fn read_value_with_process_environment<'slot>(
+    fn read_value_with_process_environment<'slot, R: typol::io::Read>(
         &self,
-        input: ConfigInput<'_>,
+        input: ReadRequest<'_, R>,
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, ValidatedConfigValue> {
         let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
         self.read_value(input, &mut environment, out)
+    }
+
+    fn read_file_with_process_environment<'slot>(
+        &self,
+        path: &Path,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, ValidatedConfigValue> {
+        let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
+        self.read_file(path, &mut environment, out)
+    }
+
+    fn read_file_named_with_process_environment<'slot>(
+        &self,
+        path: &Path,
+        display_name: &str,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, ValidatedConfigValue> {
+        let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
+        self.read_file_named(path, display_name, &mut environment, out)
+    }
+
+    fn read_io_with_process_environment<'slot>(
+        &self,
+        reader: &mut dyn Read,
+        display_name: &str,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, ValidatedConfigValue> {
+        let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
+        self.read_io(reader, display_name, &mut environment, out)
     }
 }
 
@@ -154,8 +256,10 @@ impl Environment for ReentrantEnvironment<'_> {
         out: Out<'slot, 'borrow, EnvironmentError>,
     ) -> OResult<'slot, Option<&'env [u8]>> {
         self.nested_succeeded = capture_load(|nested_out| {
-            self.loaded
-                .read_value_with_process_environment(ConfigInput::text("{value: 7}"), nested_out)
+            self.loaded.read_value_with_process_environment(
+                ReadRequest::from_text("{value: 7}"),
+                nested_out,
+            )
         });
         Err(out.fail(EnvironmentError::HostFailure))
     }
@@ -164,6 +268,7 @@ impl Environment for ReentrantEnvironment<'_> {
 struct ReentrantResolver<'loader> {
     loader: &'loader SchemaLoader,
     nested_succeeded: bool,
+    child_source: SliceSource<'static>,
 }
 
 impl SchemaResolver for ReentrantResolver<'_> {
@@ -176,7 +281,7 @@ impl SchemaResolver for ReentrantResolver<'_> {
             self.loader
                 .compile_text(b"nested", "entry struct Nested {}", nested_out)
         });
-        Ok(SchemaSource::from_str(b"child", "?"))
+        Ok(SchemaSource::from_source(b"child", &mut self.child_source))
     }
 }
 
@@ -191,7 +296,7 @@ impl Read for ReentrantReader<'_> {
             self.reentered = true;
             let nested_succeeded = capture_load(|nested_out| {
                 self.loaded.read_value_with_process_environment(
-                    ConfigInput::text("{value: 7}"),
+                    ReadRequest::from_text("{value: 7}"),
                     nested_out,
                 )
             });
@@ -239,7 +344,7 @@ fn bound_write_inherits_loaded_conversion_limits_unless_explicitly_overridden() 
         value: 7,
         optional: None,
     };
-    let errors = load_error(|out| binding.write(&value, WriteOptions::default(), out))?;
+    let errors = load_error(|out| binding.write_to_string(&value, WriteOptions::default(), out))?;
     assert_eq!(errors.stage(), TypolStage::Encoding);
     assert_eq!(
         errors.codec_errors().test_value()?.stage(),
@@ -249,8 +354,29 @@ fn bound_write_inherits_loaded_conversion_limits_unless_explicitly_overridden() 
         .with_conversion_limits(ConversionLimits::default())
         .with_pretty(true);
     assert_eq!(
-        load_value(|out| binding.write(&value, options, out))?,
+        load_value(|out| binding.write_to_string(&value, options, out))?,
         "{\n  value: 7,\n  optional: none,\n}"
+    );
+
+    let validation_defaults = default_options();
+    let restrictive_validation = ConfigValidationOptions::new(
+        *validation_defaults.config().resources(),
+        ConfigLimits::default().with_max_nesting_depth(0),
+        *validation_defaults.config().execution(),
+    );
+    let errors = load_error(|out| {
+        binding.write_to_string(
+            &value,
+            WriteOptions::default()
+                .with_validation(restrictive_validation)
+                .with_conversion_limits(ConversionLimits::default()),
+            out,
+        )
+    })?;
+    assert_eq!(errors.stage(), TypolStage::Encoding);
+    assert_eq!(
+        errors.codec_errors().test_value()?.stage(),
+        CodecStage::Validation
     );
     Ok(())
 }
@@ -336,8 +462,7 @@ fn files_and_memory_return_owned_values_and_refresh_each_call() -> TestResult {
     let loaded = load_value(|out| loader.compile_file(&schema, out))?;
     assert_eq!(loaded.options().bind(), BindOptions::default());
     let typed = load_value(|out| loaded.bind::<Root>(out))?;
-    let value =
-        load_value(|out| typed.read_with_process_environment(ConfigInput::file(&config), out))?;
+    let value = load_value(|out| typed.read_file_with_process_environment(&config, out))?;
     assert_eq!(
         value,
         Root {
@@ -345,7 +470,7 @@ fn files_and_memory_return_owned_values_and_refresh_each_call() -> TestResult {
             optional: None
         }
     );
-    load_value(|out| loaded.read_value_with_process_environment(ConfigInput::file(&config), out))?;
+    load_value(|out| loaded.read_file_with_process_environment(&config, out))?;
     let loaded = load(
         "entry struct Root { value: u8 @env(\"VALUE\"), optional: option<string> }",
         default_options(),
@@ -355,7 +480,7 @@ fn files_and_memory_return_owned_values_and_refresh_each_call() -> TestResult {
     let typed = load_value(|out| loaded.bind::<Root>(out))?;
     for _ in 0..2 {
         assert_eq!(
-            load_value(|out| typed.read(ConfigInput::file(&config), &mut provider, out))?.value,
+            load_value(|out| typed.read_file(&config, &mut provider, out))?.value,
             3
         );
     }
@@ -383,12 +508,11 @@ fn explicit_schema_binding_supports_typed_and_environment_reads() -> TestResult 
 
     let loaded = load_value(|out| loader.compile_file(&schema, out))?;
     let binding = load_value(|out| loaded.bind::<Root>(out))?;
-    let value =
-        load_value(|out| binding.read_with_process_environment(ConfigInput::file(&config), out))?;
+    let value = load_value(|out| binding.read_file_with_process_environment(&config, out))?;
     assert_eq!(value.value, 7);
     assert_eq!(value.optional, None);
 
-    let input = || ConfigInput::text("{value: env(\"VALUE\")}").named("environment config");
+    let input = || ReadRequest::from_text("{value: env(\"VALUE\")}").named("environment config");
     let mut provider = Provider::default();
     let loaded = load_value(|out| loader.compile_file(&environment_schema, out))?;
     let binding = load_value(|out| loaded.bind::<Root>(out))?;
@@ -413,7 +537,7 @@ fn environment_callback_can_reenter_loaded_schema_without_losing_outer_error() -
     };
     let errors = load_error(|out| {
         loaded.read_value(
-            ConfigInput::text("{value: env(\"VALUE\")}"),
+            ReadRequest::from_text("{value: env(\"VALUE\")}"),
             &mut environment,
             out,
         )
@@ -434,13 +558,8 @@ fn reader_callback_can_reenter_loaded_schema_without_losing_outer_error() -> Tes
         loaded: &loaded,
         reentered: false,
     };
-    let errors = load_error(|out| {
-        loaded.read_value(
-            ConfigInput::reader(&mut reader),
-            &mut Provider::default(),
-            out,
-        )
-    })?;
+    let errors =
+        load_error(|out| loaded.read_io(&mut reader, "config", &mut Provider::default(), out))?;
     assert!(reader.reentered);
     assert_eq!(errors.stage(), TypolStage::ConfigRead);
     assert_eq!(
@@ -456,6 +575,7 @@ fn schema_resolver_can_reenter_loader_without_losing_outer_schema_error() -> Tes
     let mut resolver = ReentrantResolver {
         loader: &loader,
         nested_succeeded: false,
+        child_source: SliceSource::new(b"?"),
     };
     let errors = load_error(|out| {
         loader.compile_with_resolver(
@@ -482,11 +602,9 @@ fn binding_and_config_read_fail_before_environment_access() -> TestResult {
     };
     let missing = Path::new("/missing/secret-path.tconf");
     let errors = load_error(|mut out| {
-        loaded.bind::<Different>(out.reborrow())?.read(
-            ConfigInput::file(missing),
-            &mut provider,
-            out,
-        )
+        loaded
+            .bind::<Different>(out.reborrow())?
+            .read_file(missing, &mut provider, out)
     })?;
     assert_eq!(errors.stage(), TypolStage::Binding);
     assert_eq!(
@@ -504,13 +622,11 @@ fn binding_and_config_read_fail_before_environment_access() -> TestResult {
     assert!(errors.host_error().is_none());
     for errors in [
         load_error(|mut out| {
-            loaded.bind::<Root>(out.reborrow())?.read(
-                ConfigInput::file(missing),
-                &mut provider,
-                out,
-            )
+            loaded
+                .bind::<Root>(out.reborrow())?
+                .read_file(missing, &mut provider, out)
         })?,
-        load_error(|out| loaded.read_value(ConfigInput::file(missing), &mut provider, out))?,
+        load_error(|out| loaded.read_file(missing, &mut provider, out))?,
     ] {
         assert_eq!(errors.stage(), TypolStage::ConfigRead);
         assert_eq!(
@@ -546,11 +662,9 @@ fn failed_name_snapshot_does_not_block_success_and_preserves_original_errors() -
         ..Provider::default()
     };
     let errors = load_error(|mut out| {
-        loaded.bind::<Different>(out.reborrow())?.read(
-            ConfigInput::file(missing),
-            &mut provider,
-            out,
-        )
+        loaded
+            .bind::<Different>(out.reborrow())?
+            .read_file(missing, &mut provider, out)
     })?;
     assert_eq!(errors.stage(), TypolStage::Binding);
     assert_eq!(
@@ -569,16 +683,19 @@ fn failed_name_snapshot_does_not_block_success_and_preserves_original_errors() -
     let encoded = load_value(|mut out| {
         let bound = loaded.bind::<Root>(out.reborrow())?;
         let value = bound.read_with_process_environment(
-            ConfigInput::text("{value: 3, optional: none}"),
+            ReadRequest::from_text("{value: 3, optional: none}"),
             out.reborrow(),
         )?;
-        bound.write(&value, WriteOptions::default(), out)
+        bound.write_to_string(&value, WriteOptions::default(), out)
     })?;
     assert!(!encoded.is_empty());
     let errors = load_error(|mut out| {
         loaded
             .bind::<Root>(out.reborrow())?
-            .read_with_process_environment(ConfigInput::text("{value: 300, optional: none}"), out)
+            .read_with_process_environment(
+                ReadRequest::from_text("{value: 300, optional: none}"),
+                out,
+            )
     })?;
     assert_eq!(errors.stage(), TypolStage::Decoding);
     assert!(errors.codec_errors().is_some());
@@ -589,7 +706,7 @@ fn failed_name_snapshot_does_not_block_success_and_preserves_original_errors() -
     let errors = load_error(|mut out| {
         loaded
             .bind::<Root>(out.reborrow())?
-            .read(ConfigInput::file(missing), &mut provider, out)
+            .read_file(missing, &mut provider, out)
     })?;
     assert_eq!(errors.stage(), TypolStage::ConfigRead);
     assert_eq!(
@@ -615,13 +732,11 @@ fn schema_and_config_errors_keep_names_and_locations_after_inputs_are_dropped() 
     let loader = SchemaLoader::new(TypolOptions::default());
     let mut loaded = load_value(|out| loader.compile_file(&schema, out))?;
     load_value(|out| loaded.set_source_name(SourceId::new(1), "rule\x1b\n", out))?;
-    let dynamic = load_error(|out| {
-        loaded.read_value_with_process_environment(ConfigInput::file(&config), out)
-    })?;
+    let dynamic = load_error(|out| loaded.read_file_with_process_environment(&config, out))?;
     let typed = load_error(|mut out| {
         loaded
             .bind::<Root>(out.reborrow())?
-            .read_with_process_environment(ConfigInput::file(&config), out)
+            .read_file_with_process_environment(&config, out)
     })?;
     let config_id = dynamic
         .config_errors()
@@ -683,10 +798,7 @@ fn named_file_inputs_keep_display_names_for_dynamic_and_typed_reads() -> TestRes
     )?;
     let display_name = "config\x1b\n";
     let dynamic = load_error(|out| {
-        loaded.read_value_with_process_environment(
-            ConfigInput::file(&config).named(display_name),
-            out,
-        )
+        loaded.read_file_named_with_process_environment(&config, display_name, out)
     })?;
     let config_source_id = dynamic
         .config_errors()
@@ -698,13 +810,11 @@ fn named_file_inputs_keep_display_names_for_dynamic_and_typed_reads() -> TestRes
     let typed = load_error(|mut out| {
         loaded
             .bind::<Root>(out.reborrow())?
-            .read_with_process_environment(ConfigInput::file(&config).named(display_name), out)
+            .read_file_named_with_process_environment(&config, display_name, out)
     })?;
     assert_file_display_name(&typed, config_source_id, display_name, &config)?;
 
-    let default_name = load_error(|out| {
-        loaded.read_value_with_process_environment(ConfigInput::file(&config), out)
-    })?;
+    let default_name = load_error(|out| loaded.read_file_with_process_environment(&config, out))?;
     let default_source_id = default_name
         .config_errors()
         .test_value()?
@@ -816,11 +926,11 @@ fn typed_loading_keeps_parser_and_conversion_on_one_budget() -> TestResult {
             ExecutionLimits::new(budget.steps(), defaults.execution().max_workspace_bytes()),
         )),
     )?;
-    load_value(|out| limited.read_value_with_process_environment(ConfigInput::file(&config), out))?;
+    load_value(|out| limited.read_file_with_process_environment(&config, out))?;
     let errors = load_error(|mut out| {
         limited
             .bind::<Root>(out.reborrow())?
-            .read_with_process_environment(ConfigInput::file(&config), out)
+            .read_file_with_process_environment(&config, out)
     })?;
     assert_eq!(errors.stage(), TypolStage::Decoding);
     assert_eq!(
@@ -931,13 +1041,16 @@ fn error_storage_reservation_is_independent_of_name_edit_limits() -> TestResult 
     let value = load_value(|mut out| {
         loaded
             .bind::<Root>(out.reborrow())?
-            .read_with_process_environment(ConfigInput::text("{value: 3, optional: none}"), out)
+            .read_with_process_environment(
+                ReadRequest::from_text("{value: 3, optional: none}"),
+                out,
+            )
     })?;
     assert_eq!(value.value, 3);
     let errors = load_error(|mut out| {
         loaded
             .bind::<Root>(out.reborrow())?
-            .read_with_process_environment(ConfigInput::file(Path::new("/missing.tconf")), out)
+            .read_file_with_process_environment(Path::new("/missing.tconf"), out)
     })?;
     assert_eq!(errors.stage(), TypolStage::ConfigRead);
     assert_eq!(
@@ -1055,13 +1168,11 @@ fn invalid_secret_environment_never_enters_safe_error_outputs() -> TestResult {
         default_options(),
     )?;
     for errors in [
-        load_error(|out| loaded.read_value(ConfigInput::file(&config), &mut SecretProvider, out))?,
+        load_error(|out| loaded.read_file(&config, &mut SecretProvider, out))?,
         load_error(|mut out| {
-            loaded.bind::<Root>(out.reborrow())?.read(
-                ConfigInput::file(&config),
-                &mut SecretProvider,
-                out,
-            )
+            loaded
+                .bind::<Root>(out.reborrow())?
+                .read_file(&config, &mut SecretProvider, out)
         })?,
     ] {
         let mut output = format!(
@@ -1149,19 +1260,14 @@ fn reader_paths_preserve_short_reads_and_map_read_failures() -> TestResult {
         ..Provider::default()
     };
     let mut reader = Reader::new(bytes, None);
-    load_value(|out| {
-        loaded.read_value(
-            ConfigInput::reader(&mut reader).named("reader"),
-            &mut provider,
-            out,
-        )
-    })?;
+    load_value(|out| loaded.read_io(&mut reader, "reader", &mut provider, out))?;
     let mut reader = Reader::new(bytes, None);
     assert_eq!(
-        load_value(|mut out| loaded.bind::<Root>(out.reborrow())?.read(
-            ConfigInput::reader(&mut reader).named("reader"),
+        load_value(|mut out| loaded.bind::<Root>(out.reborrow())?.read_io(
+            &mut reader,
+            "reader",
             &mut provider,
-            out,
+            out
         ))?,
         Root {
             value: 3,
@@ -1170,13 +1276,7 @@ fn reader_paths_preserve_short_reads_and_map_read_failures() -> TestResult {
     );
     for kind in [ErrorKind::Other, ErrorKind::WouldBlock] {
         let mut reader = Reader::new(bytes, Some(kind));
-        let errors = load_error(|out| {
-            loaded.read_value(
-                ConfigInput::reader(&mut reader).named("reader"),
-                &mut provider,
-                out,
-            )
-        })?;
+        let errors = load_error(|out| loaded.read_io(&mut reader, "reader", &mut provider, out))?;
         assert_eq!(errors.stage(), TypolStage::ConfigRead);
         let host_error = errors.host_error().test_value()?;
         assert_eq!(host_error.kind(), HostErrorKind::ReadFailure);
@@ -1205,11 +1305,9 @@ fn reader_paths_preserve_short_reads_and_map_read_failures() -> TestResult {
         );
         let mut reader = Reader::new(bytes, Some(kind));
         let errors = load_error(|mut out| {
-            loaded.bind::<Root>(out.reborrow())?.read(
-                ConfigInput::reader(&mut reader).named("reader"),
-                &mut provider,
-                out,
-            )
+            loaded
+                .bind::<Root>(out.reborrow())?
+                .read_io(&mut reader, "reader", &mut provider, out)
         })?;
         assert_eq!(errors.stage(), TypolStage::ConfigRead);
         assert_eq!(
@@ -1235,12 +1333,8 @@ fn reader_invariant_errors_keep_their_context_and_offset() -> TestResult {
         default_options(),
     )?;
     let mut reader = OverreportingReader;
-    let errors = load_error(|out| {
-        loaded.read_value_with_process_environment(
-            ConfigInput::reader(&mut reader).named("reader"),
-            out,
-        )
-    })?;
+    let errors =
+        load_error(|out| loaded.read_io_with_process_environment(&mut reader, "reader", out))?;
     let host_error = errors.host_error().test_value()?;
     assert_eq!(errors.stage(), TypolStage::ConfigRead);
     assert_eq!(host_error.kind(), HostErrorKind::InternalError);
@@ -1267,10 +1361,7 @@ fn binding_failure_does_not_touch_the_reader() -> TestResult {
     let errors = load_error(|mut out| {
         loaded
             .bind::<Different>(out.reborrow())?
-            .read_with_process_environment(
-                ConfigInput::reader(&mut reader).named("secret display name"),
-                out,
-            )
+            .read_io_with_process_environment(&mut reader, "secret display name", out)
     })?;
     assert_eq!(errors.stage(), TypolStage::Binding);
     assert_eq!(reader.attempts, 0);
@@ -1289,12 +1380,8 @@ fn reader_budget_and_parse_limits_keep_distinct_error_stages() -> TestResult {
         )),
     )?;
     let mut interrupted = Reader::new(b"", Some(ErrorKind::Interrupted));
-    let input_error = load_error(|out| {
-        loaded.read_value_with_process_environment(
-            ConfigInput::reader(&mut interrupted).named("reader"),
-            out,
-        )
-    })?;
+    let input_error =
+        load_error(|out| loaded.read_io_with_process_environment(&mut interrupted, "reader", out))?;
     assert_eq!(input_error.stage(), TypolStage::ConfigRead);
     assert_eq!(
         input_error.host_error().test_value()?.kind(),
@@ -1313,12 +1400,8 @@ fn reader_budget_and_parse_limits_keep_distinct_error_stages() -> TestResult {
         options,
     )?;
     let mut reader = Reader::new(b"{value: 3}", None);
-    let parse_error = load_error(|out| {
-        loaded.read_value_with_process_environment(
-            ConfigInput::reader(&mut reader).named("reader"),
-            out,
-        )
-    })?;
+    let parse_error =
+        load_error(|out| loaded.read_io_with_process_environment(&mut reader, "reader", out))?;
     assert_eq!(parse_error.stage(), TypolStage::Decoding);
     assert_eq!(
         parse_error.config_errors().test_value()?.stage(),
@@ -1349,12 +1432,8 @@ fn reader_source_limit_maps_to_host_resource_error() -> TestResult {
         )),
     )?;
     let mut reader = Reader::new(b"{} ", None);
-    let errors = load_error(|out| {
-        loaded.read_value_with_process_environment(
-            ConfigInput::reader(&mut reader).named("reader"),
-            out,
-        )
-    })?;
+    let errors =
+        load_error(|out| loaded.read_io_with_process_environment(&mut reader, "reader", out))?;
     assert_eq!(errors.stage(), TypolStage::ConfigRead);
     assert_eq!(
         errors.host_error().test_value()?.kind(),

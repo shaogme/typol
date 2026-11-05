@@ -4,19 +4,21 @@ use crate::{
     descriptor::Typol,
     diagnostics::CodecErrors,
     error::{ErrorNames, ErrorSlot},
-    loading::{
-        ConfigInput, ConfigInputOperation, ConfigInputStrategy, ConfigSourceRequest, LoadedSchema,
-    },
-    options::CodecOptions,
+    loading::{ConfigSourceRequest, LoadedSchema, ReadStrategy},
 };
 use alloc::string::String;
 use core::ops::Deref;
 use opeo::{ErrSlot, OResult, Out};
 use typol_config::{ConfigParseRequest, Environment, ValidatedConfigValue};
+use typol_core::{Read, ReadRequest, Write};
 use typol_semantic::CompiledSchema;
 
 #[cfg(feature = "std")]
 use super::loader::LoadSupport;
+#[cfg(feature = "std")]
+use crate::loading::FileReadRequest;
+#[cfg(feature = "std")]
+use std::{io::Read as IoRead, path::Path};
 
 #[cfg(feature = "serde")]
 use serde::{Serialize, de::DeserializeOwned};
@@ -83,7 +85,7 @@ struct TypolDecode<'bound, 'loaded, T: Typol> {
     bound: &'bound BoundSchema<'loaded, T>,
 }
 
-impl<T: Typol> ConfigInputStrategy for TypolDecode<'_, '_, T> {
+impl<T: Typol> ReadStrategy for TypolDecode<'_, '_, T> {
     type Value = BoundRead<T>;
     type Error = CodecErrors;
 
@@ -130,7 +132,7 @@ struct SerdeDecode<'bound, 'loaded, T: Typol> {
 }
 
 #[cfg(feature = "serde")]
-impl<T: Typol + DeserializeOwned> ConfigInputStrategy for SerdeDecode<'_, '_, T> {
+impl<T: Typol + DeserializeOwned> ReadStrategy for SerdeDecode<'_, '_, T> {
     type Value = T;
     type Error = CodecErrors;
 
@@ -193,68 +195,219 @@ impl<T: Typol> BoundSchema<'_, T> {
         self.binding.schema()
     }
 
-    pub fn read<'slot>(
+    pub fn read<'slot, R: Read>(
         &self,
-        input: ConfigInput<'_>,
+        request: ReadRequest<'_, R>,
         environment: &mut dyn Environment,
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, T> {
-        self.read_with_value(input, environment, out)
+        self.read_with_value(request, environment, out)
             .map(BoundRead::into_value)
     }
 
     /// Reads one input and returns both the derived Rust value and its validated value tree.
     ///
     /// The tree comes from the same parse and validation session as the decoded value.
-    pub fn read_with_value<'slot>(
+    pub fn read_with_value<'slot, R: Read>(
         &self,
-        input: ConfigInput<'_>,
+        request: ReadRequest<'_, R>,
         environment: &mut dyn Environment,
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, BoundRead<T>> {
-        self.loaded.run_input(
-            ConfigInputOperation::new(input, environment, TypolDecode { bound: self }),
+        self.loaded
+            .run_read_request(request, environment, TypolDecode { bound: self }, out)
+    }
+
+    pub fn read_with_value_from<'slot, R: Read>(
+        &self,
+        request: ReadRequest<'_, R>,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, BoundRead<T>> {
+        self.loaded
+            .run_read_request(request, environment, TypolDecode { bound: self }, out)
+    }
+
+    #[cfg(feature = "std")]
+    pub fn read_file<'slot>(
+        &self,
+        path: &Path,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, T> {
+        self.read_with_value_file(path, environment, out)
+            .map(BoundRead::into_value)
+    }
+
+    #[cfg(feature = "std")]
+    pub fn read_file_named<'slot>(
+        &self,
+        path: &Path,
+        display_name: &str,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, T> {
+        self.read_with_value_file_named(path, display_name, environment, out)
+            .map(BoundRead::into_value)
+    }
+
+    #[cfg(feature = "std")]
+    pub fn read_with_value_file<'slot>(
+        &self,
+        path: &Path,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, BoundRead<T>> {
+        self.read_with_value_file_named(path, "config", environment, out)
+    }
+
+    #[cfg(feature = "std")]
+    pub fn read_with_value_file_named<'slot>(
+        &self,
+        path: &Path,
+        display_name: &str,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, BoundRead<T>> {
+        self.loaded.run_file_request(
+            FileReadRequest { path, display_name },
+            environment,
+            TypolDecode { bound: self },
             out,
         )
+    }
+
+    #[cfg(feature = "std")]
+    pub fn read_io<'slot>(
+        &self,
+        reader: &mut dyn IoRead,
+        display_name: &str,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, T> {
+        self.loaded
+            .run_io_request(
+                ReadRequest::new(reader, display_name),
+                environment,
+                TypolDecode { bound: self },
+                out,
+            )
+            .map(BoundRead::into_value)
     }
 
     /// Converts and validates `value`, then writes configuration text using `options`.
     ///
     /// Pretty output uses two-space indentation and no final newline. The text retains actual
     /// values for fields marked `@secret`; treat it as sensitive.
-    pub fn write<'slot>(
+    pub fn write_to_string<'slot>(
         &self,
         value: &T,
         options: WriteOptions,
-        mut out: Out<'slot, '_, TypolError>,
+        out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, String> {
+        let mut output = String::new();
+        self.write(value, &mut output, options, out)?;
+        Ok(output)
+    }
+
+    pub fn write<'slot>(
+        &self,
+        value: &T,
+        output: &mut dyn Write,
+        options: WriteOptions,
+        mut out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, ()> {
         let slot = self.loaded.error_slot(out.reborrow())?;
-        let codec_options = CodecOptions::default()
-            .with_validation(self.loaded.options().validation())
-            .with_conversion(options.conversion_limits_or(self.loaded.options().conversion()))
-            .with_max_output_bytes(options.max_output_bytes())
+        let options = WriteOptions::new(options.max_output_bytes())
+            .with_validation(options.validation_or(self.loaded.options().validation()))
+            .with_conversion_limits(
+                options.conversion_limits_or(self.loaded.options().conversion()),
+            )
             .with_pretty(options.pretty());
         let mut codec_errors = ErrSlot::new();
         let result = codec_errors
-            .try_call(|codec_out| self.binding.serialize(value, codec_options, codec_out));
+            .try_call(|codec_out| self.binding.serialize(value, output, options, codec_out));
         match result {
-            Ok(text) => Ok(text),
+            Ok(()) => Ok(()),
             Err(caught) => Err(out.fail(slot.encoding(caught.take(), self.loaded.error_names()))),
         }
     }
 
     #[cfg(feature = "serde")]
-    pub fn read_serde<'slot>(
+    pub fn read_serde<'slot, R: Read>(
         &self,
-        input: ConfigInput<'_>,
+        request: ReadRequest<'_, R>,
         environment: &mut dyn Environment,
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, T>
     where
         T: DeserializeOwned,
     {
-        self.loaded.run_input(
-            ConfigInputOperation::new(input, environment, SerdeDecode { bound: self }),
+        self.loaded
+            .run_read_request(request, environment, SerdeDecode { bound: self }, out)
+    }
+
+    #[cfg(feature = "serde")]
+    pub fn read_serde_from<'slot, R: Read>(
+        &self,
+        request: ReadRequest<'_, R>,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, T>
+    where
+        T: DeserializeOwned,
+    {
+        self.loaded
+            .run_read_request(request, environment, SerdeDecode { bound: self }, out)
+    }
+
+    #[cfg(all(feature = "std", feature = "serde"))]
+    pub fn read_serde_file<'slot>(
+        &self,
+        path: &Path,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, T>
+    where
+        T: DeserializeOwned,
+    {
+        self.read_serde_file_named(path, "config", environment, out)
+    }
+
+    #[cfg(all(feature = "std", feature = "serde"))]
+    pub fn read_serde_file_named<'slot>(
+        &self,
+        path: &Path,
+        display_name: &str,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, T>
+    where
+        T: DeserializeOwned,
+    {
+        self.loaded.run_file_request(
+            FileReadRequest { path, display_name },
+            environment,
+            SerdeDecode { bound: self },
+            out,
+        )
+    }
+
+    #[cfg(all(feature = "std", feature = "serde"))]
+    pub fn read_serde_io<'slot>(
+        &self,
+        reader: &mut dyn IoRead,
+        display_name: &str,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, T>
+    where
+        T: DeserializeOwned,
+    {
+        self.loaded.run_io_request(
+            ReadRequest::new(reader, display_name),
+            environment,
+            SerdeDecode { bound: self },
             out,
         )
     }
@@ -264,7 +417,7 @@ impl<T: Typol> BoundSchema<'_, T> {
     /// Pretty output uses two-space indentation and no final newline. The text retains actual
     /// values for fields marked `@secret`; treat it as sensitive.
     #[cfg(feature = "serde")]
-    pub fn write_serde<'slot>(
+    pub fn write_serde_to_string<'slot>(
         &self,
         value: &T,
         options: WriteOptions,
@@ -273,20 +426,36 @@ impl<T: Typol> BoundSchema<'_, T> {
     where
         T: Serialize,
     {
-        let mut out = out;
+        let mut output = String::new();
+        self.write_serde(value, &mut output, options, out)?;
+        Ok(output)
+    }
+
+    #[cfg(feature = "serde")]
+    pub fn write_serde<'slot>(
+        &self,
+        value: &T,
+        output: &mut dyn Write,
+        options: WriteOptions,
+        mut out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, ()>
+    where
+        T: Serialize,
+    {
         let slot = self.loaded.error_slot(out.reborrow())?;
-        let codec_options = CodecOptions::default()
-            .with_validation(self.loaded.options().validation())
-            .with_conversion(options.conversion_limits_or(self.loaded.options().conversion()))
-            .with_max_output_bytes(options.max_output_bytes())
+        let options = WriteOptions::new(options.max_output_bytes())
+            .with_validation(options.validation_or(self.loaded.options().validation()))
+            .with_conversion_limits(
+                options.conversion_limits_or(self.loaded.options().conversion()),
+            )
             .with_pretty(options.pretty());
         let mut codec_errors = ErrSlot::new();
         let result = codec_errors.try_call(|codec_out| {
             self.binding
-                .serialize_serde(value, codec_options, codec_out)
+                .serialize_serde(value, output, options, codec_out)
         });
         match result {
-            Ok(text) => Ok(text),
+            Ok(()) => Ok(()),
             Err(caught) => Err(out.fail(slot.encoding(caught.take(), self.loaded.error_names()))),
         }
     }

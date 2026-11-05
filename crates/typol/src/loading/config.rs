@@ -1,23 +1,23 @@
 use super::{SourceNames, loader::LoadSupport};
 use crate::{
-    BoundSchema, ConfigInput, TypolError, TypolOptions, TypolStage,
+    BoundSchema, TypolError, TypolOptions, TypolStage,
     binding_impl::TypedSchema,
     descriptor::{BudgetedTypol, Typol},
     error::{ErrorNames, ErrorSlot},
-    loading::{ConfigInputKind, TrustedBoundSchema},
+    loading::TrustedBoundSchema,
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_config::{
     ConfigParseErrors, ConfigParseRequest, ConfigParser, Environment, ValidatedConfigValue,
 };
-use typol_core::{ByteSource, ExecutionBudget, SliceSource};
+use typol_core::{ExecutionBudget, Read, ReadRequest};
 use typol_semantic::CompiledSchema;
 
 #[cfg(feature = "std")]
-use crate::loading::{PreparedConfig, ReaderLoadRequest};
+use std::{fmt, io::Read as IoRead, path::Path};
 
 #[cfg(feature = "std")]
-use std::{fmt, path::Path};
+use crate::loading::{FileReadRequest, PreparedConfig};
 
 #[cfg(feature = "std")]
 use typol_core::{ExecutionLimits, SourceId};
@@ -32,34 +32,14 @@ use typol_std::{
 #[cfg(feature = "std")]
 const ERROR_STORAGE_LIMITS: ExecutionLimits = ExecutionLimits::new(1, 16_384);
 
-pub(crate) struct ConfigInputOperation<'input, 'environment, Strategy> {
-    input: ConfigInput<'input>,
-    environment: &'environment mut dyn Environment,
-    strategy: Strategy,
-}
-
-impl<'input, 'environment, Strategy> ConfigInputOperation<'input, 'environment, Strategy> {
-    pub(crate) fn new(
-        input: ConfigInput<'input>,
-        environment: &'environment mut dyn Environment,
-        strategy: Strategy,
-    ) -> Self {
-        Self {
-            input,
-            environment,
-            strategy,
-        }
-    }
-}
-
 pub(crate) struct ConfigSourceRequest<'source, 'budget, 'display, 'environment> {
-    pub(crate) source: &'source mut dyn ByteSource,
+    pub(crate) source: &'source mut dyn Read,
     pub(crate) budget: &'budget ExecutionBudget,
     pub(crate) display_name: &'display str,
     pub(crate) environment: &'environment mut dyn Environment,
 }
 
-pub(crate) trait ConfigInputStrategy {
+pub(crate) trait ReadStrategy {
     type Value;
     type Error;
 
@@ -85,7 +65,7 @@ struct ConfigExecution<'environment, Strategy> {
 }
 
 struct SourceExecution<'source, 'display, 'environment, Strategy> {
-    source: &'source mut dyn ByteSource,
+    source: &'source mut dyn Read,
     display_name: &'display str,
     execution: ConfigExecution<'environment, Strategy>,
 }
@@ -101,7 +81,7 @@ struct ConfigValueParser<'loaded> {
     loaded: &'loaded LoadedSchema,
 }
 
-impl ConfigInputStrategy for ConfigValueParser<'_> {
+impl ReadStrategy for ConfigValueParser<'_> {
     type Value = ValidatedConfigValue;
     type Error = ConfigParseErrors;
 
@@ -201,110 +181,102 @@ impl LoadedSchema {
     }
 
     /// Reads and returns a configuration value validated against this Schema.
-    pub fn read_value<'slot>(
+    pub fn read_value<'slot, R: Read>(
         &self,
-        input: ConfigInput<'_>,
+        request: ReadRequest<'_, R>,
         environment: &mut dyn Environment,
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, ValidatedConfigValue> {
-        self.run_input(
-            ConfigInputOperation::new(input, environment, ConfigValueParser { loaded: self }),
+        self.run_read_request(
+            request,
+            environment,
+            ConfigValueParser { loaded: self },
             out,
         )
     }
 
-    pub(crate) fn run_input<'slot, Strategy: ConfigInputStrategy>(
+    #[cfg(feature = "std")]
+    pub fn read_file<'slot>(
         &self,
-        request: ConfigInputOperation<'_, '_, Strategy>,
+        path: &Path,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, ValidatedConfigValue> {
+        self.read_file_named(path, "config", environment, out)
+    }
+
+    #[cfg(feature = "std")]
+    pub fn read_file_named<'slot>(
+        &self,
+        path: &Path,
+        display_name: &str,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, ValidatedConfigValue> {
+        self.run_file_request(
+            FileReadRequest { path, display_name },
+            environment,
+            ConfigValueParser { loaded: self },
+            out,
+        )
+    }
+
+    #[cfg(feature = "std")]
+    pub fn read_io<'slot>(
+        &self,
+        reader: &mut dyn IoRead,
+        display_name: &str,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, ValidatedConfigValue> {
+        self.run_io_request(
+            ReadRequest::new(reader, display_name),
+            environment,
+            ConfigValueParser { loaded: self },
+            out,
+        )
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn run_file_request<'slot, Strategy: ReadStrategy>(
+        &self,
+        request: FileReadRequest<'_>,
+        environment: &mut dyn Environment,
+        strategy: Strategy,
         mut out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, Strategy::Value> {
-        let ConfigInputOperation {
-            input,
-            environment,
-            strategy,
-        } = request;
-        let (kind, display_name) = input.into_parts();
         let slot = self.error_slot(out.reborrow())?;
         let budget = self.config_budget(out.reborrow())?;
-        match kind {
-            #[cfg(feature = "std")]
-            ConfigInputKind::File(path) => {
-                let mut prepared = self.prepare_config(path, slot, &budget, out.reborrow())?;
-                let execution = ConfigExecution {
+        let mut prepared = self.prepare_config(request.path, slot, &budget, out.reborrow())?;
+        self.run_source(
+            SourceExecution {
+                source: &mut prepared.source,
+                display_name: request.display_name,
+                execution: ConfigExecution {
                     environment,
                     budget,
                     slot: prepared.slot,
                     strategy,
-                };
-                self.run_source(
-                    SourceExecution {
-                        source: &mut prepared.source,
-                        display_name,
-                        execution,
-                    },
-                    out,
-                )
-            }
-            ConfigInputKind::Text(text) => {
-                let mut source = SliceSource::new(text.as_bytes());
-                let execution = ConfigExecution {
-                    environment,
-                    budget,
-                    slot,
-                    strategy,
-                };
-                self.run_source(
-                    SourceExecution {
-                        source: &mut source,
-                        display_name,
-                        execution,
-                    },
-                    out,
-                )
-            }
-            ConfigInputKind::Bytes(source) => {
-                let execution = ConfigExecution {
-                    environment,
-                    budget,
-                    slot,
-                    strategy,
-                };
-                self.run_source(
-                    SourceExecution {
-                        source,
-                        display_name,
-                        execution,
-                    },
-                    out,
-                )
-            }
-            #[cfg(feature = "std")]
-            ConfigInputKind::Reader(reader) => {
-                let request = ReaderLoadRequest::new(reader, display_name);
-                let execution = ConfigExecution {
-                    environment,
-                    budget,
-                    slot,
-                    strategy,
-                };
-                self.run_reader(request, execution, out)
-            }
-        }
+                },
+            },
+            out,
+        )
     }
 
-    #[cfg(feature = "std")]
-    fn run_reader<'slot, Strategy: ConfigInputStrategy>(
+    pub(crate) fn run_read_request<'slot, Strategy: ReadStrategy, R: Read>(
         &self,
-        request: ReaderLoadRequest<'_>,
-        execution: ConfigExecution<'_, Strategy>,
+        request: ReadRequest<'_, R>,
+        environment: &mut dyn Environment,
+        strategy: Strategy,
         mut out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, Strategy::Value> {
-        let (reader, display_name) = request.into_parts();
-        let mut source = LoadSupport::capture(
-            |source_out| ReadSource::new(reader, &execution.budget, source_out),
-            LoadSupport::read_source_error,
-            out.reborrow(),
-        )?;
+        let (mut source, display_name) = request.into_parts();
+        let execution = ConfigExecution {
+            environment,
+            budget: self.config_budget(out.reborrow())?,
+            slot: self.error_slot(out.reborrow())?,
+            strategy,
+        };
         self.run_source(
             SourceExecution {
                 source: &mut source,
@@ -315,7 +287,38 @@ impl LoadedSchema {
         )
     }
 
-    fn run_source<'slot, Strategy: ConfigInputStrategy>(
+    #[cfg(feature = "std")]
+    pub(crate) fn run_io_request<'slot, Strategy: ReadStrategy>(
+        &self,
+        request: ReadRequest<'_, &mut dyn IoRead>,
+        environment: &mut dyn Environment,
+        strategy: Strategy,
+        mut out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, Strategy::Value> {
+        let (reader, display_name) = request.into_parts();
+        let budget = self.config_budget(out.reborrow())?;
+        let slot = self.error_slot(out.reborrow())?;
+        let mut source = LoadSupport::capture(
+            |source_out| ReadSource::new(reader, &budget, source_out),
+            LoadSupport::read_source_error,
+            out.reborrow(),
+        )?;
+        self.run_source(
+            SourceExecution {
+                source: &mut source,
+                display_name,
+                execution: ConfigExecution {
+                    environment,
+                    budget,
+                    slot,
+                    strategy,
+                },
+            },
+            out,
+        )
+    }
+
+    fn run_source<'slot, Strategy: ReadStrategy>(
         &self,
         execution: SourceExecution<'_, '_, '_, Strategy>,
         out: Out<'slot, '_, TypolError>,

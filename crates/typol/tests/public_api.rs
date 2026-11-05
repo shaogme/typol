@@ -7,16 +7,16 @@ use value_support::ValueSupport;
 
 use std::{collections::HashMap, fmt::Debug, io::Cursor, marker::PhantomData, ptr::eq};
 use typol::{
-    ConfigInput, ConfigParseOptions, ConfigParser, ConfigValue, ConfigValueProcessor,
-    EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext, SchemaLoader, Sourced,
-    Typol, TypolOptions, ValidatedConfigValue, WriteOptions,
+    ConfigParseOptions, ConfigParser, ConfigValue, ConfigValueProcessor, EmptyEnvironment,
+    Environment, EnvironmentError, EnvironmentReadContext, SchemaLoader, Sourced, Typol,
+    TypolOptions, ValidatedConfigValue, WriteOptions,
     binding::{
         BindOptions, BindingLimitError, BindingLimits, BindingMismatchKind, BindingShape,
-        BudgetedTypol, CodecOptions, CodecStage, ConversionLimits, MAX_CONVERSION_DEPTH,
-        TypedSchema,
+        BudgetedTypol, CodecStage, ConversionLimits, MAX_CONVERSION_DEPTH, TypedSchema,
     },
     config::{ConfigLimits, ConfigParseRequest, ConfigValidationOptions, ConfigValidationRequest},
     core::{BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, ValueKind, ValueSource},
+    io::ReadRequest,
     opeo::{OResult, Out},
     schema::{SchemaCompileOptions, SchemaCompiler, SchemaSource},
     semantic::CompiledSchema,
@@ -104,7 +104,9 @@ fn derive_generics_payloads_rename_and_reordered_text_roundtrip() -> TestResult 
             optional: None,
             dictionary: HashMap::from([("z".into(), 2), ("a".into(), 1)]),
         };
-        let text = TestOpeo::value(|out| binding.serialize(&value, CodecOptions::default(), out))?;
+        let text = TestOpeo::value(|out| {
+            binding.serialize_to_string(&value, WriteOptions::default(), out)
+        })?;
         assert!(text.starts_with("{name: \"secret\", choice:"));
         assert!(text.contains("optional: none"));
         assert!(text.contains("dictionary: {\"a\": 1, \"z\": 2}"));
@@ -144,25 +146,59 @@ struct Root {
 
 #[test]
 fn pretty_codec_options_are_opt_in_for_typed_serialization() -> TestResult {
-    assert!(!CodecOptions::default().pretty());
+    assert!(!WriteOptions::default().pretty());
     assert!(!WriteOptions::default().pretty());
     let schema = compile("entry struct Root { value: u8 }")?;
     let binding =
         TestOpeo::value(|out| TypedSchema::<Root>::bind(&schema, BindOptions::default(), out))?;
     assert_eq!(
-        TestOpeo::value(|out| binding.serialize(&Root { value: 7 }, CodecOptions::default(), out))?,
+        TestOpeo::value(|out| binding.serialize_to_string(
+            &Root { value: 7 },
+            WriteOptions::default(),
+            out
+        ))?,
         "{value: 7}"
     );
     assert_eq!(
         TestOpeo::value(|out| {
-            binding.serialize(
+            binding.serialize_to_string(
                 &Root { value: 7 },
-                CodecOptions::default().with_pretty(true),
+                WriteOptions::default().with_pretty(true),
                 out,
             )
         })?,
         "{\n  value: 7,\n}"
     );
+    Ok(())
+}
+
+#[test]
+fn generic_read_request_and_write_sink_cover_bound_io() -> TestResult {
+    let loaded = TestOpeo::value(|out| {
+        SchemaLoader::new(TypolOptions::default()).compile_text(
+            b"io-api",
+            "entry struct Root { value: u8 }",
+            out,
+        )
+    })?;
+    let binding = TestOpeo::value(|out| loaded.bind::<Root>(out))?;
+    let mut source = SliceSource::new(b"{value: 9}");
+    let request = ReadRequest::new(&mut source, "io-api.tconf");
+    assert_eq!(
+        TestOpeo::value(|out| binding.read(request, &mut typol::EmptyEnvironment, out))?,
+        Root { value: 9 }
+    );
+
+    let mut output = Vec::new();
+    TestOpeo::value(|out| {
+        binding.write(
+            &Root { value: 9 },
+            &mut output,
+            WriteOptions::default(),
+            out,
+        )
+    })?;
+    assert_eq!(output.as_slice(), b"{value: 9}");
     Ok(())
 }
 
@@ -262,7 +298,9 @@ fn full_validation_errors_own_schema_snapshots_and_safe_diagnostics() -> TestRes
         let schema = compile("entry struct Root { value: u8 @range(1, 3) @secret }")?;
         let binding =
             TestOpeo::value(|out| TypedSchema::<Root>::bind(&schema, BindOptions::default(), out))?;
-        TestOpeo::error(|out| binding.serialize(&Root { value: 99 }, CodecOptions::default(), out))?
+        TestOpeo::error(|out| {
+            binding.serialize_to_string(&Root { value: 99 }, WriteOptions::default(), out)
+        })?
     };
     assert_eq!(errors.stage(), CodecStage::Validation);
     assert!(errors.config_parse_errors().is_none());
@@ -282,8 +320,9 @@ fn full_validation_errors_own_schema_snapshots_and_safe_diagnostics() -> TestRes
         compile("entry struct Root { value: u8 } @assert(self.value > 0, \"positive number\")")?;
     let binding =
         TestOpeo::value(|out| TypedSchema::<Root>::bind(&schema, BindOptions::default(), out))?;
-    let errors =
-        TestOpeo::error(|out| binding.serialize(&Root { value: 0 }, CodecOptions::default(), out))?;
+    let errors = TestOpeo::error(|out| {
+        binding.serialize_to_string(&Root { value: 0 }, WriteOptions::default(), out)
+    })?;
     assert_eq!(errors.stage(), CodecStage::Validation);
     assert_eq!(
         errors
@@ -505,8 +544,8 @@ fn parsing_and_final_target_share_the_same_step_limit() -> TestResult {
             .code(),
         DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
     );
-    let options = CodecOptions::new(
-        ConfigValidationOptions::new(
+    let options = WriteOptions::new(0)
+        .with_validation(ConfigValidationOptions::new(
             *defaults.resources(),
             ConfigLimits::default()
                 .with_max_environment_entries(0)
@@ -514,11 +553,10 @@ fn parsing_and_final_target_share_the_same_step_limit() -> TestResult {
                 .with_max_constructed_text_bytes(16_777_216)
                 .with_max_display_name_bytes(0),
             *defaults.execution(),
-        ),
-        ConversionLimits::default(),
-        0,
-    );
-    let errors = TestOpeo::error(|out| binding.serialize(&Root { value: 1 }, options, out))?;
+        ))
+        .with_conversion_limits(ConversionLimits::default());
+    let errors =
+        TestOpeo::error(|out| binding.serialize_to_string(&Root { value: 1 }, options, out))?;
     assert_eq!(errors.stage(), CodecStage::Encoding);
     assert_eq!(
         errors
@@ -543,11 +581,11 @@ fn encoding_rejects_unrepresentable_values_after_schema_validation() -> TestResu
     let binding =
         TestOpeo::value(|out| TypedSchema::<TextRoot>::bind(&schema, BindOptions::default(), out))?;
     let errors = TestOpeo::error(|out| {
-        binding.serialize(
+        binding.serialize_to_string(
             &TextRoot {
                 value: "secret\0".into(),
             },
-            CodecOptions::default(),
+            WriteOptions::default(),
             out,
         )
     })?;
@@ -611,22 +649,18 @@ fn facade_reads_text_and_reader_with_one_reusable_binding() -> TestResult {
     let mut environment = EmptyEnvironment;
     let first = TestOpeo::value(|out| {
         binding.read(
-            ConfigInput::text("{value: 7}").named("memory config"),
+            ReadRequest::from_text("{value: 7}").named("memory config"),
             &mut environment,
             out,
         )
     })?;
     let mut reader = Cursor::new(b"{value: 9}");
-    let second = TestOpeo::value(|out| {
-        binding.read(
-            ConfigInput::reader(&mut reader).named("reader"),
-            &mut environment,
-            out,
-        )
-    })?;
-    let encoded = TestOpeo::value(|out| binding.write(&second, WriteOptions::default(), out))?;
+    let second =
+        TestOpeo::value(|out| binding.read_io(&mut reader, "reader", &mut environment, out))?;
+    let encoded =
+        TestOpeo::value(|out| binding.write_to_string(&second, WriteOptions::default(), out))?;
     let dynamic: ValidatedConfigValue = TestOpeo::value(|out| {
-        schema.read_value(ConfigInput::text("{value: 11}"), &mut environment, out)
+        schema.read_value(ReadRequest::from_text("{value: 11}"), &mut environment, out)
     })?;
 
     assert_eq!(first, FacadeRoot { value: 7 });
@@ -652,7 +686,7 @@ fn standard_empty_environment_uses_missing_value_fallback() -> TestResult {
     let binding = TestOpeo::value(|out| schema.bind::<EmptyEnvironmentRoot>(out))?;
     let value = TestOpeo::value(|out| {
         binding.read(
-            ConfigInput::text(r#"{value: env("TYPOL_EMPTY_PROVIDER_TEST")}"#),
+            ReadRequest::from_text(r#"{value: env("TYPOL_EMPTY_PROVIDER_TEST")}"#),
             &mut EmptyEnvironment,
             out,
         )
@@ -683,7 +717,7 @@ fn sourced_binding_preserves_origins_and_returns_the_validated_tree() -> TestRes
     };
     let read = TestOpeo::value(|out| {
         binding.read_with_value(
-            ConfigInput::text("{value: env(\"TYPOL_SOURCED_VALUE\")}"),
+            ReadRequest::from_text("{value: env(\"TYPOL_SOURCED_VALUE\")}"),
             &mut environment,
             out,
         )
@@ -698,14 +732,15 @@ fn sourced_binding_preserves_origins_and_returns_the_validated_tree() -> TestRes
         ValueKind::Structure(_)
     ));
 
-    let defaulted =
-        TestOpeo::value(|out| binding.read(ConfigInput::text("{}"), &mut EmptyEnvironment, out))?;
+    let defaulted = TestOpeo::value(|out| {
+        binding.read(ReadRequest::from_text("{}"), &mut EmptyEnvironment, out)
+    })?;
     assert_eq!(defaulted.value.value(), "default");
     assert_eq!(defaulted.value.source(), ValueSource::SchemaDefault);
 
     let fallback = TestOpeo::value(|out| {
         binding.read(
-            ConfigInput::text("{value: env(\"TYPOL_SOURCED_VALUE\", \"explicit-fallback\")}"),
+            ReadRequest::from_text("{value: env(\"TYPOL_SOURCED_VALUE\", \"explicit-fallback\")}"),
             &mut EmptyEnvironment,
             out,
         )
@@ -733,7 +768,7 @@ fn optional_sourced_values_keep_environment_origin_and_conversion_limits() -> Te
     };
     let error = TestOpeo::error(|out| {
         binding.read(
-            ConfigInput::text("{value: env(\"TYPOL_OPTIONAL_SOURCED_VALUE\")}"),
+            ReadRequest::from_text("{value: env(\"TYPOL_OPTIONAL_SOURCED_VALUE\")}"),
             &mut environment,
             out,
         )
@@ -757,7 +792,7 @@ fn optional_sourced_values_keep_environment_origin_and_conversion_limits() -> Te
     };
     let read = TestOpeo::value(|out| {
         default_binding.read_with_value(
-            ConfigInput::text("{value: env(\"TYPOL_OPTIONAL_SOURCED_VALUE\")}"),
+            ReadRequest::from_text("{value: env(\"TYPOL_OPTIONAL_SOURCED_VALUE\")}"),
             &mut environment,
             out,
         )
@@ -873,9 +908,9 @@ fn assert_deep_roundtrip<T: BudgetedTypol + PartialEq + Debug>(
     })?;
     assert_eq!(decoded, value);
     let serialized = TestOpeo::value(|out| {
-        binding.serialize(
+        binding.serialize_to_string(
             &decoded,
-            CodecOptions::default()
+            WriteOptions::default()
                 .with_validation(options.validation())
                 .with_conversion(options.conversion()),
             out,

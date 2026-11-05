@@ -7,8 +7,8 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{
-    ByteSource, ConfigValue, DiagnosticCode, ExecutionLimits, SliceSource, SourceId,
-    SourceReadError, SourceReadErrorKind, ValueKind, ValuePayloadView, ValueSource, ValueView,
+    ConfigValue, DiagnosticCode, ExecutionLimits, Read, SliceSource, SourceId, SourceReadError,
+    SourceReadErrorKind, ValueKind, ValuePayloadView, ValueSource, ValueView,
 };
 use typol_policy::ResourceLimits;
 use typol_schema::{
@@ -122,6 +122,7 @@ const SECRET: &[u8] = b"fixture-secret-value";
 struct MemoryResolver {
     calls: usize,
     invalid_origin: bool,
+    source: OwnedReadSource,
 }
 
 impl SchemaResolver for MemoryResolver {
@@ -145,7 +146,8 @@ impl SchemaResolver for MemoryResolver {
         if text.len() > max_bytes {
             return Err(out.fail(ResolverError::ResourceLimitExceeded));
         }
-        Ok(SchemaSource::from_str(b"common", text))
+        self.source.replace(text);
+        Ok(SchemaSource::from_source(b"common", &mut self.source))
     }
 }
 
@@ -986,7 +988,7 @@ fn fixture_resource_boundaries_accept_exact_limit_and_reject_one_less() -> TestR
 }
 
 fn config_request<'a>(
-    source: (&'a mut impl ByteSource, &'a str),
+    source: (&'a mut impl Read, &'a str),
     limits: impl Into<TestLimits>,
 ) -> ConfigParseRequest<'a> {
     let limits = limits.into();
@@ -1063,7 +1065,7 @@ struct FragmentSource<'a> {
     next_cut: usize,
 }
 
-impl ByteSource for FragmentSource<'_> {
+impl Read for FragmentSource<'_> {
     fn read<'slot, 'borrow>(
         &mut self,
         output: &mut [u8],

@@ -1,6 +1,7 @@
 use typol::{
-    ConfigInput, EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext,
-    TypolError, TypolStage, WriteOptions,
+    EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext, TypolError,
+    TypolStage, WriteOptions,
+    io::ReadRequest,
     opeo::{ErrSlot, OResult, Out},
 };
 use typol_showcase::{
@@ -99,25 +100,20 @@ fn derived_binding_round_trips_config_and_checks_collection_constraints() {
     let config = load_errors
         .try_call(|out| {
             binding.read(
-                ConfigInput::text(include_str!("../config/demo.tconf")),
+                ReadRequest::from_text(include_str!("../config/demo.tconf")),
                 &mut environment,
                 out,
             )
         })
         .unwrap();
-    let encoded = load_errors
-        .try_call(|out| binding.write(&config, WriteOptions::default(), out))
+    let mut encoded = String::new();
+    load_errors
+        .try_call(|out| binding.write(&config, &mut encoded, WriteOptions::default(), out))
         .unwrap();
 
     let mut source = encoded.as_bytes();
     let decoded = load_errors
-        .try_call(|out| {
-            binding.read(
-                ConfigInput::reader(&mut source).named("往返配置"),
-                &mut DemoEnvironment,
-                out,
-            )
-        })
+        .try_call(|out| binding.read_io(&mut source, "往返配置", &mut DemoEnvironment, out))
         .unwrap();
 
     assert!(decoded == config);

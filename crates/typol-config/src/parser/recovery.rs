@@ -8,8 +8,8 @@ use crate::{
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ByteSource, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext,
-    ExecutionBudget, LocatedSpan, SourceId, SourceSpan, diagnostic_context,
+    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, ExecutionBudget,
+    LocatedSpan, Read, SourceId, SourceSpan, diagnostic_context,
 };
 use typol_i18n::diagnostic_key;
 use typol_semantic::SchemaAccessError;
@@ -102,7 +102,7 @@ pub(super) struct RecoveryCursor<'source> {
 
 pub(super) struct RecoveryCursorRequest<'source, 'limits, 'budget> {
     pub(super) source_id: SourceId,
-    pub(super) source: &'source mut dyn ByteSource<Diagnostic>,
+    pub(super) source: &'source mut dyn Read<Diagnostic>,
     pub(super) limits: &'limits ConfigLimits,
     pub(super) stream: StreamLimits,
     pub(super) budget: &'budget ExecutionBudget,

@@ -24,7 +24,10 @@ struct HiddenValueCase {
     origin: ValueSource,
 }
 
-struct Imports;
+#[derive(Default)]
+struct Imports {
+    source: OwnedReadSource,
+}
 
 impl SchemaResolver for Imports {
     fn resolve<'a, 'slot, 'borrow>(
@@ -32,10 +35,8 @@ impl SchemaResolver for Imports {
         _request: SchemaResolveRequest<'_>,
         _: Out<'slot, 'borrow, ResolverError>,
     ) -> OResult<'slot, SchemaSource<'a>> {
-        Ok(SchemaSource::from_str(
-            b"common",
-            "type Secret = u8 @secret @min(2);",
-        ))
+        self.source.replace("type Secret = u8 @secret @min(2);");
+        Ok(SchemaSource::from_source(b"common", &mut self.source))
     }
 }
 
@@ -315,7 +316,7 @@ fn errors_own_unicode_crlf_positions_and_imported_schema_labels() -> TestResult<
                     b"root",
                     "extern mod common; entry struct Root { value: common::Secret, }",
                 ),
-                &mut Imports,
+                &mut Imports::default(),
                 None,
                 out.reborrow(),
             )

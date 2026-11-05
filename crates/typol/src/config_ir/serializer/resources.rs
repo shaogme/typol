@@ -2,12 +2,11 @@ use crate::{
     config_ir::{ConfigIrError, ConfigIrErrorKind},
     value_walk::ValueDepth,
 };
-use alloc::vec::Vec;
 use core::{cell::Cell, fmt, fmt::Write as FmtWrite, str};
 use serde::{Serialize, Serializer, ser::Error as SerError};
+use typol_core::{Write, WriteError};
 use typol_model::BuiltinType;
 
-const INITIAL_BUFFER_CAPACITY: usize = 8;
 const SIGNED_INTEGER_TEXT_MAX_BYTES: usize = 40;
 const F64_SIGNIFICANT_DIGITS_MAX: usize = 17;
 const F64_MIN_DECIMAL_EXPONENT_MAGNITUDE: usize = 324;
@@ -43,8 +42,9 @@ pub(super) struct WorkspaceReservation<'a> {
     bytes: usize,
 }
 
-pub(super) struct BoundedBuffer {
-    bytes: Vec<u8>,
+pub(super) struct BoundedBuffer<'sink> {
+    sink: &'sink mut dyn Write,
+    bytes_written: usize,
     limit: usize,
     failure: Option<ConfigIrError>,
 }
@@ -181,10 +181,11 @@ impl Drop for WorkspaceReservation<'_> {
     }
 }
 
-impl BoundedBuffer {
-    pub(super) fn new(limit: usize) -> Self {
+impl<'sink> BoundedBuffer<'sink> {
+    pub(super) fn new(limit: usize, sink: &'sink mut dyn Write) -> Self {
         Self {
-            bytes: Vec::new(),
+            sink,
+            bytes_written: 0,
             limit,
             failure: None,
         }
@@ -198,31 +199,24 @@ impl BoundedBuffer {
         self.write_bytes(b"\n")
     }
 
-    pub(super) fn into_bytes(self) -> Vec<u8> {
-        self.bytes
-    }
-
     pub(super) fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), ConfigIrErrorKind> {
-        let Some(next_length) = self.bytes.len().checked_add(bytes.len()) else {
+        let Some(next_length) = self.bytes_written.checked_add(bytes.len()) else {
             return self.record_failure(ConfigIrError::OutputLimitExceeded);
         };
         if next_length > self.limit {
             return self.record_failure(ConfigIrError::OutputLimitExceeded);
         }
-        if self.bytes.capacity() < next_length {
-            let target_capacity = self
-                .bytes
-                .capacity()
-                .saturating_mul(2)
-                .max(INITIAL_BUFFER_CAPACITY)
-                .min(self.limit)
-                .max(next_length);
-            let additional = target_capacity - self.bytes.len();
-            if self.bytes.try_reserve_exact(additional).is_err() {
-                return self.record_failure(ConfigIrError::AllocationFailed);
-            }
+        if let Err(error) = self.sink.write_all(bytes) {
+            let failure = match error {
+                WriteError::AllocationFailed => ConfigIrError::AllocationFailed,
+                WriteError::CapacityExceeded => ConfigIrError::OutputLimitExceeded,
+                WriteError::HostFailure | WriteError::InternalInvariantFailure => {
+                    ConfigIrError::SerializationFailed
+                }
+            };
+            return self.record_failure(failure);
         }
-        self.bytes.extend_from_slice(bytes);
+        self.bytes_written = next_length;
         Ok(())
     }
 
@@ -338,39 +332,27 @@ fn number_text_capacity_covers_integer_and_float_display_extremes() {
 #[test]
 fn short_writes_grow_geometrically_with_bounded_capacity() {
     let limit = 4_096;
-    let mut buffer = BoundedBuffer::new(limit);
-    let mut previous_capacity = buffer.bytes.capacity();
-    let mut capacity_growths = 0;
-    let mut moved_bytes_upper_bound = 0;
+    let mut sink = Vec::new();
+    let mut buffer = BoundedBuffer::new(limit, &mut sink);
 
     for _ in 0..limit {
-        let previous_length = buffer.bytes.len();
         assert!(buffer.write_bytes(b"x").is_ok());
-        let capacity = buffer.bytes.capacity();
-        assert!(capacity <= limit);
-        if capacity > previous_capacity {
-            capacity_growths += 1;
-            moved_bytes_upper_bound += previous_length;
-            previous_capacity = capacity;
-        }
     }
 
-    assert_eq!(buffer.bytes.len(), limit);
-    assert!(capacity_growths <= 10);
-    assert!(moved_bytes_upper_bound < limit);
+    assert_eq!(sink.len(), limit);
 }
 
 #[cfg(test)]
 #[test]
 fn output_limit_caps_growth_and_rejects_the_next_byte() {
-    let mut buffer = BoundedBuffer::new(10);
+    let mut sink = Vec::new();
+    let mut buffer = BoundedBuffer::new(10, &mut sink);
     assert!(buffer.write_bytes(b"12345678").is_ok());
     assert!(buffer.write_bytes(b"90").is_ok());
-    assert!(buffer.bytes.capacity() <= 10);
     assert!(buffer.write_bytes(b"x").is_err());
     assert!(matches!(
         buffer.take_failure(),
         Some(ConfigIrError::OutputLimitExceeded)
     ));
-    assert_eq!(buffer.bytes.as_slice(), b"1234567890");
+    assert_eq!(sink.as_slice(), b"1234567890");
 }

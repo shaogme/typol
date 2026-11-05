@@ -25,7 +25,7 @@ sidebar:
 
 配置处理由以下组件协作完成：
 
-1. `typol-syntax` 从 `ByteSource` 按需读取 UTF-8 字节，产生带源跨度的 token。它不为配置创建完整 token 数组。
+1. `typol-syntax` 从 `Read` 按需读取 UTF-8 字节，产生带源跨度的 token。它不为配置创建完整 token 数组。
 2. `typol-config` 持有 `CompiledSchema` 的只读视图，按目标类型读取 token，并直接构造拥有型 `ConfigValue`。它不建立配置 AST。
 3. `typol-semantic` 提供类型、字段、变体、约束、断言表达式、环境授权和正则程序的只读视图及表达式执行器。
 4. `typol` 将配置解析与 Rust 类型转换、serde、加载会话和可选 Config IR 导出组合；`typol-std` 提供文件输入和进程环境适配器。
@@ -64,11 +64,11 @@ ConfigParser::new(schema).parse(request, environment)
 
 解析成功返回 `ValidatedConfigValue`，明确表示值约束和完整树断言均已通过。调用方可只读借用其中的 `ConfigValue`；只有需要不带验证标记的拥有值时才调用 `into_config_value()`。
 
-`ConfigParseRequest` 包含可读 `ByteSource`、显示名称和 `ConfigParseOptions`。选项由四部分组成：共享 `ResourceLimits`、配置专属 `ConfigLimits`、执行/工作区 `ExecutionLimits` 和词法流 `StreamLimits`。显示名称仅用于诊断元数据，不是配置文本的一部分。
+`ConfigParseRequest` 包含可读 `Read`、显示名称和 `ConfigParseOptions`。选项由四部分组成：共享 `ResourceLimits`、配置专属 `ConfigLimits`、执行/工作区 `ExecutionLimits` 和词法流 `StreamLimits`。显示名称仅用于诊断元数据，不是配置文本的一部分。
 
 `ConfigValueProcessor::validate` 与 `ConfigValueProcessor::normalize` 接收 `ConfigValidationRequest`，其 `ConfigValidationOptions` 只配置共享 `ResourceLimits`、`ConfigLimits` 和 `ExecutionLimits`，不包含词法流选项。校验与规范化不会读取配置输入或环境 提供器；两者的额度与文本解析分开配置。
 
-no_std 与 std 构建共用 `TypolOptions` 和 `SchemaLoader::new(TypolOptions)`。`ConfigInput::text`、`ConfigInput::bytes` 和 `named` 是共有输入方法；`display_name()` 始终返回字符串，默认值为 `"config"`。共有的 `LoadedSchema::read_value(input, environment, out)` 与 `BoundSchema::read(input, environment, out)` 都显式接收 `Environment` 提供器。启用 `std` 后，`ConfigInput::file`、`ConfigInput::reader` 和 `SchemaLoader::compile_file` 会把宿主输入适配到同一解析流程；需要访问进程环境时，请创建带所需 `ProcessEnvironmentLimits` 的 `ProcessEnvironment`，再传给读取方法。
+no_std 与 std 构建共用 `TypolOptions` 和 `SchemaLoader::new(TypolOptions)`。`LoadedSchema::read_value` 和 `BoundSchema` 的读取方法接收泛型 `ReadRequest<R>`；reader 实现 lexer 使用的同一 `typol_core::Read` 契约。内存文本可用 `ReadRequest::from_text`，no_std 调用方也可传入 `SliceSource` 或自定义 reader。所有读取都显式接收 `Environment` 提供器。启用 `std` 后，`read_file` 通过 `FileConfigInput` 打开配置文件，`read_io` 通过 `ReadSource` 适配标准 I/O reader；`SchemaLoader::compile_file` 会将文件 Schema 接入同一编译流程。需要访问进程环境时，请创建带所需 `ProcessEnvironmentLimits` 的 `ProcessEnvironment`，再传给读取方法。
 
 启用 `std` 后，同一个 `TypolOptions` 也携带宿主限制。配置文件输入额度通过 `with_file_input_limits` 设置；文件 Schema、来源名称及名称编辑额度分别使用 `with_files`、`with_names` 和 `with_name_edits`。配置解析与绑定额度分别通过 `with_config_limits` 和 `with_binding_limits` 调整。配置策略类型可从 `typol::config` 获取，宿主适配类型可从 `typol::host` 获取。`FileConfigInputLimits` 只控制配置文件与路径字节数，`ProcessEnvironmentLimits` 由 `ProcessEnvironment` 持有，用于限制环境名称和值字节数；Schema 导入额度由 `FileSchemaLimits` 管理，执行额度仍由 Schema/Config 选项管理。`ConfigLimits` 以 `ConfigLimits::default()` 提供有限默认额度，并为每项额度提供唯一的具名链式 `with_max_*` 更新方法；它不公开位置参数构造器或可变 setter，字段保持私有，外部通过只读 getter 查询。配置可传给 `ConfigParseOptions::with_config`。编解码选项也提供具名更新方法。
 
@@ -84,7 +84,7 @@ no_std 与 std 构建共用 `TypolOptions` 和 `SchemaLoader::new(TypolOptions)`
 
 ### 3.1 输入和根值
 
-解析器为配置源申请新的 `SourceId`，从 `schema.entry()` 取得根类型，并在初始化时确认其为结构体。随后 lexer 通过固定大小窗口从 `ByteSource` 拉取字节；token cursor 仅缓存当前事件和至多一个前瞻事件。行列位置由流式输入维护，token 的源跨度使用 UTF-8 字节偏移。
+解析器为配置源申请新的 `SourceId`，从 `schema.entry()` 取得根类型，并在初始化时确认其为结构体。随后 lexer 通过固定大小窗口从 `Read` 拉取字节；token cursor 仅缓存当前事件和至多一个前瞻事件。行列位置由流式输入维护，token 的源跨度使用 UTF-8 字节偏移。
 
 根值按结构体对象规则解析。对象完整后，解析器继续读取到 EOF；多余 token 会使配置无效。因此单个调用只接受一个根对象，根对象之后允许的内容限于 DSL 认可的空白和注释。解析器在构造值时消费 token，不保留可供调用方读取的配置 AST。
 
@@ -224,7 +224,7 @@ let limits = ConfigLimits::default()
 
 ## 9. 宿主集成
 
-`SchemaLoader` 持有编译 Schema 和源名称。文件配置通过 `typol_std::FileConfigInput` 打开并由词法器按需读取；reader 配置通过 `ReadSource` 适配 `Read`。这些适配器负责宿主 I/O 和有限错误分类，配置语法及 Schema 校验仍由 `typol-config` 完成。
+`SchemaLoader` 持有编译 Schema 和源名称。文件配置通过 `typol_std::FileConfigInput` 打开并由词法器按需读取；标准 I/O reader 配置通过 `ReadSource` 将 `std::io::Read` 适配为 `typol_core::Read`。这些适配器负责宿主 I/O 和有限错误分类，配置语法及 Schema 校验仍由 `typol-config` 完成。
 
 启用 `typol` 的 `config-ir` feature 后，Rust 调用方可通过 `ConfigIr::serialize` 导出 Config IR v1，格式定义见 [Config IR v1 规范](../config-ir/)。默认模式先补齐默认值并执行完整 Schema 校验；需要跳过约束校验时，必须显式选择 `AsProvided`。类型和值遍历、秘密标记、确定性排序、输出/排序工作区/嵌套深度额度及序列化错误分类由 facade 实现；输出超限与排序工作区超限使用独立错误类别。默认嵌套深度为 128，可由 `ConfigIrOptions` 降低，序列化器不会允许提高该上限。`typol-cli` 在配置读取阶段已完成校验，因此以 `AsProvided` 编码已校验值，避免重复校验；它只选择环境模式、加载值、调用该 API 并将完整结果写入 stdout。命令用法见 [CLI 使用指南](../../guides/cli/)。IR 中 `secret: true` 仍保留对应真实值，调用方须按敏感数据处理。
 
