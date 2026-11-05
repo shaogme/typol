@@ -229,7 +229,7 @@ let mut document = loaded.read_file(
 )?;
 ```
 
-使用 `ConfigDocument::apply_edits` 与 `ConfigPath` 批量替换、插入或删除类型化值。同一批次中的数组索引按原文解释，重叠编辑会被拒绝。替换只重写目标值；插入会沿用附近的换行和缩进。只需要校验值时，使用 `read_file_value` 或绑定对象的 `read_file`。
+使用 `ConfigDocument::apply_edits` 与 `ConfigPath` 批量替换、插入或删除类型化值。同一批次中的数组索引按原文解释，重叠编辑会被拒绝；删除末项后可在同批末尾追加。所有补丁会先应用到候选文本，再重新解析并校验；任何失败都会保留原文档。替换只重写目标值；插入会沿用附近可用项的换行和缩进。只需要校验值时，使用 `read_file_value` 或绑定对象的 `read_file`。
 
 写回文档是独立的源文件操作。标准文件系统适配器无法原子地比较保留的源快照并替换路径，因此 `write_file` 对该类期望会返回 `AtomicReplaceUnsupported`。新路径使用 `write_file_with_expectation` 和 `MustBeAbsent`；有意覆盖时选择 `ReplaceAny`。自定义目标可以实现 `ConfigSourceWriter`，提供自己的原子替换行为。
 

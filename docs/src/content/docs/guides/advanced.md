@@ -229,7 +229,7 @@ let mut document = loaded.read_file(
 )?;
 ```
 
-Apply a batch of typed replacements, insertions, or removals with `ConfigDocument::apply_edits` and `ConfigPath`. Array indexes in one batch refer to the original document, and overlapping edits are rejected. Replacements rewrite only the selected value; insertions follow the surrounding line ending and indentation. If the application only needs a validated value, use `read_file_value` or a bound schema's `read_file`.
+Apply a batch of typed replacements, insertions, or removals with `ConfigDocument::apply_edits` and `ConfigPath`. Array indexes in one batch refer to the original document, and overlapping edits are rejected; a batch can remove the last item and append a new one at the same time. Patches are applied to a candidate and the result is parsed and validated before commit, so failures leave the document unchanged. Replacements rewrite only the selected value; insertions follow the nearest available item's line ending and indentation. If the application only needs a validated value, use `read_file_value` or a bound schema's `read_file`.
 
 Writing a document back is a separate source operation. The standard filesystem adapter cannot atomically compare the retained source snapshot and replace a path, so `write_file` reports `AtomicReplaceUnsupported` for that expectation. Use `write_file_with_expectation` with `MustBeAbsent` for a new path or `ReplaceAny` when overwriting is intentional. A custom target can implement `ConfigSourceWriter` with its own atomic replacement behavior.
 

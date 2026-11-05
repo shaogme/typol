@@ -79,7 +79,16 @@ struct InsertionRequest<'a> {
     kind: PathValueKind,
     children: &'a [Span],
     index: usize,
+    append_after_removed_last: bool,
     encoded: ChargedString,
+}
+
+struct InsertionPlan<'edits, 'path> {
+    container: &'path ConfigPath,
+    kind: PathValueKind,
+    index: Option<usize>,
+    encoded: ChargedString,
+    edits: &'edits [ConfigEdit<'path>],
 }
 
 pub(super) struct DocumentEditEngine<'a> {
@@ -178,7 +187,10 @@ impl<'a> DocumentEditEngine<'a> {
     ) -> OResult<'slot, ChargedVec<SourcePatch>> {
         let mut patches = ChargedVec::new(self.context.budget, out.reborrow())?;
         for edit in edits {
-            patches.try_push(self.resolve_edit(edit, out.reborrow())?, out.reborrow())?;
+            patches.try_push(
+                self.resolve_edit(edit, edits, out.reborrow())?,
+                out.reborrow(),
+            )?;
         }
         Ok(patches)
     }
@@ -186,6 +198,7 @@ impl<'a> DocumentEditEngine<'a> {
     fn resolve_edit<'slot>(
         &self,
         edit: &ConfigEdit<'_>,
+        edits: &[ConfigEdit<'_>],
         mut out: Out<'slot, '_, ConfigEditError>,
     ) -> OResult<'slot, SourcePatch> {
         let budget = self.context.budget;
@@ -241,7 +254,16 @@ impl<'a> DocumentEditEngine<'a> {
                     limit,
                 })
                 .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
-                self.insert_patch(&parent, PathValueKind::Structure, encoded, out)
+                self.insert_patch(
+                    InsertionPlan {
+                        container: &parent,
+                        kind: PathValueKind::Structure,
+                        index: None,
+                        encoded,
+                        edits,
+                    },
+                    out,
+                )
             }
             ConfigEdit::InsertMapEntry {
                 container,
@@ -270,7 +292,16 @@ impl<'a> DocumentEditEngine<'a> {
                     limit,
                 })
                 .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
-                self.insert_patch(container, PathValueKind::Map, encoded, out)
+                self.insert_patch(
+                    InsertionPlan {
+                        container,
+                        kind: PathValueKind::Map,
+                        index: None,
+                        encoded,
+                        edits,
+                    },
+                    out,
+                )
             }
             ConfigEdit::InsertArrayItem {
                 container,
@@ -279,7 +310,16 @@ impl<'a> DocumentEditEngine<'a> {
             } => {
                 let encoded = ScalarEncoder::encode_value(value.root(), budget, limit)
                     .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
-                self.insert_array_patch(container, *index, encoded, out)
+                self.insert_patch(
+                    InsertionPlan {
+                        container,
+                        kind: PathValueKind::Array,
+                        index: Some(*index),
+                        encoded,
+                        edits,
+                    },
+                    out,
+                )
             }
             ConfigEdit::Remove { path } => self.remove_patch(path, out),
         }
@@ -287,41 +327,32 @@ impl<'a> DocumentEditEngine<'a> {
 
     fn insert_patch<'slot>(
         &self,
-        container: &ConfigPath,
-        kind: PathValueKind,
-        encoded: ChargedString,
+        plan: InsertionPlan<'_, '_>,
         mut out: Out<'slot, '_, ConfigEditError>,
     ) -> OResult<'slot, SourcePatch> {
+        let InsertionPlan {
+            container,
+            kind,
+            index,
+            encoded,
+            edits,
+        } = plan;
         let children = self.child_spans(container, kind, out.reborrow())?;
+        let index = index.unwrap_or(children.len());
+        if index > children.len() {
+            return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
+        }
+        let append_after_removed_last = index == children.len()
+            && children
+                .last()
+                .is_some_and(|last| self.removes_child(edits, container, *last));
         self.insert_patch_from_children(
             InsertionRequest {
                 container,
                 kind,
                 children: children.as_slice(),
-                index: children.len(),
-                encoded,
-            },
-            out,
-        )
-    }
-
-    fn insert_array_patch<'slot>(
-        &self,
-        container: &ConfigPath,
-        index: usize,
-        encoded: ChargedString,
-        mut out: Out<'slot, '_, ConfigEditError>,
-    ) -> OResult<'slot, SourcePatch> {
-        let children = self.child_spans(container, PathValueKind::Array, out.reborrow())?;
-        if index > children.len() {
-            return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
-        }
-        self.insert_patch_from_children(
-            InsertionRequest {
-                container,
-                kind: PathValueKind::Array,
-                children: children.as_slice(),
                 index,
+                append_after_removed_last,
                 encoded,
             },
             out,
@@ -338,14 +369,15 @@ impl<'a> DocumentEditEngine<'a> {
             kind,
             children,
             index,
+            append_after_removed_last,
             encoded,
         } = request;
         let info = self.container_info(container, kind, out.reborrow())?;
         let bounds = SourceSyntax::scan_container(self.context.source, info.span, kind)
             .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
-        let reference = children.first().copied();
-        let layout = SourceSyntax::layout(self.context.source, bounds, reference)
-            .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
+        let layout =
+            SourceSyntax::layout_for_insertion(self.context.source, bounds, children, index)
+                .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
         let mut insertion = ChargedString::with_capacity(0, self.context.budget, out.reborrow())?;
         let details = if index < children.len() {
             let Some(span) = children.get(index) else {
@@ -376,7 +408,7 @@ impl<'a> DocumentEditEngine<'a> {
             } else {
                 InsertionDetails {
                     position: last.end(),
-                    prefix_comma: true,
+                    prefix_comma: !append_after_removed_last,
                     prefix_space: !layout.multiline,
                     prefix_line_start: layout.multiline,
                     suffix_comma: false,
@@ -536,14 +568,29 @@ impl<'a> DocumentEditEngine<'a> {
         let info = self.container_info(container, kind, out.reborrow())?;
         let bounds = SourceSyntax::scan_container(self.context.source, info.span, kind)
             .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
-        let reference = self
-            .context
-            .index
-            .direct_children(container)
-            .and_then(|mut children| children.find_map(|child| child.span));
-        let layout = SourceSyntax::layout(self.context.source, bounds, reference)
-            .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
+        let children = self.child_spans(container, kind, out.reborrow())?;
+        let layout = SourceSyntax::layout_for_insertion(
+            self.context.source,
+            bounds,
+            children.as_slice(),
+            children.len(),
+        )
+        .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
         Ok(layout.colon_spacing)
+    }
+
+    fn removes_child(&self, edits: &[ConfigEdit<'_>], container: &ConfigPath, span: Span) -> bool {
+        edits.iter().any(|edit| {
+            let ConfigEdit::Remove { path } = edit else {
+                return false;
+            };
+            path.parent_path().as_ref() == Some(container)
+                && self
+                    .context
+                    .index
+                    .info(path)
+                    .is_some_and(|info| info.span == Some(span))
+        })
     }
 
     fn append_spacing(

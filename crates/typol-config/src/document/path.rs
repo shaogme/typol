@@ -23,7 +23,7 @@ pub enum ConfigPathSegment {
 }
 
 /// A sequence of schema-aware path segments into one configuration value.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ConfigPath {
     segments: Vec<ConfigPathSegment>,
 }

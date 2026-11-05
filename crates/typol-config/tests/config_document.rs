@@ -577,6 +577,32 @@ fn structural_edit_batch_inserts_fields_map_entries_and_array_items() -> TestRes
 }
 
 #[test]
+fn structural_edit_batch_can_remove_and_append_the_last_array_item() -> TestResult {
+    let schema = compile("entry struct Root { items: [u16] }")?;
+    let items = ConfigPath::new().field("items");
+    let last = items.clone().index(1);
+    let value = unsigned(3)?;
+
+    for (source, expected) in [
+        ("{items:[1,2]}", "{items:[1, 3]}"),
+        ("{items:[1,2,]}", "{items:[1, 3,]}"),
+    ] {
+        let mut document = parse_document(&schema, source)?;
+        let edits = [
+            ConfigEdit::Remove { path: &last },
+            ConfigEdit::InsertArrayItem {
+                container: &items,
+                index: 2,
+                value: &value,
+            },
+        ];
+        TestOpeo::value(|out| document.apply_edits(&edits, &mut EmptyEnvironment, out))?;
+        test_eq!(document.source(), expected);
+    }
+    Ok(())
+}
+
+#[test]
 fn inserted_map_keys_escape_quotes_and_backslashes() -> TestResult {
     let schema = compile("entry struct Root { values: map<string, u16> }")?;
     let mut document = parse_document(&schema, "{values: {}}")?;
@@ -620,6 +646,22 @@ fn structural_insertions_follow_multiline_crlf_indentation() -> TestResult {
         document.source(),
         "{\r\n  items: [\r\n    1,\r\n    9,\r\n    2,\r\n  ],\r\n  port: 9000,\r\n}"
     );
+    Ok(())
+}
+
+#[test]
+fn structural_insertion_uses_the_nearest_multiline_item_layout() -> TestResult {
+    let schema = compile("entry struct Root { first: u16, second: u16, third: u16 = 0 }")?;
+    let mut document = parse_document(&schema, "{first:1,\n  second:2}")?;
+    let third = ConfigPath::new().field("third");
+    let value = unsigned(3)?;
+    let edit = ConfigEdit::InsertField {
+        path: &third,
+        value: &value,
+    };
+
+    TestOpeo::value(|out| document.apply_edits(&[edit], &mut EmptyEnvironment, out))?;
+    test_eq!(document.source(), "{first:1,\n  second:2,\n  third:3}");
     Ok(())
 }
 

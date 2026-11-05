@@ -32,6 +32,42 @@ struct LexicalSpan {
 pub(super) struct SourceSyntax;
 
 impl SourceSyntax {
+    pub(super) fn layout_for_insertion<'source>(
+        source: &'source str,
+        bounds: SourceContainer,
+        children: &[Span],
+        index: usize,
+    ) -> Result<SourceLayout<'source>, ConfigEditErrorKind> {
+        if index > children.len() {
+            return Err(ConfigEditErrorKind::InvalidPath);
+        }
+        for distance in 0..children.len() {
+            let previous = index
+                .checked_sub(distance)
+                .and_then(|candidate| children.get(candidate).copied());
+            if let Some(reference) = previous
+                && Self::item_indent(source, bounds, reference)?.is_some()
+            {
+                return Self::layout(source, bounds, Some(reference));
+            }
+            if distance > 0 {
+                let next = index
+                    .checked_add(distance)
+                    .and_then(|candidate| children.get(candidate).copied());
+                if let Some(reference) = next
+                    && Self::item_indent(source, bounds, reference)?.is_some()
+                {
+                    return Self::layout(source, bounds, Some(reference));
+                }
+            }
+        }
+        let reference = children
+            .get(index)
+            .copied()
+            .or_else(|| children.last().copied());
+        Self::layout(source, bounds, reference)
+    }
+
     pub(super) fn layout<'source>(
         source: &'source str,
         bounds: SourceContainer,
