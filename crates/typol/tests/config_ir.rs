@@ -164,7 +164,7 @@ fn load_config(
     path: &Path,
     environment: &mut dyn Environment,
 ) -> Result<ConfigValue, Box<dyn Error>> {
-    Ok(capture(|out| loaded.read_file(path, environment, out))?.into_config_value())
+    Ok(capture(|out| loaded.read_file_value(path, environment, out))?.into_config_value())
 }
 
 fn field_value<'a>(fields: &'a [Value], name: &str) -> Option<&'a Value> {

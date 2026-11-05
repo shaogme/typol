@@ -63,7 +63,7 @@ impl LoadedProcessEnvironmentTestExt for LoadedSchema {
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, ValidatedConfigValue> {
         let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
-        self.read_file(path, &mut environment, out)
+        self.read_file_value(path, &mut environment, out)
     }
 }
 
@@ -409,7 +409,7 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
         let errors = if bytes.is_empty() {
             load_error(|out| loaded.read_value_with_process_environment(&config, out))?
         } else {
-            load_error(|out| loaded.read_file(&config, &mut provider, out))?
+            load_error(|out| loaded.read_file_value(&config, &mut provider, out))?
         };
         safe_errors(&errors)?;
     }
@@ -445,7 +445,7 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
         EnvironmentError::AllocationFailed,
     ] {
         for errors in [
-            load_error(|out| loaded.read_file(&config, &mut Fault(fault), out))?,
+            load_error(|out| loaded.read_file_value(&config, &mut Fault(fault), out))?,
             load_error(|out| {
                 read_typed_with_environment::<Root>(&loaded, &config, &mut Fault(fault), out)
             })?,

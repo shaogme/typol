@@ -13,7 +13,7 @@ sidebar:
 
 | 环节 | 当前行为 |
 | --- | --- |
-| 解析 | 按编译后的 Schema 增量读取 token 并构造拥有型值，不保留配置 AST。 |
+| 解析 | 值读取增量消费 token，不保留 AST；文档读取还会在额度内保留源文本和解析器生成的值跨度。 |
 | 环境变量 | 只有遇到已授权的 `env(...)` 表达式时，才调用调用方传入的提供器读取环境变量。 |
 | 限制与错误 | 解析、校验、诊断和执行都有显式资源额度，并通过结构化错误报告失败。 |
 
@@ -26,7 +26,7 @@ sidebar:
 配置处理由以下组件协作完成：
 
 1. `typol-syntax` 从 `Read` 按需读取 UTF-8 字节，产生带源跨度的 token。它不为配置创建完整 token 数组。
-2. `typol-config` 持有 `CompiledSchema` 的只读视图，按目标类型读取 token，并直接构造拥有型 `ConfigValue`。它不建立配置 AST。
+2. `typol-config` 持有 `CompiledSchema` 的只读视图，按目标类型读取 token，并直接构造拥有型 `ConfigValue`。文档入口还会保留原始文本和同一次解析产生的 `LocationIndex` 跨度，不会为了定位值而重新词法扫描原文。
 3. `typol-semantic` 提供类型、字段、变体、约束、断言表达式、环境授权和正则程序的只读视图及表达式执行器。
 4. `typol` 将配置解析与 Rust 类型转换、serde、加载会话和可选 Config IR 导出组合；`typol-std` 提供文件输入和进程环境适配器。
 
@@ -65,6 +65,10 @@ ConfigParser::new(schema).parse(request, environment)
 解析成功返回 `ValidatedConfigValue`，明确表示值约束和完整树断言均已通过。调用方可只读借用其中的 `ConfigValue`；只有需要不带验证标记的拥有值时才调用 `into_config_value()`。
 
 `ConfigParseRequest` 包含可读 `Read`、显示名称和 `ConfigParseOptions`。选项由四部分组成：共享 `ResourceLimits`、配置专属 `ConfigLimits`、执行/工作区 `ExecutionLimits` 和词法流 `StreamLimits`。显示名称仅用于诊断元数据，不是配置文本的一部分。
+
+`ConfigParser::parse_document` 和 `LoadedSchema::read_document` 会在额度内保留源文及 parser 的语义定位索引。`ConfigDocument::write_to` 原样输出保留的文本。`apply_edits` 通过 parser 索引解析带类型的替换、字段/map 项/数组元素插入和删除操作，拒绝重叠源范围，组装一个候选文档，再重解析并校验后提交内存文档。替换会编码目标子树；插入会推断容器换行、缩进和键分隔空格。删除和复合值替换会提取受影响范围内的注释，并把注释字节保留在替换区域。未触及的源范围逐字节不变。编辑器扫描受限的源切片定位分隔符和注释范围，不另建 token/trivia CST。
+
+`LoadedSchema::read_file` 返回 `ConfigDocument`；只需要原有已校验值结果时使用 `read_file_value`。启用 `std` 后，`LoadedSchema::write_file` 使用文档快照期望值，并同时限制源字节和文件输入字节。普通文件系统不能把按字节比较与路径替换作为一个原子操作，因此本地 adapter 对 `ExactSnapshot` 返回 `AtomicReplaceUnsupported`。新目标使用 `write_file_with_expectation` 和 `MustBeAbsent`；有意覆盖时显式选择 `ReplaceAny`。Unix 通过同目录硬链接原子创建新目标；Windows 使用同卷且不允许覆盖的写穿透移动，两者都不会覆盖并发创建的目标。`ReplaceAny` 使用原子替换；Unix 在提交后同步父目录，若无法确认持久性则返回专门错误。Windows 使用同卷写穿透移动。no_std 调用方为自己的目标实现 `ConfigSourceWriter`，并负责提供所选期望值要求的原子语义。
 
 `ConfigValueProcessor::validate` 与 `ConfigValueProcessor::normalize` 接收 `ConfigValidationRequest`，其 `ConfigValidationOptions` 只配置共享 `ResourceLimits`、`ConfigLimits` 和 `ExecutionLimits`，不包含词法流选项。校验与规范化不会读取配置输入或环境 提供器；两者的额度与文本解析分开配置。
 

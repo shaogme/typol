@@ -164,28 +164,20 @@ impl EnvironmentBytes {
     ) -> OResult<'slot, Self> {
         let mut length = 0usize;
         let mut units = value.encode_wide();
-        while let Some(scalar) =
-            Self::scalar(&mut units, budget, out.reborrow()).store_err_into(out.reborrow())?
-        {
+        while let Some(scalar) = Self::scalar(&mut units, budget, out.reborrow())? {
             length = length
                 .checked_add(scalar.len_utf8())
                 .filter(|length| *length <= limit)
                 .ok_or(EnvironmentFailure::Budget(BudgetError::Resource))
                 .store_err_into(out.reborrow())?;
         }
-        let mut output =
-            ChargedVec::new(Some(budget), out.reborrow()).store_err_into(out.reborrow())?;
-        output
-            .try_reserve_exact(length, out.reborrow())
-            .store_err_into(out.reborrow())?;
+        let mut output = ChargedVec::new(Some(budget), out.reborrow())?;
+        output.try_reserve_exact(length, out.reborrow())?;
         let mut units = value.encode_wide();
-        while let Some(scalar) =
-            Self::scalar(&mut units, budget, out.reborrow()).store_err_into(out.reborrow())?
-        {
+        while let Some(scalar) = Self::scalar(&mut units, budget, out.reborrow())? {
             let mut encoded = [0; 4];
             output
-                .extend_from_slice(scalar.encode_utf8(&mut encoded).as_bytes(), out.reborrow())
-                .store_err_into(out.reborrow())?;
+                .extend_from_slice(scalar.encode_utf8(&mut encoded).as_bytes(), out.reborrow())?;
         }
         Ok(Self { bytes: output })
     }
@@ -199,18 +191,14 @@ impl EnvironmentBytes {
         let Some(first) = units.next() else {
             return Ok(None);
         };
-        budget
-            .consume(1, out.reborrow())
-            .store_err_into(out.reborrow())?;
+        budget.consume(1, out.reborrow())?;
         let point = match first {
             0xd800..=0xdbff => {
                 let second = units
                     .next()
                     .ok_or(EnvironmentFailure::Host)
                     .store_err_into(out.reborrow())?;
-                budget
-                    .consume(1, out.reborrow())
-                    .store_err_into(out.reborrow())?;
+                budget.consume(1, out.reborrow())?;
                 if !(0xdc00..=0xdfff).contains(&second) {
                     return Err(out.fail(EnvironmentFailure::Host));
                 }

@@ -156,9 +156,12 @@ pub use loading::{
 pub use opeo;
 pub use options::{ConversionLimitError, TypolOptions, WriteOptions};
 pub use typol_config::{
-    ConfigParseErrors, ConfigParseOptions, ConfigParseRequest, ConfigParser,
-    ConfigValidationOptions, ConfigValueProcessor, EmptyEnvironment, Environment, EnvironmentError,
-    EnvironmentReadContext, NormalizedConfigValue, ValidatedConfigValue,
+    ConfigDocument, ConfigEdit, ConfigEditError, ConfigEditErrorKind, ConfigParseErrors,
+    ConfigParseOptions, ConfigParseRequest, ConfigParser, ConfigPath, ConfigPathSegment,
+    ConfigReplacement, ConfigSourceCommitError, ConfigSourceExpectation, ConfigSourceRevision,
+    ConfigSourceWriter, ConfigValidationOptions, ConfigValueProcessor, EmptyEnvironment,
+    Environment, EnvironmentError, EnvironmentReadContext, NormalizedConfigValue,
+    ValidatedConfigValue,
 };
 pub use typol_core::{ConfigValue, ExecutionBudget, ExecutionLimits, Read, SliceSource};
 

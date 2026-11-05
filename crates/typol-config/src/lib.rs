@@ -7,6 +7,7 @@ extern crate alloc;
 mod api;
 mod context;
 mod diagnostics;
+mod document;
 mod environment;
 mod instance;
 mod options;
@@ -21,6 +22,11 @@ mod value_validation;
 
 pub use api::{ConfigDiagnosticRedactor, ConfigParser, ConfigValueProcessor};
 pub use diagnostics::{ConfigFailureStage, ConfigParseErrors, ConfigValueErrors};
+pub use document::{
+    ConfigDocument, ConfigEdit, ConfigEditError, ConfigEditErrorKind, ConfigPath,
+    ConfigPathSegment, ConfigReplacement, ConfigSourceCommitError, ConfigSourceExpectation,
+    ConfigSourceRevision, ConfigSourceWriter,
+};
 pub use environment::{EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext};
 pub use opeo;
 pub use options::{

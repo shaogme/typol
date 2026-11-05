@@ -13,7 +13,7 @@ You need to trace a configuration read through the parser, environment provider,
 
 | Area | Current behavior |
 | --- | --- |
-| Parsing | Reads tokens incrementally against a compiled Schema and builds an owned value without retaining a config AST. |
+| Parsing | Value reads consume tokens incrementally without retaining an AST; document reads additionally retain bounded source text and parser-produced value spans. |
 | Environment | Reads happen only for authorized `env(...)` expressions through the provider passed by the caller. |
 | Limits and errors | Parsing, validation, diagnostics, and execution use explicit resource budgets and structured failures. |
 
@@ -26,7 +26,7 @@ This description is based on the current source. Config and Schema DSL specifica
 Configuration handling is shared across four layers:
 
 1. `typol-syntax` reads UTF-8 bytes from `Read` on demand and emits tokens with source spans. It does not build a complete token array for configuration.
-2. `typol-config` reads token input against read-only views of `CompiledSchema` and directly builds an owned `ConfigValue`; it does not create a configuration AST.
+2. `typol-config` reads token input against read-only views of `CompiledSchema` and directly builds an owned `ConfigValue`. The document entry point also retains the original text and `LocationIndex` spans from that same parser pass; it does not re-lex the text to locate values.
 3. `typol-semantic` supplies read-only views for types, fields, variants, constraints, assertion expressions, environment authorization, and regex programs, as well as expression execution.
 4. `typol` combines parsing with Rust conversion, Serde, loading sessions, and optional Config IR export. `typol-std` supplies file input and process environment adapters.
 
@@ -54,6 +54,10 @@ For application-level setup with the facade in a `no_std + alloc` environment, s
 General callers use `ConfigParser::new(schema).parse(request, environment)`. Success returns `ValidatedConfigValue`, which certifies that value constraints and full-tree assertions passed. Callers can borrow its `ConfigValue`; `into_config_value()` consumes the validation marker when an unmarked owned value is required.
 
 `ConfigParseRequest` contains a readable `Read`, display name, and `ConfigParseOptions`. Options combine shared `ResourceLimits`, `ConfigLimits`, execution/workspace `ExecutionLimits`, and lexical `StreamLimits`. The display name is diagnostic metadata, not part of the configuration input.
+
+`ConfigParser::parse_document` and `LoadedSchema::read_document` retain a bounded source copy and the parser's semantic location index. `ConfigDocument::write_to` returns the exact retained text. `apply_edits` resolves typed replacements, field/map/array insertions, and removals through the parser index. It rejects overlapping source patches, assembles one candidate, then reparses and validates it before committing the in-memory document. Replacements encode the requested subtree; insertions infer the container line ending, indentation, and key spacing. Removal and composite replacement extract comments from the touched range and preserve their bytes in the replacement area. Untouched source ranges remain byte-for-byte unchanged. The editor scans bounded source slices for delimiters and comment ranges instead of building a separate token/trivia CST.
+
+`LoadedSchema::read_file` returns a `ConfigDocument`; callers that only need the previous validated-value result use `read_file_value`. With `std`, `LoadedSchema::write_file` uses the document snapshot expectation and enforces both the source and file input byte limits. Ordinary filesystems cannot atomically compare file bytes and replace a path, so the local adapter returns `AtomicReplaceUnsupported` for `ExactSnapshot`. Use `write_file_with_expectation` with `MustBeAbsent` for a new target or `ReplaceAny` for an intentional overwrite. New-target commit uses same-directory hard-link creation on Unix and a same-volume no-replace write-through move on Windows; both atomically refuse a target created by a concurrent writer. `ReplaceAny` uses atomic replacement; Unix syncs the parent directory after commit and reports a distinct error if durability cannot be confirmed. Windows uses a same-volume write-through move. no_std callers implement `ConfigSourceWriter` for their target and must provide the requested expectation semantics.
 
 `ConfigValueProcessor::validate` and `ConfigValueProcessor::normalize` accept a `ConfigValidationRequest`. Its options configure shared resource limits, config limits, and execution limits, but no token stream. Validation and normalization do not read configuration input or an environment provider and have independent limits from text parsing.
 

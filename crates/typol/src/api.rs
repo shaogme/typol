@@ -27,9 +27,12 @@ pub mod config {
     pub use typol_config::ConfigValueErrors;
 
     pub use typol_config::{
-        ConfigFailureStage, ConfigLimits, ConfigParseErrors, ConfigParseRequest, ConfigParser,
-        ConfigValidationOptions, ConfigValidationRequest, ConfigValueProcessor,
-        EnvironmentReadContext, NormalizedConfigValue, StreamLimits, ValidatedConfigValue,
+        ConfigDocument, ConfigEdit, ConfigEditError, ConfigEditErrorKind, ConfigFailureStage,
+        ConfigLimits, ConfigParseErrors, ConfigParseRequest, ConfigParser, ConfigPath,
+        ConfigPathSegment, ConfigReplacement, ConfigSourceCommitError, ConfigSourceExpectation,
+        ConfigSourceRevision, ConfigSourceWriter, ConfigValidationOptions, ConfigValidationRequest,
+        ConfigValueProcessor, EnvironmentReadContext, NormalizedConfigValue, StreamLimits,
+        ValidatedConfigValue,
     };
 }
 
@@ -57,9 +60,10 @@ pub mod policy {
 pub mod host {
     pub use typol_i18n::{Language, Translator};
     pub use typol_std::{
-        DiagnosticContext, DiagnosticRenderError, DiagnosticRenderer, DiagnosticReport,
-        DiagnosticReportStage, DiagnosticReportTitle, DisplayError, DisplayFailurePoint,
-        DisplayOptions, FileConfigInput, FileConfigInputLimitParams, FileConfigInputLimits,
+        ConfigSourceWriteError, ConfigSourceWriteErrorKind, DiagnosticContext,
+        DiagnosticRenderError, DiagnosticRenderer, DiagnosticReport, DiagnosticReportStage,
+        DiagnosticReportTitle, DisplayError, DisplayFailurePoint, DisplayOptions, FileConfigInput,
+        FileConfigInputLimitParams, FileConfigInputLimits, FileConfigSourceWriter,
         FileSchemaCompilation, FileSchemaCompileErrors, FileSchemaCompileFailure,
         FileSchemaCompileOptions, FileSchemaCompiler, FileSchemaLimitParams, FileSchemaLimits,
         FileSchemaResolver, FileSchemaSource, HostError, HostErrorKind, HostFailureStep,

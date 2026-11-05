@@ -21,7 +21,10 @@ use typol::{
 };
 
 #[cfg(not(feature = "std"))]
-use typol::{OrderedMap, TypolStage, core::SourceId};
+use typol::{
+    ConfigSourceExpectation, ConfigSourceRevision, ConfigSourceWriter, OrderedMap, TypolStage,
+    core::SourceId,
+};
 
 #[cfg(all(feature = "hashbrown", not(feature = "std")))]
 use hashbrown::HashMap;
@@ -83,6 +86,43 @@ fn bind_service<'slot, 'schema, 'borrow>(
     out: Out<'slot, 'borrow, CodecErrors>,
 ) -> OResult<'slot, TypedSchema<'schema, Service>> {
     TypedSchema::bind(schema, BindOptions::default(), out)
+}
+
+#[cfg(not(feature = "std"))]
+struct NoStdConfigWriter {
+    contents: Option<Vec<u8>>,
+}
+
+#[cfg(not(feature = "std"))]
+impl ConfigSourceWriter for NoStdConfigWriter {
+    type Target = str;
+    type Error = ();
+
+    fn replace_atomically(
+        &mut self,
+        _: &Self::Target,
+        expectation: ConfigSourceExpectation<'_>,
+        replacement: &[u8],
+        max_bytes: usize,
+    ) -> Result<ConfigSourceRevision, Self::Error> {
+        if replacement.len() > max_bytes {
+            return Err(());
+        }
+        match expectation {
+            ConfigSourceExpectation::ExactSnapshot(expected)
+                if self.contents.as_deref() != Some(expected) =>
+            {
+                return Err(());
+            }
+            ConfigSourceExpectation::MustBeAbsent if self.contents.is_some() => return Err(()),
+            ConfigSourceExpectation::DocumentSnapshot => return Err(()),
+            ConfigSourceExpectation::ExactSnapshot(_)
+            | ConfigSourceExpectation::MustBeAbsent
+            | ConfigSourceExpectation::ReplaceAny => {}
+        }
+        self.contents = Some(replacement.to_vec());
+        Ok(ConfigSourceRevision::new(1))
+    }
 }
 
 fn assert_budgeted<T: BudgetedTypol>() {}
@@ -287,6 +327,35 @@ fn in_memory_loading_and_binding_work_in_a_no_std_consumer() {
         assert_eq!(parse_error.stage(), TypolStage::Decoding);
         assert!(parse_error.config_errors().is_some());
         assert!(parse_error.schema_errors().is_none());
+        Ok(())
+    });
+    assert!(result.is_ok());
+}
+
+#[cfg(not(feature = "std"))]
+#[test]
+fn no_std_consumer_writes_config_documents_through_its_backend() {
+    let mut errors = ErrSlot::<TypolError>::new();
+    let result = errors.try_call(|mut out| {
+        let loaded = SchemaLoader::new(TypolOptions::default()).compile_text(
+            b"no-std-write-test",
+            "entry struct Settings { enabled: bool }",
+            out.reborrow(),
+        )?;
+        let mut environment = EmptyEnvironment;
+        let source = b"{enabled: true}";
+        let mut document = loaded.read_document(
+            ReadRequest::from_text("{enabled: true}"),
+            &mut environment,
+            out.reborrow(),
+        )?;
+        let mut writer = NoStdConfigWriter {
+            contents: Some(source.to_vec()),
+        };
+        let expectation = document.source_expectation();
+        let revision = document.write_source("memory", &mut writer, expectation);
+        assert!(revision.is_ok());
+        assert_eq!(writer.contents.as_deref(), Some(source.as_slice()));
         Ok(())
     });
     assert!(result.is_ok());

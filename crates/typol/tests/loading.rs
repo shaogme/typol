@@ -1,16 +1,17 @@
 use std::{
     env::temp_dir,
     error::Error,
-    fs::{create_dir, remove_dir_all, write},
+    fs::{create_dir, read_to_string, remove_dir_all, write},
     io::{self, ErrorKind, Read},
     path::{Path, PathBuf},
     process::id,
     sync::atomic::{AtomicUsize, Ordering},
 };
 use typol::{
-    BoundSchema, ConfigParseOptions, Environment, EnvironmentError, EnvironmentReadContext,
-    LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader, Typol, TypolError,
-    TypolOptions, TypolStage, ValidatedConfigValue, WriteOptions,
+    BoundSchema, ConfigParseOptions, ConfigPath, ConfigSourceCommitError, ConfigSourceExpectation,
+    EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext, LoadedSchema,
+    ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader, Typol, TypolError, TypolOptions,
+    TypolStage, ValidatedConfigValue, WriteOptions,
     binding::{
         BindOptions, CodecStage, ConversionLimits, MAX_CONVERSION_DEPTH, Typol as TypolTrait,
     },
@@ -18,10 +19,14 @@ use typol::{
         ConfigFailureStage, ConfigLimits, ConfigParseErrors, ConfigParseRequest, ConfigParser,
         ConfigValidationOptions,
     },
-    core::{BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, SliceSource, SourceId},
+    core::{
+        BudgetError, ConfigValueBuilder, DiagnosticCode, ExecutionBudget, ExecutionLimits,
+        SliceSource, SourceId, ValueSource,
+    },
     host::{
-        FileConfigInput, FileSchemaCompileErrors, HostError, HostErrorKind, HostOperation,
-        Language, RenderOptions, SourceNameEditOptions, SourceNameLimits, Translator,
+        FileConfigInput, FileConfigInputLimits, FileSchemaCompileErrors, HostError, HostErrorKind,
+        HostOperation, Language, RenderOptions, SourceNameEditOptions, SourceNameLimits,
+        Translator,
     },
     io::ReadRequest,
     opeo::{OResult, Out},
@@ -147,7 +152,7 @@ impl LoadedProcessEnvironmentTestExt for LoadedSchema {
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, ValidatedConfigValue> {
         let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
-        self.read_file(path, &mut environment, out)
+        self.read_file_value(path, &mut environment, out)
     }
 
     fn read_file_named_with_process_environment<'slot>(
@@ -157,7 +162,7 @@ impl LoadedProcessEnvironmentTestExt for LoadedSchema {
         out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, ValidatedConfigValue> {
         let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
-        self.read_file_named(path, display_name, &mut environment, out)
+        self.read_file_value_named(path, display_name, &mut environment, out)
     }
 
     fn read_io_with_process_environment<'slot>(
@@ -493,6 +498,75 @@ fn files_and_memory_return_owned_values_and_refresh_each_call() -> TestResult {
 }
 
 #[test]
+fn loaded_schema_writes_the_edited_document_with_its_original_snapshot() -> TestResult {
+    let loaded = load("entry struct Root { value: u8 }", TypolOptions::default())?;
+    let directory = Directory::new()?;
+    let config = directory.put("root.tconf", "{ value: 1, // keep this comment\n}")?;
+    let mut environment = EmptyEnvironment;
+    let mut document = load_value(|out| loaded.read_file(&config, &mut environment, out))?;
+    let budget =
+        TestOpeo::value(|out| ExecutionBudget::new(ExecutionLimits::new(100_000, 100_000), out))?;
+    let value = TestOpeo::value(|mut out| {
+        let mut builder = ConfigValueBuilder::new(Some(&budget), out.reborrow())?;
+        let root = builder.add_unsigned(2, ValueSource::RustValue, out.reborrow())?;
+        builder.finish(root, out)
+    })?;
+    let path = ConfigPath::new().field("value");
+    TestOpeo::value(|out| document.set_value(&path, &value, &mut environment, out))?;
+    let revision = loaded
+        .write_file_with_expectation(&mut document, &config, ConfigSourceExpectation::ReplaceAny)
+        .test_value()?;
+    assert!(revision.value() > 0);
+    assert_eq!(
+        read_to_string(&config).test_value()?,
+        "{ value: 2, // keep this comment\n}"
+    );
+    directory.cleanup()?;
+    Ok(())
+}
+
+#[test]
+fn file_write_enforces_input_file_limit_and_exact_snapshot_fails_closed() -> TestResult {
+    let source = "{value: 1}";
+    let limits = FileConfigInputLimits::default().with_max_file_bytes(source.len() - 1);
+    let loaded = load(
+        "entry struct Root { value: u8 }",
+        default_options().with_file_input_limits(limits),
+    )?;
+    let mut environment = EmptyEnvironment;
+    let mut document = load_value(|out| {
+        loaded.read_document(ReadRequest::from_text(source), &mut environment, out)
+    })?;
+    let directory = Directory::new()?;
+    let limited_target = directory.path.join("limited.tconf");
+    let limited = loaded.write_file_with_expectation(
+        &mut document,
+        &limited_target,
+        ConfigSourceExpectation::MustBeAbsent,
+    );
+    assert!(matches!(
+        limited,
+        Err(ConfigSourceCommitError::ResourceLimitExceeded)
+    ));
+    assert!(!limited_target.exists());
+
+    let original = directory.put("existing.tconf", source)?;
+    let unrestricted = load("entry struct Root { value: u8 }", default_options())?;
+    let mut unrestricted_environment = EmptyEnvironment;
+    let mut exact_document =
+        load_value(|out| unrestricted.read_file(&original, &mut unrestricted_environment, out))?;
+    let exact = unrestricted.write_file(&mut exact_document, &original);
+    assert!(matches!(
+        exact,
+        Err(ConfigSourceCommitError::Writer(error))
+            if error.kind() == typol::host::ConfigSourceWriteErrorKind::AtomicReplaceUnsupported
+    ));
+    assert_eq!(read_to_string(&original).test_value()?, source);
+    directory.cleanup()?;
+    Ok(())
+}
+
+#[test]
 fn explicit_schema_binding_supports_typed_and_environment_reads() -> TestResult {
     let directory = Directory::new()?;
     let schema = directory.put(
@@ -626,7 +700,7 @@ fn binding_and_config_read_fail_before_environment_access() -> TestResult {
                 .bind::<Root>(out.reborrow())?
                 .read_file(missing, &mut provider, out)
         })?,
-        load_error(|out| loaded.read_file(missing, &mut provider, out))?,
+        load_error(|out| loaded.read_file_value(missing, &mut provider, out))?,
     ] {
         assert_eq!(errors.stage(), TypolStage::ConfigRead);
         assert_eq!(
@@ -1168,7 +1242,7 @@ fn invalid_secret_environment_never_enters_safe_error_outputs() -> TestResult {
         default_options(),
     )?;
     for errors in [
-        load_error(|out| loaded.read_file(&config, &mut SecretProvider, out))?,
+        load_error(|out| loaded.read_file_value(&config, &mut SecretProvider, out))?,
         load_error(|mut out| {
             loaded
                 .bind::<Root>(out.reborrow())?

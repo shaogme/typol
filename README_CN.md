@@ -1,180 +1,126 @@
 # Typol
 
-[English](README.md) · [文档站](https://shaogme.github.io/typol/zh-cn/)
+[English](README.md) · [简体中文文档站](https://shaogme.github.io/typol/zh-cn/)
 
-Typol 是面向 Rust 的 Schema 驱动配置库。它编译 `.tschem` Schema，按编译后的类型解析 `.tconf` 配置值，校验约束和断言，并可通过 `#[derive(Typol)]` 将结果绑定到 Rust 类型。
+Typol 是面向 Rust 的 Schema 驱动配置库。`.tschem` 文件声明配置类型与规则，`.tconf` 文件提供具体值。Typol 编译 Schema、解析并校验配置，然后可通过 `#[derive(Typol)]` 将结果转换为匹配的 Rust 结构体和枚举。
 
-工作区要求 Rust 1.85 或更高版本。以下示例使用 `typol` facade crate；底层 crate 也可以独立使用。
+工作区要求 Rust 1.85 或更高版本。以下示例使用 `typol` facade crate。
 
-Facade 默认使用 `no_std`，拥有型值使用 `alloc`。配置来源实现 `typol::io::Read`；`LoadedSchema::read_value` 和 `BoundSchema::read` 接收 `ReadRequest`，并显式传入 `Environment`。编码器写入 `typol::io::Write` sink，由调用方选择目标。需要缓冲输出时可使用 `String` 和 `Vec<u8>` helper。`OrderedMap<T>` 绑定无需 `std`；启用 `btree-map` 后可绑定 `alloc::collections::BTreeMap<String, T>`，启用 `hashbrown` 并直接依赖 `hashbrown` 后可绑定 `hashbrown::HashMap<String, T>`。BTreeMap 节点分配失败不能恢复为结构化错误，其目标存储预算只是估算。`serde` 和 `config-ir` feature 均可在不启用 `std` 时使用。启用 `std` 后可使用文件和 reader adapter、进程环境访问及宿主诊断渲染。
+## 从这里开始
 
-显式启用 `btree-map` 即可使用 BTreeMap 绑定；该 feature 不会启用 `std`：
-
-```toml
-typol = { version = "0.1", default-features = false, features = ["btree-map"] }
-```
-
-要读取进程环境变量，请使用 `ProcessEnvironment::new(ProcessEnvironmentLimits::default())` 创建 provider，再将它传给 `BoundSchema::read` 或 `LoadedSchema::read_value`。这两个类型由 facade 根级导出；环境额度由 provider 自身携带，应用可以按读取策略选择额度。
-
-## 快速开始
-
-此示例通过 `std` 宿主适配器在内存中编译 Schema，将其绑定到 Rust 类型，解析配置文本，应用 Schema 默认值，并通过显式 provider 解析已授权的环境表达式。要使用这些 API，请在 `typol` 依赖中启用 `std`。
+应用需要读取文件或访问进程环境时，请启用 `std` feature：
 
 ```toml
 [dependencies]
 typol = { version = "0.1", features = ["std"] }
 ```
 
-```rust
-use typol::{
-    io::{ReadRequest, SliceSource}, opeo::ErrSlot, EmptyEnvironment, SchemaLoader, Typol,
-    TypolError, TypolOptions,
-};
+仓库包含一个完整的文件加载示例：
 
-#[derive(Debug, PartialEq, Typol)]
-struct ServiceConfig {
-    name: String,
-    port: u16,
-    tags: Vec<String>,
-    enabled: bool,
-    endpoint: String,
-}
+```sh
+cargo run -p typol-showcase
+```
 
-let mut errors = ErrSlot::<TypolError>::new();
-let result = errors.try_call(|mut out| {
-    let loaded = SchemaLoader::new(TypolOptions::default()).compile_text(
-        b"readme",
-        r#"
-entry struct ServiceConfig {
-    name: string @length(1, 64),
+想按步骤构建应用，请先阅读[快速上手](docs/src/content/docs/zh-cn/guides/quickstart.md)。该教程依次讲解 Schema、配置、Rust 类型映射，以及连接这些步骤的方法。
+
+## 数据模型
+
+Schema 描述类型和校验规则，配置文本提供入口类型的一个实例。
+
+```tschem
+struct Endpoint {
+    host: string,
     port: u16 = 8080,
-    tags: [string] @size(min = 1, max = 8),
-    enabled: bool = true,
-    endpoint: string @env("APP_ENDPOINT") = "127.0.0.1:8080",
 }
-"#,
-        out.reborrow(),
-    )?;
-    let binding = loaded.bind::<ServiceConfig>(out.reborrow())?;
-    let mut environment = EmptyEnvironment;
-    let mut source = SliceSource::new(
-        r#"{ name: "edge", tags: ["api"], endpoint: env("APP_ENDPOINT") }"#.as_bytes(),
-    );
-    let request = ReadRequest::new(&mut source, "readme config");
-    let config = binding.read(request, &mut environment, out)?;
 
-    assert_eq!(
-        config,
-        ServiceConfig {
-            name: "edge".into(),
-            port: 8080,
-            tags: vec!["api".into()],
-            enabled: true,
-            endpoint: "127.0.0.1:8080".into(),
-        }
-    );
-    Ok(())
-});
-
-assert!(result.is_ok());
-```
-
-Facade 的可失败操作接收 `Out` 错误上下文，并返回 OPEO 结果。`ErrSlot::try_call` 是执行这类操作并取得错误的一种方式。`compile_text` 用于不含导入的 Schema。对于含 `extern mod` 的 Schema，请使用 `SchemaLoader::compile_file`，或通过 `SchemaResolver` 调用较底层的编译器。
-
-## 功能
-
-- **Schema DSL：** 结构体、包含无载荷/单值/结构体载荷的枚举、类型别名、嵌套模块、有有限值的递归类型、默认值、类型化断言和校验注解。
-- **Config DSL：** 类型化标量、可选值、数组、定长数组、字符串键 map、枚举值、注释，以及显式 `env("NAME")` 表达式。
-- **校验：** 标量和集合约束、预编译正则、`@all` 谓词，以及对完整配置值执行的 `@assert` 检查。
-- **Rust 集成：** `#[derive(Typol)]` 为 Rust 结构体和枚举生成类型描述；绑定时会对照已编译入口类型检查形态。绑定后的 Schema 可重复读取和写入多个值。
-- **宿主适配器：** 启用 `std` feature 后，`typol-std` 提供文件加载、reader 输入、进程环境访问和安全诊断渲染。核心 parser 和 compiler 不直接访问文件系统或进程环境。
-- **类型化 JSON 导出：** 启用 `config-ir` 后可导出 Config IR v1。该格式保留 Schema 类型信息并提供确定性排序。`secret: true` 标记敏感节点，但不会移除或加密其值。
-- **资源边界：** 配置解析、Schema 编译、校验、正则、诊断和 IR 序列化均使用可配置额度；资源失败会显式报告，不返回部分结果。
-
-正则表达式遵循 Typol 文档规定的子集和搜索语义。需要整个字符串都匹配时，请使用 `^` 和 `$`。`@secret` 控制诊断和安全展示；应用中的值及序列化输出仍包含真实数据。
-
-递归 Schema 可描述有限树结构和递归枚举。Rust derive 支持通过 `Vec<Self>` 和内建 map 类型形成递归边；递归类型仍必须存在有限分支，每个实例也继续受配置的深度和工作量额度限制。参见[递归 Schema](examples/config/recursive.tschem)及[有限配置实例](examples/config/recursive.tconf)：
-
-```rust
-#[derive(Typol)]
-struct Node {
-    value: String,
-    children: Vec<Node>,
+entry struct ServiceConfig {
+    name: string,
+    endpoint: Endpoint,
+    tags: [string],
+    note: option<string>,
 }
 ```
 
-## 写入绑定值
+`Endpoint` 和 `ServiceConfig` 是 Schema 结构体。`entry` 选择配置根类型。应用可以定义同名且字段匹配的 Rust 结构体；`#[derive(Typol)]` 会生成它们的转换映射。Rust 方法和字段可见性仍由应用控制。
 
-将 `WriteOptions` 直接传给绑定写入入口。默认仍使用紧凑格式；调用 `with_pretty(true)` 可使用两空格缩进的多行输出：
+常见 Schema 类型与 Rust 类型的对应关系：
 
-```rust
-use typol::WriteOptions;
+| Schema 类型 | Rust 类型 |
+| --- | --- |
+| `bool`、`string`、整数和浮点标量 | `bool`、`String`、相同位宽的整数或浮点类型 |
+| `option<T>` | `Option<T>` |
+| `[T]` | `Vec<T>` |
+| `[T; N]` | `[T; N]` |
+| `map<string, T>` | 启用 `std` 时为 `HashMap<String, T>`；不启用时为 `OrderedMap<T>` |
+| Schema `struct` / `enum` | 使用 `#[derive(Typol)]` 的 Rust `struct` / `enum` |
 
-let mut text = String::new();
-binding.write(
-    &config,
-    &mut text,
-    WriteOptions::default().with_pretty(true),
-    out,
-)?;
-```
+Schema 和 Rust 声明中的字段名及类型必须匹配。[快速上手](docs/src/content/docs/zh-cn/guides/quickstart.md)包含私有字段和访问器方法的示例。
 
-`BoundSchema::write` 和 `write_serde` 写入调用方提供的 sink 并返回 `()`。需要缓冲为 `String` 时使用 `write_to_string` 或 `write_serde_to_string`。`TypedSchema::serialize` 和 `serialize_serde` 使用相同的 `WriteOptions`。格式空白也计入输出字节额度；sink 失败时可能已经写入前缀，转换和完整 Schema 校验会在首字节写入前完成。序列化结果仍包含 `@secret` 的实际值。
+## Rust API 的调用关系
 
-## 手写 `Typol` 实现
+主要流程分为三个阶段：
 
-`LoadedSchema::bind` 和 `TypedSchema::bind` 用于内建类型，以及所有嵌套字段和枚举载荷也带有隐藏 `BudgetedTypol` 标记的派生类型。应通过 `SchemaLoader` 加载 Schema、绑定 Rust 类型，再使用绑定读取配置。派生类型包含手写实现时，请添加 `#[typol(trusted)]`，再通过 `LoadedSchema::bind_trusted` 或 `TypedSchema::bind_trusted` 使用；返回的 `TrustedBoundSchema` 或 `TrustedTypedSchema` 会在 Rust 类型中保留此选择。
+| 阶段 | 类型或方法 | 作用 |
+| --- | --- | --- |
+| 编译 | `SchemaLoader::compile_text` 或 `compile_file` | 校验 Schema 并生成 `LoadedSchema`。文件加载需要 `std`。 |
+| 绑定 | `LoadedSchema::bind::<T>()` | 检查 Rust 类型 `T` 与 Schema 入口是否一致，并生成可复用的 `BoundSchema<T>`。 |
+| 读取 | `BoundSchema::read` 或 `read_file` | 解析、应用默认值、校验，并返回 `T`。每次读取都显式接收 `Environment` 提供器。 |
 
-库额度覆盖库管理的转换节点、深度、工作区、输出和经上下文分发的目标存储，不是操作系统 CPU、进程内存或实时性上限。受信任回调仍可自行分配、阻塞或执行任意代码，其返回的 Rust 值也不会再次校验。普通结构体和枚举映射建议使用 derive；只有应用已审查并信任的特殊映射才保留手写实现。不可信代码需要通过独立进程或 Wasm 边界运行。即使绑定满足 `BudgetedTypol`，调用方提供的 Serde 实现仍属于独立的用户代码信任边界。
+`SchemaLoader::new(options)` 是创建 loader 的关联函数。表中的其他入口是作用于 loader、已加载 Schema 或绑定对象的方法。`LoadedSchema` 及其 binding 可以重复使用，以读取多份配置。
 
-## 工作区 crate
+可能失败的操作接收 OPEO `Out` 错误上下文并返回 OPEO 结果。快速上手教程展示如何通过 `opeo::ErrSlot::try_call` 捕获并报告 `TypolError`。
+
+配置输入同样是显式提供的：`BoundSchema::read` 接收包含 `Read` 源的 `ReadRequest`，例如 `SliceSource`。启用 `std` 后，可用 `read_file` 和 `read_io` 适配宿主文件和 reader。每次读取还会接收 `Environment` provider；Typol 不会隐式查询进程环境变量。
+
+## 工作区结构
+
+源码按职责拆分。普通应用使用的 API 位于 `crates/typol`；大多数用户无需直接依赖底层 crate。
 
 | Crate | 职责 |
 | --- | --- |
-| `typol` | 公共 facade、Rust 类型绑定、加载、编解码及可选 Config IR |
-| `typol-syntax` | 通用 lexer、token 及 Schema parser/AST |
-| `typol-schema` | Schema 导入、名称和类型解析、静态检查及编译 |
-| `typol-semantic` | 不可变编译 Schema 模型、约束视图、表达式程序及求值 |
-| `typol-config` | 流式、Schema 指导的配置解析与校验 |
+| `typol` | 公共 facade、加载、Rust 绑定、编解码及可选 Config IR |
+| `typol-macros` | 实现 `#[derive(Typol)]` |
+| `typol-syntax` | Lexer、Schema parser 和语法树 |
+| `typol-model` | Schema 运算符和内建类型的共享定义 |
+| `typol-schema` | 导入、名称和类型解析、静态检查及 Schema 编译 |
+| `typol-semantic` | 编译后的 Schema 模型、约束、表达式程序及求值 |
+| `typol-config` | Schema 指导的配置解析、校验和保留源格式的文档编辑 |
 | `typol-regex` | 有界正则编译器和匹配器 |
-| `typol-core` | 共享值类型、额度、预算、源跨度和诊断类型 |
-| `typol-std` | 文件系统、进程环境及诊断宿主适配器 |
-| `typol-i18n` | 由 `u18n` 编译的英文和简体中文 CLI 翻译 |
-| `typol-macros` | `#[derive(Typol)]` 的实现 |
-| `typol-cli` | Schema 检查、配置检查和 Config IR 导出命令 |
+| `typol-core` | 共享值、源码、诊断和执行预算 |
+| `typol-policy` | 共享资源限制策略 |
+| `typol-report` | 本地化诊断报告格式化 |
+| `typol-std` | 可选的文件、进程环境和诊断宿主适配器 |
+| `typol-i18n` | 英文和简体中文消息目录 |
+| `typol-cli` | Schema 与配置检查，以及 Config IR 导出 |
 
-## 文档
+## 按需阅读
 
-[Typol 文档站](docs/src/content/docs/zh-cn/index.md) 使用 Starlight 构建，提供 English 和简体中文版本。DSL 与格式规范定义语法和语义，是规范性依据；实现文档说明当前各 crate 如何实现这些约定。
-
-| 文档 | 内容 |
+| 如果你想…… | 请阅读 |
 | --- | --- |
-| [快速上手](docs/src/content/docs/zh-cn/guides/quickstart.md) | Schema、Config 与 Rust 类型绑定入门教程 |
-| [no_std 指南](docs/src/content/docs/zh-cn/guides/no_std.md) | 不启用 `std` 时的内存加载、alloc 和显式 provider |
-| [CLI 使用指南](docs/src/content/docs/zh-cn/guides/cli.md) | 构建并使用 CLI 检查文件和导出 Config IR |
-| [进阶教程](docs/src/content/docs/zh-cn/guides/advanced.md) | Schema 导入、校验、Rust 绑定、Serde、资源上限与 Config IR |
-| [Config DSL](docs/src/content/docs/zh-cn/specification/config-dsl.md) | `.tconf` 语法、值、默认值、可选值和环境表达式 |
-| [Schema DSL](docs/src/content/docs/zh-cn/specification/schema-dsl.md) | `.tschem` 语法、类型、注解、断言和正则子集 |
-| [Config 实现](docs/src/content/docs/zh-cn/specification/config-implementation.md) | 流式解析、校验、环境处理和诊断 |
-| [Schema 实现](docs/src/content/docs/zh-cn/specification/schema-implementation.md) | 导入、静态编译、编译记录和运行期使用 |
-| [Config IR v1](docs/src/content/docs/zh-cn/specification/config-ir.md) | 类型化 JSON 导出格式、排序、秘密标记和额度 |
-| [正则实现](docs/src/content/docs/zh-cn/specification/regex-implementation.md) | 正则编译、NFA 搜索、工作区和资源边界 |
-| [完整示例](examples/showcase/README.md) | 基于文件的 Schema 与配置端到端示例 |
-| [CLI 示例](examples/cli/CLI.md) | CLI 检查和 Config IR 导出示例 |
+| 构建类型化配置加载器，了解核心类型和方法 | [快速上手](docs/src/content/docs/zh-cn/guides/quickstart.md) |
+| 使用导入 Schema、跨字段检查、Serde 或 Config IR | [进阶教程](docs/src/content/docs/zh-cn/guides/advanced.md) |
+| 不依赖标准库使用 Typol | [no_std 指南](docs/src/content/docs/zh-cn/guides/no_std.md) |
+| 从命令行检查文件或导出 Config IR | [CLI 使用指南](docs/src/content/docs/zh-cn/guides/cli.md) |
+| 查询 Schema 或配置语法 | [Schema DSL](docs/src/content/docs/zh-cn/specification/schema-dsl.md) · [Config DSL](docs/src/content/docs/zh-cn/specification/config-dsl.md) |
+| 了解实现细节 | [Schema 实现](docs/src/content/docs/zh-cn/specification/schema-implementation.md) · [Config 实现](docs/src/content/docs/zh-cn/specification/config-implementation.md) |
 
-从仓库根目录本地运行文档站：
+文档站提供英文和简体中文版本。DSL 与格式规范定义语言行为；实现文档说明当前各 crate 如何实现这些规则。
 
-```sh
-cd docs
-npm install
-npm run dev
-```
+## Feature 与构建
 
-在 `docs` 目录运行 `npm run build` 可生成生产站点。
+`typol` 默认不启用任何 feature。请按应用需要启用能力：
 
-## 构建与测试
+| Feature | 提供内容 |
+| --- | --- |
+| `std` | 文件和 reader 输入、基于文件的 Schema 加载、进程环境访问和宿主诊断渲染 |
+| `serde` | 带 Schema 上下文的 Serde 读写 |
+| `hashbrown` | `hashbrown::HashMap<String, T>` 绑定 |
+| `btree-map` | `BTreeMap<String, T>` 绑定 |
+| `config-ir` | Config IR v1 JSON 序列化；同时启用 `serde` |
 
-在工作区根目录运行：
+不启用 `std` 时，可在内存中提供 Schema 和配置源，并在每次读取时传入 `Environment` 实现。拥有型值需要 allocator。
+
+在工作区根目录执行：
 
 ```sh
 cargo fmt --check
@@ -182,49 +128,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-运行完整示例或通过 CLI 检查 Schema：
-
-```sh
-cargo run -p typol-showcase
-cargo run -p typol-cli -- schema check examples/cli/cli_demo.tschem
-cargo run -p typol-cli -- config check --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf
-cargo run -p typol-cli -- --language zh-CN --help
-```
-
-CLI 可通过 `--language en|zh-CN` 选择英文或简体中文。省略该选项时，会依次检查
-`TYPOL_LANG`、`LC_ALL`、`LC_MESSAGES` 和 `LANG`，最后默认使用英文。帮助、命令行错误和
-CLI 操作错误由 `u18n` 生成的目录提供翻译；Typol 库生成的详细 Schema 和配置诊断目前仍以英文显示。
-检测会将 `en_US.UTF-8` 等 POSIX 名称规范化为 BCP-47 tag；区域英文 tag 使用生成目录的回退，
-所有 `zh-*` tag 都选择唯一的简体中文目录。目录 tag 回退只负责选择已编译目录，不会补充缺失的消息翻译。
-翻译错误会沿调用方的错误通道返回，不会被固定文案替代。
-
-## Nix
-
-Nix 支持 `x86_64-linux`、`aarch64-linux` 和 `aarch64-darwin`。Flake、传统包入口、overlay 和开发
-shell 都会拒绝 `x86_64-darwin`。默认 `typol-cli` 包会获取匹配版本的 GitHub Release 二进制。
-首个兼容的 Nix Release 发布前，请显式选择源码包：
-
-```sh
-nix build .#typol-cli
-nix run .#typol-cli -- --help
-nix build .#typol-cli-source
-nix run .#typol-cli-source -- --help
-nix flake check
-nix develop
-nix fmt
-
-nix-build -A typol-cli
-nix-build -A typol-cli-source
-nix-shell
-```
-
-Flake 与传统 Nix 入口提供相同的发布包、源码包、默认 app 和 overlay。源码包始终从仓库构建。
-默认包不会自动切换到源码；没有匹配 Release 时会明确提示使用 `typol-cli-source`。
-
-Nix 消费者可以使用 `lib.mkConfigIr` 在 derivation 中校验 Schema 和 Config，也可以用
-`lib.typolConfigIr` 读取预先生成的公开 IR 文件。derivation 使用空环境，并拒绝含有秘密标记的配置。
-源配置文件会进入 Nix store，因此不能在其中放入凭证。Config IR 标记 `secret: true` 时仍保留真实值；
-详见 [Nix 集成指南](docs/src/content/docs/zh-cn/guides/nix.md) 和
-[集成示例](examples/nix/README.md)。
-
-项目采用 Apache-2.0 或 MIT 双许可证，详见 [LICENSE-APACHE](LICENSE-APACHE) 和 [LICENSE-MIT](LICENSE-MIT)。
+在 `docs` 目录中运行 `npm run build` 可构建文档站。Nix 打包说明见 [Nix 指南](docs/src/content/docs/zh-cn/guides/nix.md)。项目采用 Apache-2.0 或 MIT 双许可证，详见 [LICENSE-APACHE](LICENSE-APACHE) 和 [LICENSE-MIT](LICENSE-MIT)。

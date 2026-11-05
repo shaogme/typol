@@ -4,7 +4,9 @@ use crate::{
         BudgetDiagnostic, ConfigFailureStage, ConfigParseErrors, ConfigValueErrors,
         DiagnosticBuffer, DiagnosticFactory,
     },
+    document::{ConfigDocument, ConfigDocumentInput},
     environment::Environment,
+    instance::LocationIndex,
     options::{ConfigParseRequest, ConfigValidationRequest, RequestParts},
     parser::Parser,
     secret::SecretPolicy,
@@ -16,8 +18,8 @@ use crate::{
 use ::opeo::{ErrSlot, OResult, Out};
 use core::cell::RefCell;
 use typol_core::{
-    BudgetError, ConfigValue, Diagnostic, DiagnosticContext, ExcerptLimits, ExecutionBudget, Read,
-    SourceCapture, SourceId, diagnostic_context,
+    BudgetError, ChargedVec, ConfigValue, Diagnostic, DiagnosticCode, DiagnosticContext,
+    ExcerptLimits, ExecutionBudget, Read, SourceCapture, SourceId, diagnostic_context,
 };
 use typol_semantic::CompiledSchema;
 
@@ -61,6 +63,18 @@ struct ParserSetupRequest<'schema, 'source, 'limits, 'input, 'name, R: Read + ?S
     source_name: &'name str,
 }
 
+struct DocumentParseOutput<'schema> {
+    value: ValidatedConfigValue,
+    locations: LocationIndex<'schema>,
+    source: ChargedVec<u8>,
+}
+
+static CONFIG_PARSE_BUDGET_MISMATCH: DiagnosticContext = diagnostic_context!(
+    "typol-config",
+    "config-parse-entry",
+    "execution-budget-does-not-match-options",
+);
+
 impl<'schema> ConfigParser<'schema> {
     pub const fn new(schema: &'schema CompiledSchema) -> Self {
         Self { schema }
@@ -85,6 +99,77 @@ impl<'schema> ConfigParser<'schema> {
         out: Out<'slot, '_, ConfigParseErrors>,
     ) -> OResult<'slot, ValidatedConfigValue> {
         parse_for_schema_with_budget(self.schema, request, environment, budget, out)
+    }
+
+    /// Parse and validate a complete source while retaining its text and source locations.
+    pub fn parse_document<'slot, R: Read + ?Sized>(
+        &self,
+        request: ConfigParseRequest<'_, R>,
+        environment: &mut dyn Environment,
+        mut out: Out<'slot, '_, ConfigParseErrors>,
+    ) -> OResult<'slot, ConfigDocument<'schema>> {
+        check_source(self.schema, &request, out.reborrow())?;
+        let mut budget_errors = ErrSlot::new();
+        let budget = match budget_errors
+            .try_call(|budget_out| ExecutionBudget::new(*request.options().execution(), budget_out))
+        {
+            Ok(budget) => budget,
+            Err(caught) => {
+                return Err(out.fail(ConfigParseErrors::emergency(
+                    BudgetDiagnostic::from_error(caught.take()),
+                    self.schema.next_source_id(),
+                )));
+            }
+        };
+        self.parse_document_with_budget(request, environment, &budget, out.reborrow())
+    }
+
+    /// Parse a retained source while sharing the caller's execution budget.
+    pub fn parse_document_with_budget<'slot, 'borrow, R: Read + ?Sized>(
+        &self,
+        request: ConfigParseRequest<'_, R>,
+        environment: &mut dyn Environment,
+        budget: &ExecutionBudget,
+        mut out: Out<'slot, 'borrow, ConfigParseErrors>,
+    ) -> OResult<'slot, ConfigDocument<'schema>> {
+        if budget.limits() != *request.options().execution() {
+            return Err(out.fail(ConfigParseErrors::emergency(
+                DiagnosticFactory::internal(CONFIG_PARSE_BUDGET_MISMATCH, None, None, None),
+                self.schema.next_source_id(),
+            )));
+        }
+        check_source(self.schema, &request, out.reborrow())?;
+        let parts = request.into_parts();
+        let options = parts.options;
+        let display_name = parts.display_name;
+        let Some(source_id) = self.schema.next_source_id() else {
+            return Err(out.fail(ConfigParseErrors::emergency(
+                BudgetDiagnostic::from_error(BudgetError::Resource),
+                None,
+            )));
+        };
+        let parsed = parse_document_source(
+            ParseSourceRequest {
+                schema: self.schema,
+                parts,
+                environment,
+                budget,
+                source_id,
+            },
+            out.reborrow(),
+        )?;
+        ConfigDocument::from_parse(
+            ConfigDocumentInput {
+                schema: self.schema,
+                options,
+                display_name,
+                value: parsed.value,
+                locations: parsed.locations,
+                source: parsed.source,
+                budget,
+            },
+            out,
+        )
     }
 }
 
@@ -163,11 +248,6 @@ impl<'schema> ConfigDiagnosticRedactor<'schema> {
     }
 }
 
-static CONFIG_PARSE_BUDGET_MISMATCH: DiagnosticContext = diagnostic_context!(
-    "typol-config",
-    "config-parse-entry",
-    "execution-budget-does-not-match-options",
-);
 static CONFIG_VALUE_BUDGET_MISMATCH: DiagnosticContext = diagnostic_context!(
     "typol-config",
     "config-value-validation-entry",
@@ -231,6 +311,80 @@ fn parse_source<'slot, R: Read + ?Sized>(
     }
 }
 
+fn parse_document_source<'slot, 'schema, R: Read + ?Sized>(
+    request: ParseSourceRequest<'schema, '_, '_, '_, R>,
+    mut out: Out<'slot, '_, ConfigParseErrors>,
+) -> OResult<'slot, DocumentParseOutput<'schema>> {
+    let ParseSourceRequest {
+        schema,
+        parts,
+        environment,
+        budget,
+        source_id,
+    } = request;
+    let options = &parts.options;
+    let capture = RefCell::new(Some(SourceCapture::new(
+        source_id,
+        *options.resources().excerpts(),
+        Some(budget),
+    )));
+    let session = ConfigSession::with_budget(environment, options, budget, out.reborrow())?
+        .with_capture(&capture);
+    let input =
+        TrackingInput::new(parts.input, options.config().max_source_bytes()).with_capture(&capture);
+    let mut retention_errors = ErrSlot::<Diagnostic>::new();
+    let mut input = match retention_errors
+        .try_call(|diagnostic_out| input.retain_source(budget, diagnostic_out))
+    {
+        Ok(input) => input,
+        Err(caught) => {
+            return Err(out.fail(ConfigParseErrors::emergency(caught.take(), Some(source_id))));
+        }
+    };
+    let mut parser_slot = None;
+    prepare_parser(
+        ParserSetupRequest {
+            schema,
+            source: &mut input,
+            limits: options.config(),
+            session,
+            source_name: parts.display_name,
+        },
+        &mut parser_slot,
+        out.reborrow(),
+    )?;
+    let mut parse_errors = ErrSlot::new();
+    let parse_result = parse_errors.try_call(|parse_out| {
+        Parser::parse_slot_with_locations(parser_slot.take(), source_id, parse_out)
+    });
+    match parse_result {
+        Ok((value, locations)) => {
+            let source = input.take_retained_source().ok_or_else(|| {
+                out.reborrow().fail(ConfigParseErrors::emergency(
+                    Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR),
+                    Some(source_id),
+                ))
+            })?;
+            Ok(DocumentParseOutput {
+                value: ValidatedConfigValue::from_config_value(value),
+                locations,
+                source,
+            })
+        }
+        Err(caught) => finish_parse_failure(
+            ParseFailureRequest {
+                errors: caught.take(),
+                schema,
+                excerpt_limits: *options.resources().excerpts(),
+                budget,
+                capture: capture.borrow_mut().take(),
+                input_failed: input.failed(),
+            },
+            out,
+        ),
+    }
+}
+
 fn prepare_parser<'schema, 'source, 'limits, 'input, 'name, 'slot, R: Read + ?Sized>(
     request: ParserSetupRequest<'schema, 'source, 'limits, 'input, 'name, R>,
     parser_slot: &mut Option<Parser<'schema, 'source, 'limits>>,
@@ -249,10 +403,10 @@ fn prepare_parser<'schema, 'source, 'limits, 'input, 'name, 'slot, R: Read + ?Si
     Ok(())
 }
 
-fn finish_parse_failure<'slot>(
+fn finish_parse_failure<'slot, T>(
     request: ParseFailureRequest<'_, '_>,
     out: Out<'slot, '_, ConfigParseErrors>,
-) -> OResult<'slot, ValidatedConfigValue> {
+) -> OResult<'slot, T> {
     let ParseFailureRequest {
         errors,
         schema,

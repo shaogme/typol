@@ -58,7 +58,7 @@ impl<'input> TestSource<'input> {
     ) -> OResult<'slot, ValidatedConfigValue> {
         match self {
             Self::File { path, display_name } => {
-                loaded.read_file_named(path, display_name, environment, out)
+                loaded.read_file_value_named(path, display_name, environment, out)
             }
             Self::Reader {
                 reader,

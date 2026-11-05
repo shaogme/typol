@@ -20,6 +20,7 @@ use self::{
 use crate::{
     ConfigLimits,
     diagnostics::{BudgetDiagnostic, ConfigParseErrors, DiagnosticFactory},
+    instance::LocationIndex,
     parser::context::ParserControl,
     session::ConfigSession,
 };
@@ -169,16 +170,24 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
     }
 
     pub(super) fn parse<'slot, 'borrow>(
-        mut self,
+        self,
         out: Out<'slot, 'borrow, ConfigParseErrors>,
     ) -> OResult<'slot, ConfigValue> {
+        self.parse_with_locations(out)
+            .map(|(value, _locations)| value)
+    }
+
+    pub(super) fn parse_with_locations<'slot, 'borrow>(
+        mut self,
+        out: Out<'slot, 'borrow, ConfigParseErrors>,
+    ) -> OResult<'slot, (ConfigValue, LocationIndex<'schema>)> {
         let mut parse_errors = ErrSlot::new();
         let result = parse_errors.try_call(|parse_out| self.parse_value(parse_out));
         self.context
             .session
             .begin_secret(self.context.cursor.consumed_end());
         match result {
-            Ok(value) if self.context.diagnostics.is_empty() => Ok(value),
+            Ok(value) if self.context.diagnostics.is_empty() => Ok((value, self.context.locations)),
             Ok(_) => Err(out.fail(ConfigParseErrors::from_buffer(
                 self.context.diagnostics,
                 self.context.schema,
@@ -209,6 +218,20 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
             )));
         };
         parser.parse(out)
+    }
+
+    pub(super) fn parse_slot_with_locations<'slot, 'borrow>(
+        parser: Option<Self>,
+        source_id: SourceId,
+        out: Out<'slot, 'borrow, ConfigParseErrors>,
+    ) -> OResult<'slot, (ConfigValue, LocationIndex<'schema>)> {
+        let Some(parser) = parser else {
+            return Err(out.fail(ConfigParseErrors::emergency(
+                DiagnosticFactory::internal(PARSER_SETUP_RESULT_MISSING, None, None, None),
+                Some(source_id),
+            )));
+        };
+        parser.parse_with_locations(out)
     }
 
     fn parse_value<'slot>(

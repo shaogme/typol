@@ -1,15 +1,54 @@
 ---
 title: Advanced tutorial
-description: Use imported Schemas, cross-field validation, explicit environment access, trusted Rust mappings, Serde, and Config IR.
+description: Reuse bindings, compose Schemas, validate related fields, and choose Rust and JSON integration paths.
 sidebar:
   order: 3
 ---
 
-This tutorial builds on the [quick start](../quickstart/). It covers integration choices for applications with reusable Schema files, richer validation, and Rust or JSON boundaries. Examples that use files or process variables require Typol's `std` feature. For the in-memory `no_std + alloc` path, see the [no_std guide](../no_std/).
+This tutorial extends the [Quick start](../quickstart/). Start with the core object flow:
+
+`SchemaLoader` compiles a Schema into `LoadedSchema`; `LoadedSchema::bind::<T>()` checks a Rust type and returns a reusable `BoundSchema<T>`; that binding reads configuration into `T`. Keep the loaded Schema and binding when the application reads multiple files.
+
+File APIs and process-environment access require the `std` feature. In-memory sources and custom providers also work without `std`; see the [no_std guide](../no_std/). Rust snippets below are method bodies that reuse `loaded`, `binding`, `out`, and imports from the Quick start unless the snippet shows its own setup.
+
+## Reuse compiled Schemas and bindings
+
+Compile and bind once, then reuse the binding for each input:
+
+```rust
+let loaded = SchemaLoader::new(TypolOptions::default())
+    .compile_file(Path::new("service.tschem"), out.reborrow())?;
+let binding = loaded.bind::<ServiceConfig>(out.reborrow())?;
+
+let first = binding.read_file(
+    Path::new("service-a.tconf"),
+    &mut environment,
+    out.reborrow(),
+)?;
+let second = binding.read_file(
+    Path::new("service-b.tconf"),
+    &mut environment,
+    out,
+)?;
+```
+
+`compile_text(name, text, out)` is for Schemas without imports. Use `compile_file` with `std` for file imports, or `compile_with_resolver` when the application supplies its own source resolver. Compilation creates a fresh loading session; file contents are not cached across separate calls.
+
+The read methods depend on which result the application needs:
+
+| Call | Result |
+| --- | --- |
+| `BoundSchema::read` / `read_file` | A Rust value of type `T` |
+| `BoundSchema::read_with_value` | `BoundRead<T>` containing both `T` and the validated Typol value tree |
+| `LoadedSchema::read_value` | A validated Typol value tree without a Rust binding |
+| `LoadedSchema::read_file` | A `ConfigDocument` retaining source text and value locations for editing |
+| `LoadedSchema::read_file_value` | A validated Typol value tree from a file |
+
+In particular, `BoundSchema::read_file` returns the typed Rust value. `LoadedSchema::read_file` has a different purpose: it retains the source representation so edits can preserve formatting.
 
 ## Split a Schema across files
 
-Use `extern mod` to import declarations from another `.tschem` file. For example, keep reusable network types beside the application Schema:
+Use `extern mod` to import reusable declarations from another `.tschem` file:
 
 ```text
 schemas/
@@ -17,9 +56,9 @@ schemas/
 └── network.tschem
 ```
 
-In `application.tschem`, declare the imported module and refer to its types by module path:
+In `application.tschem`, reference imported types through their module path:
 
-```text
+```tschem
 extern mod network;
 
 struct WorkerPool {
@@ -38,9 +77,9 @@ entry struct ServiceConfig {
 )
 ```
 
-In `network.tschem`, define the imported types:
+In `network.tschem`, define the imported type:
 
-```text
+```tschem
 mod address {
     type Host = string @host;
     type Port = u16 @range(1, 65535);
@@ -52,37 +91,37 @@ struct Endpoint {
 }
 ```
 
-`SchemaLoader::compile_text` accepts schemas without imports. With `std`, `compile_file` uses the file resolver, which looks for `network.tschem` beside `application.tschem` (and supports a directory named after the root file as an alternate layout):
+With `std`, `SchemaLoader::compile_file` uses the file resolver. It looks for `network.tschem` beside the root file and follows imports from imported files as well:
 
 ```rust
 let loaded = SchemaLoader::new(TypolOptions::default())
     .compile_file(Path::new("schemas/application.tschem"), out.reborrow())?;
 ```
 
-The file resolver follows imports from imported files as well. `LoadedSchema` owns the compiled Schema and can be reused for multiple configuration reads. Each `compile_file` call starts a new loading session; file contents are not cached across calls. For in-memory or packaged sources, implement `SchemaResolver` and call `compile_with_resolver`; the resolver receives the requesting source identity and one module name at a time. See the [Schema implementation](../../specification/schema-implementation/) for the lower-level loading model.
+For memory or packaged sources, implement `SchemaResolver` and call `compile_with_resolver`. The resolver receives the requesting source identity and one module name at a time. The [Schema implementation](../../specification/schema-implementation/) describes the lower-level loading and compilation pipeline.
 
-## Validate relationships between values
+## Choose a validation rule
 
-Field annotations validate one value or collection. `@assert` checks a completed struct or selected enum variant, so it can express relationships between fields. In the example above, the worker pool checks its two bounds together, and the entry assertion checks each peer against the local endpoint.
+A field annotation checks one field or collection. A struct or enum `@assert` checks a completed value and can compare fields:
 
-Other useful collection checks include:
-
-```text
+```tschem
 struct RetryPolicy {
-    delays_ms: [u32] @size(min = 1, max = 5) @all(item > 0, "delays must be positive") @sum(max = 60000),
+    delays_ms: [u32] @size(min = 1, max = 5)
+        @all(item > 0, "delays must be positive")
+        @sum(max = 60000),
     targets: [network::Endpoint] @unique(by = "host"),
 }
 ```
 
-Expressions are type-checked when the Schema is compiled. `@all` checks every array item or map value; `@unique(by = "...")` checks a field path on an array of structs; `@sum` applies to numeric arrays. Assertions run after the whole configuration has been parsed and locally validated. A failed parse or local constraint prevents root assertions from running.
+`@all` checks every array item or map value. `@unique(by = "...")` checks a field path on an array of structs, and `@sum` applies to numeric arrays. Expressions are type-checked when the Schema is compiled. Struct and active enum-variant assertions run after the full configuration value is constructed; a parse or local validation failure prevents those assertions from running.
 
-Regular expressions use search semantics: a pattern succeeds when a substring matches. Add `^` and `$` when the entire string must match, for example `@regex("^[a-z][a-z0-9-]*$")`. Typol supports a documented regex subset rather than every feature of a general-purpose regex engine; see the [Schema DSL specification](../../specification/schema-dsl/).
+Regular expressions use search semantics, so any matching substring is sufficient. Add `^` and `$` when the whole string must match, for example `@regex("^[a-z][a-z0-9-]*$")`. Typol implements the documented regex subset, not every feature of a general-purpose regex engine. See the [Schema DSL reference](../../specification/schema-dsl/).
 
 ## Keep environment access explicit
 
-An `env("NAME")` expression is allowed only when the target field declares the same name with `@env`. The Schema is the allowlist; configuration text does not get arbitrary access to process variables.
+A configuration may use `env("NAME")` only on a field that declares the same name with `@env`. The Schema is the allowlist:
 
-```text
+```tschem
 entry struct ServiceConfig {
     host: string @host @env("SERVICE_HOST") = "127.0.0.1",
 }
@@ -94,20 +133,53 @@ entry struct ServiceConfig {
 }
 ```
 
-The fallback is parsed and validated against the field type. An unset variable selects the fallback when one is present; a set but invalid value is an error and does not select the fallback. Without an expression fallback, an unset variable follows the usual Schema default, optional, or required-field rule.
+The fallback is parsed and validated as the field type. An unset variable uses the expression fallback when present. A set but invalid value is an error; Typol does not replace it with the fallback. Without an expression fallback, an unset variable follows the ordinary Schema default, optional-field, or required-field rule.
 
-Reads always receive an `Environment` provider. Use `EmptyEnvironment` for deterministic reads that should not consult the host, or use the `std` adapter when process access is intended:
+Every read receives an `Environment` provider. Use `EmptyEnvironment` when reads must not consult the host. With `std`, use the process adapter when process variables are intended:
 
 ```rust
 let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
-let config = binding.read(input, &mut environment, out)?;
+let config = binding.read_file(
+    Path::new("service.tconf"),
+    &mut environment,
+    out,
+)?;
 ```
 
-`ProcessEnvironmentLimits` caps environment-name and value bytes accepted by the process adapter. `ConfigLimits` separately caps the number of distinct names read and the total bytes cached during one configuration read. Applications can implement `Environment` to read from a secret manager or another controlled source. The [Config implementation](../../specification/config-implementation/) describes lookup, caching, and fallback behavior.
+Applications can implement `Environment` to read from a secret manager or another controlled source. The process adapter limits accepted variable name and value sizes; configuration limits separately bound the number of distinct names queried and the bytes cached for one read. See the [Config implementation](../../specification/config-implementation/) for lookup and caching behavior.
 
-## Bind custom Rust types and use Serde
+## Map Rust structs, enums, and recursive types
 
-Recursive Schema types can represent finite trees when a container, option, zero-length array, or enum terminal branch can end construction. A required cycle with no finite value is rejected during compilation. Derive supports recursive fields such as `Vec<Self>`:
+A Rust record mirrors a Schema struct. Field names and types must match; fields may remain private, and application methods can expose the intended API. Enum type and variant names and payload shapes must also match. Derive supports unit, single-payload, and named-field variants. For example, this Schema:
+
+```tschem
+enum Storage {
+    Memory,
+    Local(string),
+    ObjectStore {
+        bucket: string,
+        region: string,
+    },
+}
+```
+
+can map to:
+
+```rust
+#[derive(Typol)]
+enum Storage {
+    Memory,
+    Local(String),
+    ObjectStore {
+        bucket: String,
+        region: String,
+    },
+}
+```
+
+Arrays map to `Vec<T>` or fixed-size `[T; N]` values. `option<T>` maps to `Option<T>`. A `map<string, T>` can use `HashMap<String, T>` with `std`, `OrderedMap<T>` without `std`, or the optional map integrations listed in the [Schema implementation](../../specification/schema-implementation/).
+
+Recursive Schema types are valid when they have a finite value. For example, an empty child list ends a finite tree:
 
 ```tschem
 struct Node {
@@ -128,11 +200,9 @@ struct Node {
 }
 ```
 
-Empty `children` arrays provide finite leaf values. Non-empty values use the usual configuration nesting, node, execution, binding, and conversion limits.
+A required cycle with no finite branch is rejected at Schema compilation. Recursive values remain subject to depth, node, execution, binding, and conversion limits.
 
-For ordinary Rust records and enums, prefer `#[derive(Typol)]`. The normal `bind` path accepts built-in or derive-generated implementations whose nested fields and enum payloads follow the same rule.
-
-When a type contains a handwritten `Typol` implementation, mark the containing derive as trusted and call `bind_trusted`:
+For ordinary records and enums, use `#[derive(Typol)]` and the normal `bind` method. A handwritten `Typol` implementation is application code and is not covered by all library-managed limits. If a derived type contains a handwritten implementation, mark it `#[typol(trusted)]` and bind it explicitly:
 
 ```rust
 #[derive(Typol)]
@@ -145,13 +215,29 @@ struct ServiceConfig {
 let binding = loaded.bind_trusted::<ServiceConfig>(out.reborrow())?;
 ```
 
-`LegacyAccountId` must have its own handwritten `Typol` implementation. Such callbacks are application code: Typol budgets cover work routed through `ConversionContext`, but cannot constrain arbitrary computation, blocking, or direct allocations in the callback. Input is validated against the Schema before conversion; the returned Rust value is not validated again. Keep handwritten implementations small and reviewed. The API contract is documented in the [Schema implementation](../../specification/schema-implementation/).
+`LegacyAccountId` must provide its own `Typol` implementation. Typol validates the input before conversion, but does not validate the Rust value returned by handwritten code. The callback can allocate, block, or do arbitrary work outside the library's budgets. Use this path only for reviewed mappings; it is not a sandbox.
 
-`BoundSchema` writes a value with the same complete Schema validation used by serialization. Pass `WriteOptions` as the second argument; `WriteOptions::default()` keeps compact output, while `with_pretty(true)` expands containers with two-space indentation:
+## Edit configuration while preserving its source
+
+Use `LoadedSchema::read_file` when an editor or application needs to keep comments, whitespace, and source locations:
 
 ```rust
-use typol::WriteOptions;
+let mut document = loaded.read_file(
+    Path::new("service.tconf"),
+    &mut environment,
+    out,
+)?;
+```
 
+Apply a batch of typed replacements, insertions, or removals with `ConfigDocument::apply_edits` and `ConfigPath`. Array indexes in one batch refer to the original document, and overlapping edits are rejected. Replacements rewrite only the selected value; insertions follow the surrounding line ending and indentation. If the application only needs a validated value, use `read_file_value` or a bound schema's `read_file`.
+
+Writing a document back is a separate source operation. The standard filesystem adapter cannot atomically compare the retained source snapshot and replace a path, so `write_file` reports `AtomicReplaceUnsupported` for that expectation. Use `write_file_with_expectation` with `MustBeAbsent` for a new path or `ReplaceAny` when overwriting is intentional. A custom target can implement `ConfigSourceWriter` with its own atomic replacement behavior.
+
+## Write a typed Rust value
+
+A bound schema validates the complete value against the Schema before serializing it. Import `WriteOptions` with `use typol::WriteOptions;`. The method call order is `write(&value, sink, options, out)`; `WriteOptions` comes after the output sink:
+
+```rust
 let mut text = String::new();
 binding.write(
     &config,
@@ -161,9 +247,13 @@ binding.write(
 )?;
 ```
 
-The writer adds no final newline. Formatting whitespace counts toward the output byte limit. Conversion and complete Schema validation finish before the first output byte; a sink or output-limit failure can leave an already-written prefix. Output includes actual values from fields marked `@secret`. `BoundSchema::write` and the feature-gated `write_serde` accept a sink and `WriteOptions`; `write_to_string` and `write_serde_to_string` are available for buffered output. `TypedSchema::serialize` and `serialize_serde` use the same `WriteOptions`.
+Pretty output uses two-space indentation; default output is compact. The writer adds no final newline, and formatting whitespace counts toward the output limit. Validation and conversion finish before the first byte is written. A sink or output-limit error can leave an already-written prefix. Values marked `@secret` are still included in the output.
 
-The optional Serde bridge can read or write Serde types with the bound Schema in context. Enable both Typol's `serde` feature and Serde's derive feature:
+Use `write_to_string` when a buffered `String` is useful. The `write_serde` methods use the same options when the `serde` feature is enabled.
+
+## Use the Schema-aware Serde bridge
+
+Enable Typol's `serde` feature and Serde's derive feature:
 
 ```toml
 [dependencies]
@@ -171,67 +261,26 @@ typol = { version = "0.1", features = ["std", "serde"] }
 serde = { version = "1", features = ["derive"] }
 ```
 
-```rust
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Serialize, Deserialize, Typol)]
-struct ServiceConfig {
-    host: String,
-    port: u16,
-}
-
-let binding = loaded.bind::<ServiceConfig>(out.reborrow())?;
-let config = binding.read_serde(input, &mut environment, out)?;
-```
-
-The Schema field names and types must match the Serde data model. `read_serde` validates the parsed value before constructing the target. Ordinary calls to `Serialize` or `Deserialize` without a `TypedSchema` bridge have no Typol Schema context or validation guarantee. Custom Serde implementations are also caller code and have their own trust boundary; consult the [Schema implementation](../../specification/schema-implementation/) for the supported Serde data model.
+`read_serde` and `write_serde` use the successfully bound Schema to validate Serde data-model events. Field names, types, and enum payloads must match the Schema. Ordinary calls to Serde's `Serialize` or `Deserialize` traits do not carry a Typol Schema context and do not promise Schema validation. Custom Serde implementations remain caller code and have their own trust boundary. The [Schema implementation](../../specification/schema-implementation/) lists supported Serde data-model operations.
 
 ## Export typed JSON with Config IR
 
-Enable `config-ir` to serialize a `ConfigValue` as Config IR v1. It works with `no_std + alloc` and does not enable `std`:
+Enable `config-ir` to serialize a validated value as Config IR v1. It also enables `serde` and can be used with `no_std + alloc`:
 
 ```toml
 [dependencies]
 typol = { version = "0.1", features = ["config-ir"] }
 ```
 
-The default mode fills Schema defaults and performs full validation before writing JSON. A small helper for a value already obtained from a validated read is:
+`ConfigIrOptions::default()` selects `Validated`: it validates the supplied value but does not add missing defaults. Select `ConfigIrValueMode::WithDefaults` to fill Schema defaults and validate, or `AsProvided` to deliberately skip both. Values returned by `LoadedSchema::read_value` already have defaults applied; pass `into_config_value()` to the serializer.
+
+Map entries and struct fields have deterministic output order. Integers are JSON strings so the full `i128` and `u128` ranges are preserved. A node marked `"secret": true` still contains its value; the marker is metadata, not encryption or redaction. Treat that node and its subtree as sensitive. See the [Config IR v1 reference](../../specification/config-ir/).
+
+## Set limits and handle sensitive values
+
+`TypolOptions` configures Schema, configuration, binding, file, conversion, and execution policies. Import `ConfigLimits` and `TypolOptions` with `use typol::{config::ConfigLimits, TypolOptions};`. Tune the relevant limits for expected inputs, for example:
 
 ```rust
-use std::vec::Vec;
-use typol::{
-    core::ConfigValue, semantic::CompiledSchema,
-    ConfigIr, ConfigIrError, ConfigIrOptions,
-};
-
-fn export_ir(
-    schema: &CompiledSchema,
-    value: ConfigValue,
-) -> Result<Vec<u8>, ConfigIrError> {
-    let mut output = Vec::new();
-    ConfigIr::serialize_to(
-        schema,
-        value,
-        ConfigIrOptions::new().with_pretty(true),
-        &mut output,
-    )?;
-    Ok(output)
-}
-```
-
-The same API is available in a `no_std` application with an allocator; import the output type from `alloc::vec::Vec`. In-memory Schema loading and value reading work without host file or environment adapters.
-
-Pass `validated.into_config_value()` from `LoadedSchema::read_value` as the helper's value. To deliberately export without default filling or constraint validation, select `ConfigIrValueMode::AsProvided` with `ConfigIrOptions::with_value_mode`. Map entries and struct fields have deterministic output order, and integer values are JSON strings so full `i128` and `u128` ranges are preserved.
-
-An IR node marked `"secret": true` still contains the actual value. Treat the node and its subtree as sensitive; the marker is metadata, not encryption or redaction. See the [Config IR v1 specification](../../specification/config-ir/).
-
-## Set limits and handle diagnostics
-
-Tune configuration limits for the expected input instead of relying on a larger host-wide budget. For example, these settings cap each source, nesting depth, and collected diagnostics:
-
-```rust
-use typol::{TypolOptions, config::ConfigLimits};
-
 let options = TypolOptions::default().with_config_limits(
     ConfigLimits::default()
         .with_max_source_bytes(256 * 1024)
@@ -240,13 +289,13 @@ let options = TypolOptions::default().with_config_limits(
 );
 ```
 
-`TypolOptions` also accepts schema, binding, file, conversion, and execution policies. Keep in mind that these limits cover library-managed input and workspaces; they are not operating-system CPU, total process-memory, or real-time limits. Handwritten `Typol` and Serde callbacks remain user-code boundaries.
+These limits cover library-managed inputs and workspaces. They are not operating-system CPU, total process-memory, or real-time limits. Handwritten `Typol` and custom Serde callbacks remain user-code boundaries.
 
-Return or display `TypolError` through its diagnostic interface rather than logging raw configuration values. `@secret` marks values for safe diagnostics and display, including paths below the secret value. Successful Rust values and Config IR still carry the actual secret, so application logging and storage need their own controls.
+`@secret` protects diagnostic and safe-display output, including paths below a secret value. A successful Rust value and Config IR still contain actual secret contents. Applications must protect their own logs, serialized output, and storage.
 
 ## Next steps
 
-- Follow the `examples/showcase` files in the repository for a complete multi-file application Schema and configuration.
-- See the [CLI guide](../cli/) to check files or export validated configuration values from the command line.
+- See `examples/showcase` in the repository for a complete multi-file application.
+- Use the [CLI guide](../cli/) to validate files or export a Config IR document.
 - Read the [Schema DSL](../../specification/schema-dsl/) and [Config DSL](../../specification/config-dsl/) for normative language behavior.
-- See the [Schema implementation](../../specification/schema-implementation/), [Config implementation](../../specification/config-implementation/), and [Config IR v1 specification](../../specification/config-ir/) for detailed API and format contracts.
+- Consult the [Schema implementation](../../specification/schema-implementation/), [Config implementation](../../specification/config-implementation/), and [Config IR v1 reference](../../specification/config-ir/) for detailed contracts.

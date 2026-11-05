@@ -1,178 +1,124 @@
 # Typol
 
-[简体中文](README_CN.md) · [Documentation](https://shaogme.github.io/typol/)
+[简体中文](README_CN.md) · [Documentation site](https://shaogme.github.io/typol/)
 
-Typol is a schema-driven configuration library for Rust. It compiles `.tschem` schemas, parses `.tconf` configuration values against the compiled types, validates constraints and assertions, and can bind the result to Rust types with `#[derive(Typol)]`.
+Typol is a schema-driven configuration library for Rust. A `.tschem` file declares the configuration types and rules; a `.tconf` file supplies values. Typol compiles the Schema, parses and validates the configuration, then can convert it to matching Rust structs and enums with `#[derive(Typol)]`.
 
-The workspace requires Rust 1.85 or newer. The examples below use the `typol` facade crate; the lower-level crates can also be used independently.
+The workspace requires Rust 1.85 or newer. The examples below use the `typol` facade crate.
 
-The facade defaults to `no_std` and uses `alloc` for owned values. Configuration sources implement `typol::io::Read`; `LoadedSchema::read_value` and `BoundSchema::read` accept a `ReadRequest` plus an explicit `Environment`. Encoders write to `typol::io::Write` sinks, so callers choose their own destination. The `String` and `Vec<u8>` helpers remain convenient for buffered output. The `OrderedMap<T>` binding works without `std`; opt into `btree-map` for `alloc::collections::BTreeMap<String, T>`, or opt into `hashbrown` and depend directly on `hashbrown` for `hashbrown::HashMap<String, T>`. The BTreeMap feature does not make node allocation failures recoverable, and its target-storage budget is an estimate. The `serde` and `config-ir` features remain available without `std`. Enable `std` for file and reader adapters, process environment access, and host diagnostic rendering.
+## Start here
 
-Enable `btree-map` explicitly; it does not enable `std`:
-
-```toml
-typol = { version = "0.1", default-features = false, features = ["btree-map"] }
-```
-
-To read process variables, construct `ProcessEnvironment` with `ProcessEnvironmentLimits` and pass it to `BoundSchema::read` or `LoadedSchema::read_value`. Both types are exported from the facade root. Environment limits belong to the provider, so applications can choose them per read policy.
-
-## Quick start
-
-This example uses the `std` host adapter to compile a schema in memory, bind it to a Rust type, read configuration text, apply schema defaults, and resolve an authorized environment expression through an explicit provider. Add `features = ["std"]` to the `typol` dependency for this API.
+Add Typol with the `std` feature when your application reads files or uses the process environment:
 
 ```toml
 [dependencies]
 typol = { version = "0.1", features = ["std"] }
 ```
 
-```rust
-use typol::{
-    io::{ReadRequest, SliceSource}, opeo::ErrSlot, EmptyEnvironment, SchemaLoader, Typol,
-    TypolError, TypolOptions,
-};
+The repository includes a complete file-based example:
 
-#[derive(Debug, PartialEq, Typol)]
-struct ServiceConfig {
-    name: String,
-    port: u16,
-    tags: Vec<String>,
-    enabled: bool,
-    endpoint: String,
-}
+```sh
+cargo run -p typol-showcase
+```
 
-let mut errors = ErrSlot::<TypolError>::new();
-let result = errors.try_call(|mut out| {
-    let loaded = SchemaLoader::new(TypolOptions::default()).compile_text(
-        b"readme",
-        r#"
-entry struct ServiceConfig {
-    name: string @length(1, 64),
+For a guided application walkthrough, start with the [Quick start](docs/src/content/docs/guides/quickstart.md). It explains the Schema, configuration, Rust type mapping, and the methods that connect them.
+
+## The data model
+
+A Schema describes types and validation rules. Configuration text provides an instance of the entry type.
+
+```tschem
+struct Endpoint {
+    host: string,
     port: u16 = 8080,
-    tags: [string] @size(min = 1, max = 8),
-    enabled: bool = true,
-    endpoint: string @env("APP_ENDPOINT") = "127.0.0.1:8080",
 }
-"#,
-        out.reborrow(),
-    )?;
-    let binding = loaded.bind::<ServiceConfig>(out.reborrow())?;
-    let mut environment = EmptyEnvironment;
-    let mut source = SliceSource::new(
-        r#"{ name: "edge", tags: ["api"], endpoint: env("APP_ENDPOINT") }"#.as_bytes(),
-    );
-    let request = ReadRequest::new(&mut source, "readme config");
-    let config = binding.read(request, &mut environment, out)?;
 
-    assert_eq!(
-        config,
-        ServiceConfig {
-            name: "edge".into(),
-            port: 8080,
-            tags: vec!["api".into()],
-            enabled: true,
-            endpoint: "127.0.0.1:8080".into(),
-        }
-    );
-    Ok(())
-});
-
-assert!(result.is_ok());
-```
-
-Fallible facade operations receive an `Out` error context and return an OPEO result. `ErrSlot::try_call` is one way to run such an operation and retrieve its error. `compile_text` is for schemas without imports. For `extern mod` schemas, use `SchemaLoader::compile_file` or the lower-level compiler with a `SchemaResolver`.
-
-## Capabilities
-
-- **Schema DSL:** structs, enums with unit/single/record payloads, aliases, nested modules, finite recursive types, defaults, typed assertions, and validation annotations.
-- **Config DSL:** typed scalars, options, arrays, fixed-size arrays, string-keyed maps, enum values, comments, and explicit `env("NAME")` expressions.
-- **Validation:** scalar and collection constraints, precompiled regular expressions, `@all` predicates, and `@assert` checks over completed values.
-- **Rust integration:** `#[derive(Typol)]` describes Rust structs and enums; binding checks their shape against the compiled entry type. Bound schemas can read and write multiple values.
-- **Host adapters:** with the `std` feature, `typol-std` supplies file loading, reader inputs, process environment access, and safe diagnostic rendering. The core parser and compiler do not access the filesystem or process environment directly.
-- **Typed JSON export:** enable `config-ir` to export Config IR v1. The format preserves schema type information and deterministic ordering. `secret: true` marks sensitive nodes but does not remove or encrypt their values.
-- **Resource bounds:** parsing, schema compilation, validation, regular expressions, diagnostics, and IR serialization use configurable limits and report resource failures instead of returning partial results.
-
-Regular expressions use Typol's documented subset and search semantics. Use `^` and `$` when a pattern must match the entire string. `@secret` controls diagnostic and safe-display behavior; application values and serialized output still contain the actual data.
-
-Recursive schemas can describe finite trees and recursive enums. Rust derive supports recursive edges through `Vec<Self>` and the built-in map types; a recursive type still needs a finite branch, and each value remains subject to the configured depth and work limits. See the [recursive Schema](examples/config/recursive.tschem) and [finite Config value](examples/config/recursive.tconf) example:
-
-```rust
-#[derive(Typol)]
-struct Node {
-    value: String,
-    children: Vec<Node>,
+entry struct ServiceConfig {
+    name: string,
+    endpoint: Endpoint,
+    tags: [string],
+    note: option<string>,
 }
 ```
 
-## Write bound values
+`Endpoint` and `ServiceConfig` are Schema structs. `entry` selects the root configuration type. The application may define Rust structs with the same names and matching fields; `#[derive(Typol)]` generates their conversion mapping. Rust methods and field visibility remain under the application's control.
 
-Pass `WriteOptions` directly to the bound writer. Compact output remains the default; use `with_pretty(true)` for two-space indentation:
+At a glance, common Schema types map to Rust as follows:
 
-```rust
-use typol::WriteOptions;
+| Schema type | Rust type |
+| --- | --- |
+| `bool`, `string`, integer and float scalars | `bool`, `String`, same-width integer or float |
+| `option<T>` | `Option<T>` |
+| `[T]` | `Vec<T>` |
+| `[T; N]` | `[T; N]` |
+| `map<string, T>` | `HashMap<String, T>` with `std`, or `OrderedMap<T>` without it |
+| Schema `struct` / `enum` | Rust `struct` / `enum` with `#[derive(Typol)]` |
 
-let mut text = String::new();
-binding.write(
-    &config,
-    &mut text,
-    WriteOptions::default().with_pretty(true),
-    out,
-)?;
-```
+Field names and types must agree between the Schema and Rust declaration. See the [Quick start](docs/src/content/docs/guides/quickstart.md) for examples, including private fields and accessor methods.
 
-`BoundSchema::write` and `write_serde` write to a caller-provided sink and return `()`. Use `write_to_string` or `write_serde_to_string` when a buffered `String` is useful. `TypedSchema::serialize` and `serialize_serde` use the same `WriteOptions`. Formatting whitespace counts toward the output limit. Sink failures can leave an already-written prefix; conversion and complete Schema validation finish before the first byte is written. Serialization retains actual `@secret` values.
+## How the Rust API fits together
 
-## Handwritten `Typol` implementations
+The main path has three stages:
 
-`LoadedSchema::bind` and `TypedSchema::bind` are for built-in types and derive-generated types whose nested fields and enum payloads also carry the hidden `BudgetedTypol` marker. Mark a derived type that contains a handwritten implementation with `#[typol(trusted)]`; it remains available through `LoadedSchema::bind_trusted` or `TypedSchema::bind_trusted`, and its returned `TrustedBoundSchema` or `TrustedTypedSchema` keeps that choice visible in the Rust type. Load the schema with `SchemaLoader`, bind the Rust type, and read configuration through the resulting binding; for handwritten types, call `bind_trusted` explicitly.
+| Stage | Type or method | Purpose |
+| --- | --- | --- |
+| Compile | `SchemaLoader::compile_text` or `compile_file` | Check a Schema and produce a `LoadedSchema`. File loading requires `std`. |
+| Bind | `LoadedSchema::bind::<T>()` | Check Rust type `T` against the Schema entry and produce a reusable `BoundSchema<T>`. |
+| Read | `BoundSchema::read` or `read_file` | Parse, apply defaults, validate, and return `T`. Every read receives an explicit `Environment` provider. |
 
-Library budgets cover library-managed conversion nodes, depth, workspace, output, and context-routed target storage. They are not operating-system CPU, process-memory, or real-time limits. A trusted callback can still allocate, block, or run arbitrary code, and its returned Rust value is not revalidated. Use derive for ordinary record and enum mappings; keep handwritten implementations for special mappings that the application has reviewed and trusts. If code is untrusted, run it behind a separate process or Wasm boundary. Caller-provided Serde implementations remain a separate user-code trust boundary even on a regular `BudgetedTypol` binding.
+`SchemaLoader::new(options)` is an associated function that creates the loader. The other entries above are methods called on a loader, loaded Schema, or binding. A `LoadedSchema` and its binding can be reused to read multiple configuration values.
 
-## Workspace crates
+Operations that can fail take an OPEO `Out` error context and return an OPEO result. The Quick start shows how `opeo::ErrSlot::try_call` captures and reports a `TypolError`.
+
+Configuration inputs are explicit too: `BoundSchema::read` receives a `ReadRequest` containing a `Read` source such as `SliceSource`. With `std`, `read_file` and `read_io` adapt host files and readers. Each read also receives an `Environment` provider; Typol never consults process variables implicitly.
+
+## Workspace structure
+
+The source is split by responsibility. The normal application API is in `crates/typol`; most users do not need to depend on the lower-level crates directly.
 
 | Crate | Responsibility |
 | --- | --- |
-| `typol` | Public facade, Rust type binding, loading, codecs, and optional Config IR |
-| `typol-syntax` | Shared lexer, tokens, and Schema parser/AST |
-| `typol-schema` | Schema imports, name and type resolution, static checks, and compilation |
-| `typol-semantic` | Immutable compiled schema model, constraint views, expression programs, and evaluation |
-| `typol-config` | Streaming, schema-guided configuration parsing and validation |
+| `typol` | Public facade, loading, Rust bindings, codecs, and optional Config IR |
+| `typol-macros` | Implements `#[derive(Typol)]` |
+| `typol-syntax` | Lexer, Schema parser, and syntax tree |
+| `typol-model` | Shared Schema operator and built-in type definitions |
+| `typol-schema` | Imports, name and type resolution, static checks, and Schema compilation |
+| `typol-semantic` | Compiled Schema model, constraints, expression programs, and evaluation |
+| `typol-config` | Schema-guided configuration parsing, validation, and source-preserving documents |
 | `typol-regex` | Bounded regular-expression compiler and matcher |
-| `typol-core` | Shared values, limits, budgets, source spans, and diagnostic types |
-| `typol-std` | Filesystem, process environment, and diagnostic host adapters |
-| `typol-i18n` | English and Simplified Chinese CLI translations compiled by `u18n` |
-| `typol-macros` | `#[derive(Typol)]` implementation |
-| `typol-cli` | Schema checking, configuration checking, and Config IR export commands |
+| `typol-core` | Shared values, sources, diagnostics, and execution budgets |
+| `typol-policy` | Shared resource-limit policies |
+| `typol-report` | Localized diagnostic report formatting |
+| `typol-std` | Optional file, process-environment, and diagnostic host adapters |
+| `typol-i18n` | English and Simplified Chinese message catalogs |
+| `typol-cli` | Schema and configuration checks, plus Config IR export |
 
-## Documentation
+## Choose a guide
 
-The [Typol documentation site](docs/src/content/docs/index.md) is built with Starlight and includes English and Simplified Chinese editions. The DSL and format specifications are normative; implementation documents describe how the current crates realize those contracts.
-
-| Document | Description |
+| If you want to… | Read |
 | --- | --- |
-| [Quick start](docs/src/content/docs/guides/quickstart.md) | Beginner tutorial for Schema, Config, and Rust type binding |
-| [no_std guide](docs/src/content/docs/guides/no_std.md) | In-memory loading, alloc, and explicit providers without `std` |
-| [CLI guide](docs/src/content/docs/guides/cli.md) | Build and use the CLI to check files and export Config IR |
-| [Advanced tutorial](docs/src/content/docs/guides/advanced.md) | Imports, validation, Rust bindings, Serde, resource limits, and Config IR |
-| [Config DSL](docs/src/content/docs/specification/config-dsl.md) | `.tconf` syntax, values, defaults, options, and environment expressions |
-| [Schema DSL](docs/src/content/docs/specification/schema-dsl.md) | `.tschem` syntax, types, annotations, assertions, and regex subset |
-| [Config implementation](docs/src/content/docs/specification/config-implementation.md) | Streaming parse, validation, environment handling, and diagnostics |
-| [Schema implementation](docs/src/content/docs/specification/schema-implementation.md) | Imports, static compilation, compiled records, and runtime use |
-| [Config IR v1](docs/src/content/docs/specification/config-ir.md) | Typed JSON export format, ordering, secret markers, and limits |
-| [Regex implementation](docs/src/content/docs/specification/regex-implementation.md) | Regex compilation, NFA search, workspace, and resource bounds |
-| [Showcase](examples/showcase/README.md) | End-to-end file-based schema and configuration example |
-| [CLI examples](examples/cli/CLI.md) | CLI checks and Config IR export examples |
+| Build a typed configuration loader and understand the core types and methods | [Quick start](docs/src/content/docs/guides/quickstart.md) |
+| Use imported Schemas, cross-field checks, Serde, or Config IR | [Advanced tutorial](docs/src/content/docs/guides/advanced.md) |
+| Use Typol without the standard library | [no_std guide](docs/src/content/docs/guides/no_std.md) |
+| Check files or export Config IR from the command line | [CLI guide](docs/src/content/docs/guides/cli.md) |
+| Look up Schema or configuration syntax | [Schema DSL](docs/src/content/docs/specification/schema-dsl.md) · [Config DSL](docs/src/content/docs/specification/config-dsl.md) |
+| Understand implementation details | [Schema implementation](docs/src/content/docs/specification/schema-implementation.md) · [Config implementation](docs/src/content/docs/specification/config-implementation.md) |
 
-Run the documentation site locally from the repository root:
+The documentation site has English and Simplified Chinese editions. Its DSL and format specifications define language behavior; implementation pages describe how the current crates realize those rules.
 
-```sh
-cd docs
-npm install
-npm run dev
-```
+## Features and build
 
-Use `npm run build` in `docs` to generate the production site.
+`typol` has no default features. Add only the capabilities the application needs:
 
-## Build and test
+| Feature | Adds |
+| --- | --- |
+| `std` | File and reader inputs, file-based Schema loading, process environment access, and host diagnostic rendering |
+| `serde` | Schema-aware Serde reads and writes |
+| `hashbrown` | `hashbrown::HashMap<String, T>` bindings |
+| `btree-map` | `BTreeMap<String, T>` bindings |
+| `config-ir` | Config IR v1 JSON serialization; also enables `serde` |
+
+Without `std`, provide Schema and configuration sources in memory and pass an `Environment` implementation to each read. An allocator is required for owned values.
 
 From the workspace root:
 
@@ -182,54 +128,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Run the showcase or check a schema with the CLI:
-
-```sh
-cargo run -p typol-showcase
-cargo run -p typol-cli -- schema check examples/cli/cli_demo.tschem
-cargo run -p typol-cli -- config check --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf
-cargo run -p typol-cli -- --language zh-CN --help
-```
-
-The CLI selects English or Simplified Chinese with `--language en|zh-CN`. When omitted, it checks
-`TYPOL_LANG`, `LC_ALL`, `LC_MESSAGES`, and `LANG` in that order, then defaults to English. CLI help,
-usage errors, and operation errors use the generated `u18n` catalogs. Typol's detailed schema and
-configuration diagnostics are currently rendered in English by the library. Locale detection
-normalizes POSIX names such as `en_US.UTF-8` to BCP 47 tags; regional English tags use the generated
-catalog fallback, while any `zh-*` tag selects the single Simplified Chinese catalog. Catalog tag
-fallback only chooses an included catalog and does not provide missing message translations.
-Translation errors remain visible to the caller and are not replaced with fixed fallback text.
-
-## Nix
-
-Nix supports `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`. `x86_64-darwin` is rejected by
-the Flake, traditional package entry, overlay, and development shell. The default `typol-cli` package
-fetches the matching GitHub Release binary. Before a compatible Nix Release is available, select the
-source package explicitly:
-
-```sh
-nix build .#typol-cli
-nix run .#typol-cli -- --help
-nix build .#typol-cli-source
-nix run .#typol-cli-source -- --help
-nix flake check
-nix develop
-nix fmt
-
-nix-build -A typol-cli
-nix-build -A typol-cli-source
-nix-shell
-```
-
-Both Nix entry points expose the same release package, source package, default app, and overlay
-names. The source package always builds from the repository; the default package never switches to
-source automatically and explains how to select `typol-cli-source` when its Release is unavailable.
-
-Nix consumers can use `lib.mkConfigIr` to validate a Schema and Config in a derivation, or use
-`lib.typolConfigIr` to read a pre-generated public IR file. The derivation uses an empty
-environment and rejects secret-marked configurations. Source configuration files become Nix store
-inputs, so they must not contain credentials. Config IR still contains actual values when marked
-`secret: true`; see the [Nix integration guide](docs/src/content/docs/guides/nix.md) and
-[integration example](examples/nix/README.md).
-
-The project is dual-licensed under Apache-2.0 or MIT; see [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT).
+Build the documentation site from `docs` with `npm run build`. For Nix packaging, see the [Nix guide](docs/src/content/docs/guides/nix.md). The project is dual-licensed under Apache-2.0 or MIT; see [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT).

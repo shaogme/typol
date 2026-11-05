@@ -1,22 +1,28 @@
 ---
 title: Quick start
-description: Build a small typed configuration loader with Typol.
+description: Learn Typol's Schema types, Rust mappings, core methods, and configuration read flow.
 sidebar:
   order: 1
 ---
 
-This guide creates a Rust program that reads a `.tschem` schema and a `.tconf` file, validates the configuration, and returns a Rust struct.
+This guide builds a small Rust program that reads a Schema and a configuration file. It introduces the three pieces involved:
 
-## Add Typol to a Rust project
+1. A `.tschem` Schema declares data types and validation rules.
+2. A `.tconf` file provides values for the Schema's entry type.
+3. Rust structs and enums represent the validated values in the application.
 
-Typol requires Rust 1.85 or newer. In your application's `Cargo.toml`, add the facade crate with its `std` feature. This feature enables file inputs and host adapters. For applications that do not use the standard library, see the [no_std guide](../no_std/).
+The usual call order is `SchemaLoader → LoadedSchema → BoundSchema<T> → T`. Each step has a distinct job: compile, bind, then read.
+
+## Set up the project
+
+Typol requires Rust 1.85 or newer. File loading and the process-environment adapter need the `std` feature:
 
 ```toml
 [dependencies]
 typol = { version = "0.1", features = ["std"] }
 ```
 
-Create these files in the project root:
+Create a project with `cargo new service-app`, then add these files:
 
 ```text
 service-app/
@@ -27,138 +33,223 @@ service-app/
     └── main.rs
 ```
 
-For a new project, run `cargo new service-app` and then `cd service-app` before adding the Schema and configuration files.
+For an application that does not use the standard library, follow the [no_std guide](../no_std/).
 
-## Describe the configuration in a Schema
+## 1. Declare Schema types
 
-Put this in `service.tschem`:
+Save this in `service.tschem`:
 
-```text
+```tschem
+struct Endpoint {
+    host: string @host,
+    port: u16 @range(1, 65535) = 8080,
+}
+
 entry struct ServiceConfig {
     service_name: string @length(1, 64),
-    host: string @host = "127.0.0.1",
-    port: u16 @range(1, 65535) = 8080,
+    endpoint: Endpoint,
     tags: [string] @size(min = 1, max = 8) = ["api"],
     enabled: bool = true,
     note: option<string>,
 }
 ```
 
-`entry` marks the root configuration type. `service_name` is required and must contain 1–64 characters. The other fields show scalar types, a list, constraints, and defaults. Because `note` is optional and has no default, omitting it produces `none`.
+A Schema `struct` groups named fields. Each field has a type and may also have annotations or a default value. `entry` marks the one struct that is the root of a configuration.
 
-## Write a configuration file
+Here, `ServiceConfig` is the entry. The `endpoint` field is another declared type. `service_name` is required; `endpoint.port`, `tags`, and `enabled` have defaults; `note` is optional. The Schema validates defaults as well as values supplied in a configuration.
 
-Put this in `service.tconf`:
+Common Schema types are:
+
+| Schema type | Meaning |
+| --- | --- |
+| `bool`, `string`, `i8`…`i128`, `u8`…`u128`, `f32`, `f64` | Boolean, string, integer, and finite floating-point scalar |
+| `option<T>` | An optional `T`; its empty value is `none` |
+| `[T]` | A variable-length array |
+| `[T; N]` | An array with exactly `N` elements |
+| `map<string, T>` | A map with string keys |
+| `struct`, `enum` | User-declared record and choice types |
+
+Annotations such as `@range`, `@length`, and `@size` add validation rules. The [Schema DSL reference](../../specification/schema-dsl/) lists supported types and annotations.
+
+## 2. Provide a configuration value
+
+Save this in `service.tconf`:
 
 ```text
 {
     service_name: "edge",
-    host: "edge.internal",
+    endpoint: {
+        host: "edge.internal",
+        port: 8443,
+    },
 }
 ```
 
-The configuration uses the Schema's field names and types. Omitted fields receive their Schema defaults; an omitted optional field becomes `none`. A supplied value still has to satisfy its type and constraints. For example, setting `port` to `0` fails its `@range` check.
+Configuration keys and values follow the Schema. Missing fields use their defaults; an omitted optional field becomes `none`. A supplied value must still match its declared type and constraints. For example, `port: 0` fails the `@range(1, 65535)` rule.
 
-## Bind the Schema to Rust and read the file
+## 3. Map Schema types to Rust
 
-Put this in `src/main.rs`:
+Declare Rust types with the same names and matching fields:
+
+```rust
+use typol::Typol;
+
+#[derive(Debug, Typol)]
+struct Endpoint {
+    host: String,
+    port: u16,
+}
+
+#[derive(Debug, Typol)]
+struct ServiceConfig {
+    service_name: String,
+    endpoint: Endpoint,
+    tags: Vec<String>,
+    enabled: bool,
+    note: Option<String>,
+}
+
+impl ServiceConfig {
+    fn service_name(&self) -> &str {
+        &self.service_name
+    }
+
+    fn port(&self) -> u16 {
+        self.endpoint.port
+    }
+}
+```
+
+The derive macro generates the conversion between each Rust type and its Schema type. The Rust type name, field names and types, enum variant names, and payload shapes must correspond to the Schema declarations; binding checks that mapping. Derive does not generate accessors: methods in an `impl` block are ordinary Rust methods chosen by the application. For example, `port(&self)` reads a private field while keeping that field hidden from other modules.
+
+Common mappings are:
+
+| Schema type | Rust type |
+| --- | --- |
+| `bool`, `string`, integer/float scalar | `bool`, `String`, same-width integer/float |
+| `option<T>` | `Option<T>` |
+| `[T]` | `Vec<T>` |
+| `[T; N]` | `[T; N]` |
+| `map<string, T>` | `HashMap<String, T>` with `std`; `OrderedMap<T>` without it |
+| `struct Name` / `enum Name` | Rust `struct Name` / `enum Name` deriving `Typol` |
+
+A derived Rust struct must include every Schema field, even when the configuration can omit a field due to a default or `option`. In Rust, an optional Schema field is still represented by an `Option<T>` field on the struct. Schema enum variants can be unit, single-payload, or named-field variants; see the [advanced tutorial](../advanced/) for examples.
+
+## 4. Compile, bind, and read
+
+Put this in `src/main.rs`. The example compiles the Schema file, binds it to `ServiceConfig`, then reads and validates the configuration file:
 
 ```rust
 use std::{path::Path, process::ExitCode};
 
 use typol::{
     EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
-    host::{DiagnosticRenderError, Language, RenderOptions, Translator},
     opeo::ErrSlot,
 };
 
 #[derive(Debug, Typol)]
-struct ServiceConfig {
-    service_name: String,
+struct Endpoint {
     host: String,
     port: u16,
+}
+
+#[derive(Debug, Typol)]
+struct ServiceConfig {
+    service_name: String,
+    endpoint: Endpoint,
     tags: Vec<String>,
     enabled: bool,
     note: Option<String>,
 }
 
+impl ServiceConfig {
+    fn service_name(&self) -> &str {
+        &self.service_name
+    }
+
+    fn port(&self) -> u16 {
+        self.endpoint.port
+    }
+}
+
 fn main() -> ExitCode {
     let mut errors = ErrSlot::<TypolError>::new();
     match errors.try_call(|mut out| {
-        let loaded = SchemaLoader::new(TypolOptions::default())
-            .compile_file(Path::new("service.tschem"), out.reborrow())?;
+        let loader = SchemaLoader::new(TypolOptions::default());
+        let loaded = loader.compile_file(Path::new("service.tschem"), out.reborrow())?;
         let binding = loaded.bind::<ServiceConfig>(out.reborrow())?;
         let mut environment = EmptyEnvironment;
-        let config = binding.read_file(Path::new("service.tconf"), &mut environment, out)?;
+        let config = binding.read_file(
+            Path::new("service.tconf"),
+            &mut environment,
+            out,
+        )?;
 
-        println!("{config:#?}");
+        println!("{} listens on port {}", config.service_name(), config.port());
         Ok(())
     }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(caught) => {
-            let mut render_errors = ErrSlot::<DiagnosticRenderError>::new();
-            match render_errors.call(|out| {
-                caught.get().render(
-                    Translator::new(Language::English),
-                    RenderOptions::default(),
-                    out,
-                )
-            }) {
-                Ok(diagnostics) => {
-                    eprintln!("{diagnostics}");
-                    ExitCode::FAILURE
-                }
-                Err(render_error) => {
-                    eprintln!("Diagnostic rendering failed: {render_error}");
-                    ExitCode::from(3)
-                }
-            }
+            eprintln!("{}", caught.get());
+            ExitCode::FAILURE
         }
     }
 }
 ```
 
-Run the program from the project root:
+Run it from the project directory:
 
 ```sh
 cargo run
 ```
 
-`#[derive(Typol)]` generates the mapping between the Schema's `ServiceConfig` and the Rust struct. `bind` checks that the declared fields and types match. `read` loads and validates the configuration before returning the typed value. The example uses `EmptyEnvironment` so its result does not depend on the machine's environment.
+The methods in this path are:
 
-With `std` enabled, `TypolError::render` renders library diagnostics using the `Translator` you pass. Its result distinguishes a Typol operation error from a diagnostic rendering or translation error, so an application can handle rendering failure separately.
+| Call | What it does |
+| --- | --- |
+| `SchemaLoader::new(options)` | Creates a loader with the selected limits and policies. |
+| `loader.compile_file(path, out)` | Loads and compiles a Schema file. This file API requires `std`. For an in-memory Schema, use `compile_text(name, text, out)`. |
+| `loaded.bind::<ServiceConfig>(out)` | Checks the Rust type against the Schema entry and prepares a reusable binding. |
+| `binding.read_file(path, environment, out)` | Reads, applies defaults, validates, and converts one file to `ServiceConfig`. |
 
-For this input, the returned struct has `port: 8080`, `tags: ["api"]`, `enabled: true`, and `note: None`; those values came from defaults or the optional-field rule.
+`SchemaLoader::new` is an associated function: it is called on the type. `compile_file`, `bind`, and `read_file` are methods called on values. Fallible methods take an `Out` error context and return an OPEO result; `ErrSlot::try_call` provides that context and captures the resulting `TypolError`.
 
-## Read environment variables when needed
+A `LoadedSchema` and its binding can be kept and reused to read many configurations. The binding checks the Rust type once; each read still parses and validates its input. If you need Typol's validated value tree instead of a Rust type, use `LoadedSchema::read_value`.
 
-Environment access is explicit. To allow the `host` field to read `SERVICE_HOST`, update its Schema declaration to include `@env("SERVICE_HOST")`:
+The file methods in this example require `std`. For in-memory input, `BoundSchema::read` accepts a `ReadRequest` wrapping a `Read` source, such as `SliceSource`; `ReadRequest::from_text` is a shortcut for text. The [no_std guide](../no_std/) shows that form in a complete program.
 
-```text
+## Read environment variables only when allowed
+
+Environment access is explicit. To permit `host` to use `SERVICE_HOST`, add the same name to the Schema field's `@env` annotation:
+
+```tschem
 host: string @host @env("SERVICE_HOST") = "127.0.0.1",
 ```
 
-Then write the configuration file as:
+Then the configuration can contain:
 
 ```text
 {
     service_name: "edge",
-    host: env("SERVICE_HOST", "127.0.0.1"),
+    endpoint: {
+        host: env("SERVICE_HOST", "127.0.0.1"),
+        port: 8443,
+    },
 }
 ```
 
-Then replace `EmptyEnvironment` in the top-level `typol` import with `ProcessEnvironment` and `ProcessEnvironmentLimits`, and replace the provider initialization:
+Replace `EmptyEnvironment` with `ProcessEnvironment` and `ProcessEnvironmentLimits` in the `typol` import, then create the provider:
 
 ```rust
 let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
 ```
 
-The expression's fallback is used when the variable is unset. A set value is parsed as the field's declared type and still has to pass its constraints. Only fields authorized with the matching `@env` annotation can use that expression.
+The fallback is used when the variable is unset. A set value is parsed as the field's declared type and still has to pass its constraints. Only a field declaring the matching `@env` name can use that environment expression. The [advanced tutorial](../advanced/) explains custom providers and failure behavior.
 
 ## Next steps
 
-- Read the [Schema DSL specification](../../specification/schema-dsl/) for types, defaults, constraints, and assertions.
-- Read the [Config DSL specification](../../specification/config-dsl/) for configuration values, enums, maps, and environment expressions.
-- Use the [CLI guide](../cli/) to check Schema and configuration files or export Config IR without writing a Rust application.
-- See the [no_std guide](../no_std/) for in-memory loading and explicit providers without the standard library.
-- Try the [advanced tutorial](../advanced/) for imports, trusted handwritten mappings, resource limits, and Config IR.
+- Read the [Schema DSL reference](../../specification/schema-dsl/) for type and validation rules.
+- Read the [Config DSL reference](../../specification/config-dsl/) for values, enums, maps, and environment expressions.
+- Use the [CLI guide](../cli/) to check files without writing a Rust application.
+- Follow the [advanced tutorial](../advanced/) for imported Schemas, richer validation, Serde, and Config IR.
+- See the [no_std guide](../no_std/) for in-memory inputs without the standard library.

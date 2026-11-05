@@ -26,6 +26,10 @@ name = "config_api"
 path = "tests/config_api.rs"
 
 [[test]]
+name = "config_document"
+path = "tests/config_document.rs"
+
+[[test]]
 name = "config_fixtures"
 path = "tests/config_fixtures.rs"
 

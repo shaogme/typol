@@ -218,16 +218,6 @@ impl<T: Typol> BoundSchema<'_, T> {
             .run_read_request(request, environment, TypolDecode { bound: self }, out)
     }
 
-    pub fn read_with_value_from<'slot, R: Read>(
-        &self,
-        request: ReadRequest<'_, R>,
-        environment: &mut dyn Environment,
-        out: Out<'slot, '_, TypolError>,
-    ) -> OResult<'slot, BoundRead<T>> {
-        self.loaded
-            .run_read_request(request, environment, TypolDecode { bound: self }, out)
-    }
-
     #[cfg(feature = "std")]
     pub fn read_file<'slot>(
         &self,

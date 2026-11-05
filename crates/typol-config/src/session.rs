@@ -16,8 +16,8 @@ use opeo::{ErrSlot, OResult, Out};
 use core::cell::RefCell;
 
 use typol_core::{
-    BudgetError, ConfigValue, Diagnostic, ExecutionBudget, Read, SecretRange, SourceCapture,
-    SourceId, SourceReadError, SourceSpan, SpanLocation,
+    BudgetError, ChargedVec, ConfigValue, Diagnostic, ExecutionBudget, Read, SecretRange,
+    SourceCapture, SourceId, SourceReadError, SourceSpan, SpanLocation,
 };
 use typol_policy::{RegexLimits, ValueLimits};
 use typol_semantic::{
@@ -274,7 +274,9 @@ pub(crate) struct TrackingInput<'input, R: Read + ?Sized = dyn Read> {
     fetched: usize,
     limit: usize,
     capture: Option<&'input RefCell<Option<SourceCapture>>>,
+    retained_source: Option<ChargedVec<u8>>,
     source_errors: ErrSlot<SourceReadError>,
+    retained_source_errors: ErrSlot<BudgetError>,
 }
 
 impl<'input, R: Read + ?Sized> TrackingInput<'input, R> {
@@ -285,13 +287,28 @@ impl<'input, R: Read + ?Sized> TrackingInput<'input, R> {
             fetched: 0,
             limit,
             capture: None,
+            retained_source: None,
             source_errors: ErrSlot::new(),
+            retained_source_errors: ErrSlot::new(),
         }
     }
 
     pub(crate) fn with_capture(mut self, capture: &'input RefCell<Option<SourceCapture>>) -> Self {
         self.capture = Some(capture);
         self
+    }
+
+    pub(crate) fn retain_source<'slot>(
+        mut self,
+        budget: &ExecutionBudget,
+        out: Out<'slot, '_, Diagnostic>,
+    ) -> OResult<'slot, Self> {
+        self.retained_source = Some(ChargedVec::new(Some(budget), out)?);
+        Ok(self)
+    }
+
+    pub(crate) fn take_retained_source(&mut self) -> Option<ChargedVec<u8>> {
+        self.retained_source.take()
     }
 
     pub(crate) fn failed(&self) -> bool {
@@ -318,6 +335,20 @@ impl<R: Read + ?Sized> Read<Diagnostic> for TrackingInput<'_, R> {
             }
         };
         self.failed |= count > output.len();
+        if let Some(bytes) = output.get(..count) {
+            if let Some(retained) = &mut self.retained_source {
+                let retain_count = bytes.len().min(self.limit.saturating_sub(self.fetched));
+                if let Some(bytes) = bytes.get(..retain_count) {
+                    if let Err(caught) = self
+                        .retained_source_errors
+                        .try_call(|budget_out| retained.extend_from_slice(bytes, budget_out))
+                    {
+                        self.failed = true;
+                        return Err(out.fail(Diagnostic::from(caught.take())));
+                    }
+                }
+            }
+        }
         if let Some(capture) = self.capture {
             if count == 0 {
                 if let Some(capture) = capture.borrow_mut().as_mut() {

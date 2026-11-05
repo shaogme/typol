@@ -19,11 +19,47 @@ use std::{
 use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 
 #[cfg(windows)]
-use std::os::windows::{ffi::OsStrExt, fs::MetadataExt};
+use std::{
+    ffi::c_void,
+    os::windows::{ffi::OsStrExt, io::AsRawHandle},
+};
 
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
     fn readlink(path: *const c_char, buffer: *mut c_char, size: usize) -> isize;
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+#[repr(C)]
+struct WindowsFileTime {
+    low: u32,
+    high: u32,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+#[repr(C)]
+struct WindowsFileInformation {
+    attributes: u32,
+    creation_time: WindowsFileTime,
+    access_time: WindowsFileTime,
+    write_time: WindowsFileTime,
+    volume_serial: u32,
+    size_high: u32,
+    size_low: u32,
+    links: u32,
+    file_index_high: u32,
+    file_index_low: u32,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetFileInformationByHandle(
+        file: *mut c_void,
+        information: *mut WindowsFileInformation,
+    ) -> i32;
 }
 
 pub(crate) struct NativePath {
@@ -132,24 +168,33 @@ impl NativePath {
         Self::from_path(requested_path, budget, operation, out)
     }
 
-    pub(crate) fn file_identity(metadata: &Metadata) -> Option<FileIdentity> {
+    pub(crate) fn file_identity(file: &File, _metadata: &Metadata) -> Option<FileIdentity> {
         #[cfg(unix)]
         {
+            let _ = file;
             Some(FileIdentity {
-                volume: metadata.dev(),
-                file: metadata.ino(),
+                volume: _metadata.dev(),
+                file: _metadata.ino(),
             })
         }
         #[cfg(windows)]
         {
+            let mut information = WindowsFileInformation::default();
+            // The handle is borrowed from an open File and the output points to a valid structure.
+            let succeeded =
+                unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+            if succeeded == 0 {
+                return None;
+            }
             Some(FileIdentity {
-                volume: u64::from(metadata.volume_serial_number()?),
-                file: metadata.file_index()?,
+                volume: u64::from(information.volume_serial),
+                file: (u64::from(information.file_index_high) << 32)
+                    | u64::from(information.file_index_low),
             })
         }
         #[cfg(not(any(unix, windows)))]
         {
-            let _ = metadata;
+            let _ = (file, _metadata);
             None
         }
     }

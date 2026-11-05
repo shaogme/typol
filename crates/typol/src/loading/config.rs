@@ -8,24 +8,24 @@ use crate::{
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_config::{
-    ConfigParseErrors, ConfigParseRequest, ConfigParser, Environment, ValidatedConfigValue,
+    ConfigDocument, ConfigParseErrors, ConfigParseRequest, ConfigParser, Environment,
+    ValidatedConfigValue,
 };
 use typol_core::{ExecutionBudget, Read, ReadRequest};
 use typol_semantic::CompiledSchema;
 
 #[cfg(feature = "std")]
-use std::{fmt, io::Read as IoRead, path::Path};
-
-#[cfg(feature = "std")]
 use crate::loading::{FileReadRequest, PreparedConfig};
-
+#[cfg(feature = "std")]
+use std::{fmt, io::Read as IoRead, path::Path};
+#[cfg(feature = "std")]
+use typol_config::{ConfigSourceCommitError, ConfigSourceExpectation, ConfigSourceRevision};
 #[cfg(feature = "std")]
 use typol_core::{ExecutionLimits, SourceId};
-
 #[cfg(feature = "std")]
 use typol_std::{
-    FileConfigInput, FileSchemaCompilation, HostError, HostOperation, ReadSource,
-    SourceNames as HostSourceNames,
+    ConfigSourceWriteError, FileConfigInput, FileConfigSourceWriter, FileSchemaCompilation,
+    HostError, HostOperation, ReadSource, SourceNames as HostSourceNames,
 };
 
 // The terminal slot reserves one error payload without consuming source-name edit limits.
@@ -81,6 +81,10 @@ struct ConfigValueParser<'loaded> {
     loaded: &'loaded LoadedSchema,
 }
 
+struct ConfigDocumentParser<'loaded> {
+    loaded: &'loaded LoadedSchema,
+}
+
 impl ReadStrategy for ConfigValueParser<'_> {
     type Value = ValidatedConfigValue;
     type Error = ConfigParseErrors;
@@ -91,6 +95,41 @@ impl ReadStrategy for ConfigValueParser<'_> {
         out: Out<'slot, 'borrow, Self::Error>,
     ) -> OResult<'slot, Self::Value> {
         ConfigParser::new(self.loaded.schema()).parse_with_budget(
+            ConfigParseRequest::new(
+                request.source,
+                request.display_name,
+                self.loaded.options.config(),
+            ),
+            request.environment,
+            request.budget,
+            out,
+        )
+    }
+
+    fn finish_error(
+        &mut self,
+        slot: ErrorSlot,
+        error: Self::Error,
+        names: ErrorNames,
+    ) -> TypolError {
+        #[cfg(feature = "std")]
+        if let Some(source_error) = error.source_read_error() {
+            return LoadSupport::read_source_error(source_error);
+        }
+        slot.config(error, names)
+    }
+}
+
+impl<'loaded> ReadStrategy for ConfigDocumentParser<'loaded> {
+    type Value = ConfigDocument<'loaded>;
+    type Error = ConfigParseErrors;
+
+    fn convert<'slot, 'borrow>(
+        &mut self,
+        request: ConfigSourceRequest<'_, '_, '_, '_>,
+        out: Out<'slot, 'borrow, Self::Error>,
+    ) -> OResult<'slot, Self::Value> {
+        ConfigParser::new(self.loaded.schema()).parse_document_with_budget(
             ConfigParseRequest::new(
                 request.source,
                 request.display_name,
@@ -195,18 +234,59 @@ impl LoadedSchema {
         )
     }
 
+    /// Reads a configuration source and retains its text and source locations for editing.
+    pub fn read_document<'slot, R: Read>(
+        &self,
+        request: ReadRequest<'_, R>,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, ConfigDocument<'_>> {
+        self.run_read_request(
+            request,
+            environment,
+            ConfigDocumentParser { loaded: self },
+            out,
+        )
+    }
+
     #[cfg(feature = "std")]
     pub fn read_file<'slot>(
         &self,
         path: &Path,
         environment: &mut dyn Environment,
         out: Out<'slot, '_, TypolError>,
-    ) -> OResult<'slot, ValidatedConfigValue> {
+    ) -> OResult<'slot, ConfigDocument<'_>> {
         self.read_file_named(path, "config", environment, out)
     }
 
     #[cfg(feature = "std")]
     pub fn read_file_named<'slot>(
+        &self,
+        path: &Path,
+        display_name: &str,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, ConfigDocument<'_>> {
+        self.run_file_request(
+            FileReadRequest { path, display_name },
+            environment,
+            ConfigDocumentParser { loaded: self },
+            out,
+        )
+    }
+
+    #[cfg(feature = "std")]
+    pub fn read_file_value<'slot>(
+        &self,
+        path: &Path,
+        environment: &mut dyn Environment,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, ValidatedConfigValue> {
+        self.read_file_value_named(path, "config", environment, out)
+    }
+
+    #[cfg(feature = "std")]
+    pub fn read_file_value_named<'slot>(
         &self,
         path: &Path,
         display_name: &str,
@@ -219,6 +299,42 @@ impl LoadedSchema {
             ConfigValueParser { loaded: self },
             out,
         )
+    }
+
+    #[cfg(feature = "std")]
+    /// Writes a file using the document's retained source snapshot as the expectation.
+    ///
+    /// A local filesystem that cannot atomically compare that snapshot with the target returns
+    /// `AtomicReplaceUnsupported`. Use `write_file_with_expectation` to choose an explicit
+    /// overwrite policy when that behavior is intended.
+    pub fn write_file(
+        &self,
+        document: &mut ConfigDocument<'_>,
+        path: &Path,
+    ) -> Result<ConfigSourceRevision, ConfigSourceCommitError<ConfigSourceWriteError>> {
+        self.write_file_with_expectation(document, path, document.source_expectation())
+    }
+
+    #[cfg(feature = "std")]
+    /// Writes a file using an explicit target expectation and the configured file/source limit.
+    pub fn write_file_with_expectation(
+        &self,
+        document: &mut ConfigDocument<'_>,
+        path: &Path,
+        expectation: ConfigSourceExpectation<'_>,
+    ) -> Result<ConfigSourceRevision, ConfigSourceCommitError<ConfigSourceWriteError>> {
+        let max_bytes = self
+            .options
+            .config()
+            .config()
+            .max_source_bytes()
+            .min(self.options.file_input_limits().max_file_bytes());
+        if document.source().len() > max_bytes {
+            return Err(ConfigSourceCommitError::ResourceLimitExceeded);
+        }
+        let mut writer =
+            FileConfigSourceWriter::new(self.options.file_input_limits().max_path_bytes());
+        document.write_source(path, &mut writer, expectation)
     }
 
     #[cfg(feature = "std")]

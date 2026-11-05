@@ -228,7 +228,7 @@ impl OpenedSchemaFile {
     }
 
     pub(crate) fn identity(&self) -> Option<FileIdentity> {
-        NativePath::file_identity(&self.metadata)
+        NativePath::file_identity(&self.file, &self.metadata)
     }
 
     pub(crate) fn handle(&self) -> &File {

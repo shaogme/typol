@@ -28,6 +28,12 @@ static INSTANCE_LOCATION_NODE_MISSING: DiagnosticContext = diagnostic_context!(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NodeId(usize);
 
+impl NodeId {
+    pub(crate) const fn index(self) -> usize {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Member<'schema> {
     Root,
@@ -158,12 +164,15 @@ impl<'schema> LocationIndex<'schema> {
         Ok(id)
     }
 
-    #[cfg(test)]
     pub(crate) fn nodes(&self) -> impl Iterator<Item = (NodeId, &LocationNode<'schema>)> {
         self.nodes
             .iter()
             .enumerate()
             .map(|(index, node)| (NodeId(index), node))
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.nodes.len()
     }
 
     pub(crate) fn set_variant<'slot, 'borrow>(
@@ -383,6 +392,14 @@ impl<'schema> LocationIndex<'schema> {
 }
 
 impl<'schema> LocationNode<'schema> {
+    pub(crate) const fn parent(&self) -> Option<NodeId> {
+        self.parent
+    }
+
+    pub(crate) const fn member(&self) -> Member<'schema> {
+        self.member
+    }
+
     pub(crate) fn span(&self) -> Option<LocatedSpan> {
         self.span
     }

@@ -31,7 +31,8 @@ pub use environment::ProcessEnvironment;
 #[cfg(all(test, windows))]
 pub(crate) use environment::{EnvironmentBytes, EnvironmentFailure};
 pub use filesystem::{
-    FileConfigInput, FileSchemaResolver, FileSchemaSource, IoWriteSink, ReadSource,
+    ConfigSourceWriteError, ConfigSourceWriteErrorKind, FileConfigInput, FileConfigSourceWriter,
+    FileSchemaResolver, FileSchemaSource, IoWriteSink, ReadSource,
 };
 pub use host::{
     FileConfigInputLimitParams, FileConfigInputLimits, HostError, HostErrorKind, HostFailureStep,

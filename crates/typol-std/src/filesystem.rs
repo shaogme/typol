@@ -1,5 +1,6 @@
 mod input;
 mod paths;
+mod source_writer;
 
 #[cfg(test)]
 mod allocation_tests;
@@ -20,6 +21,9 @@ use self::{
 use crate::{FileSchemaLimits, HostError, HostErrorKind, HostFailureStep, HostOperation};
 
 pub use input::{FileConfigInput, IoWriteSink, ReadSource};
+pub use source_writer::{
+    ConfigSourceWriteError, ConfigSourceWriteErrorKind, FileConfigSourceWriter,
+};
 
 struct SelectedFile {
     path: NativePath,
