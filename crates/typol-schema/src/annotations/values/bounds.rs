@@ -17,10 +17,10 @@ struct NamedArguments<'a> {
     second: Option<NamedArgument<'a, NumberLiteral<'a>>>,
 }
 
-pub(in crate::annotations) struct AnnotationBounds;
+pub(crate) struct AnnotationBounds;
 
 impl AnnotationBounds {
-    pub(in crate::annotations) fn parse_collection_bounds<'slot>(
+    pub(crate) fn parse_collection_bounds<'slot>(
         bounds: SizeArguments<'_>,
         context: &CompileContext,
         mut out: Out<'slot, '_, AnnotationError>,
@@ -72,7 +72,7 @@ impl AnnotationBounds {
         Ok((min, max))
     }
 
-    pub(in crate::annotations) fn parse_sum_bounds<'slot>(
+    pub(crate) fn parse_sum_bounds<'slot>(
         bounds: NamedBounds<'_>,
         builtin: BuiltinType,
         context: &CompileContext,

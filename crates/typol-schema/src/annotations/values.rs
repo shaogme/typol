@@ -1,6 +1,6 @@
 mod bounds;
 mod summary;
-pub(in crate::annotations) use bounds::AnnotationBounds;
+pub(crate) use bounds::AnnotationBounds;
 
 use crate::{
     SchemaLimits,

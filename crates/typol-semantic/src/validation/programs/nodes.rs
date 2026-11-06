@@ -8,14 +8,14 @@ use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{ChargedVec, DiagnosticContext, ExecutionBudget, diagnostic_context};
 use typol_model::{BinaryOperator, BuiltinType, UnaryOperator};
 
-pub(in crate::validation) static PROGRAM_VALIDATION_INTERNAL: DiagnosticContext = diagnostic_context!(
+pub(crate) static PROGRAM_VALIDATION_INTERNAL: DiagnosticContext = diagnostic_context!(
     "typol-semantic",
     "expression-validation",
     "typed-program-invariant-failed",
 );
 
 #[derive(Clone, Copy)]
-pub(in crate::validation) struct ProgramBindings {
+pub(crate) struct ProgramBindings {
     self_type: Option<TypeId>,
     root: bool,
     item: Option<TypeId>,
@@ -24,7 +24,7 @@ pub(in crate::validation) struct ProgramBindings {
 }
 
 impl ProgramBindings {
-    pub(in crate::validation) fn assertion(self_type: Option<TypeId>) -> Self {
+    pub(crate) fn assertion(self_type: Option<TypeId>) -> Self {
         Self {
             self_type,
             root: true,
@@ -92,7 +92,7 @@ struct MethodOperation<'a> {
     argument: &'a Option<TypedMethodArgument>,
 }
 
-pub(in crate::validation) struct ProgramValidationState<'schema, 'program, 'execution> {
+pub(crate) struct ProgramValidationState<'schema, 'program, 'execution> {
     schema: &'schema CompiledSchema,
     program: &'program TypedExpression,
     bindings: ProgramBindings,
