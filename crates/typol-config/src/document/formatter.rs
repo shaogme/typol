@@ -45,6 +45,11 @@ pub(crate) struct FormatRequest<'source, 'budget> {
     pub(crate) options: ConfigFormatOptions,
 }
 
+struct FormatResult {
+    output: Option<ChargedString>,
+    matches_source: bool,
+}
+
 #[derive(Clone, Copy)]
 struct FormatFrame {
     opener: u8,
@@ -57,12 +62,17 @@ pub(crate) struct FormatterEngine<'source, 'budget> {
     source: &'source str,
     budget: Option<&'budget ExecutionBudget>,
     newline: &'static str,
-    output: ChargedString,
+    output: Option<ChargedString>,
+    output_len: usize,
+    last_output_byte: Option<u8>,
+    comparison_offset: usize,
+    matches_source: bool,
     stack: ChargedVec<FormatFrame>,
     options: ConfigFormatOptions,
     output_limit: usize,
     previous: Option<TokenKind>,
     previous_comment_standalone: bool,
+    comment_run_checked: bool,
 }
 
 impl ConfigFormatError {
@@ -163,6 +173,28 @@ impl FormatterEngine<'_, '_> {
         request: FormatRequest<'_, '_>,
         mut out: Out<'slot, '_, ConfigFormatError>,
     ) -> OResult<'slot, FormattedConfig> {
+        let result = Self::format_result(request, true, out.reborrow())?;
+        let Some(source) = result.output else {
+            return Err(out.fail(ConfigFormatError::new(
+                ConfigFormatErrorKind::InvalidStructure,
+            )));
+        };
+        Ok(FormattedConfig { source })
+    }
+
+    pub(crate) fn matches_source<'slot>(
+        request: FormatRequest<'_, '_>,
+        out: Out<'slot, '_, ConfigFormatError>,
+    ) -> OResult<'slot, bool> {
+        let result = Self::format_result(request, false, out)?;
+        Ok(result.matches_source)
+    }
+
+    fn format_result<'slot>(
+        request: FormatRequest<'_, '_>,
+        collect_output: bool,
+        mut out: Out<'slot, '_, ConfigFormatError>,
+    ) -> OResult<'slot, FormatResult> {
         if request.source.len() > request.source_limit {
             return Err(out.fail(ConfigFormatError::new(
                 ConfigFormatErrorKind::ResourceLimitExceeded,
@@ -181,37 +213,54 @@ impl FormatterEngine<'_, '_> {
         } else {
             "\n"
         };
-        let output = ChargedString::with_capacity(0, request.budget, out.reborrow())?;
+        let output = if collect_output {
+            Some(ChargedString::with_capacity(
+                0,
+                request.budget,
+                out.reborrow(),
+            )?)
+        } else {
+            None
+        };
         let stack = ChargedVec::new(request.budget, out.reborrow())?;
         let mut engine = FormatterEngine {
             source: request.source,
             budget: request.budget,
             newline,
             output,
+            output_len: 0,
+            last_output_byte: None,
+            comparison_offset: 0,
+            matches_source: true,
             stack,
             options: request.options,
             output_limit,
             previous: None,
             previous_comment_standalone: false,
+            comment_run_checked: false,
         };
         engine.run(out.reborrow())?;
-        if !engine.output.as_str().ends_with('\n') {
+        if engine.last_output_byte != Some(b'\n') {
             engine.append_text(newline, out.reborrow())?;
         }
-        if engine.output.len() > request.constructed_text_limit {
+        if engine.output_len > request.constructed_text_limit {
             return Err(out.fail(ConfigFormatError::new(
                 ConfigFormatErrorKind::ResourceLimitExceeded,
             )));
         }
-        if let Some(budget) = request.budget {
-            budget.construct_text(
-                engine.output.len(),
-                request.constructed_text_limit,
-                out.reborrow(),
-            )?;
+        if collect_output {
+            if let Some(budget) = request.budget {
+                budget.construct_text(
+                    engine.output_len,
+                    request.constructed_text_limit,
+                    out.reborrow(),
+                )?;
+            }
         }
-        Ok(FormattedConfig {
-            source: engine.output,
+        Ok(FormatResult {
+            output: engine.output,
+            matches_source: engine.matches_source
+                && engine.comparison_offset == request.source.len(),
         })
     }
 
@@ -258,10 +307,20 @@ impl FormatterEngine<'_, '_> {
             TokenKind::LineComment | TokenKind::BlockComment => {
                 self.write_comment(token, out.reborrow())
             }
-            TokenKind::Open(opener) => self.open(opener, token, out.reborrow()),
-            TokenKind::Close(closer) => self.close(closer, token, out.reborrow()),
-            TokenKind::Comma => self.comma(token, out.reborrow()),
+            TokenKind::Open(opener) => {
+                self.comment_run_checked = false;
+                self.open(opener, token, out.reborrow())
+            }
+            TokenKind::Close(closer) => {
+                self.comment_run_checked = false;
+                self.close(closer, token, out.reborrow())
+            }
+            TokenKind::Comma => {
+                self.comment_run_checked = false;
+                self.comma(token, out.reborrow())
+            }
             TokenKind::Colon => {
+                self.comment_run_checked = false;
                 self.mark_item();
                 self.prepare_token(token, out.reborrow())?;
                 self.append_source(token.start, token.end, out.reborrow())?;
@@ -270,6 +329,7 @@ impl FormatterEngine<'_, '_> {
                 Ok(())
             }
             TokenKind::Atom | TokenKind::String => {
+                self.comment_run_checked = false;
                 self.mark_item();
                 self.prepare_token(token, out.reborrow())?;
                 self.append_source(token.start, token.end, out.reborrow())?;
@@ -386,7 +446,10 @@ impl FormatterEngine<'_, '_> {
         token: ScannedToken,
         mut out: Out<'slot, '_, ConfigFormatError>,
     ) -> OResult<'slot, ()> {
-        self.insert_comma_before_closing_comment(token.end, out.reborrow())?;
+        if !self.comment_run_checked {
+            self.insert_comma_before_closing_comment(token.end, out.reborrow())?;
+            self.comment_run_checked = true;
+        }
         let opening_boundary = matches!(
             self.previous,
             Some(TokenKind::Open(b'{') | TokenKind::Open(b'['))
@@ -396,7 +459,7 @@ impl FormatterEngine<'_, '_> {
             || self.previous.is_none()
             || self.previous_comment_standalone;
         if standalone {
-            if !self.output.is_empty() {
+            if self.output_len > 0 {
                 self.append_newline(out.reborrow())?;
             }
             self.append_indent(self.stack.len(), out.reborrow())?;
@@ -491,7 +554,7 @@ impl FormatterEngine<'_, '_> {
         token: ScannedToken,
         mut out: Out<'slot, '_, ConfigFormatError>,
     ) -> OResult<'slot, ()> {
-        if self.output.as_str().ends_with('\n') {
+        if self.last_output_byte == Some(b'\n') {
             self.append_indent(self.stack.len(), out.reborrow())?;
         }
         let needs_space = matches!(self.previous, Some(TokenKind::Colon))
@@ -515,11 +578,11 @@ impl FormatterEngine<'_, '_> {
         &mut self,
         mut out: Out<'slot, '_, ConfigFormatError>,
     ) -> OResult<'slot, ()> {
-        if self.output.as_str().ends_with('\n') {
+        if self.last_output_byte == Some(b'\n') {
             self.append_indent(self.stack.len(), out.reborrow())?;
         }
         if matches!(self.previous, Some(TokenKind::BlockComment))
-            && !self.output.as_str().ends_with(' ')
+            && self.last_output_byte != Some(b' ')
         {
             self.append_space(out.reborrow())?;
         }
@@ -530,7 +593,7 @@ impl FormatterEngine<'_, '_> {
         &mut self,
         mut out: Out<'slot, '_, ConfigFormatError>,
     ) -> OResult<'slot, ()> {
-        if self.output.as_str().ends_with('\n') {
+        if self.last_output_byte == Some(b'\n') {
             let depth = self.stack.len().checked_sub(1).ok_or_else(|| {
                 out.reborrow().fail(ConfigFormatError::new(
                     ConfigFormatErrorKind::InvalidStructure,
@@ -644,7 +707,7 @@ impl FormatterEngine<'_, '_> {
         text: &str,
         mut out: Out<'slot, '_, ConfigFormatError>,
     ) -> OResult<'slot, ()> {
-        let Some(length) = self.output.len().checked_add(text.len()) else {
+        let Some(length) = self.output_len.checked_add(text.len()) else {
             return Err(out.fail(ConfigFormatError::new(
                 ConfigFormatErrorKind::ResourceLimitExceeded,
             )));
@@ -654,14 +717,26 @@ impl FormatterEngine<'_, '_> {
                 ConfigFormatErrorKind::ResourceLimitExceeded,
             )));
         }
-        self.output.try_push_str(text, out.reborrow())
+        if let Some(output) = &mut self.output {
+            output.try_push_str(text, out.reborrow())?;
+        } else if let Some(budget) = self.budget {
+            budget.consume(text.len(), out.reborrow())?;
+        }
+        self.matches_source &= self
+            .source
+            .get(self.comparison_offset..length)
+            .is_some_and(|candidate| candidate == text);
+        self.comparison_offset = length;
+        self.output_len = length;
+        self.last_output_byte = text.as_bytes().last().copied().or(self.last_output_byte);
+        Ok(())
     }
 
     fn append_space<'slot>(
         &mut self,
         out: Out<'slot, '_, ConfigFormatError>,
     ) -> OResult<'slot, ()> {
-        if self.output.as_str().ends_with([' ', '\t', '\n', '\r']) {
+        if matches!(self.last_output_byte, Some(b' ' | b'\t' | b'\n' | b'\r')) {
             return Ok(());
         }
         self.append_text(" ", out)
@@ -671,7 +746,7 @@ impl FormatterEngine<'_, '_> {
         &mut self,
         out: Out<'slot, '_, ConfigFormatError>,
     ) -> OResult<'slot, ()> {
-        if self.output.as_str().ends_with('\n') {
+        if self.last_output_byte == Some(b'\n') {
             return Ok(());
         }
         self.append_text(self.newline, out)
@@ -682,7 +757,7 @@ impl FormatterEngine<'_, '_> {
         depth: usize,
         mut out: Out<'slot, '_, ConfigFormatError>,
     ) -> OResult<'slot, ()> {
-        if !self.output.as_str().ends_with('\n') {
+        if self.last_output_byte != Some(b'\n') {
             return Ok(());
         }
         let spaces = depth.checked_mul(4).ok_or_else(|| {
@@ -690,7 +765,7 @@ impl FormatterEngine<'_, '_> {
                 ConfigFormatErrorKind::ResourceLimitExceeded,
             ))
         })?;
-        if spaces > self.output_limit.saturating_sub(self.output.len()) {
+        if spaces > self.output_limit.saturating_sub(self.output_len) {
             return Err(out.fail(ConfigFormatError::new(
                 ConfigFormatErrorKind::ResourceLimitExceeded,
             )));

@@ -297,7 +297,7 @@ impl<'input, R: Read + ?Sized> ConfigParseRequest<'input, R> {
         &self.options
     }
 
-    pub(crate) const fn display_name(&self) -> &str {
+    pub(crate) const fn display_name(&self) -> &'input str {
         self.display_name
     }
 

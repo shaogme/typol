@@ -22,6 +22,7 @@ typol-report.workspace = true
 typol-semantic.workspace = true
 typol-schema.workspace = true
 typol-config.workspace = true
+typol-syntax.workspace = true
 typol-std = { workspace = true, optional = true }
 typol-i18n.workspace = true
 u18n.workspace = true

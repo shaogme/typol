@@ -3,12 +3,14 @@ locale zh-CN;
 message cli.help = "用法：
   typol [--language en|zh-CN] --help
   typol [--language en|zh-CN] schema check <schema.tschem>
+  typol [--language en|zh-CN] schema fmt [--check] <schema.tschem>
   typol [--language en|zh-CN] config check --schema <schema.tschem> [--environment inherit|empty] <config.tconf>
   typol [--language en|zh-CN] config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] [--reject-secrets] <config.tconf>
   typol [--language en|zh-CN] config fmt --schema <schema.tschem> [--environment inherit|empty] [--check] <config.tconf>
 
 命令：
   schema check       编译并检查 Schema 及其导入
+  schema fmt         原地格式化 Schema 文件
   config check       根据 Schema 校验配置
   config export-ir   加载并校验配置，然后输出类型化 JSON IR v1
   config fmt         格式化经过校验的配置文件并原地写回
@@ -19,6 +21,7 @@ message cli.help = "用法：
   --pretty           以缩进格式输出 IR
   --reject-secrets   配置含有秘密标记时，在写出 IR 前失败
   --check            检查 config fmt 的格式，不写入文件
+  --check            检查 schema fmt 的格式，不写入文件
   -h, --help         显示此帮助
 
 请在命令前使用 --language。省略该选项时，可通过 TYPOL_LANG 设置语言。\n";
@@ -29,13 +32,16 @@ message cli.ir_error = "IR 序列化失败或超出输出限制。";
 message cli.ir_secret_rejected = "配置包含秘密值，已拒绝导出 IR。";
 message cli.format_error = "配置格式化或文件替换失败。";
 message cli.format_check_failed = "配置需要格式化。";
+message cli.schema_format_error = "Schema 格式化或文件替换失败。";
+message cli.schema_format_check_failed = "Schema 需要格式化。";
 message cli.command_utf8 = "命令名称必须是有效的 UTF-8 文本。";
 message cli.unknown_command = "未知命令。";
-message cli.schema_action_missing = "缺少 schema check 子命令。";
+message cli.schema_action_missing = "缺少 schema check 或 fmt 子命令。";
 message cli.schema_action_utf8 = "Schema 子命令必须是有效的 UTF-8 文本。";
-message cli.schema_action_invalid = "Schema 目前只支持 check 子命令。";
+message cli.schema_action_invalid = "Schema 只支持 check 和 fmt 子命令。";
 message cli.schema_path_missing = "缺少 Schema 文件路径。";
-message cli.schema_path_extra = "schema check 只能接受一个 Schema 文件路径。";
+message cli.schema_path_extra = "Schema 命令只能接受一个 Schema 文件路径。";
+message cli.schema_option_invalid = "未知的 schema fmt 选项。";
 message cli.config_action_missing = "缺少 config check、config export-ir 或 config fmt 子命令。";
 message cli.config_action_utf8 = "Config 子命令必须是有效的 UTF-8 文本。";
 message cli.config_action_invalid = "Config 目前只支持 check、export-ir 和 fmt 子命令。";
@@ -92,6 +98,7 @@ message report.title.operation_failed = "Typol 操作失败";
 message report.title.schema_compilation_failed = "Schema 编译失败";
 message report.title.payload_storage_failed = "无法存储错误负载";
 message report.stage.schema_read = "读取 Schema";
+message report.stage.schema_parsing = "解析 Schema";
 message report.stage.schema_compilation = "编译 Schema";
 message report.stage.source_name_registration = "注册来源名称";
 message report.stage.type_binding = "类型绑定";

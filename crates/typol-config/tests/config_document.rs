@@ -6,9 +6,8 @@ use std::{
 use typol_config::{
     ConfigDocument, ConfigEdit, ConfigEditErrorKind, ConfigFormatErrorKind, ConfigFormatOptions,
     ConfigFormatter, ConfigLimits, ConfigParseOptions, ConfigParseRequest, ConfigParser,
-    ConfigPath, ConfigReplacement, ConfigSourceCommitError, ConfigSourceExpectation,
-    ConfigSourceRevision, ConfigSourceWriter, EmptyEnvironment, Environment, EnvironmentError,
-    EnvironmentReadContext,
+    ConfigPath, ConfigReplacement, EmptyEnvironment, Environment, EnvironmentError,
+    EnvironmentReadContext, SourceCommitError, SourceExpectation, SourceRevision, SourceWriter,
 };
 use typol_core::{
     ConfigValue, ConfigValueBuilder, ExecutionBudget, ExecutionLimits, SliceSource, ValueSource,
@@ -43,33 +42,33 @@ struct MemoryWriter {
     fail: bool,
 }
 
-impl ConfigSourceWriter for MemoryWriter {
+impl SourceWriter for MemoryWriter {
     type Target = str;
     type Error = MemoryWriteError;
 
     fn replace_atomically(
         &mut self,
         _: &Self::Target,
-        expectation: ConfigSourceExpectation<'_>,
+        expectation: SourceExpectation<'_>,
         replacement: &[u8],
         max_bytes: usize,
-    ) -> Result<ConfigSourceRevision, Self::Error> {
+    ) -> Result<SourceRevision, Self::Error> {
         if replacement.len() > max_bytes {
             return Err(MemoryWriteError::Failed);
         }
         match expectation {
-            ConfigSourceExpectation::ExactSnapshot(expected)
+            SourceExpectation::ExactSnapshot(expected)
                 if self.contents.as_deref() != Some(expected) =>
             {
                 return Err(MemoryWriteError::Conflict);
             }
-            ConfigSourceExpectation::MustBeAbsent if self.contents.is_some() => {
+            SourceExpectation::MustBeAbsent if self.contents.is_some() => {
                 return Err(MemoryWriteError::Conflict);
             }
-            ConfigSourceExpectation::DocumentSnapshot => return Err(MemoryWriteError::Conflict),
-            ConfigSourceExpectation::ExactSnapshot(_)
-            | ConfigSourceExpectation::MustBeAbsent
-            | ConfigSourceExpectation::ReplaceAny => {}
+            SourceExpectation::DocumentSnapshot => return Err(MemoryWriteError::Conflict),
+            SourceExpectation::ExactSnapshot(_)
+            | SourceExpectation::MustBeAbsent
+            | SourceExpectation::ReplaceAny => {}
         }
         if self.fail {
             return Err(MemoryWriteError::Failed);
@@ -81,7 +80,7 @@ impl ConfigSourceWriter for MemoryWriter {
         contents.extend_from_slice(replacement);
         self.contents = Some(contents);
         self.revision = self.revision.saturating_add(1);
-        Ok(ConfigSourceRevision::new(self.revision))
+        Ok(SourceRevision::new(self.revision))
     }
 }
 
@@ -143,6 +142,9 @@ fn formatter_expands_containers_and_preserves_source_expressions_and_order() -> 
     let source = r#"{title:"中,}/*",values:[1,2],settings:{"b":2,"a":1},mode:.Named("x, //"),details:.Details{name:"owner"},port:env("PORT",3)}"#;
     let document = parse_document(&schema, source)?;
     let formatted = format_document(&document, ConfigFormatOptions::default())?;
+    test_assert!(!TestOpeo::value(|out| {
+        ConfigFormatter::is_formatted(&document, ConfigFormatOptions::default(), out)
+    })?);
     test_eq!(
         formatted,
         concat!(
@@ -165,6 +167,9 @@ fn formatter_expands_containers_and_preserves_source_expressions_and_order() -> 
         )
     );
     let formatted_document = parse_document(&schema, &formatted)?;
+    test_assert!(TestOpeo::value(|out| {
+        ConfigFormatter::is_formatted(&formatted_document, ConfigFormatOptions::default(), out)
+    })?);
     test_eq!(
         format_document(&formatted_document, ConfigFormatOptions::default())?,
         formatted
@@ -205,6 +210,19 @@ fn formatter_preserves_comments_and_crlf_while_ending_with_a_newline() -> TestRe
     test_assert!(formatted_crlf.contains("\r\n"));
     test_assert!(!formatted_crlf.replace("\r\n", "").contains('\n'));
     test_assert!(formatted_crlf.ends_with("}\r\n"));
+    Ok(())
+}
+
+#[test]
+fn formatter_scans_a_dense_comment_run_within_a_linear_execution_budget() -> TestResult<()> {
+    let schema = compile("entry struct Root { value: u8 }")?;
+    let comments = "/*x*/".repeat(512);
+    let source = format!("{{value:1{comments},}}");
+    let options =
+        ConfigParseOptions::default().with_execution(ExecutionLimits::new(50_000, 16_777_216));
+    let document = parse_document_with_options(&schema, &source, options)?;
+    let formatted = format_document(&document, ConfigFormatOptions::default())?;
+    test_eq!(formatted.matches("/*x*/").count(), 512);
     Ok(())
 }
 
@@ -491,7 +509,7 @@ fn writer_conflicts_and_failures_leave_document_and_target_unchanged() -> TestRe
     let conflict = document.write_source("config", &mut writer, expectation);
     test_assert!(matches!(
         conflict,
-        Err(ConfigSourceCommitError::Writer(MemoryWriteError::Conflict))
+        Err(SourceCommitError::Writer(MemoryWriteError::Conflict))
     ));
     test_eq!(document.source(), original);
     test_eq!(writer.contents.as_deref(), Some(b"{port: 9000}".as_slice()));
@@ -502,7 +520,7 @@ fn writer_conflicts_and_failures_leave_document_and_target_unchanged() -> TestRe
     let failure = document.write_source("config", &mut writer, expectation);
     test_assert!(matches!(
         failure,
-        Err(ConfigSourceCommitError::Writer(MemoryWriteError::Failed))
+        Err(SourceCommitError::Writer(MemoryWriteError::Failed))
     ));
     test_eq!(document.source(), original);
     test_eq!(writer.contents.as_deref(), Some(original.as_bytes()));
@@ -627,6 +645,24 @@ fn inserted_map_keys_escape_quotes_and_backslashes() -> TestResult {
         document.source(),
         "{values: {\"quote\\\"and\\\\slash\": 7}}"
     );
+    Ok(())
+}
+
+#[test]
+fn map_entry_insertion_rejects_an_existing_key_without_changing_source() -> TestResult {
+    let schema = compile("entry struct Root { values: map<string, u16> }")?;
+    let source = "{values: {\"a\": 1, \"m\": 2, \"z\": 3}}";
+    let mut document = parse_document(&schema, source)?;
+    let values = ConfigPath::new().field("values");
+    let value = unsigned(4)?;
+    let edit = ConfigEdit::InsertMapEntry {
+        container: &values,
+        key: "m",
+        value: &value,
+    };
+    let error = TestOpeo::error(|out| document.apply_edits(&[edit], &mut EmptyEnvironment, out))?;
+    test_eq!(error.kind(), ConfigEditErrorKind::EntryAlreadyExists);
+    test_eq!(document.source(), source);
     Ok(())
 }
 

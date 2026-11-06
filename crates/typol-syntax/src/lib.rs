@@ -5,6 +5,7 @@ extern crate alloc;
 mod ast;
 mod cursor;
 mod error;
+mod formatter;
 mod input;
 mod lexer;
 mod parser;
@@ -29,6 +30,10 @@ pub use ast::{
 };
 pub use cursor::TokenCursor;
 pub use error::{SyntaxDiagnosticIter, SyntaxErrors};
+pub use formatter::{
+    FormattedSchema, SchemaDocument, SchemaFormatError, SchemaFormatErrorKind, SchemaFormatOptions,
+    SchemaFormatter,
+};
 pub use input::{InputConfig, InputLimits, StreamLimits, StreamLimitsError, SyntaxLimits};
 pub use parser::{SchemaParseOptions, SchemaParseOutput, SchemaParser, SourcePositionIndex};
 pub use token::{Keyword, LexEvent, Symbol, Token, TokenKind};

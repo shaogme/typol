@@ -25,8 +25,7 @@ pub use diagnostics::{ConfigFailureStage, ConfigParseErrors, ConfigValueErrors};
 pub use document::{
     ConfigDocument, ConfigEdit, ConfigEditError, ConfigEditErrorKind, ConfigFormatError,
     ConfigFormatErrorKind, ConfigFormatOptions, ConfigFormatter, ConfigPath, ConfigPathSegment,
-    ConfigReplacement, ConfigSourceCommitError, ConfigSourceExpectation, ConfigSourceRevision,
-    ConfigSourceWriter, FormattedConfig,
+    ConfigReplacement, FormattedConfig,
 };
 pub use environment::{EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext};
 pub use opeo;
@@ -34,5 +33,6 @@ pub use options::{
     ConfigLimits, ConfigParseOptions, ConfigParseRequest, ConfigValidationOptions,
     ConfigValidationRequest,
 };
+pub use typol_core::{SourceCommitError, SourceExpectation, SourceRevision, SourceWriter};
 pub use typol_syntax::{StreamLimits, StreamLimitsError};
 pub use value::{NormalizedConfigValue, ValidatedConfigValue};

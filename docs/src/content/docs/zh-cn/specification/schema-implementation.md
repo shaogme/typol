@@ -76,6 +76,52 @@ Schema parser 从 `SchemaLimits::syntax()` 读取 `SyntaxLimits`：解析深度�
 
 当前 parser 使用显式续接帧处理嵌套声明、类型、默认值和表达式；恢复过程也受工作预算约束。实现应维持本节列出的解析深度、节点数、输入字节和诊断数量边界。
 
+### 2.4 Parse-only 文档与格式化
+
+需要保留原文的工具可调用 `SchemaParser::parse_document`。它返回 `SchemaDocument<'source>`，借用传入的确切 `&str`，并拥有成功解析的语法 AST。该入口不解析导入，也不执行静态语义检查；编译路径仍使用原有流式 `parse`，不会保存完整源文本。
+
+`SchemaFormatter::format` 消费绑定后的文档和 `SchemaFormatOptions`，通过 OPEO 错误槽返回完整的 `FormattedSchema`。它会在分配 formatter token 表之前释放仅用于语法验证的 AST，避免 AST 与 formatter 工作区同时驻留。选项限制输出字节数、formatter 工作区和嵌套深度。Formatter 保留所有 token 与注释的原字节和顺序，统一布局与尾逗号；输入中含 CRLF 时使用 CRLF，否则使用 LF。调用方可用 `FormattedSchema::as_str()` 检查结果，或消费式调用 `write_to()` 写入 `fmt::Write` sink。
+
+```rust
+use std::{error::Error, io::Error as IoError};
+use typol::{
+    SchemaFormatError, SchemaFormatOptions, SchemaFormatter, SchemaParseOptions, SchemaParser,
+    SyntaxErrors,
+    core::{ExecutionBudget, ExecutionLimits, SourceId},
+    opeo::ErrSlot,
+};
+
+fn format_schema(source: &str) -> Result<String, Box<dyn Error>> {
+    let mut budget_errors = ErrSlot::new();
+    let budget = budget_errors
+        .try_call(|out| {
+            ExecutionBudget::new(ExecutionLimits::new(2_000_000, 16_000_000), out)
+        })
+        .map_err(|caught| IoError::other(format!("{:?}", caught.take())))?;
+    let mut parse_errors = ErrSlot::<SyntaxErrors>::new();
+    let document = parse_errors
+        .try_call(|out| {
+            SchemaParser::parse_document(
+                SourceId::new(0),
+                source,
+                &SchemaParseOptions::default(),
+                &budget,
+                out,
+            )
+        })
+        .map_err(|caught| IoError::other(format!("{:?}", caught.take())))?;
+    let mut format_errors = ErrSlot::<SchemaFormatError>::new();
+    let formatted = format_errors
+        .try_call(|out| {
+            SchemaFormatter::format(document, SchemaFormatOptions::default(), out)
+        })
+        .map_err(|caught| IoError::other(format!("{:?}", caught.take())))?;
+    let mut output = String::new();
+    formatted.write_to(&mut output)?;
+    Ok(output)
+}
+```
+
 ## 3. Schema 编译会话
 
 ### 3.1 编译入口

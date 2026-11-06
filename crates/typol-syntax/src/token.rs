@@ -115,6 +115,96 @@ pub enum Symbol {
     Pipe,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CommentKind {
+    Line,
+    Block,
+}
+
+impl Symbol {
+    pub(crate) const fn has_pair_prefix(byte: u8) -> bool {
+        matches!(byte, b':' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|')
+    }
+
+    pub(crate) const fn can_start(character: char) -> bool {
+        matches!(
+            character,
+            ':' | '('
+                | ')'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | ','
+                | ';'
+                | '.'
+                | '@'
+                | '='
+                | '!'
+                | '<'
+                | '>'
+                | '&'
+                | '|'
+                | '+'
+                | '-'
+                | '*'
+                | '/'
+        )
+    }
+
+    pub(crate) const fn comment_kind(byte: u8, next: Option<u8>) -> Option<CommentKind> {
+        match (byte, next) {
+            (b'/', Some(b'/')) => Some(CommentKind::Line),
+            (b'/', Some(b'*')) => Some(CommentKind::Block),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn identifier_continue(character: char) -> bool {
+        character.is_ascii_alphanumeric() || character == '_'
+    }
+
+    pub(crate) fn from_ascii(byte: u8, next: Option<u8>) -> Option<(Self, usize)> {
+        let paired = match (byte, next) {
+            (b':', Some(b':')) => Some(Self::PathSeparator),
+            (b'=', Some(b'=')) => Some(Self::EqualEqual),
+            (b'!', Some(b'=')) => Some(Self::NotEqual),
+            (b'<', Some(b'=')) => Some(Self::LessEqual),
+            (b'>', Some(b'=')) => Some(Self::GreaterEqual),
+            (b'&', Some(b'&')) => Some(Self::AndAnd),
+            (b'|', Some(b'|')) => Some(Self::OrOr),
+            _ => None,
+        };
+        if let Some(symbol) = paired {
+            return Some((symbol, 2));
+        }
+        let symbol = match byte {
+            b'(' => Self::LeftParen,
+            b')' => Self::RightParen,
+            b'{' => Self::LeftBrace,
+            b'}' => Self::RightBrace,
+            b'[' => Self::LeftBracket,
+            b']' => Self::RightBracket,
+            b',' => Self::Comma,
+            b';' => Self::Semicolon,
+            b':' => Self::Colon,
+            b'.' => Self::Dot,
+            b'@' => Self::At,
+            b'=' => Self::Equal,
+            b'!' => Self::Bang,
+            b'<' => Self::Less,
+            b'>' => Self::Greater,
+            b'+' => Self::Plus,
+            b'-' => Self::Minus,
+            b'*' => Self::Star,
+            b'/' => Self::Slash,
+            b'|' => Self::Pipe,
+            _ => return None,
+        };
+        Some((symbol, 1))
+    }
+}
+
 /// The lexical category of a token; its text is available through [`Token::text`].
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TokenKind {

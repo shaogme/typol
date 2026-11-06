@@ -21,9 +21,7 @@ use self::{
 use crate::{FileSchemaLimits, HostError, HostErrorKind, HostFailureStep, HostOperation};
 
 pub use input::{FileConfigInput, IoWriteSink, ReadSource};
-pub use source_writer::{
-    ConfigSourceWriteError, ConfigSourceWriteErrorKind, FileConfigSourceWriter,
-};
+pub use source_writer::{FileSourceWriter, SourceWriteError, SourceWriteErrorKind};
 
 struct SelectedFile {
     path: NativePath,

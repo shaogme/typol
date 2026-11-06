@@ -68,13 +68,15 @@ ConfigParser::new(schema).parse(request, environment)
 
 `ConfigParseRequest` 包含可读 `Read`、显示名称和 `ConfigParseOptions`。选项由四部分组成：共享 `ResourceLimits`、配置专属 `ConfigLimits`、执行/工作区 `ExecutionLimits` 和词法流 `StreamLimits`。显示名称仅用于诊断元数据，不是配置文本的一部分。
 
-`ConfigParser::parse_document` 和 `LoadedSchema::read_document` 会在额度内保留源文及 parser 的语义定位索引。`ConfigDocument::write_to` 原样输出保留的文本。`apply_edits` 通过 parser 索引解析带类型的替换、字段/map 项/数组元素插入和删除操作，拒绝重叠源范围，组装一个候选文档，再重解析并校验后提交内存文档。替换会编码目标子树；插入会推断容器换行、缩进和键分隔空格。删除和复合值替换会提取受影响范围内的注释，并把注释字节保留在替换区域。未触及的源范围逐字节不变。编辑器扫描受限的源切片定位分隔符和注释范围，不另建 token/trivia CST。
+`ConfigParser::parse_document` 和 `LoadedSchema::read_document` 会保留 parser 的 UTF-8 源缓冲区及语义定位索引。文档直接接管该缓冲区作为源文本，不再复制第二份完整内容。首次编辑前，源文本本身也用于 `DocumentSnapshot` 写入期望值；首次编辑成功时，旧源缓冲区会直接转为计费快照，不再分配第二份文本。写入成功后，期望值更新为当前源文本，并释放独立快照。
 
-`ConfigFormatter::format(&document, options, out)` 只格式化成功解析得到的 `ConfigDocument`。它使用显式分隔符栈直接扫描保留的源文，不构造配置 AST，也不重新编码 `ConfigValue`。`FormattedConfig` 独立拥有完整结果，提供只读字符串视图，并可通过 `typol_core::Write` sink 消费写出。原文档及其源位置保持不变。格式化按顺序保留所有非空白源 token 和注释，包括字符串/数值写法和 `env(...)` 表达式。非空容器按每行一个条目展开，使用 4 空格缩进并添加尾逗号；空容器保持紧凑。枚举单值载荷和 `env(...)` 括号保持紧凑，其中的容器除外。输入采用 LF 或 CRLF 时保留对应风格，输出以相应换行符结束，并满足幂等性。
+`ConfigDocument::write_to` 原样输出保留的文本。`apply_edits` 通过 parser 索引解析带类型的替换、字段/map 项/数组元素插入和删除操作。事务按父容器分组子节点索引，并为每个受影响容器只准备一次边界、条目位置、逗号和布局。它拒绝重叠源范围，组装一个候选文档，再重解析并校验后提交内存文档。重解析只记录位置，不会再保留一份候选源码；校验成功后，候选缓冲区会直接成为新文档保留的源码。替换会编码目标子树；插入会推断容器换行、缩进和键分隔空格。插入值直接编码到最终补丁缓冲区；map 项存在性检查使用已解析的父节点，不克隆完整路径。删除和复合值替换会提取受影响范围内的注释，并把注释字节保留在替换区域。未触及的源范围逐字节不变。编辑数量、排序、索引遍历和有界源扫描均计入共享执行额度。相关修改应通过一次 `apply_edits` 或 `replace_values` 批量提交，这样候选文档只会解析和校验一次；分开的 `set_value` 调用会各自付出一次成本。编辑器扫描受限的源切片定位分隔符和注释范围，不另建 token/trivia CST。
 
-`ConfigFormatOptions` 只提供输出字节、格式化工作区和嵌套深度额度，不提供会产生多种规范格式的样式选项。格式化还受文档的源码和构造文本额度约束；输出、栈存储和扫描工作计入文档共享执行预算。结果写入拥有型计费缓冲区，只有扫描、范围检查和输出计量全部成功后才返回。结构错误、资源超限、分配失败和后续输出 sink 错误保持不同类别；格式化中断时不会把部分缓冲区作为成功结果返回。
+`ConfigFormatter::format(&document, options, out)` 只格式化成功解析得到的 `ConfigDocument`。它使用显式分隔符栈直接扫描保留的源文，不构造配置 AST，也不重新编码 `ConfigValue`。`FormattedConfig` 独立拥有完整结果，提供只读字符串视图，并可通过 `typol_core::Write` sink 消费写出。`ConfigFormatter::is_formatted` 使用相同格式化流程，将每段输出直接与原文比较，不分配完整输出缓冲区；CLI 的 `config fmt --check` 使用此路径。原文档及其源位置保持不变。格式化按顺序保留所有非空白源 token 和注释，包括字符串/数值写法和 `env(...)` 表达式。非空容器按每行一个条目展开，使用 4 空格缩进并添加尾逗号；空容器保持紧凑。枚举单值载荷和 `env(...)` 括号保持紧凑，其中的容器除外。输入采用 LF 或 CRLF 时保留对应风格，输出以相应换行符结束，并满足幂等性。
 
-`LoadedSchema::read_file` 返回 `ConfigDocument`；只需要原有已校验值结果时使用 `read_file_value`。启用 `std` 后，`LoadedSchema::write_file` 使用文档快照期望值，并同时限制源字节和文件输入字节。普通文件系统不能把按字节比较与路径替换作为一个原子操作，因此本地 adapter 对 `ExactSnapshot` 返回 `AtomicReplaceUnsupported`。新目标使用 `write_file_with_expectation` 和 `MustBeAbsent`；有意覆盖时显式选择 `ReplaceAny`。Unix 通过同目录硬链接原子创建新目标；Windows 使用同卷且不允许覆盖的写穿透移动，两者都不会覆盖并发创建的目标。`ReplaceAny` 使用原子替换；Unix 在提交后同步父目录，若无法确认持久性则返回专门错误。Windows 使用同卷写穿透移动。no_std 调用方为自己的目标实现 `ConfigSourceWriter`，并负责提供所选期望值要求的原子语义。
+`ConfigFormatOptions` 只提供输出字节、格式化工作区和嵌套深度额度，不提供会产生多种规范格式的样式选项。格式化还受文档的源码和构造文本额度约束；栈存储和扫描工作计入文档共享执行预算。`format` 会构造拥有型计费输出缓冲区，并计量构造文本；`is_formatted` 使用相同的输出额度逐段比较，不构造或保留该缓冲区。尾部注释的逗号前瞻每串连续注释只执行一次，因此含 `k` 条注释的串只增加线性扫描工作。拥有型结果只有在扫描、范围检查和输出计量全部成功后才返回。结构错误、资源超限、分配失败和后续输出 sink 错误保持不同类别；格式化中断时不会把部分缓冲区作为成功结果返回。
+
+`LoadedSchema::read_file` 返回 `ConfigDocument`；只需要原有已校验值结果时使用 `read_file_value`。启用 `std` 后，`LoadedSchema::write_file` 使用文档快照期望值，并同时限制源字节和文件输入字节。普通文件系统不能把按字节比较与路径替换作为一个原子操作，因此本地 adapter 对 `ExactSnapshot` 返回 `AtomicReplaceUnsupported`。新目标使用 `write_file_with_expectation` 和 `MustBeAbsent`；有意覆盖时显式选择 `ReplaceAny`。Unix 通过同目录硬链接原子创建新目标；Windows 使用同卷且不允许覆盖的写穿透移动，两者都不会覆盖并发创建的目标。`ReplaceAny` 使用原子替换；Unix 在提交后同步父目录，若无法确认持久性则返回专门错误。Windows 使用同卷写穿透移动。no_std 调用方为自己的目标实现 `SourceWriter`，并负责提供所选期望值要求的原子语义。
 
 `ConfigValueProcessor::validate` 与 `ConfigValueProcessor::normalize` 接收 `ConfigValidationRequest`，其 `ConfigValidationOptions` 只配置共享 `ResourceLimits`、`ConfigLimits` 和 `ExecutionLimits`，不包含词法流选项。校验与规范化不会读取配置输入或环境 提供器；两者的额度与文本解析分开配置。
 

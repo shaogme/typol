@@ -5,15 +5,14 @@ mod path;
 mod syntax;
 
 use core::{
-    error::Error,
-    fmt::{self, Debug, Display, Formatter},
-    mem::swap,
-    str,
+    fmt::{self, Debug, Formatter},
+    mem::{replace, swap},
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, ConfigValue, Diagnostic, DiagnosticCode,
-    DiagnosticContext, ExecutionBudget, SliceSource, Write, WriteError, diagnostic_context,
+    DiagnosticContext, ExecutionBudget, SliceSource, SourceCommitError, SourceExpectation,
+    SourceRevision, SourceWriter, Write, WriteError, diagnostic_context,
 };
 use typol_semantic::CompiledSchema;
 
@@ -45,55 +44,13 @@ pub struct ConfigDocument<'schema> {
     options: ConfigParseOptions,
     display_name: ChargedString,
     source: ChargedString,
-    snapshot: ChargedVec<u8>,
+    snapshot: Option<ChargedString>,
     value: ValidatedConfigValue,
     index: SourcePathIndex,
 }
 
 /// Formats a validated configuration document while preserving its source tokens and comments.
 pub struct ConfigFormatter;
-
-/// The target state required before an atomic source replacement.
-pub enum ConfigSourceExpectation<'snapshot> {
-    /// Require exact byte equality with the supplied prior version.
-    ExactSnapshot(&'snapshot [u8]),
-    /// Use the snapshot retained by this document as the expected prior version.
-    DocumentSnapshot,
-    /// Require that the target does not exist.
-    MustBeAbsent,
-    /// Replace any existing target explicitly.
-    ReplaceAny,
-}
-
-/// A backend revision returned after an atomic source replacement succeeds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ConfigSourceRevision(u64);
-
-/// A failure reported by a source writer or by the bounded document layer.
-pub enum ConfigSourceCommitError<E> {
-    ResourceLimitExceeded,
-    AllocationFailed,
-    Writer(E),
-}
-
-/// Performs bounded, transactional replacement of a platform-specific source target.
-///
-/// An implementation must keep the target unchanged for failures before the atomic commit and
-/// return success only after the complete replacement is committed. If durability confirmation
-/// can fail after visibility changes, the error must identify that the commit occurred and that
-/// durability is uncertain.
-pub trait ConfigSourceWriter {
-    type Target: ?Sized;
-    type Error;
-
-    fn replace_atomically(
-        &mut self,
-        target: &Self::Target,
-        expectation: ConfigSourceExpectation<'_>,
-        replacement: &[u8],
-        max_bytes: usize,
-    ) -> Result<ConfigSourceRevision, Self::Error>;
-}
 
 pub(crate) struct ConfigDocumentInput<'schema, 'display, 'budget> {
     pub(crate) schema: &'schema CompiledSchema,
@@ -103,16 +60,6 @@ pub(crate) struct ConfigDocumentInput<'schema, 'display, 'budget> {
     pub(crate) locations: LocationIndex<'schema>,
     pub(crate) source: ChargedVec<u8>,
     pub(crate) budget: &'budget ExecutionBudget,
-}
-
-impl ConfigSourceRevision {
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub const fn value(self) -> u64 {
-        self.0
-    }
 }
 
 impl ConfigFormatter {
@@ -125,7 +72,7 @@ impl ConfigFormatter {
         formatter::FormatterEngine::format_source(
             formatter::FormatRequest {
                 source: document.source(),
-                budget: document.snapshot.budget(),
+                budget: document.workspace_budget(),
                 source_limit: document.options.config().max_source_bytes(),
                 constructed_text_limit: document.options.config().max_constructed_text_bytes(),
                 options,
@@ -133,38 +80,23 @@ impl ConfigFormatter {
             out,
         )
     }
-}
 
-impl<E> Debug for ConfigSourceCommitError<E> {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ResourceLimitExceeded => formatter.write_str("ResourceLimitExceeded"),
-            Self::AllocationFailed => formatter.write_str("AllocationFailed"),
-            Self::Writer(_) => formatter.write_str("Writer(..)"),
-        }
-    }
-}
-
-impl<E: Display> Display for ConfigSourceCommitError<E> {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ResourceLimitExceeded => {
-                formatter.write_str("configuration source write limit exceeded")
-            }
-            Self::AllocationFailed => {
-                formatter.write_str("configuration source write allocation failed")
-            }
-            Self::Writer(error) => Display::fmt(error, formatter),
-        }
-    }
-}
-
-impl<E: Error + 'static> Error for ConfigSourceCommitError<E> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Writer(error) => Some(error),
-            Self::ResourceLimitExceeded | Self::AllocationFailed => None,
-        }
+    /// Checks whether a document already matches the canonical format without retaining it.
+    pub fn is_formatted<'slot>(
+        document: &ConfigDocument<'_>,
+        options: ConfigFormatOptions,
+        out: Out<'slot, '_, ConfigFormatError>,
+    ) -> OResult<'slot, bool> {
+        formatter::FormatterEngine::matches_source(
+            formatter::FormatRequest {
+                source: document.source(),
+                budget: document.workspace_budget(),
+                source_limit: document.options.config().max_source_bytes(),
+                constructed_text_limit: document.options.config().max_constructed_text_bytes(),
+                options,
+            },
+            out,
+        )
     }
 }
 
@@ -183,14 +115,12 @@ impl<'schema> ConfigDocument<'schema> {
             budget,
         } = request;
         let display_name = ChargedString::copy(display_name, Some(budget), out.reborrow())?;
-        let snapshot = source;
-        let source_text = str::from_utf8(snapshot.as_slice()).map_err(|_| {
+        let source = ChargedString::from_utf8_bytes(source).map_err(|(_bytes, _error)| {
             out.reborrow().fail(ConfigParseErrors::emergency(
                 Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR),
                 schema.next_source_id(),
             ))
         })?;
-        let source = ChargedString::copy(source_text, Some(budget), out.reborrow())?;
         let index =
             SourcePathIndex::new(&locations, value.as_config_value(), budget, out.reborrow())?;
         Ok(ConfigDocument {
@@ -198,7 +128,7 @@ impl<'schema> ConfigDocument<'schema> {
             options,
             display_name,
             source,
-            snapshot,
+            snapshot: None,
             value,
             index,
         })
@@ -206,6 +136,27 @@ impl<'schema> ConfigDocument<'schema> {
 
     pub fn source(&self) -> &str {
         self.source.as_str()
+    }
+
+    fn workspace_budget(&self) -> Option<&ExecutionBudget> {
+        self.snapshot
+            .as_ref()
+            .and_then(ChargedString::budget)
+            .or_else(|| self.source.budget())
+    }
+
+    fn consume_path_steps<'slot>(
+        &self,
+        path: &ConfigPath,
+        out: Out<'slot, '_, ConfigEditError>,
+    ) -> OResult<'slot, ()> {
+        let Some(budget) = self.workspace_budget() else {
+            return Ok(());
+        };
+        let index_size = self.index.len();
+        let search_bound = (usize::BITS - index_size.leading_zeros()) as usize;
+        let steps = path.segment_count().saturating_mul(search_bound.max(1));
+        budget.consume(steps, out)
     }
 
     pub fn as_config_value(&self) -> &ConfigValue {
@@ -221,8 +172,8 @@ impl<'schema> ConfigDocument<'schema> {
         matches!(self.index.lookup(path), PathLookup::Explicit(_))
     }
 
-    pub const fn source_expectation(&self) -> ConfigSourceExpectation<'static> {
-        ConfigSourceExpectation::DocumentSnapshot
+    pub const fn source_expectation(&self) -> SourceExpectation<'static> {
+        SourceExpectation::DocumentSnapshot
     }
 
     pub fn write_to(&self, output: &mut dyn Write) -> Result<(), WriteError> {
@@ -247,9 +198,13 @@ impl<'schema> ConfigDocument<'schema> {
         environment: &mut dyn Environment,
         mut out: Out<'slot, '_, ConfigEditError>,
     ) -> OResult<'slot, ()> {
+        if let Some(budget) = self.workspace_budget() {
+            budget.consume(replacements.len(), out.reborrow())?;
+        }
         let source = self.source.as_str();
-        let mut patches = ChargedVec::new(self.snapshot.budget(), out.reborrow())?;
+        let mut patches = ChargedVec::new(self.workspace_budget(), out.reborrow())?;
         for replacement in replacements {
+            self.consume_path_steps(replacement.path(), out.reborrow())?;
             let span = match self.index.lookup(replacement.path()) {
                 PathLookup::Missing => {
                     return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
@@ -267,11 +222,11 @@ impl<'schema> ConfigDocument<'schema> {
             }
             let mut encoded = ScalarEncoder::encode_value(
                 replacement.value().root(),
-                self.snapshot.budget(),
+                self.workspace_budget(),
                 self.options.config().max_source_bytes(),
             )
             .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
-            let comments = SourceSyntax::comments_in(source, start, end, self.snapshot.budget())
+            let comments = SourceSyntax::comments_in(source, start, end, self.workspace_budget())
                 .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
             append_charged(
                 &mut encoded,
@@ -301,7 +256,7 @@ impl<'schema> ConfigDocument<'schema> {
         let patches = DocumentEditEngine::new(EditContext {
             source: self.source.as_str(),
             index: &self.index,
-            budget: self.snapshot.budget(),
+            budget: self.workspace_budget(),
             source_limit: self.options.config().max_source_bytes(),
         })
         .resolve(edits, out.reborrow())?;
@@ -337,12 +292,23 @@ impl<'schema> ConfigDocument<'schema> {
             return Ok(());
         }
         let source = self.source.as_str();
-        patches.sort_unstable_by_key(|patch| patch.start);
+        patches.sort_by(
+            |left, right, mut sort_out| {
+                if let Some(budget) = self.workspace_budget() {
+                    budget.consume(1, sort_out.reborrow())?;
+                }
+                Ok(left.start.cmp(&right.start))
+            },
+            out.reborrow(),
+        )?;
         let mut removed_bytes = 0usize;
         let mut added_bytes = 0usize;
         let mut previous_end = 0usize;
         let mut previous_start = None;
         for (index, patch) in patches.iter().enumerate() {
+            if let Some(budget) = self.workspace_budget() {
+                budget.consume(1, out.reborrow())?;
+            }
             if index > 0 && (patch.start < previous_end || previous_start == Some(patch.start)) {
                 return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::EditConflict)));
             }
@@ -379,10 +345,13 @@ impl<'schema> ConfigDocument<'schema> {
         }
         let mut budget_errors = ErrSlot::<BudgetError>::new();
         let candidate = match budget_errors.try_call(|mut budget_out| {
-            let mut candidate = ChargedVec::new(self.snapshot.budget(), budget_out.reborrow())?;
+            let mut candidate = ChargedVec::new(self.workspace_budget(), budget_out.reborrow())?;
             candidate.try_reserve_exact(candidate_len, budget_out.reborrow())?;
             let mut cursor = 0usize;
             for patch in &patches {
+                if let Some(budget) = self.workspace_budget() {
+                    budget.consume(1, budget_out.reborrow())?;
+                }
                 let Some(original) = source.as_bytes().get(cursor..patch.start) else {
                     return Err(budget_out.fail(BudgetError::invariant(&EDIT_SOURCE_RANGE_INVALID)));
                 };
@@ -401,59 +370,94 @@ impl<'schema> ConfigDocument<'schema> {
                 return Err(out.fail(ConfigEditError::new(edit_budget_error(caught.take()))));
             }
         };
-        let mut input = SliceSource::new(candidate.as_slice());
-        let request = ConfigParseRequest::new(&mut input, self.display_name.as_str(), self.options);
+        let Some(budget) = self.workspace_budget() else {
+            return Err(out.fail(ConfigEditError::new(
+                ConfigEditErrorKind::ResourceLimitExceeded,
+            )));
+        };
         let mut parse_errors = ErrSlot::new();
-        let parsed = parse_errors.try_call(|parse_out| {
-            ConfigParser::new(self.schema).parse_document(request, environment, parse_out)
+        let parsed = {
+            let mut input = SliceSource::new(candidate.as_slice());
+            let request =
+                ConfigParseRequest::new(&mut input, self.display_name.as_str(), self.options);
+            parse_errors.try_call(|parse_out| {
+                ConfigParser::new(self.schema).parse_document_without_source_retention_with_budget(
+                    request,
+                    environment,
+                    budget,
+                    parse_out,
+                )
+            })
+        };
+        let parsed = match parsed {
+            Ok(parsed) => parsed,
+            Err(caught) => return Err(out.fail(ConfigEditError::validation(caught.take()))),
+        };
+        let mut document_errors = ErrSlot::new();
+        let updated = document_errors.try_call(|document_out| {
+            ConfigDocument::from_parse(
+                ConfigDocumentInput {
+                    schema: self.schema,
+                    options: self.options,
+                    display_name: self.display_name.as_str(),
+                    value: parsed.value,
+                    locations: parsed.locations,
+                    source: candidate,
+                    budget,
+                },
+                document_out,
+            )
         });
-        let mut updated = match parsed {
+        let mut updated = match updated {
             Ok(document) => document,
             Err(caught) => return Err(out.fail(ConfigEditError::validation(caught.take()))),
         };
-        swap(&mut updated.snapshot, &mut self.snapshot);
+        let mut budget_errors = ErrSlot::<BudgetError>::new();
+        let empty_source = match budget_errors
+            .try_call(|budget_out| ChargedString::with_capacity(0, None, budget_out))
+        {
+            Ok(source) => source,
+            Err(caught) => {
+                return Err(out.fail(ConfigEditError::new(edit_budget_error(caught.take()))));
+            }
+        };
+        swap(&mut self.source, &mut updated.source);
+        let previous_source = replace(&mut updated.source, empty_source);
+        updated.snapshot = match self.snapshot.take() {
+            Some(snapshot) => {
+                drop(previous_source);
+                Some(snapshot)
+            }
+            None => Some(previous_source),
+        };
+        swap(&mut self.source, &mut updated.source);
         *self = updated;
         Ok(())
     }
 
     /// Writes the retained source through a backend that provides atomic replacement semantics.
-    pub fn write_source<W: ConfigSourceWriter>(
+    pub fn write_source<W: SourceWriter>(
         &mut self,
         target: &W::Target,
         writer: &mut W,
-        expectation: ConfigSourceExpectation<'_>,
-    ) -> Result<ConfigSourceRevision, ConfigSourceCommitError<W::Error>> {
+        expectation: SourceExpectation<'_>,
+    ) -> Result<SourceRevision, SourceCommitError<W::Error>> {
         let max_bytes = self.options.config().max_source_bytes();
         if self.source.len() > max_bytes {
-            return Err(ConfigSourceCommitError::ResourceLimitExceeded);
+            return Err(SourceCommitError::ResourceLimitExceeded);
         }
-        let mut errors = ErrSlot::<BudgetError>::new();
-        let snapshot = match errors.try_call(|mut budget_out| {
-            let mut snapshot = ChargedVec::new(self.snapshot.budget(), budget_out.reborrow())?;
-            snapshot.extend_from_slice(self.source.as_bytes(), budget_out.reborrow())?;
-            Ok(snapshot)
-        }) {
-            Ok(snapshot) => snapshot,
-            Err(caught) => {
-                return Err(match caught.take() {
-                    BudgetError::Resource => ConfigSourceCommitError::ResourceLimitExceeded,
-                    BudgetError::Allocation | BudgetError::CapacityExceeded => {
-                        ConfigSourceCommitError::AllocationFailed
-                    }
-                    BudgetError::InvariantViolation(_) => ConfigSourceCommitError::AllocationFailed,
-                });
-            }
-        };
+        let snapshot = self
+            .snapshot
+            .as_ref()
+            .map_or(self.source.as_bytes(), |snapshot| snapshot.as_bytes());
         let expectation = match expectation {
-            ConfigSourceExpectation::DocumentSnapshot => {
-                ConfigSourceExpectation::ExactSnapshot(self.snapshot.as_slice())
-            }
+            SourceExpectation::DocumentSnapshot => SourceExpectation::ExactSnapshot(snapshot),
             expectation => expectation,
         };
         let revision = writer
             .replace_atomically(target, expectation, self.source.as_bytes(), max_bytes)
-            .map_err(ConfigSourceCommitError::Writer)?;
-        self.snapshot = snapshot;
+            .map_err(SourceCommitError::Writer)?;
+        self.snapshot = None;
         Ok(revision)
     }
 }

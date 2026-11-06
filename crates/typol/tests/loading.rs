@@ -8,9 +8,9 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 use typol::{
-    BoundSchema, ConfigParseOptions, ConfigPath, ConfigSourceCommitError, ConfigSourceExpectation,
-    EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext, LoadedSchema,
-    ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader, Typol, TypolError, TypolOptions,
+    BoundSchema, ConfigParseOptions, ConfigPath, EmptyEnvironment, Environment, EnvironmentError,
+    EnvironmentReadContext, LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits,
+    SchemaLoader, SourceCommitError, SourceExpectation, Typol, TypolError, TypolOptions,
     TypolStage, ValidatedConfigValue, WriteOptions,
     binding::{
         BindOptions, CodecStage, ConversionLimits, MAX_CONVERSION_DEPTH, Typol as TypolTrait,
@@ -514,7 +514,7 @@ fn loaded_schema_writes_the_edited_document_with_its_original_snapshot() -> Test
     let path = ConfigPath::new().field("value");
     TestOpeo::value(|out| document.set_value(&path, &value, &mut environment, out))?;
     let revision = loaded
-        .write_file_with_expectation(&mut document, &config, ConfigSourceExpectation::ReplaceAny)
+        .write_file_with_expectation(&mut document, &config, SourceExpectation::ReplaceAny)
         .test_value()?;
     assert!(revision.value() > 0);
     assert_eq!(
@@ -542,11 +542,11 @@ fn file_write_enforces_input_file_limit_and_exact_snapshot_fails_closed() -> Tes
     let limited = loaded.write_file_with_expectation(
         &mut document,
         &limited_target,
-        ConfigSourceExpectation::MustBeAbsent,
+        SourceExpectation::MustBeAbsent,
     );
     assert!(matches!(
         limited,
-        Err(ConfigSourceCommitError::ResourceLimitExceeded)
+        Err(SourceCommitError::ResourceLimitExceeded)
     ));
     assert!(!limited_target.exists());
 
@@ -558,8 +558,8 @@ fn file_write_enforces_input_file_limit_and_exact_snapshot_fails_closed() -> Tes
     let exact = unrestricted.write_file(&mut exact_document, &original);
     assert!(matches!(
         exact,
-        Err(ConfigSourceCommitError::Writer(error))
-            if error.kind() == typol::host::ConfigSourceWriteErrorKind::AtomicReplaceUnsupported
+        Err(SourceCommitError::Writer(error))
+            if error.kind() == typol::host::SourceWriteErrorKind::AtomicReplaceUnsupported
     ));
     assert_eq!(read_to_string(&original).test_value()?, source);
     directory.cleanup()?;

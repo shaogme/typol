@@ -61,6 +61,17 @@ impl ScalarEncoder {
         let mut output = errors
             .try_call(|out| ChargedString::with_capacity(0, budget, out))
             .map_err(|caught| budget_error_kind(caught.take()))?;
+        Self::encode_value_into(&mut output, value, budget, limit)?;
+        Ok(output)
+    }
+
+    pub(super) fn encode_value_into(
+        output: &mut ChargedString,
+        value: ValueView<'_>,
+        budget: Option<&ExecutionBudget>,
+        limit: usize,
+    ) -> Result<(), ConfigEditErrorKind> {
+        let mut errors = ErrSlot::<BudgetError>::new();
         let mut frames = errors
             .try_call(|out| ChargedVec::new(budget, out))
             .map_err(|caught| budget_error_kind(caught.take()))?;
@@ -69,33 +80,33 @@ impl ScalarEncoder {
             .map_err(|caught| budget_error_kind(caught.take()))?;
         while let Some(frame) = frames.pop() {
             match frame {
-                EncodeFrame::Text(text) => append_text(&mut output, text, limit)?,
-                EncodeFrame::Quoted(text) => append_escaped(&mut output, text, limit)?,
+                EncodeFrame::Text(text) => append_text(output, text, limit)?,
+                EncodeFrame::Quoted(text) => append_escaped(output, text, limit)?,
                 EncodeFrame::Entries(entries, map_keys) => {
-                    append_text(&mut output, "{", limit)?;
+                    append_text(output, "{", limit)?;
                     push_frame(&mut frames, EncodeFrame::Text("}"))?;
                     push_entries(&mut frames, entries, map_keys)?;
                 }
                 EncodeFrame::Value(value) => match value.as_ref() {
                     ValueKind::Signed(number) => {
-                        append_format(&mut output, format_args!("{number}"), limit)?;
+                        append_format(output, format_args!("{number}"), limit)?;
                     }
                     ValueKind::Unsigned(number) => {
-                        append_format(&mut output, format_args!("{number}"), limit)?;
+                        append_format(output, format_args!("{number}"), limit)?;
                     }
-                    ValueKind::Float32(number) => append_float(&mut output, number, limit)?,
-                    ValueKind::Float64(number) => append_float(&mut output, number, limit)?,
-                    ValueKind::String(text) => append_escaped(&mut output, text, limit)?,
+                    ValueKind::Float32(number) => append_float(output, number, limit)?,
+                    ValueKind::Float64(number) => append_float(output, number, limit)?,
+                    ValueKind::String(text) => append_escaped(output, text, limit)?,
                     ValueKind::Bool(value) => {
-                        append_text(&mut output, if value { "true" } else { "false" }, limit)?;
+                        append_text(output, if value { "true" } else { "false" }, limit)?;
                     }
                     ValueKind::Optional(Some(value)) => {
                         push_frame(&mut frames, EncodeFrame::Value(value))?;
                     }
-                    ValueKind::Optional(None) => append_text(&mut output, "none", limit)?,
+                    ValueKind::Optional(None) => append_text(output, "none", limit)?,
                     ValueKind::Array(entries) => {
                         encode_entries(
-                            &mut output,
+                            output,
                             &mut frames,
                             EntriesEncoding {
                                 entries,
@@ -106,7 +117,7 @@ impl ScalarEncoder {
                         )?;
                     }
                     ValueKind::Map(entries) => {
-                        append_text(&mut output, "{", limit)?;
+                        append_text(output, "{", limit)?;
                         push_frame(&mut frames, EncodeFrame::Text("}"))?;
                         push_entries(&mut frames, entries, true)?;
                     }
@@ -114,17 +125,17 @@ impl ScalarEncoder {
                         push_frame(&mut frames, EncodeFrame::Entries(entries, false))?;
                     }
                     ValueKind::Enumeration { variant, payload } => {
-                        append_text(&mut output, ".", limit)?;
-                        append_text(&mut output, variant, limit)?;
+                        append_text(output, ".", limit)?;
+                        append_text(output, variant, limit)?;
                         match payload {
                             ValuePayloadView::Unit => {}
                             ValuePayloadView::Single(value) => {
-                                append_text(&mut output, "(", limit)?;
+                                append_text(output, "(", limit)?;
                                 push_frame(&mut frames, EncodeFrame::Text(")"))?;
                                 push_frame(&mut frames, EncodeFrame::Value(value))?;
                             }
                             ValuePayloadView::Structure(entries) => {
-                                append_text(&mut output, " ", limit)?;
+                                append_text(output, " ", limit)?;
                                 push_frame(&mut frames, EncodeFrame::Entries(entries, false))?;
                             }
                         }
@@ -132,26 +143,21 @@ impl ScalarEncoder {
                 },
             }
         }
-        Ok(output)
+        Ok(())
     }
 
-    pub(super) fn encode_entry(
+    pub(super) fn encode_entry_into(
+        output: &mut ChargedString,
         request: EntryEncoding<'_, '_>,
-    ) -> Result<ChargedString, ConfigEditErrorKind> {
-        let encoded_value = Self::encode_value(request.value, request.budget, request.limit)?;
-        let mut errors = ErrSlot::<BudgetError>::new();
-        let mut output = errors
-            .try_call(|out| ChargedString::with_capacity(0, request.budget, out))
-            .map_err(|caught| budget_error_kind(caught.take()))?;
+    ) -> Result<(), ConfigEditErrorKind> {
         if request.map_key {
-            append_escaped(&mut output, request.name, request.limit)?;
+            append_escaped(output, request.name, request.limit)?;
         } else {
-            append_text(&mut output, request.name, request.limit)?;
+            append_text(output, request.name, request.limit)?;
         }
-        append_text(&mut output, ":", request.limit)?;
-        append_text(&mut output, request.colon_spacing, request.limit)?;
-        append_text(&mut output, encoded_value.as_str(), request.limit)?;
-        Ok(output)
+        append_text(output, ":", request.limit)?;
+        append_text(output, request.colon_spacing, request.limit)?;
+        Self::encode_value_into(output, request.value, request.budget, request.limit)
     }
 }
 

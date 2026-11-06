@@ -3,7 +3,7 @@ use crate::{
     error::SyntaxDiagnostic,
     input::{Input, InputConfig},
     parser::SourcePositionIndex,
-    token::{Keyword, Symbol, Token, TokenKind},
+    token::{CommentKind, Keyword, Symbol, Token, TokenKind},
 };
 use opeo::{OResult, Out};
 use typol_core::{
@@ -176,7 +176,7 @@ impl<'input> Lexer<'input> {
             while self
                 .input
                 .character(out.reborrow())?
-                .is_some_and(|character| identifier_continue(character) || character == '.')
+                .is_some_and(|character| Symbol::identifier_continue(character) || character == '.')
             {
                 self.step_token(start, out.reborrow())?;
             }
@@ -193,12 +193,14 @@ impl<'input> Lexer<'input> {
         if character == '"' {
             return self.string(start, out.reborrow());
         }
-        if let Some(symbol) = self.symbol(start, out.reborrow())? {
-            return Ok(Token::new(
-                TokenKind::Symbol(symbol),
-                self.input.span_from(start, out.reborrow())?,
-                None,
-            ));
+        if Symbol::can_start(character) {
+            if let Some(symbol) = self.symbol(start, out.reborrow())? {
+                return Ok(Token::new(
+                    TokenKind::Symbol(symbol),
+                    self.input.span_from(start, out.reborrow())?,
+                    None,
+                ));
+            }
         }
         self.input.advance(out.reborrow())?;
         let diagnostic = self.diagnostic(
@@ -308,11 +310,13 @@ impl<'input> Lexer<'input> {
                     }
                     self.input.advance(out.reborrow())?;
                 }
-                Some('/') => match self.input.byte(1, out.reborrow())? {
-                    Some(b'/') => self.comment(false, out.reborrow())?,
-                    Some(b'*') => self.comment(true, out.reborrow())?,
-                    _ => break,
-                },
+                Some('/') => {
+                    match Symbol::comment_kind(b'/', self.input.byte(1, out.reborrow())?) {
+                        Some(CommentKind::Line) => self.comment(false, out.reborrow())?,
+                        Some(CommentKind::Block) => self.comment(true, out.reborrow())?,
+                        None => break,
+                    }
+                }
                 _ => break,
             }
         }
@@ -390,7 +394,7 @@ impl<'input> Lexer<'input> {
         while self
             .input
             .character(out.reborrow())?
-            .is_some_and(identifier_continue)
+            .is_some_and(Symbol::identifier_continue)
         {
             let character = self.step_token(start, out.reborrow())?;
             self.append(&mut text, character, true, out.reborrow())?;
@@ -419,7 +423,7 @@ impl<'input> Lexer<'input> {
         while self
             .input
             .character(out.reborrow())?
-            .is_some_and(|character| identifier_continue(character) || character == '.')
+            .is_some_and(|character| Symbol::identifier_continue(character) || character == '.')
         {
             let character = self.step_token(start, out.reborrow())?;
             self.append(&mut text, character, false, out.reborrow())?;
@@ -593,50 +597,17 @@ impl<'input> Lexer<'input> {
                     "symbol-start-byte-missing"
                 ))));
         };
-        let next = if matches!(byte, b':' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|') {
+        let next = if Symbol::has_pair_prefix(byte) {
             self.input.byte(1, out.reborrow())?
         } else {
             None
         };
-        let pair = match (byte, next) {
-            (b':', Some(b':')) => Some(Symbol::PathSeparator),
-            (b'=', Some(b'=')) => Some(Symbol::EqualEqual),
-            (b'!', Some(b'=')) => Some(Symbol::NotEqual),
-            (b'<', Some(b'=')) => Some(Symbol::LessEqual),
-            (b'>', Some(b'=')) => Some(Symbol::GreaterEqual),
-            (b'&', Some(b'&')) => Some(Symbol::AndAnd),
-            (b'|', Some(b'|')) => Some(Symbol::OrOr),
-            _ => None,
+        let Some((symbol, width)) = Symbol::from_ascii(byte, next) else {
+            return Ok(None);
         };
-        if let Some(symbol) = pair {
+        for _ in 0..width {
             self.step_token(start, out.reborrow())?;
-            self.step_token(start, out.reborrow())?;
-            return Ok(Some(symbol));
         }
-        let symbol = match byte {
-            b'(' => Symbol::LeftParen,
-            b')' => Symbol::RightParen,
-            b'{' => Symbol::LeftBrace,
-            b'}' => Symbol::RightBrace,
-            b'[' => Symbol::LeftBracket,
-            b']' => Symbol::RightBracket,
-            b',' => Symbol::Comma,
-            b';' => Symbol::Semicolon,
-            b':' => Symbol::Colon,
-            b'.' => Symbol::Dot,
-            b'@' => Symbol::At,
-            b'=' => Symbol::Equal,
-            b'!' => Symbol::Bang,
-            b'<' => Symbol::Less,
-            b'>' => Symbol::Greater,
-            b'+' => Symbol::Plus,
-            b'-' => Symbol::Minus,
-            b'*' => Symbol::Star,
-            b'/' => Symbol::Slash,
-            b'|' => Symbol::Pipe,
-            _ => return Ok(None),
-        };
-        self.step_token(start, out.reborrow())?;
         Ok(Some(symbol))
     }
 }
@@ -649,8 +620,4 @@ fn pack_position(location: SourceLocation) -> u64 {
         return 0;
     };
     (u64::from(line) << 32) | u64::from(column)
-}
-
-fn identifier_continue(character: char) -> bool {
-    character.is_ascii_alphanumeric() || character == '_'
 }

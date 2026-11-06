@@ -19,13 +19,13 @@ use crate::loading::{FileReadRequest, PreparedConfig};
 #[cfg(feature = "std")]
 use std::{fmt, io::Read as IoRead, path::Path};
 #[cfg(feature = "std")]
-use typol_config::{ConfigSourceCommitError, ConfigSourceExpectation, ConfigSourceRevision};
+use typol_config::{SourceCommitError, SourceExpectation, SourceRevision};
 #[cfg(feature = "std")]
 use typol_core::{ExecutionLimits, SourceId};
 #[cfg(feature = "std")]
 use typol_std::{
-    ConfigSourceWriteError, FileConfigInput, FileConfigSourceWriter, FileSchemaCompilation,
-    HostError, HostOperation, ReadSource, SourceNames as HostSourceNames,
+    FileConfigInput, FileSchemaCompilation, FileSourceWriter, HostError, HostOperation, ReadSource,
+    SourceNames as HostSourceNames, SourceWriteError,
 };
 
 // The terminal slot reserves one error payload without consuming source-name edit limits.
@@ -311,7 +311,7 @@ impl LoadedSchema {
         &self,
         document: &mut ConfigDocument<'_>,
         path: &Path,
-    ) -> Result<ConfigSourceRevision, ConfigSourceCommitError<ConfigSourceWriteError>> {
+    ) -> Result<SourceRevision, SourceCommitError<SourceWriteError>> {
         self.write_file_with_expectation(document, path, document.source_expectation())
     }
 
@@ -321,8 +321,8 @@ impl LoadedSchema {
         &self,
         document: &mut ConfigDocument<'_>,
         path: &Path,
-        expectation: ConfigSourceExpectation<'_>,
-    ) -> Result<ConfigSourceRevision, ConfigSourceCommitError<ConfigSourceWriteError>> {
+        expectation: SourceExpectation<'_>,
+    ) -> Result<SourceRevision, SourceCommitError<SourceWriteError>> {
         let max_bytes = self
             .options
             .config()
@@ -330,10 +330,9 @@ impl LoadedSchema {
             .max_source_bytes()
             .min(self.options.file_input_limits().max_file_bytes());
         if document.source().len() > max_bytes {
-            return Err(ConfigSourceCommitError::ResourceLimitExceeded);
+            return Err(SourceCommitError::ResourceLimitExceeded);
         }
-        let mut writer =
-            FileConfigSourceWriter::new(self.options.file_input_limits().max_path_bytes());
+        let mut writer = FileSourceWriter::new(self.options.file_input_limits().max_path_bytes());
         document.write_source(path, &mut writer, expectation)
     }
 

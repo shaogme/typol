@@ -1,6 +1,6 @@
 use crate::{
-    Diagnostic, ExcerptLimits, ExecutionBudget, SourceExcerptSet, SourceId, SourceSpan, Span,
-    SpanLocation,
+    Diagnostic, ExcerptLimits, ExecutionBudget, LocatedSpan, SourceExcerptSet, SourceId,
+    SourceSpan, Span, SpanLocation,
     excerpts::{ExcerptLine, MarkerInput},
     optional_storage::OptionalVec,
 };
@@ -486,10 +486,36 @@ impl SourceCapture {
     }
 
     pub fn finish(&self, excerpts: &mut SourceExcerptSet, diagnostics: &[Diagnostic]) {
+        self.finish_diagnostics(excerpts, diagnostics.iter(), LocatedSpan::location);
+    }
+
+    pub fn finish_iter<'diagnostics>(
+        &self,
+        excerpts: &mut SourceExcerptSet,
+        diagnostics: impl Clone + Iterator<Item = &'diagnostics Diagnostic>,
+    ) {
+        self.finish_diagnostics(excerpts, diagnostics, LocatedSpan::location);
+    }
+
+    pub fn finish_iter_with_locations<'diagnostics>(
+        &self,
+        excerpts: &mut SourceExcerptSet,
+        diagnostics: impl Clone + Iterator<Item = &'diagnostics Diagnostic>,
+        location: impl Fn(LocatedSpan) -> Option<SpanLocation>,
+    ) {
+        self.finish_diagnostics(excerpts, diagnostics, location);
+    }
+
+    fn finish_diagnostics<'diagnostics>(
+        &self,
+        excerpts: &mut SourceExcerptSet,
+        diagnostics: impl Clone + Iterator<Item = &'diagnostics Diagnostic>,
+        location: impl Fn(LocatedSpan) -> Option<SpanLocation>,
+    ) {
         if self.unavailable || !self.sealed || !self.redactions_valid() {
             let mut found = false;
             for span in diagnostics
-                .iter()
+                .clone()
                 .flat_map(|diagnostic| {
                     diagnostic
                         .located_primary()
@@ -526,7 +552,7 @@ impl SourceCapture {
                     excerpts.mark_missing();
                     continue;
                 }
-                let Some(location) = located.location() else {
+                let Some(location) = location(located).or_else(|| located.location()) else {
                     excerpts.mark_span_missing(span);
                     continue;
                 };

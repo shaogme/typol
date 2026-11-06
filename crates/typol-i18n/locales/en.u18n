@@ -3,12 +3,14 @@ locale en;
 message cli.help = "Usage:
   typol [--language en|zh-CN] --help
   typol [--language en|zh-CN] schema check <schema.tschem>
+  typol [--language en|zh-CN] schema fmt [--check] <schema.tschem>
   typol [--language en|zh-CN] config check --schema <schema.tschem> [--environment inherit|empty] <config.tconf>
   typol [--language en|zh-CN] config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] [--reject-secrets] <config.tconf>
   typol [--language en|zh-CN] config fmt --schema <schema.tschem> [--environment inherit|empty] [--check] <config.tconf>
 
 Commands:
   schema check       Compile and check a schema and its imports
+  schema fmt         Format a schema file in place
   config check       Validate configuration against a schema
   config export-ir   Load and validate configuration, then output typed JSON IR v1
   config fmt         Format a validated configuration file in place
@@ -19,6 +21,7 @@ Options:
   --pretty           Output IR with indentation
   --reject-secrets   Fail before writing IR if any value is marked secret
   --check            Check config fmt without writing the file
+  --check            Check schema fmt without writing the file
   -h, --help         Show this help
 
 Use --language before the command. Set TYPOL_LANG to select a language when the option is omitted.\n";
@@ -29,13 +32,16 @@ message cli.ir_error = "IR serialization failed or exceeded the output limit.";
 message cli.ir_secret_rejected = "IR export was rejected because the configuration contains a secret value.";
 message cli.format_error = "Configuration formatting or file replacement failed.";
 message cli.format_check_failed = "Configuration needs formatting.";
+message cli.schema_format_error = "Schema formatting or file replacement failed.";
+message cli.schema_format_check_failed = "Schema needs formatting.";
 message cli.command_utf8 = "Command name must be valid UTF-8 text.";
 message cli.unknown_command = "Unknown command.";
-message cli.schema_action_missing = "Missing schema check subcommand.";
+message cli.schema_action_missing = "Missing schema check or fmt subcommand.";
 message cli.schema_action_utf8 = "Schema subcommand must be valid UTF-8 text.";
-message cli.schema_action_invalid = "Schema supports only the check subcommand.";
+message cli.schema_action_invalid = "Schema supports only check and fmt subcommands.";
 message cli.schema_path_missing = "Missing schema file path.";
-message cli.schema_path_extra = "Schema check accepts only one schema file path.";
+message cli.schema_path_extra = "Schema commands accept only one schema file path.";
+message cli.schema_option_invalid = "Unknown schema fmt option.";
 message cli.config_action_missing = "Missing config check, config export-ir, or config fmt subcommand.";
 message cli.config_action_utf8 = "Config subcommand must be valid UTF-8 text.";
 message cli.config_action_invalid = "Config supports only check, export-ir, and fmt subcommands.";
@@ -92,6 +98,7 @@ message report.title.operation_failed = "Typol operation failed";
 message report.title.schema_compilation_failed = "Schema compilation failed";
 message report.title.payload_storage_failed = "Failed to store error payload";
 message report.stage.schema_read = "schema reading";
+message report.stage.schema_parsing = "schema parsing";
 message report.stage.schema_compilation = "schema compilation";
 message report.stage.source_name_registration = "source name registration";
 message report.stage.type_binding = "type binding";

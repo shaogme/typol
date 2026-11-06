@@ -22,8 +22,7 @@ use typol::{
 
 #[cfg(not(feature = "std"))]
 use typol::{
-    ConfigSourceExpectation, ConfigSourceRevision, ConfigSourceWriter, OrderedMap, TypolStage,
-    core::SourceId,
+    OrderedMap, SourceExpectation, SourceRevision, SourceWriter, TypolStage, core::SourceId,
 };
 
 #[cfg(all(feature = "hashbrown", not(feature = "std")))]
@@ -94,34 +93,34 @@ struct NoStdConfigWriter {
 }
 
 #[cfg(not(feature = "std"))]
-impl ConfigSourceWriter for NoStdConfigWriter {
+impl SourceWriter for NoStdConfigWriter {
     type Target = str;
     type Error = ();
 
     fn replace_atomically(
         &mut self,
         _: &Self::Target,
-        expectation: ConfigSourceExpectation<'_>,
+        expectation: SourceExpectation<'_>,
         replacement: &[u8],
         max_bytes: usize,
-    ) -> Result<ConfigSourceRevision, Self::Error> {
+    ) -> Result<SourceRevision, Self::Error> {
         if replacement.len() > max_bytes {
             return Err(());
         }
         match expectation {
-            ConfigSourceExpectation::ExactSnapshot(expected)
+            SourceExpectation::ExactSnapshot(expected)
                 if self.contents.as_deref() != Some(expected) =>
             {
                 return Err(());
             }
-            ConfigSourceExpectation::MustBeAbsent if self.contents.is_some() => return Err(()),
-            ConfigSourceExpectation::DocumentSnapshot => return Err(()),
-            ConfigSourceExpectation::ExactSnapshot(_)
-            | ConfigSourceExpectation::MustBeAbsent
-            | ConfigSourceExpectation::ReplaceAny => {}
+            SourceExpectation::MustBeAbsent if self.contents.is_some() => return Err(()),
+            SourceExpectation::DocumentSnapshot => return Err(()),
+            SourceExpectation::ExactSnapshot(_)
+            | SourceExpectation::MustBeAbsent
+            | SourceExpectation::ReplaceAny => {}
         }
         self.contents = Some(replacement.to_vec());
-        Ok(ConfigSourceRevision::new(1))
+        Ok(SourceRevision::new(1))
     }
 }
 

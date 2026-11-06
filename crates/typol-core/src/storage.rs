@@ -7,7 +7,7 @@ use alloc::{
 };
 use core::{
     ops::{Deref, DerefMut},
-    str::from_utf8_unchecked,
+    str::{Utf8Error, from_utf8, from_utf8_unchecked},
 };
 use opeo::{OResult, Out, ResultOutExt};
 
@@ -204,6 +204,13 @@ pub struct WorkspaceString {
 }
 
 impl WorkspaceString {
+    pub fn from_utf8_bytes(bytes: WorkspaceVec<u8>) -> Result<Self, (WorkspaceVec<u8>, Utf8Error)> {
+        match from_utf8(bytes.as_slice()) {
+            Ok(_) => Ok(Self { bytes }),
+            Err(error) => Err((bytes, error)),
+        }
+    }
+
     pub fn copy<'slot, E>(
         value: &str,
         budget: Option<&ExecutionBudget>,

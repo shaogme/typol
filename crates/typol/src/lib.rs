@@ -159,17 +159,23 @@ pub use typol_config::{
     ConfigDocument, ConfigEdit, ConfigEditError, ConfigEditErrorKind, ConfigFormatError,
     ConfigFormatErrorKind, ConfigFormatOptions, ConfigFormatter, ConfigParseErrors,
     ConfigParseOptions, ConfigParseRequest, ConfigParser, ConfigPath, ConfigPathSegment,
-    ConfigReplacement, ConfigSourceCommitError, ConfigSourceExpectation, ConfigSourceRevision,
-    ConfigSourceWriter, ConfigValidationOptions, ConfigValueProcessor, EmptyEnvironment,
+    ConfigReplacement, ConfigValidationOptions, ConfigValueProcessor, EmptyEnvironment,
     Environment, EnvironmentError, EnvironmentReadContext, FormattedConfig, NormalizedConfigValue,
     ValidatedConfigValue,
 };
-pub use typol_core::{ConfigValue, ExecutionBudget, ExecutionLimits, Read, SliceSource};
+pub use typol_core::{
+    ConfigValue, ExecutionBudget, ExecutionLimits, Read, SliceSource, SourceCommitError,
+    SourceExpectation, SourceRevision, SourceWriter,
+};
 
 pub use api::{binding, config, core, model, policy, schema, semantic};
 pub use typol_macros::Typol;
 pub use typol_schema::{
     SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaResolver, SchemaSource,
+};
+pub use typol_syntax::{
+    FormattedSchema, SchemaDocument, SchemaFormatError, SchemaFormatErrorKind, SchemaFormatOptions,
+    SchemaFormatter, SchemaParseOptions, SchemaParser, SyntaxErrors,
 };
 
 #[cfg(feature = "std")]

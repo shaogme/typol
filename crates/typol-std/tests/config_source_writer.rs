@@ -10,8 +10,8 @@ use std::{
     process,
     sync::atomic::{AtomicU64, Ordering},
 };
-use typol_config::{ConfigSourceExpectation, ConfigSourceWriter};
-use typol_std::{ConfigSourceWriteErrorKind, FileConfigSourceWriter};
+use typol_config::{SourceExpectation, SourceWriter};
+use typol_std::{FileSourceWriter, SourceWriteErrorKind};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -69,10 +69,10 @@ fn local_writer_refuses_snapshot_replacement_without_atomic_compare_and_swap()
     let directory = TemporaryDirectory::new()?;
     let target = directory.path("settings.tconf");
     fs::write(&target, b"old source")?;
-    let mut writer = FileConfigSourceWriter::new(4096);
+    let mut writer = FileSourceWriter::new(4096);
     let error = match writer.replace_atomically(
         &target,
-        ConfigSourceExpectation::ExactSnapshot(b"old source"),
+        SourceExpectation::ExactSnapshot(b"old source"),
         b"new source",
         128,
     ) {
@@ -81,10 +81,7 @@ fn local_writer_refuses_snapshot_replacement_without_atomic_compare_and_swap()
         }
         Err(error) => error,
     };
-    ensure_eq!(
-        error.kind(),
-        ConfigSourceWriteErrorKind::AtomicReplaceUnsupported
-    );
+    ensure_eq!(error.kind(), SourceWriteErrorKind::AtomicReplaceUnsupported);
     ensure_eq!(fs::read(&target)?, b"old source");
     Ok(())
 }
@@ -94,25 +91,22 @@ fn stale_snapshot_and_existing_absent_target_leave_files_unchanged() -> Result<(
     let directory = TemporaryDirectory::new()?;
     let target = directory.path("settings.tconf");
     fs::write(&target, b"changed by another writer")?;
-    let mut writer = FileConfigSourceWriter::new(4096);
+    let mut writer = FileSourceWriter::new(4096);
     let error = match writer.replace_atomically(
         &target,
-        ConfigSourceExpectation::ExactSnapshot(b"old source"),
+        SourceExpectation::ExactSnapshot(b"old source"),
         b"replacement",
         128,
     ) {
         Ok(_) => return Err(io::Error::other("stale snapshot unexpectedly committed").into()),
         Err(error) => error,
     };
-    ensure_eq!(
-        error.kind(),
-        ConfigSourceWriteErrorKind::ConcurrentModification
-    );
+    ensure_eq!(error.kind(), SourceWriteErrorKind::ConcurrentModification);
     ensure_eq!(fs::read(&target)?, b"changed by another writer");
 
     let absent_error = match writer.replace_atomically(
         &target,
-        ConfigSourceExpectation::MustBeAbsent,
+        SourceExpectation::MustBeAbsent,
         b"replacement",
         128,
     ) {
@@ -125,7 +119,7 @@ fn stale_snapshot_and_existing_absent_target_leave_files_unchanged() -> Result<(
     };
     ensure_eq!(
         absent_error.kind(),
-        ConfigSourceWriteErrorKind::TargetAlreadyExists
+        SourceWriteErrorKind::TargetAlreadyExists
     );
     ensure_eq!(fs::read(&target)?, b"changed by another writer");
     Ok(())
@@ -135,15 +129,10 @@ fn stale_snapshot_and_existing_absent_target_leave_files_unchanged() -> Result<(
 fn new_target_requires_absence_and_replace_any_is_explicit() -> Result<(), Box<dyn Error>> {
     let directory = TemporaryDirectory::new()?;
     let target = directory.path("new.tconf");
-    let mut writer = FileConfigSourceWriter::new(4096);
-    writer.replace_atomically(
-        &target,
-        ConfigSourceExpectation::MustBeAbsent,
-        b"first",
-        128,
-    )?;
+    let mut writer = FileSourceWriter::new(4096);
+    writer.replace_atomically(&target, SourceExpectation::MustBeAbsent, b"first", 128)?;
     ensure_eq!(fs::read(&target)?, b"first");
-    writer.replace_atomically(&target, ConfigSourceExpectation::ReplaceAny, b"second", 128)?;
+    writer.replace_atomically(&target, SourceExpectation::ReplaceAny, b"second", 128)?;
     ensure_eq!(fs::read(&target)?, b"second");
     Ok(())
 }
@@ -151,10 +140,10 @@ fn new_target_requires_absence_and_replace_any_is_explicit() -> Result<(), Box<d
 #[test]
 fn relative_target_syncs_the_current_directory() -> Result<(), Box<dyn Error>> {
     let target = TemporaryRelativeFile::new();
-    let mut writer = FileConfigSourceWriter::new(4096);
+    let mut writer = FileSourceWriter::new(4096);
     writer.replace_atomically(
         &target.path,
-        ConfigSourceExpectation::MustBeAbsent,
+        SourceExpectation::MustBeAbsent,
         b"relative source",
         128,
     )?;
@@ -167,8 +156,8 @@ fn replace_any_limits_the_new_source_without_reading_the_old_one() -> Result<(),
     let directory = TemporaryDirectory::new()?;
     let target = directory.path("large-old.tconf");
     fs::write(&target, b"old source larger than the replacement limit")?;
-    let mut writer = FileConfigSourceWriter::new(4096);
-    writer.replace_atomically(&target, ConfigSourceExpectation::ReplaceAny, b"x", 1)?;
+    let mut writer = FileSourceWriter::new(4096);
+    writer.replace_atomically(&target, SourceExpectation::ReplaceAny, b"x", 1)?;
     ensure_eq!(fs::read(&target)?, b"x");
     Ok(())
 }
@@ -176,24 +165,21 @@ fn replace_any_limits_the_new_source_without_reading_the_old_one() -> Result<(),
 #[test]
 fn source_writer_rejects_directories_and_enforces_limits() -> Result<(), Box<dyn Error>> {
     let directory = TemporaryDirectory::new()?;
-    let mut writer = FileConfigSourceWriter::new(4096);
+    let mut writer = FileSourceWriter::new(4096);
     let invalid_target = match writer.replace_atomically(
         directory.path.as_path(),
-        ConfigSourceExpectation::ReplaceAny,
+        SourceExpectation::ReplaceAny,
         b"replacement",
         128,
     ) {
         Ok(_) => return Err(io::Error::other("directory target unexpectedly accepted").into()),
         Err(error) => error,
     };
-    ensure_eq!(
-        invalid_target.kind(),
-        ConfigSourceWriteErrorKind::InvalidTarget
-    );
+    ensure_eq!(invalid_target.kind(), SourceWriteErrorKind::InvalidTarget);
     let target = directory.path("limited.tconf");
     let limit_error = match writer.replace_atomically(
         &target,
-        ConfigSourceExpectation::MustBeAbsent,
+        SourceExpectation::MustBeAbsent,
         b"too large",
         2,
     ) {
@@ -202,7 +188,7 @@ fn source_writer_rejects_directories_and_enforces_limits() -> Result<(), Box<dyn
     };
     ensure_eq!(
         limit_error.kind(),
-        ConfigSourceWriteErrorKind::ResourceLimitExceeded
+        SourceWriteErrorKind::ResourceLimitExceeded
     );
     ensure!(!target.exists());
     Ok(())

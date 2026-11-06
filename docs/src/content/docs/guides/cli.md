@@ -1,11 +1,11 @@
 ---
 title: CLI guide
-description: Check and format Typol configurations, and export validated values as Config IR.
+description: Check and format Typol Schemas and configurations, and export validated values as Config IR.
 sidebar:
   order: 2
 ---
 
-The `typol` command line tool checks `.tschem` schemas, validates and formats `.tconf` files, and exports configuration values as typed JSON. It complements the [Rust quick start](../quickstart/): use the CLI to check or format files directly, or use the Rust library when your application needs to load values itself.
+The `typol` command line tool checks and formats `.tschem` schemas, validates and formats `.tconf` files, and exports configuration values as typed JSON. It complements the [Rust quick start](../quickstart/): use the CLI to check or format files directly, or use the Rust library when your application needs to load values itself.
 
 The CLI supports English and Simplified Chinese. Help, command-line errors, operation messages, and detailed schema and configuration diagnostics use the same selected language. The CLI checks are rendered from the build-time `u18n` catalogs in `typol-i18n`.
 
@@ -36,6 +36,14 @@ cargo run -p typol-cli -- schema check examples/cli/cli_demo.tschem
 ```
 
 This compiles the Schema and its `extern mod` imports. On success, the command exits with status `0` and writes nothing to standard output.
+
+### Format a Schema
+
+```sh
+cargo run -p typol-cli -- schema fmt examples/cli/cli_demo.tschem
+```
+
+`schema fmt` parses syntax without loading imports or performing static type checks, then atomically replaces the file with the canonical layout. It preserves token spelling, comments, declaration order, and the input's LF or CRLF convention. Add `--check` to compare the canonical result without writing; it exits with status `1` when formatting is needed. A schema path beginning with `-` can follow `--`.
 
 ### Check a configuration
 
@@ -80,7 +88,7 @@ cargo run -p typol-cli -- config fmt \
   examples/cli/cli_demo.tconf
 ```
 
-`config fmt` validates the file with its Schema, then atomically writes the canonical layout back to the same file. Nonempty arrays and objects are expanded with four spaces per nesting level. Source values, comments, and entry order are preserved; resolved environment values and omitted Schema defaults are not written into the file. Add `--check` to report whether formatting is needed without changing the file; that check exits with status `1` when the file needs formatting.
+`config fmt` validates the file with its Schema, then atomically writes the canonical layout back to the same file. Nonempty arrays and objects are expanded with four spaces per nesting level. Source values, comments, and entry order are preserved; resolved environment values and omitted Schema defaults are not written into the file. Add `--check` to compare formatted output with the source without retaining a complete formatted copy or changing the file; that check exits with status `1` when the file needs formatting.
 
 ## Environment selection
 
@@ -97,6 +105,7 @@ For example, the demo configuration reads `TYPOL_CLI_DEMO_KEY`. With the default
 
 ```text
 typol schema check <schema.tschem>
+typol schema fmt [--check] <schema.tschem>
 typol config check --schema <schema.tschem> [--environment inherit|empty] <config.tconf>
 typol config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] [--reject-secrets] <config.tconf>
 typol config fmt --schema <schema.tschem> [--environment inherit|empty] [--check] <config.tconf>
@@ -106,21 +115,21 @@ typol config fmt --schema <schema.tschem> [--environment inherit|empty] [--check
 - `--environment inherit|empty` selects the environment provider for configuration reads.
 - `--pretty` is available only for `config export-ir`.
 - `--reject-secrets` is available only for `config export-ir`; it prevents output when any secret marker is present.
-- `--check` is available only for `config fmt`; it checks formatting without writing the file.
+- `--check` is available for `schema fmt` and `config fmt`; it checks formatting without writing the file.
 - `--language en|zh-CN` selects the language for CLI messages and detailed diagnostics, and must appear before the command. `TYPOL_LANG` can set the same preference.
 - `-h` and `--help` print command help. For example, use `typol --help`, `typol schema check --help`, or `typol config export-ir --help`.
-- In a `config` command, put `--` before a configuration path that begins with `-`, so it is treated as a path rather than an option.
+- Put `--` before a Schema or configuration path that begins with `-`, so it is treated as a path rather than an option.
 
 The CLI accepts file paths; it does not read Schema or configuration text from standard input. Schema imports are resolved relative to the importing Schema file.
 
 ## Output and exit status
 
-Successful check commands and `config fmt` are quiet. `config fmt --check` writes a localized message to standard error when formatting is needed. `config export-ir` writes JSON to standard output. Diagnostics and command-line errors go to standard error.
+Successful check commands and format commands are quiet. `schema fmt --check` and `config fmt --check` write a localized message to standard error when formatting is needed. `config export-ir` writes JSON to standard output. Diagnostics and command-line errors go to standard error.
 
 | Status | Meaning |
 | ---: | --- |
 | `0` | Success, including help output. |
-| `1` | Schema or configuration diagnostics, a failed validation, or a `config fmt --check` result that needs formatting. |
+| `1` | Schema or configuration diagnostics, a failed validation, or a `schema fmt --check` / `config fmt --check` result that needs formatting. |
 | `2` | Invalid command-line usage, such as a missing argument or unknown option. |
 | `3` | Host or I/O failure, translation rendering failure, or failure to write or serialize output. |
 

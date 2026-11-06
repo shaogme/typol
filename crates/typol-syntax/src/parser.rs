@@ -8,7 +8,8 @@ mod type_expr;
 mod value;
 
 use crate::{
-    InputConfig, Keyword, StreamLimits, Symbol, SyntaxErrors, SyntaxLimits, TokenKind,
+    InputConfig, Keyword, SchemaDocument, StreamLimits, Symbol, SyntaxErrors, SyntaxLimits,
+    TokenKind,
     ast::SchemaAst,
     parser::{
         context::{ParserControl, ParserState},
@@ -250,6 +251,22 @@ impl SchemaParser {
     ) -> OResult<'slot, SchemaAst> {
         let mut input = SliceSource::new(source.as_bytes());
         SchemaParser::parse(source_id, &mut input, options, budget, out)
+    }
+
+    /// Parses source text without resolving imports or performing static semantic checks.
+    pub fn parse_document<'source, 'slot>(
+        source_id: SourceId,
+        source: &'source str,
+        options: &SchemaParseOptions,
+        budget: &ExecutionBudget,
+        out: Out<'slot, '_, SyntaxErrors>,
+    ) -> OResult<'slot, SchemaDocument<'source>> {
+        let ast = Self::parse_str(source_id, source, options, budget, out)?;
+        Ok(SchemaDocument::new(
+            source,
+            ast,
+            options.syntax.max_source_bytes(),
+        ))
     }
 }
 

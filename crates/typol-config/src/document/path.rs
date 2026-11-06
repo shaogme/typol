@@ -107,21 +107,12 @@ impl ConfigPath {
         self
     }
 
-    pub(super) fn parent_path(&self) -> Option<Self> {
-        let length = self.segments.len().checked_sub(1)?;
-        Some(Self {
-            segments: self.segments.get(..length)?.to_vec(),
-        })
-    }
-
     pub(super) fn last(&self) -> Option<&ConfigPathSegment> {
         self.segments.last()
     }
 
-    pub(super) fn pushed(&self, segment: ConfigPathSegment) -> Self {
-        let mut path = self.clone();
-        path.segments.push(segment);
-        path
+    pub(super) fn segment_count(&self) -> usize {
+        self.segments.len()
     }
 }
 
@@ -289,27 +280,72 @@ impl SourcePathIndex {
         })
     }
 
-    pub(super) fn direct_children(
+    pub(super) fn direct_children_by_id(
         &self,
-        path: &ConfigPath,
+        parent_id: usize,
     ) -> Option<impl Iterator<Item = PathNodeInfo> + '_> {
-        let parent_id = self.resolve_id(path)?;
-        Some(
+        self.entries.get(parent_id)?;
+        let order = self.order.as_slice();
+        let start = order.partition_point(|index| {
             self.entries
-                .iter()
-                .enumerate()
-                .filter_map(move |(id, entry)| {
-                    (id != parent_id && entry.parent == parent_id).then_some(PathNodeInfo {
-                        span: entry.span,
-                        kind: entry.kind,
-                    })
-                }),
-        )
+                .get(*index)
+                .is_some_and(|entry| entry.parent < parent_id)
+        });
+        let end = order.partition_point(|index| {
+            self.entries
+                .get(*index)
+                .is_some_and(|entry| entry.parent <= parent_id)
+        });
+        let indices = order.get(start..end)?;
+        Some(indices.iter().filter_map(move |index| {
+            self.entries.get(*index).map(|entry| PathNodeInfo {
+                span: entry.span,
+                kind: entry.kind,
+            })
+        }))
+    }
+
+    pub(super) fn node_id(&self, path: &ConfigPath) -> Option<usize> {
+        self.resolve_id(path)
+    }
+
+    pub(super) fn parent_id(&self, path: &ConfigPath) -> Option<usize> {
+        let length = path.segments.len().checked_sub(1)?;
+        self.resolve_segments(path.segments.get(..length)?)
+    }
+
+    pub(super) fn info_by_id(&self, id: usize) -> Option<PathNodeInfo> {
+        let entry = self.entries.get(id)?;
+        Some(PathNodeInfo {
+            span: entry.span,
+            kind: entry.kind,
+        })
+    }
+
+    pub(super) fn map_key_child_info(&self, parent_id: usize, key: &str) -> Option<PathNodeInfo> {
+        let order = self.order.as_slice();
+        let found = order
+            .binary_search_by(|index| {
+                let Some(entry) = self.entries.get(*index) else {
+                    return Ordering::Less;
+                };
+                entry
+                    .parent
+                    .cmp(&parent_id)
+                    .then_with(|| compare_map_key(&entry.segment, key))
+            })
+            .ok()?;
+        let id = *order.get(found)?;
+        self.info_by_id(id)
     }
 
     fn resolve_id(&self, path: &ConfigPath) -> Option<usize> {
+        self.resolve_segments(&path.segments)
+    }
+
+    fn resolve_segments(&self, segments: &[ConfigPathSegment]) -> Option<usize> {
         let mut parent = 0;
-        for segment in &path.segments {
+        for segment in segments {
             let order = self.order.as_slice();
             let found = order
                 .binary_search_by(|index| {
@@ -556,6 +592,19 @@ fn compare_query(indexed: &Option<IndexedPathSegment>, query: &ConfigPathSegment
         (Some(IndexedPathSegment::Variant(_)), _) => Ordering::Greater,
         (Some(IndexedPathSegment::Payload), _) => Ordering::Greater,
         (None, _) => Ordering::Less,
+    }
+}
+
+fn compare_map_key(indexed: &Option<IndexedPathSegment>, query: &str) -> Ordering {
+    match indexed.as_ref() {
+        Some(IndexedPathSegment::Field(_)) => Ordering::Less,
+        Some(IndexedPathSegment::MapKey(key)) => key.as_str().cmp(query),
+        Some(
+            IndexedPathSegment::Index(_)
+            | IndexedPathSegment::Variant(_)
+            | IndexedPathSegment::Payload,
+        ) => Ordering::Greater,
+        None => Ordering::Less,
     }
 }
 

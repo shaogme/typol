@@ -126,6 +126,7 @@ dependencies = [
  "typol-schema",
  "typol-semantic",
  "typol-std",
+ "typol-syntax",
  "typol-test-support",
  "u18n",
 ]

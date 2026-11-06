@@ -63,10 +63,17 @@ struct ParserSetupRequest<'schema, 'source, 'limits, 'input, 'name, R: Read + ?S
     source_name: &'name str,
 }
 
-struct DocumentParseOutput<'schema> {
-    value: ValidatedConfigValue,
-    locations: LocationIndex<'schema>,
-    source: ChargedVec<u8>,
+struct DocumentPartsRequest<'input, 'environment, 'budget, R: Read + ?Sized> {
+    request: ConfigParseRequest<'input, R>,
+    environment: &'environment mut dyn Environment,
+    budget: &'budget ExecutionBudget,
+    retain_source: bool,
+}
+
+pub(crate) struct DocumentParseOutput<'schema> {
+    pub(crate) value: ValidatedConfigValue,
+    pub(crate) locations: LocationIndex<'schema>,
+    pub(crate) source: Option<ChargedVec<u8>>,
 }
 
 static CONFIG_PARSE_BUDGET_MISMATCH: DiagnosticContext = diagnostic_context!(
@@ -132,6 +139,73 @@ impl<'schema> ConfigParser<'schema> {
         budget: &ExecutionBudget,
         mut out: Out<'slot, 'borrow, ConfigParseErrors>,
     ) -> OResult<'slot, ConfigDocument<'schema>> {
+        let options = *request.options();
+        let display_name = request.display_name();
+        let parsed = self.parse_document_parts_with_budget(
+            DocumentPartsRequest {
+                request,
+                environment,
+                budget,
+                retain_source: true,
+            },
+            out.reborrow(),
+        )?;
+        let source = parsed.source.ok_or_else(|| {
+            out.reborrow().fail(ConfigParseErrors::emergency(
+                Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR),
+                self.schema.next_source_id(),
+            ))
+        })?;
+        ConfigDocument::from_parse(
+            ConfigDocumentInput {
+                schema: self.schema,
+                options,
+                display_name,
+                value: parsed.value,
+                locations: parsed.locations,
+                source,
+                budget,
+            },
+            out,
+        )
+    }
+
+    pub(crate) fn parse_document_without_source_retention_with_budget<
+        'slot,
+        'borrow,
+        R: Read + ?Sized,
+    >(
+        &self,
+        request: ConfigParseRequest<'_, R>,
+        environment: &mut dyn Environment,
+        budget: &ExecutionBudget,
+        out: Out<'slot, 'borrow, ConfigParseErrors>,
+    ) -> OResult<'slot, DocumentParseOutput<'schema>> {
+        self.parse_document_parts_with_budget(
+            DocumentPartsRequest {
+                request,
+                environment,
+                budget,
+                retain_source: false,
+            },
+            out,
+        )
+    }
+
+    fn parse_document_parts_with_budget<'slot, 'borrow, 'input, 'environment, 'budget, R>(
+        &self,
+        request: DocumentPartsRequest<'input, 'environment, 'budget, R>,
+        mut out: Out<'slot, 'borrow, ConfigParseErrors>,
+    ) -> OResult<'slot, DocumentParseOutput<'schema>>
+    where
+        R: Read + ?Sized,
+    {
+        let DocumentPartsRequest {
+            request,
+            environment,
+            budget,
+            retain_source,
+        } = request;
         if budget.limits() != *request.options().execution() {
             return Err(out.fail(ConfigParseErrors::emergency(
                 DiagnosticFactory::internal(CONFIG_PARSE_BUDGET_MISMATCH, None, None, None),
@@ -140,8 +214,6 @@ impl<'schema> ConfigParser<'schema> {
         }
         check_source(self.schema, &request, out.reborrow())?;
         let parts = request.into_parts();
-        let options = parts.options;
-        let display_name = parts.display_name;
         let Some(source_id) = self.schema.next_source_id() else {
             return Err(out.fail(ConfigParseErrors::emergency(
                 BudgetDiagnostic::from_error(BudgetError::Resource),
@@ -156,20 +228,10 @@ impl<'schema> ConfigParser<'schema> {
                 budget,
                 source_id,
             },
+            retain_source,
             out.reborrow(),
         )?;
-        ConfigDocument::from_parse(
-            ConfigDocumentInput {
-                schema: self.schema,
-                options,
-                display_name,
-                value: parsed.value,
-                locations: parsed.locations,
-                source: parsed.source,
-                budget,
-            },
-            out,
-        )
+        Ok(parsed)
     }
 }
 
@@ -313,6 +375,7 @@ fn parse_source<'slot, R: Read + ?Sized>(
 
 fn parse_document_source<'slot, 'schema, R: Read + ?Sized>(
     request: ParseSourceRequest<'schema, '_, '_, '_, R>,
+    retain_source: bool,
     mut out: Out<'slot, '_, ConfigParseErrors>,
 ) -> OResult<'slot, DocumentParseOutput<'schema>> {
     let ParseSourceRequest {
@@ -332,15 +395,18 @@ fn parse_document_source<'slot, 'schema, R: Read + ?Sized>(
         .with_capture(&capture);
     let input =
         TrackingInput::new(parts.input, options.config().max_source_bytes()).with_capture(&capture);
-    let mut retention_errors = ErrSlot::<Diagnostic>::new();
-    let mut input = match retention_errors
-        .try_call(|diagnostic_out| input.retain_source(budget, diagnostic_out))
-    {
-        Ok(input) => input,
-        Err(caught) => {
-            return Err(out.fail(ConfigParseErrors::emergency(caught.take(), Some(source_id))));
-        }
-    };
+    let mut input = input;
+    if retain_source {
+        let mut retention_errors = ErrSlot::<Diagnostic>::new();
+        input = match retention_errors
+            .try_call(|diagnostic_out| input.retain_source(budget, diagnostic_out))
+        {
+            Ok(input) => input,
+            Err(caught) => {
+                return Err(out.fail(ConfigParseErrors::emergency(caught.take(), Some(source_id))));
+            }
+        };
+    }
     let mut parser_slot = None;
     prepare_parser(
         ParserSetupRequest {
@@ -358,19 +424,11 @@ fn parse_document_source<'slot, 'schema, R: Read + ?Sized>(
         Parser::parse_slot_with_locations(parser_slot.take(), source_id, parse_out)
     });
     match parse_result {
-        Ok((value, locations)) => {
-            let source = input.take_retained_source().ok_or_else(|| {
-                out.reborrow().fail(ConfigParseErrors::emergency(
-                    Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR),
-                    Some(source_id),
-                ))
-            })?;
-            Ok(DocumentParseOutput {
-                value: ValidatedConfigValue::from_config_value(value),
-                locations,
-                source,
-            })
-        }
+        Ok((value, locations)) => Ok(DocumentParseOutput {
+            value: ValidatedConfigValue::from_config_value(value),
+            locations,
+            source: input.take_retained_source(),
+        }),
         Err(caught) => finish_parse_failure(
             ParseFailureRequest {
                 errors: caught.take(),

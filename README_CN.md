@@ -91,7 +91,7 @@ Schema 和 Rust 声明中的字段名及类型必须匹配。[快速上手](docs
 | `typol-report` | 本地化诊断报告格式化 |
 | `typol-std` | 可选的文件、进程环境和诊断宿主适配器 |
 | `typol-i18n` | 英文和简体中文消息目录 |
-| `typol-cli` | Schema 与配置检查、`.tconf` 格式化，以及 Config IR 导出 |
+| `typol-cli` | Schema 与配置检查、`.tschem` 和 `.tconf` 格式化，以及 Config IR 导出 |
 
 ## 按需阅读
 

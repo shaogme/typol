@@ -91,7 +91,7 @@ The source is split by responsibility. The normal application API is in `crates/
 | `typol-report` | Localized diagnostic report formatting |
 | `typol-std` | Optional file, process-environment, and diagnostic host adapters |
 | `typol-i18n` | English and Simplified Chinese message catalogs |
-| `typol-cli` | Schema and configuration checks, `.tconf` formatting, and Config IR export |
+| `typol-cli` | Schema and configuration checks, `.tschem` and `.tconf` formatting, and Config IR export |
 
 ## Choose a guide
 

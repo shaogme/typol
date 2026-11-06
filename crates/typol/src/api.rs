@@ -30,8 +30,7 @@ pub mod config {
         ConfigDocument, ConfigEdit, ConfigEditError, ConfigEditErrorKind, ConfigFailureStage,
         ConfigFormatError, ConfigFormatErrorKind, ConfigFormatOptions, ConfigFormatter,
         ConfigLimits, ConfigParseErrors, ConfigParseRequest, ConfigParser, ConfigPath,
-        ConfigPathSegment, ConfigReplacement, ConfigSourceCommitError, ConfigSourceExpectation,
-        ConfigSourceRevision, ConfigSourceWriter, ConfigValidationOptions, ConfigValidationRequest,
+        ConfigPathSegment, ConfigReplacement, ConfigValidationOptions, ConfigValidationRequest,
         ConfigValueProcessor, EnvironmentReadContext, FormattedConfig, NormalizedConfigValue,
         StreamLimits, ValidatedConfigValue,
     };
@@ -40,10 +39,12 @@ pub mod config {
 pub mod core {
     pub use typol_core::{
         AllocationError, BudgetError, ChargedString, ChargedVec, ConfigValue, ConfigValueBuilder,
-        Diagnostic, DiagnosticCode, DiagnosticContext as ErrorContext, ExecutionBudget,
-        ExecutionLimits, LocatedSpan, NamedValue, NamedValueEntryView, Read, SliceSource, SourceId,
-        SourceReadError, SourceSpan, ValueCopyLimits, ValueEntries, ValueEntryView, ValueError,
-        ValueId, ValueKind, ValuePayload, ValuePayloadView, ValueSource, ValueView,
+        Diagnostic, DiagnosticCode, DiagnosticContext as ErrorContext, ExcerptLimits,
+        ExecutionBudget, ExecutionLimits, LocatedSpan, NamedValue, NamedValueEntryView, Read,
+        SliceSource, SourceCapture, SourceCommitError, SourceExcerptSet, SourceExpectation,
+        SourceId, SourceLocation, SourceReadError, SourceRevision, SourceSpan, SourceWriter,
+        ValueCopyLimits, ValueEntries, ValueEntryView, ValueError, ValueId, ValueKind,
+        ValuePayload, ValuePayloadView, ValueSource, ValueView,
     };
 
     pub use crate::loading::SourceNames;
@@ -61,15 +62,15 @@ pub mod policy {
 pub mod host {
     pub use typol_i18n::{Language, Translator};
     pub use typol_std::{
-        ConfigSourceWriteError, ConfigSourceWriteErrorKind, DiagnosticContext,
-        DiagnosticRenderError, DiagnosticRenderer, DiagnosticReport, DiagnosticReportStage,
-        DiagnosticReportTitle, DisplayError, DisplayFailurePoint, DisplayOptions, FileConfigInput,
-        FileConfigInputLimitParams, FileConfigInputLimits, FileConfigSourceWriter,
+        DiagnosticContext, DiagnosticRenderError, DiagnosticRenderer, DiagnosticReport,
+        DiagnosticReportStage, DiagnosticReportTitle, DisplayError, DisplayFailurePoint,
+        DisplayOptions, FileConfigInput, FileConfigInputLimitParams, FileConfigInputLimits,
         FileSchemaCompilation, FileSchemaCompileErrors, FileSchemaCompileFailure,
         FileSchemaCompileOptions, FileSchemaCompiler, FileSchemaLimitParams, FileSchemaLimits,
-        FileSchemaResolver, FileSchemaSource, HostError, HostErrorKind, HostFailureStep,
-        HostOperation, ProcessEnvironment, ProcessEnvironmentLimitParams, ProcessEnvironmentLimits,
-        ReadSource, RenderOptions, SafeValueFormatter, SourceNameEditOptions, SourceNameLimits,
+        FileSchemaResolver, FileSchemaSource, FileSourceWriter, HostError, HostErrorKind,
+        HostFailureStep, HostOperation, ProcessEnvironment, ProcessEnvironmentLimitParams,
+        ProcessEnvironmentLimits, ReadSource, RenderOptions, SafeValueFormatter,
+        SourceNameEditOptions, SourceNameLimits, SourceWriteError, SourceWriteErrorKind,
     };
 }
 
@@ -79,6 +80,10 @@ pub mod schema {
         SchemaCompileOptions, SchemaCompileStage, SchemaCompileUsage, SchemaCompiler, SchemaLimits,
         SchemaResolveRequest, SchemaResolver, SchemaSource, SourceLoadedRequest, SourceObserver,
         SourceObserverError,
+    };
+    pub use typol_syntax::{
+        FormattedSchema, SchemaDocument, SchemaFormatError, SchemaFormatErrorKind,
+        SchemaFormatOptions, SchemaFormatter, SchemaParseOptions, SchemaParser, SyntaxErrors,
     };
 }
 

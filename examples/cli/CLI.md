@@ -6,6 +6,7 @@
 
 ```sh
 cargo run -p typol-cli -- schema check examples/cli/cli_demo.tschem
+cargo run -p typol-cli -- schema fmt --check examples/cli/cli_demo.tschem
 cargo run -p typol-cli -- config check --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf
 cargo run -p typol-cli -- config export-ir --schema examples/cli/cli_demo.tschem --environment empty examples/cli/cli_demo.tconf
 ```

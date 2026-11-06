@@ -254,6 +254,173 @@ fn config_format_writes_atomically_and_check_mode_never_changes_the_file()
 }
 
 #[test]
+fn schema_format_is_parse_only_idempotent_and_check_mode_is_read_only() -> Result<(), Box<dyn Error>>
+{
+    let schema_path = temp_dir().join(format!("typol-schema-fmt-{}.tschem", id()));
+    let source = "type Alias=Missing;entry struct Root{value:Alias}";
+    fs::write(&schema_path, source)?;
+    let formatted = run_cli(vec![
+        argument("schema"),
+        argument("fmt"),
+        schema_path.clone().into_os_string(),
+    ])?;
+    ensure_equal(formatted.status.code(), Some(0), "schema fmt exit code")?;
+    ensure(
+        formatted.stdout.is_empty(),
+        "schema fmt must be quiet on success",
+    )?;
+    ensure(
+        fs::read_to_string(&schema_path)?.contains("type Alias = Missing;"),
+        "schema fmt must parse syntax without resolving types",
+    )?;
+    let canonical = fs::read_to_string(&schema_path)?;
+    ensure_equal(
+        canonical.clone(),
+        "type Alias = Missing;\n\nentry struct Root {\n    value: Alias,\n}\n".to_owned(),
+        "schema fmt canonical output",
+    )?;
+
+    let clean_check = run_cli(vec![
+        argument("schema"),
+        argument("fmt"),
+        argument("--check"),
+        schema_path.clone().into_os_string(),
+    ])?;
+    ensure_equal(
+        clean_check.status.code(),
+        Some(0),
+        "clean schema fmt check exit code",
+    )?;
+    ensure_equal(
+        fs::read_to_string(&schema_path)?,
+        canonical.clone(),
+        "clean schema fmt check must not write",
+    )?;
+
+    fs::write(&schema_path, source)?;
+    let dirty_check = run_cli(vec![
+        argument("schema"),
+        argument("fmt"),
+        argument("--check"),
+        schema_path.clone().into_os_string(),
+    ])?;
+    ensure_equal(
+        dirty_check.status.code(),
+        Some(1),
+        "dirty schema fmt check exit code",
+    )?;
+    ensure(
+        String::from_utf8_lossy(&dirty_check.stderr).contains("needs formatting"),
+        "dirty schema fmt check must explain that formatting is needed",
+    )?;
+    ensure_equal(
+        fs::read_to_string(&schema_path)?,
+        source.to_owned(),
+        "dirty schema fmt check must preserve the file",
+    )?;
+
+    let second = run_cli(vec![
+        argument("schema"),
+        argument("fmt"),
+        schema_path.clone().into_os_string(),
+    ])?;
+    ensure_equal(
+        second.status.code(),
+        Some(0),
+        "repeated schema fmt exit code",
+    )?;
+    ensure_equal(
+        fs::read_to_string(&schema_path)?,
+        canonical,
+        "schema fmt must be idempotent",
+    )?;
+
+    let repeated_option = run_cli(vec![
+        argument("schema"),
+        argument("fmt"),
+        argument("--check"),
+        argument("--check"),
+        schema_path.clone().into_os_string(),
+    ])?;
+    ensure_equal(
+        repeated_option.status.code(),
+        Some(2),
+        "repeated schema fmt option exit code",
+    )?;
+    fs::remove_file(schema_path)?;
+    Ok(())
+}
+
+#[test]
+fn schema_format_syntax_errors_use_localized_diagnostics() -> Result<(), Box<dyn Error>> {
+    let path = temp_dir().join(format!("typol-schema-fmt-invalid-{}.tschem", id()));
+    fs::write(&path, "entry struct Root { value: }")?;
+    for (language, expected_stage) in [("en", "schema parsing"), ("zh-CN", "解析 Schema")] {
+        let output = run_cli(vec![
+            argument(&format!("--language={language}")),
+            argument("schema"),
+            argument("fmt"),
+            path.clone().into_os_string(),
+        ])?;
+        ensure_equal(
+            output.status.code(),
+            Some(1),
+            "schema fmt syntax error exit code",
+        )?;
+        let rendered = String::from_utf8_lossy(&output.stderr);
+        ensure(
+            rendered.contains(expected_stage),
+            "schema syntax report must use the selected language",
+        )?;
+        ensure(
+            rendered.contains(path.to_str().unwrap_or_default()),
+            "schema syntax report must include its path",
+        )?;
+        ensure(
+            rendered.contains("1:"),
+            "schema syntax report must include a source location",
+        )?;
+        ensure(
+            rendered.contains("<redacted>"),
+            "schema syntax report must include a redacted bounded source excerpt",
+        )?;
+        ensure(
+            !rendered.contains("entry struct Root { value: }"),
+            "schema syntax report must not expose unclassified source text",
+        )?;
+    }
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn schema_format_rejects_oversized_input_as_a_host_failure() -> Result<(), Box<dyn Error>> {
+    let path = temp_dir().join(format!("typol-schema-fmt-large-{}.tschem", id()));
+    fs::write(&path, vec![b' '; 1_048_577])?;
+    let output = run_cli(vec![
+        argument("schema"),
+        argument("fmt"),
+        path.clone().into_os_string(),
+    ])?;
+    ensure_equal(
+        output.status.code(),
+        Some(3),
+        "oversized schema fmt exit code",
+    )?;
+    ensure(
+        String::from_utf8_lossy(&output.stderr).contains("Schema formatting"),
+        "oversized schema fmt must report a host operation failure",
+    )?;
+    ensure_equal(
+        fs::metadata(&path)?.len(),
+        1_048_577,
+        "oversized input must remain unchanged",
+    )?;
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
 fn export_ir_writes_to_stdout() -> Result<(), Box<dyn Error>> {
     let output = run_cli(config_arguments(
         "export-ir",

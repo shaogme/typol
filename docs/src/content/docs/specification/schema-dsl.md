@@ -269,3 +269,7 @@ Equality supports same-type scalars, enums, and comparable optional values; stru
 A Schema is usable for configuration parsing only if its syntax and static semantics are valid. Type references must resolve to structs, enums, or valid aliases. Aliases cannot be cyclic, and recursive user-declared types must have at least one finite value. Struct fields, enum variants, and declarations in the same namespace cannot be duplicated. The entry must be a struct.
 
 Every default must match its declared type and constraints. Annotations must apply to supported target types and have valid arguments and bounds. Assertions and collection expressions must pass static type checking. If any condition fails, the Schema is invalid.
+
+## 8. Canonical formatting
+
+`SchemaFormatter` formats syntax-valid source without resolving imports or checking static semantics. It preserves every non-whitespace token and comment byte in source order, including numeric and string spelling. The canonical layout uses four-space indentation, expands non-empty declaration bodies and compound defaults, puts list elements on separate lines with trailing commas, and leaves declarations one blank line apart. Empty braces stay inline; types and expressions stay compact. The output ends with a newline and uses CRLF when the input contains any CRLF, otherwise LF. Formatting does not reorder declarations or comments.

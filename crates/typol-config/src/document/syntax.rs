@@ -1,7 +1,7 @@
-use opeo::ErrSlot;
-use typol_core::{BudgetError, ChargedString, ExecutionBudget, Span};
+use opeo::{ErrSlot, OResult, Out};
+use typol_core::{BudgetError, ChargedString, ChargedVec, ExecutionBudget, Span};
 
-use super::{ConfigEditErrorKind, path::PathValueKind};
+use super::{ConfigEditError, ConfigEditErrorKind, path::PathValueKind};
 
 #[derive(Clone, Copy)]
 pub(super) struct SourceContainer {
@@ -9,6 +9,7 @@ pub(super) struct SourceContainer {
     pub(super) close: usize,
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct SourceItemBounds {
     pub(super) start: usize,
     pub(super) end: usize,
@@ -32,71 +33,186 @@ struct LexicalSpan {
 pub(super) struct SourceSyntax;
 
 impl SourceSyntax {
-    pub(super) fn layout_for_insertion<'source>(
-        source: &'source str,
-        bounds: SourceContainer,
-        children: &[Span],
-        index: usize,
-    ) -> Result<SourceLayout<'source>, ConfigEditErrorKind> {
-        if index > children.len() {
-            return Err(ConfigEditErrorKind::InvalidPath);
-        }
-        for distance in 0..children.len() {
-            let previous = index
-                .checked_sub(distance)
-                .and_then(|candidate| children.get(candidate).copied());
-            if let Some(reference) = previous
-                && Self::item_indent(source, bounds, reference)?.is_some()
-            {
-                return Self::layout(source, bounds, Some(reference));
-            }
-            if distance > 0 {
-                let next = index
-                    .checked_add(distance)
-                    .and_then(|candidate| children.get(candidate).copied());
-                if let Some(reference) = next
-                    && Self::item_indent(source, bounds, reference)?.is_some()
-                {
-                    return Self::layout(source, bounds, Some(reference));
-                }
-            }
-        }
-        let reference = children
-            .get(index)
-            .copied()
-            .or_else(|| children.last().copied());
-        Self::layout(source, bounds, reference)
-    }
-
     pub(super) fn layout<'source>(
         source: &'source str,
         bounds: SourceContainer,
-        reference: Option<Span>,
+        budget: Option<&ExecutionBudget>,
     ) -> Result<SourceLayout<'source>, ConfigEditErrorKind> {
         let content = source
             .get(bounds.open + 1..bounds.close)
             .ok_or(ConfigEditErrorKind::EditConflict)?;
+        consume(budget, content.len())?;
         let multiline = content.contains('\n') || content.contains('\r');
         let line_break = if content.contains("\r\n") {
             "\r\n"
         } else {
             "\n"
         };
-        let indent = reference
-            .map(|span| Self::item_indent(source, bounds, span))
-            .transpose()?
-            .flatten()
-            .unwrap_or("    ");
-        let colon_spacing = reference
-            .map(|span| Self::item_colon_spacing(source, bounds, span))
-            .transpose()?
-            .unwrap_or(" ");
         Ok(SourceLayout {
             multiline,
             line_break,
-            indent,
-            colon_spacing,
+            indent: "    ",
+            colon_spacing: " ",
         })
+    }
+
+    pub(super) fn entry_bounds<'slot>(
+        source: &str,
+        bounds: SourceContainer,
+        children: &[Span],
+        budget: Option<&ExecutionBudget>,
+        mut out: Out<'slot, '_, ConfigEditError>,
+    ) -> OResult<'slot, ChargedVec<SourceItemBounds>> {
+        let mut entries = ChargedVec::new(budget, out.reborrow())?;
+        entries.try_reserve_exact(children.len(), out.reborrow())?;
+        let content_len = bounds.close.checked_sub(bounds.open + 1).ok_or_else(|| {
+            out.reborrow()
+                .fail(ConfigEditError::new(ConfigEditErrorKind::EditConflict))
+        })?;
+        consume_budget(budget, content_len, out.reborrow())?;
+        let mut entry_index = 0usize;
+        let mut item_start = bounds.open + 1;
+        let mut previous_comma = None;
+        let bytes = source.as_bytes();
+        let mut cursor = item_start;
+        let mut nested = 0usize;
+        while cursor < bounds.close {
+            if let Some(lexeme) = lexical_span(source, cursor)
+                .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?
+            {
+                cursor = lexeme.end;
+                continue;
+            }
+            let Some(byte) = bytes.get(cursor).copied() else {
+                return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::EditConflict)));
+            };
+            if byte == b',' && nested == 0 {
+                while let Some(span) = children.get(entry_index).copied() {
+                    if span.start() < item_start {
+                        return Err(
+                            out.fail(ConfigEditError::new(ConfigEditErrorKind::EditConflict))
+                        );
+                    }
+                    if span.end() > cursor {
+                        break;
+                    }
+                    entries.try_push(
+                        SourceItemBounds {
+                            start: item_start,
+                            end: cursor,
+                            previous_comma,
+                            next_comma: Some(cursor),
+                        },
+                        out.reborrow(),
+                    )?;
+                    entry_index += 1;
+                }
+                item_start = cursor.checked_add(1).ok_or_else(|| {
+                    out.reborrow().fail(ConfigEditError::new(
+                        ConfigEditErrorKind::ResourceLimitExceeded,
+                    ))
+                })?;
+                previous_comma = Some(cursor);
+            } else if matches!(byte, b'{' | b'[' | b'(') {
+                nested = nested.checked_add(1).ok_or_else(|| {
+                    out.reborrow().fail(ConfigEditError::new(
+                        ConfigEditErrorKind::ResourceLimitExceeded,
+                    ))
+                })?;
+            } else if matches!(byte, b'}' | b']' | b')') && nested > 0 {
+                nested -= 1;
+            }
+            cursor = cursor.checked_add(1).ok_or_else(|| {
+                out.reborrow().fail(ConfigEditError::new(
+                    ConfigEditErrorKind::ResourceLimitExceeded,
+                ))
+            })?;
+        }
+        let mut invalid = false;
+        while let Some(span) = children.get(entry_index).copied() {
+            if span.start() < item_start || span.end() > bounds.close {
+                invalid = true;
+                break;
+            }
+            entries.try_push(
+                SourceItemBounds {
+                    start: item_start,
+                    end: bounds.close,
+                    previous_comma,
+                    next_comma: None,
+                },
+                out.reborrow(),
+            )?;
+            entry_index = entry_index.saturating_add(1);
+        }
+        if invalid || entry_index != children.len() {
+            return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::EditConflict)));
+        }
+        Ok(entries)
+    }
+
+    pub(super) fn entry_layout<'source>(
+        source: &'source str,
+        span: Span,
+        item: SourceItemBounds,
+        budget: Option<&ExecutionBudget>,
+    ) -> Result<(Option<&'source str>, &'source str), ConfigEditErrorKind> {
+        let prefix = source
+            .get(item.start..span.start())
+            .ok_or(ConfigEditErrorKind::EditConflict)?;
+        let scan_bytes = prefix
+            .len()
+            .checked_mul(2)
+            .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+        consume(budget, scan_bytes)?;
+        let line_start = prefix
+            .rfind('\n')
+            .map_or(0, |index| index.saturating_add(1));
+        let line_prefix = prefix
+            .get(line_start..)
+            .ok_or(ConfigEditErrorKind::EditConflict)?;
+        let indent_len = line_prefix
+            .bytes()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        let indent = if indent_len == 0 {
+            None
+        } else {
+            Some(
+                line_prefix
+                    .get(..indent_len)
+                    .ok_or(ConfigEditErrorKind::EditConflict)?,
+            )
+        };
+        let bytes = source.as_bytes();
+        let mut cursor = item.start;
+        let colon_spacing = loop {
+            if cursor >= span.start() {
+                break " ";
+            }
+            if let Some(lexeme) = lexical_span(source, cursor)? {
+                cursor = lexeme.end;
+                continue;
+            }
+            if bytes.get(cursor) == Some(&b':') {
+                let start = cursor
+                    .checked_add(1)
+                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                let mut end = start;
+                while matches!(bytes.get(end), Some(b' ' | b'\t')) {
+                    end = end
+                        .checked_add(1)
+                        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                }
+                break source
+                    .get(start..end)
+                    .ok_or(ConfigEditErrorKind::EditConflict)?;
+            }
+            cursor = cursor
+                .checked_add(1)
+                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+        };
+        Ok((indent, colon_spacing))
     }
 
     pub(super) fn comments_in(
@@ -108,6 +224,7 @@ impl SourceSyntax {
         let range = source
             .get(start..end)
             .ok_or(ConfigEditErrorKind::EditConflict)?;
+        consume(budget, range.len())?;
         let mut errors = ErrSlot::<BudgetError>::new();
         let mut comments = errors
             .try_call(|out| ChargedString::with_capacity(0, budget, out))
@@ -135,7 +252,9 @@ impl SourceSyntax {
         source: &str,
         span: Span,
         kind: PathValueKind,
+        budget: Option<&ExecutionBudget>,
     ) -> Result<SourceContainer, ConfigEditErrorKind> {
+        consume(budget, span.len())?;
         let (opening, closing) = match kind {
             PathValueKind::Structure | PathValueKind::Map => (b'{', b'}'),
             PathValueKind::Array => (b'[', b']'),
@@ -194,117 +313,27 @@ impl SourceSyntax {
         }
         Err(ConfigEditErrorKind::InvalidContainer)
     }
+}
 
-    pub(super) fn locate_item(
-        source: &str,
-        bounds: SourceContainer,
-        target: Span,
-    ) -> Result<SourceItemBounds, ConfigEditErrorKind> {
-        let mut start = bounds.open + 1;
-        let mut previous_comma = None;
-        let mut located = None;
-        visit_top_level_commas(source, bounds, |comma| {
-            if target.start() >= start && target.end() <= comma {
-                located = Some(SourceItemBounds {
-                    start,
-                    end: comma,
-                    previous_comma,
-                    next_comma: Some(comma),
-                });
-                false
-            } else {
-                start = comma + 1;
-                previous_comma = Some(comma);
-                true
-            }
-        })?;
-        if let Some(item) = located {
-            return Ok(item);
-        }
-        if target.start() >= start && target.end() <= bounds.close {
-            return Ok(SourceItemBounds {
-                start,
-                end: bounds.close,
-                previous_comma,
-                next_comma: None,
-            });
-        }
-        Err(ConfigEditErrorKind::EditConflict)
-    }
+fn consume(budget: Option<&ExecutionBudget>, steps: usize) -> Result<(), ConfigEditErrorKind> {
+    let Some(budget) = budget else {
+        return Ok(());
+    };
+    let mut errors = ErrSlot::<BudgetError>::new();
+    errors
+        .try_call(|out| budget.consume(steps, out))
+        .map_err(|caught| edit_budget_error(caught.take()))
+}
 
-    pub(super) fn trailing_comma(
-        source: &str,
-        bounds: SourceContainer,
-        after: usize,
-    ) -> Result<Option<usize>, ConfigEditErrorKind> {
-        let mut trailing = None;
-        visit_top_level_commas(source, bounds, |comma| {
-            if comma >= after {
-                trailing = Some(comma);
-            }
-            true
-        })?;
-        Ok(trailing)
-    }
-
-    fn item_indent(
-        source: &str,
-        bounds: SourceContainer,
-        span: Span,
-    ) -> Result<Option<&str>, ConfigEditErrorKind> {
-        let item = Self::locate_item(source, bounds, span)?;
-        let prefix = source
-            .get(item.start..span.start())
-            .ok_or(ConfigEditErrorKind::EditConflict)?;
-        let line_start = prefix
-            .rfind('\n')
-            .map_or(0, |index| index.saturating_add(1));
-        let line_prefix = prefix
-            .get(line_start..)
-            .ok_or(ConfigEditErrorKind::EditConflict)?;
-        let indent_len = line_prefix
-            .bytes()
-            .take_while(|byte| matches!(byte, b' ' | b'\t'))
-            .count();
-        if indent_len == 0 {
-            return Ok(None);
-        }
-        Ok(line_prefix.get(..indent_len))
-    }
-
-    fn item_colon_spacing(
-        source: &str,
-        bounds: SourceContainer,
-        span: Span,
-    ) -> Result<&str, ConfigEditErrorKind> {
-        let item = Self::locate_item(source, bounds, span)?;
-        let bytes = source.as_bytes();
-        let mut cursor = item.start;
-        while cursor < span.start() {
-            if let Some(lexeme) = lexical_span(source, cursor)? {
-                cursor = lexeme.end;
-                continue;
-            }
-            if bytes.get(cursor) == Some(&b':') {
-                let start = cursor
-                    .checked_add(1)
-                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-                let mut end = start;
-                while matches!(bytes.get(end), Some(b' ' | b'\t')) {
-                    end = end
-                        .checked_add(1)
-                        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-                }
-                return source
-                    .get(start..end)
-                    .ok_or(ConfigEditErrorKind::EditConflict);
-            }
-            cursor = cursor
-                .checked_add(1)
-                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-        }
-        Ok(" ")
-    }
+fn consume_budget<'slot>(
+    budget: Option<&ExecutionBudget>,
+    steps: usize,
+    out: Out<'slot, '_, ConfigEditError>,
+) -> OResult<'slot, ()> {
+    let Some(budget) = budget else {
+        return Ok(());
+    };
+    budget.consume(steps, out)
 }
 
 fn append_charged(
@@ -324,40 +353,6 @@ fn append_charged(
     errors
         .try_call(|out| output.try_push_str(text, out))
         .map_err(|caught| edit_budget_error(caught.take()))?;
-    Ok(())
-}
-
-fn visit_top_level_commas(
-    source: &str,
-    bounds: SourceContainer,
-    mut visit: impl FnMut(usize) -> bool,
-) -> Result<(), ConfigEditErrorKind> {
-    let bytes = source.as_bytes();
-    let mut cursor = bounds.open + 1;
-    let mut nested = 0usize;
-    while cursor < bounds.close {
-        if let Some(lexeme) = lexical_span(source, cursor)? {
-            cursor = lexeme.end;
-            continue;
-        }
-        let Some(byte) = bytes.get(cursor).copied() else {
-            return Err(ConfigEditErrorKind::EditConflict);
-        };
-        if byte == b',' && nested == 0 {
-            if !visit(cursor) {
-                return Ok(());
-            }
-        } else if matches!(byte, b'{' | b'[' | b'(') {
-            nested = nested
-                .checked_add(1)
-                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-        } else if matches!(byte, b'}' | b']' | b')') && nested > 0 {
-            nested -= 1;
-        }
-        cursor = cursor
-            .checked_add(1)
-            .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-    }
     Ok(())
 }
 

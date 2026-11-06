@@ -48,6 +48,7 @@ pub enum DiagnosticReportTitle {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticReportStage {
     SchemaRead,
+    SchemaParsing,
     SchemaCompilation,
     SourceNameRegistration,
     TypeBinding,
@@ -257,6 +258,9 @@ fn write_report_title_localized<'slot>(
         let text = match stage {
             DiagnosticReportStage::SchemaRead => {
                 t!("report.stage.schema_read", locale = localizer.translator)
+            }
+            DiagnosticReportStage::SchemaParsing => {
+                t!("report.stage.schema_parsing", locale = localizer.translator)
             }
             DiagnosticReportStage::SchemaCompilation => {
                 t!(

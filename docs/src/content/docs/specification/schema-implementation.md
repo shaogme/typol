@@ -63,6 +63,52 @@ The AST uses table-based nodes and owned text. Callers receive read-only views a
 
 `SyntaxLimits` bounds parse depth, AST nodes, decoded strings, per-source bytes, and diagnostics. `StreamLimits` separately bounds the token window and bytes per token. Current defaults are depth 128, 100 diagnostics, 256 KiB decoded strings, 100,000 AST nodes per file, an 8,192-byte token window, and a 1 MiB token cap. The parser uses explicit continuation frames for nested declarations, types, defaults, and expressions; recovery is also budgeted.
 
+### 2.4 Parse-only documents and formatting
+
+`SchemaParser::parse_document` is the in-memory path for tools that need the original text. It returns a `SchemaDocument<'source>` that borrows that exact `&str` and owns the successful syntax AST. It does not resolve imports or perform static semantic checks; the existing streaming `parse` path used by compilation still does not retain the complete source.
+
+`SchemaFormatter::format` consumes a bound document and `SchemaFormatOptions`, then returns a complete `FormattedSchema` through an OPEO error slot. It releases the syntax AST before allocating the formatter token table, so the two workspaces do not remain resident together. The options cap output bytes, formatter workspace bytes, and nesting depth. The formatter preserves every token and comment in source order, standardizes layout and trailing commas, and emits CRLF if the input contains CRLF, otherwise LF. `FormattedSchema::as_str()` allows inspection; consuming `write_to()` sends the complete result to a `fmt::Write` sink.
+
+```rust
+use std::{error::Error, io::Error as IoError};
+use typol::{
+    SchemaFormatError, SchemaFormatOptions, SchemaFormatter, SchemaParseOptions, SchemaParser,
+    SyntaxErrors,
+    core::{ExecutionBudget, ExecutionLimits, SourceId},
+    opeo::ErrSlot,
+};
+
+fn format_schema(source: &str) -> Result<String, Box<dyn Error>> {
+    let mut budget_errors = ErrSlot::new();
+    let budget = budget_errors
+        .try_call(|out| {
+            ExecutionBudget::new(ExecutionLimits::new(2_000_000, 16_000_000), out)
+        })
+        .map_err(|caught| IoError::other(format!("{:?}", caught.take())))?;
+    let mut parse_errors = ErrSlot::<SyntaxErrors>::new();
+    let document = parse_errors
+        .try_call(|out| {
+            SchemaParser::parse_document(
+                SourceId::new(0),
+                source,
+                &SchemaParseOptions::default(),
+                &budget,
+                out,
+            )
+        })
+        .map_err(|caught| IoError::other(format!("{:?}", caught.take())))?;
+    let mut format_errors = ErrSlot::<SchemaFormatError>::new();
+    let formatted = format_errors
+        .try_call(|out| {
+            SchemaFormatter::format(document, SchemaFormatOptions::default(), out)
+        })
+        .map_err(|caught| IoError::other(format!("{:?}", caught.take())))?;
+    let mut output = String::new();
+    formatted.write_to(&mut output)?;
+    Ok(output)
+}
+```
+
 ## 3. Compilation sessions and imports
 
 ### 3.1 Entry points

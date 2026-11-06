@@ -22,9 +22,15 @@ pub struct ConfigRequest {
     format_check: bool,
 }
 
+pub struct SchemaFormatRequest {
+    schema_path: PathBuf,
+    check: bool,
+}
+
 pub enum Command {
     Help,
     SchemaCheck(PathBuf),
+    SchemaFmt(SchemaFormatRequest),
     ConfigCheck(ConfigRequest),
     ConfigExportIr(ConfigRequest),
     ConfigFmt(ConfigRequest),
@@ -73,6 +79,16 @@ impl ConfigRequest {
 
     pub const fn format_check(&self) -> bool {
         self.format_check
+    }
+}
+
+impl SchemaFormatRequest {
+    pub fn schema_path(&self) -> &Path {
+        &self.schema_path
+    }
+
+    pub const fn check(&self) -> bool {
+        self.check
     }
 }
 
@@ -180,6 +196,9 @@ impl Arguments {
         if matches!(action, "--help" | "-h") {
             return Ok(Command::Help);
         }
+        if action == "fmt" {
+            return Self::parse_schema_format(arguments, language);
+        }
         if action != "check" {
             return Err(Self::error(
                 t!("cli.schema_action_invalid", locale = translator),
@@ -202,6 +221,74 @@ impl Arguments {
             ));
         }
         Ok(Command::SchemaCheck(PathBuf::from(path)))
+    }
+
+    fn parse_schema_format(
+        arguments: impl Iterator<Item = OsString>,
+        language: Language,
+    ) -> Result<Command, ArgumentError> {
+        let translator = Translator::new(language);
+        let mut path = None;
+        let mut check = false;
+        let mut check_seen = false;
+        let mut positional_only = false;
+        for argument in arguments {
+            if !positional_only && argument == "--" {
+                positional_only = true;
+                continue;
+            }
+            let Some(option) = argument.to_str() else {
+                if positional_only || !argument.to_string_lossy().starts_with('-') {
+                    Self::set_schema_format_path(&mut path, argument, language)?;
+                    continue;
+                }
+                return Err(Self::error(
+                    t!("cli.option_utf8", locale = translator),
+                    language,
+                ));
+            };
+            if !positional_only && option == "--check" {
+                if check_seen {
+                    return Err(Self::error(
+                        t!("cli.format_check_repeated", locale = translator),
+                        language,
+                    ));
+                }
+                check = true;
+                check_seen = true;
+            } else if !positional_only && matches!(option, "--help" | "-h") {
+                return Ok(Command::Help);
+            } else if !positional_only && option.starts_with('-') {
+                return Err(Self::error(
+                    t!("cli.schema_option_invalid", locale = translator),
+                    language,
+                ));
+            } else {
+                Self::set_schema_format_path(&mut path, argument, language)?;
+            }
+        }
+        let schema_path = path.ok_or_else(|| {
+            Self::error(t!("cli.schema_path_missing", locale = translator), language)
+        })?;
+        Ok(Command::SchemaFmt(SchemaFormatRequest {
+            schema_path,
+            check,
+        }))
+    }
+
+    fn set_schema_format_path(
+        path: &mut Option<PathBuf>,
+        value: OsString,
+        language: Language,
+    ) -> Result<(), ArgumentError> {
+        if path.is_some() {
+            return Err(Self::error(
+                t!("cli.schema_path_extra", locale = Translator::new(language)),
+                language,
+            ));
+        }
+        *path = Some(PathBuf::from(value));
+        Ok(())
     }
 
     fn parse_configuration_arguments(

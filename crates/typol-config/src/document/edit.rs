@@ -1,16 +1,19 @@
-use core::{
-    error::Error,
-    fmt::{self, Debug, Display, Formatter},
-};
-use opeo::{ErrSlot, OResult, Out};
-use typol_core::{BudgetError, ChargedString, ChargedVec, ConfigValue, ExecutionBudget, Span};
+mod analysis;
+mod error;
 
+use opeo::{ErrSlot, OResult, Out};
+use typol_core::{BudgetError, ChargedString, ChargedVec, ConfigValue, ExecutionBudget, ValueView};
+
+pub use error::ConfigEditError;
+
+use self::analysis::{ContainerAnalysis, PreparedEdits, RemovalEntry};
 use super::{
     encoding::{ConfigEditErrorKind, EntryEncoding, ScalarEncoder},
     path::{ConfigPath, ConfigPathSegment, ConfigReplacement, PathValueKind, SourcePathIndex},
     syntax::{SourceLayout, SourceSyntax},
 };
-use crate::ConfigParseErrors;
+
+const MAX_PATH_LOOKUPS_PER_EDIT: usize = 4;
 
 pub enum ConfigEdit<'a> {
     Replace(ConfigReplacement<'a>),
@@ -33,11 +36,6 @@ pub enum ConfigEdit<'a> {
     },
 }
 
-pub struct ConfigEditError {
-    kind: ConfigEditErrorKind,
-    validation: Option<ConfigParseErrors>,
-}
-
 pub(super) struct SourcePatch {
     pub(super) start: usize,
     pub(super) end: usize,
@@ -51,9 +49,19 @@ pub(super) struct EditContext<'a> {
     pub(super) source_limit: usize,
 }
 
-struct ContainerInfo {
-    span: Span,
-    kind: PathValueKind,
+enum InsertionValue<'value, 'name> {
+    Value(ValueView<'value>),
+    Entry {
+        name: &'name str,
+        value: ValueView<'value>,
+        map_key: bool,
+    },
+}
+
+struct InsertionPlan<'analysis, 'source, 'value, 'name> {
+    analysis: &'analysis ContainerAnalysis<'source>,
+    index: Option<usize>,
+    value: InsertionValue<'value, 'name>,
 }
 
 struct InsertionDetails {
@@ -74,105 +82,8 @@ struct SpacingRequest<'source> {
     limit: usize,
 }
 
-struct InsertionRequest<'a> {
-    container: &'a ConfigPath,
-    kind: PathValueKind,
-    children: &'a [Span],
-    index: usize,
-    append_after_removed_last: bool,
-    encoded: ChargedString,
-}
-
-struct InsertionPlan<'edits, 'path> {
-    container: &'path ConfigPath,
-    kind: PathValueKind,
-    index: Option<usize>,
-    encoded: ChargedString,
-    edits: &'edits [ConfigEdit<'path>],
-}
-
 pub(super) struct DocumentEditEngine<'a> {
     context: EditContext<'a>,
-}
-
-impl ConfigEditError {
-    pub const fn kind(&self) -> ConfigEditErrorKind {
-        self.kind
-    }
-
-    pub fn validation_errors(&self) -> Option<&ConfigParseErrors> {
-        self.validation.as_ref()
-    }
-
-    pub(super) fn new(kind: ConfigEditErrorKind) -> Self {
-        Self {
-            kind,
-            validation: None,
-        }
-    }
-
-    pub(super) fn validation(errors: ConfigParseErrors) -> Self {
-        Self {
-            kind: ConfigEditErrorKind::ValidationFailed,
-            validation: Some(errors),
-        }
-    }
-
-    fn from_budget(error: BudgetError) -> Self {
-        Self::new(edit_budget_error(error))
-    }
-}
-
-impl From<BudgetError> for ConfigEditError {
-    fn from(error: BudgetError) -> Self {
-        Self::from_budget(error)
-    }
-}
-
-impl Debug for ConfigEditError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ConfigEditError")
-            .field("kind", &self.kind)
-            .field(
-                "validation_diagnostic_count",
-                &self
-                    .validation
-                    .as_ref()
-                    .map(|errors| errors.diagnostics().len()),
-            )
-            .finish()
-    }
-}
-
-impl Display for ConfigEditError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self.kind {
-            ConfigEditErrorKind::InvalidPath => "configuration edit path is invalid",
-            ConfigEditErrorKind::ValueNotExplicit => {
-                "configuration edit path has no explicit source value"
-            }
-            ConfigEditErrorKind::EncodingFailed => "configuration value encoding failed",
-            ConfigEditErrorKind::EditConflict => "configuration edits overlap in source",
-            ConfigEditErrorKind::InvalidContainer => {
-                "configuration edit path does not name a supported container"
-            }
-            ConfigEditErrorKind::EntryAlreadyExists => "configuration edit entry already exists",
-            ConfigEditErrorKind::ValidationFailed => "edited configuration failed validation",
-            ConfigEditErrorKind::ResourceLimitExceeded => {
-                "configuration edit resource limit exceeded"
-            }
-            ConfigEditErrorKind::AllocationFailed => "configuration edit allocation failed",
-        })
-    }
-}
-
-impl Error for ConfigEditError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        self.validation
-            .as_ref()
-            .map(|errors| errors as &(dyn Error + 'static))
-    }
 }
 
 impl<'a> DocumentEditEngine<'a> {
@@ -185,20 +96,149 @@ impl<'a> DocumentEditEngine<'a> {
         edits: &[ConfigEdit<'_>],
         mut out: Out<'slot, '_, ConfigEditError>,
     ) -> OResult<'slot, ChargedVec<SourcePatch>> {
+        if let Some(budget) = self.context.budget {
+            budget.consume(edits.len(), out.reborrow())?;
+        }
+        let mut container_ids = ChargedVec::new(self.context.budget, out.reborrow())?;
+        let mut removals = ChargedVec::new(self.context.budget, out.reborrow())?;
+        for edit in edits {
+            self.consume_path_work(edit, out.reborrow())?;
+            match edit {
+                ConfigEdit::Replace(_) => {}
+                ConfigEdit::InsertField { path, .. } => {
+                    let Some(id) = self.context.index.parent_id(path) else {
+                        return Err(
+                            out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath))
+                        );
+                    };
+                    container_ids.try_push(id, out.reborrow())?;
+                }
+                ConfigEdit::InsertMapEntry { container, .. }
+                | ConfigEdit::InsertArrayItem { container, .. } => {
+                    let Some(id) = self.context.index.node_id(container) else {
+                        return Err(
+                            out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath))
+                        );
+                    };
+                    container_ids.try_push(id, out.reborrow())?;
+                }
+                ConfigEdit::Remove { path } => {
+                    let Some(target) = self.context.index.info(path) else {
+                        return Err(
+                            out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath))
+                        );
+                    };
+                    let Some(span) = target.span else {
+                        return Err(
+                            out.fail(ConfigEditError::new(ConfigEditErrorKind::ValueNotExplicit))
+                        );
+                    };
+                    let Some(container_id) = self.context.index.parent_id(path) else {
+                        return Err(
+                            out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath))
+                        );
+                    };
+                    container_ids.try_push(container_id, out.reborrow())?;
+                    removals.try_push(RemovalEntry::new(container_id, span), out.reborrow())?;
+                }
+            }
+        }
+
+        container_ids.sort_by(
+            |left, right, mut sort_out| {
+                if let Some(budget) = self.context.budget {
+                    budget.consume(1, sort_out.reborrow())?;
+                }
+                Ok(left.cmp(right))
+            },
+            out.reborrow(),
+        )?;
+        container_ids.dedup();
+        removals.sort_by(
+            |left, right, mut sort_out| {
+                if let Some(budget) = self.context.budget {
+                    budget.consume(1, sort_out.reborrow())?;
+                }
+                Ok(left
+                    .container_id()
+                    .cmp(&right.container_id())
+                    .then_with(|| left.span().start().cmp(&right.span().start()))
+                    .then_with(|| left.span().end().cmp(&right.span().end())))
+            },
+            out.reborrow(),
+        )?;
+
+        let mut containers = ChargedVec::new(self.context.budget, out.reborrow())?;
+        for id in container_ids.as_slice() {
+            containers.try_push(
+                ContainerAnalysis::new(
+                    *id,
+                    self.context.source,
+                    self.context.index,
+                    self.context.budget,
+                    out.reborrow(),
+                )?,
+                out.reborrow(),
+            )?;
+        }
+        let prepared = PreparedEdits::new(containers, removals);
+        if let Some(budget) = self.context.budget {
+            budget.consume(edits.len(), out.reborrow())?;
+        }
         let mut patches = ChargedVec::new(self.context.budget, out.reborrow())?;
         for edit in edits {
             patches.try_push(
-                self.resolve_edit(edit, edits, out.reborrow())?,
+                self.resolve_edit(edit, &prepared, out.reborrow())?,
                 out.reborrow(),
             )?;
         }
         Ok(patches)
     }
 
+    fn consume_path_work<'slot>(
+        &self,
+        edit: &ConfigEdit<'_>,
+        mut out: Out<'slot, '_, ConfigEditError>,
+    ) -> OResult<'slot, ()> {
+        let path_length = match edit {
+            ConfigEdit::Replace(replacement) => replacement.path().segment_count(),
+            ConfigEdit::InsertField { path, .. } | ConfigEdit::Remove { path } => {
+                path.segment_count()
+            }
+            ConfigEdit::InsertMapEntry { container, .. }
+            | ConfigEdit::InsertArrayItem { container, .. } => container.segment_count(),
+        };
+        let index_size = self.context.index.len();
+        let search_bound = binary_search_bound(index_size);
+        let path_steps = path_length
+            .saturating_add(1)
+            .checked_mul(search_bound.max(1))
+            .and_then(|steps| steps.checked_mul(MAX_PATH_LOOKUPS_PER_EDIT))
+            .ok_or_else(|| {
+                out.reborrow().fail(ConfigEditError::new(
+                    ConfigEditErrorKind::ResourceLimitExceeded,
+                ))
+            })?;
+        let auxiliary_steps = search_bound.checked_mul(3).ok_or_else(|| {
+            out.reborrow().fail(ConfigEditError::new(
+                ConfigEditErrorKind::ResourceLimitExceeded,
+            ))
+        })?;
+        let steps = path_steps.checked_add(auxiliary_steps).ok_or_else(|| {
+            out.reborrow().fail(ConfigEditError::new(
+                ConfigEditErrorKind::ResourceLimitExceeded,
+            ))
+        })?;
+        if let Some(budget) = self.context.budget {
+            budget.consume(steps, out)?;
+        }
+        Ok(())
+    }
+
     fn resolve_edit<'slot>(
         &self,
         edit: &ConfigEdit<'_>,
-        edits: &[ConfigEdit<'_>],
+        prepared: &PreparedEdits<'_>,
         mut out: Out<'slot, '_, ConfigEditError>,
     ) -> OResult<'slot, SourcePatch> {
         let budget = self.context.budget;
@@ -230,9 +270,6 @@ impl<'a> DocumentEditEngine<'a> {
                 let Some(ConfigPathSegment::Field(name)) = path.last() else {
                     return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
                 };
-                let Some(parent) = path.parent_path() else {
-                    return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
-                };
                 if self
                     .context
                     .index
@@ -243,25 +280,28 @@ impl<'a> DocumentEditEngine<'a> {
                         ConfigEditErrorKind::EntryAlreadyExists,
                     )));
                 }
-                let colon_spacing =
-                    self.entry_colon_spacing(&parent, PathValueKind::Structure, out.reborrow())?;
-                let encoded = ScalarEncoder::encode_entry(EntryEncoding {
-                    name,
-                    value: value.root(),
-                    map_key: false,
-                    colon_spacing,
-                    budget,
-                    limit,
-                })
-                .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
+                let Some(parent_id) = self.context.index.parent_id(path) else {
+                    return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
+                };
+                let Some(analysis) = prepared.container(parent_id, budget, out.reborrow())? else {
+                    return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
+                };
+                if analysis.kind() != PathValueKind::Structure {
+                    return Err(
+                        out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidContainer))
+                    );
+                }
                 self.insert_patch(
                     InsertionPlan {
-                        container: &parent,
-                        kind: PathValueKind::Structure,
+                        analysis,
                         index: None,
-                        encoded,
-                        edits,
+                        value: InsertionValue::Entry {
+                            name,
+                            value: value.root(),
+                            map_key: false,
+                        },
                     },
+                    prepared,
                     out,
                 )
             }
@@ -270,36 +310,39 @@ impl<'a> DocumentEditEngine<'a> {
                 key,
                 value,
             } => {
-                let entry_path = container.pushed(ConfigPathSegment::MapKey((*key).into()));
+                let Some(container_id) = self.context.index.node_id(container) else {
+                    return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
+                };
                 if self
                     .context
                     .index
-                    .info(&entry_path)
+                    .map_key_child_info(container_id, key)
                     .is_some_and(|node| node.span.is_some())
                 {
                     return Err(out.fail(ConfigEditError::new(
                         ConfigEditErrorKind::EntryAlreadyExists,
                     )));
                 }
-                let colon_spacing =
-                    self.entry_colon_spacing(container, PathValueKind::Map, out.reborrow())?;
-                let encoded = ScalarEncoder::encode_entry(EntryEncoding {
-                    name: key,
-                    value: value.root(),
-                    map_key: true,
-                    colon_spacing,
-                    budget,
-                    limit,
-                })
-                .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
+                let Some(analysis) = prepared.container(container_id, budget, out.reborrow())?
+                else {
+                    return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
+                };
+                if analysis.kind() != PathValueKind::Map {
+                    return Err(
+                        out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidContainer))
+                    );
+                }
                 self.insert_patch(
                     InsertionPlan {
-                        container,
-                        kind: PathValueKind::Map,
+                        analysis,
                         index: None,
-                        encoded,
-                        edits,
+                        value: InsertionValue::Entry {
+                            name: key,
+                            value: value.root(),
+                            map_key: true,
+                        },
                     },
+                    prepared,
                     out,
                 )
             }
@@ -308,79 +351,67 @@ impl<'a> DocumentEditEngine<'a> {
                 index,
                 value,
             } => {
-                let encoded = ScalarEncoder::encode_value(value.root(), budget, limit)
-                    .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
+                let Some(container_id) = self.context.index.node_id(container) else {
+                    return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
+                };
+                let Some(analysis) = prepared.container(container_id, budget, out.reborrow())?
+                else {
+                    return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
+                };
+                if analysis.kind() != PathValueKind::Array {
+                    return Err(
+                        out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidContainer))
+                    );
+                }
                 self.insert_patch(
                     InsertionPlan {
-                        container,
-                        kind: PathValueKind::Array,
+                        analysis,
                         index: Some(*index),
-                        encoded,
-                        edits,
+                        value: InsertionValue::Value(value.root()),
                     },
+                    prepared,
                     out,
                 )
             }
-            ConfigEdit::Remove { path } => self.remove_patch(path, out),
+            ConfigEdit::Remove { path } => self.remove_patch(path, prepared, out),
         }
     }
 
     fn insert_patch<'slot>(
         &self,
-        plan: InsertionPlan<'_, '_>,
+        plan: InsertionPlan<'_, '_, '_, '_>,
+        prepared: &PreparedEdits<'_>,
         mut out: Out<'slot, '_, ConfigEditError>,
     ) -> OResult<'slot, SourcePatch> {
         let InsertionPlan {
-            container,
-            kind,
+            analysis,
             index,
-            encoded,
-            edits,
+            value,
         } = plan;
-        let children = self.child_spans(container, kind, out.reborrow())?;
-        let index = index.unwrap_or(children.len());
-        if index > children.len() {
+        let child_count = analysis.child_count();
+        let index = index.unwrap_or(child_count);
+        if index > child_count {
             return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
         }
-        let append_after_removed_last = index == children.len()
-            && children
-                .last()
-                .is_some_and(|last| self.removes_child(edits, container, *last));
-        self.insert_patch_from_children(
-            InsertionRequest {
-                container,
-                kind,
-                children: children.as_slice(),
-                index,
-                append_after_removed_last,
-                encoded,
-            },
-            out,
-        )
-    }
-
-    fn insert_patch_from_children<'slot>(
-        &self,
-        request: InsertionRequest<'_>,
-        mut out: Out<'slot, '_, ConfigEditError>,
-    ) -> OResult<'slot, SourcePatch> {
-        let InsertionRequest {
-            container,
-            kind,
-            children,
-            index,
-            append_after_removed_last,
-            encoded,
-        } = request;
-        let info = self.container_info(container, kind, out.reborrow())?;
-        let bounds = SourceSyntax::scan_container(self.context.source, info.span, kind)
-            .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
-        let layout =
-            SourceSyntax::layout_for_insertion(self.context.source, bounds, children, index)
-                .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
+        let last_is_removed = if index == child_count {
+            match analysis.last_span() {
+                Some(last) => {
+                    prepared.removes(analysis.id(), last, self.context.budget, out.reborrow())?
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+        let append_after_removed_last = last_is_removed;
+        let Some(layout) =
+            analysis.layout_for_insertion(index, self.context.budget, out.reborrow())?
+        else {
+            return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
+        };
         let mut insertion = ChargedString::with_capacity(0, self.context.budget, out.reborrow())?;
-        let details = if index < children.len() {
-            let Some(span) = children.get(index) else {
+        let details = if index < child_count {
+            let Some(span) = analysis.child_span(index) else {
                 return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
             };
             InsertionDetails {
@@ -392,10 +423,8 @@ impl<'a> DocumentEditEngine<'a> {
                 suffix_space: !layout.multiline,
                 suffix_line_start: layout.multiline,
             }
-        } else if let Some(last) = children.last() {
-            let comma = SourceSyntax::trailing_comma(self.context.source, bounds, last.end())
-                .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
-            if let Some(comma) = comma {
+        } else if let Some(last) = analysis.last_span() {
+            if let Some(comma) = analysis.trailing_comma() {
                 InsertionDetails {
                     position: comma + 1,
                     prefix_comma: false,
@@ -418,7 +447,7 @@ impl<'a> DocumentEditEngine<'a> {
             }
         } else {
             InsertionDetails {
-                position: bounds.open + 1,
+                position: analysis.open() + 1,
                 prefix_comma: false,
                 prefix_space: false,
                 prefix_line_start: layout.multiline,
@@ -438,8 +467,35 @@ impl<'a> DocumentEditEngine<'a> {
             },
         )
         .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
-        append_charged(&mut insertion, encoded.as_str(), self.context.source_limit)
-            .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
+        match value {
+            InsertionValue::Value(value) => {
+                ScalarEncoder::encode_value_into(
+                    &mut insertion,
+                    value,
+                    self.context.budget,
+                    self.context.source_limit,
+                )
+                .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
+            }
+            InsertionValue::Entry {
+                name,
+                value,
+                map_key,
+            } => {
+                ScalarEncoder::encode_entry_into(
+                    &mut insertion,
+                    EntryEncoding {
+                        name,
+                        value,
+                        map_key,
+                        colon_spacing: layout.colon_spacing,
+                        budget: self.context.budget,
+                        limit: self.context.source_limit,
+                    },
+                )
+                .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
+            }
+        }
         Self::append_spacing(
             &mut insertion,
             SpacingRequest {
@@ -461,6 +517,7 @@ impl<'a> DocumentEditEngine<'a> {
     fn remove_patch<'slot>(
         &self,
         path: &ConfigPath,
+        prepared: &PreparedEdits<'_>,
         mut out: Out<'slot, '_, ConfigEditError>,
     ) -> OResult<'slot, SourcePatch> {
         let Some(target) = self.context.index.info(path) else {
@@ -469,18 +526,17 @@ impl<'a> DocumentEditEngine<'a> {
         let Some(span) = target.span else {
             return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::ValueNotExplicit)));
         };
-        let Some(container) = path.parent_path() else {
+        let Some(container_id) = self.context.index.parent_id(path) else {
             return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
         };
-        let container_info = self.container_info_any(&container, out.reborrow())?;
-        let bounds = SourceSyntax::scan_container(
-            self.context.source,
-            container_info.span,
-            container_info.kind,
-        )
-        .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
-        let item = SourceSyntax::locate_item(self.context.source, bounds, span)
-            .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
+        let Some(container) =
+            prepared.container(container_id, self.context.budget, out.reborrow())?
+        else {
+            return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
+        };
+        let Some(item) = container.item_bounds(span, self.context.budget, out.reborrow())? else {
+            return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::EditConflict)));
+        };
         let (start, end) = if let Some(comma) = item.next_comma {
             (item.start, comma + 1)
         } else if let Some(comma) = item.previous_comma {
@@ -495,101 +551,6 @@ impl<'a> DocumentEditEngine<'a> {
             start,
             end,
             encoded: comments,
-        })
-    }
-
-    fn container_info<'slot>(
-        &self,
-        path: &ConfigPath,
-        kind: PathValueKind,
-        out: Out<'slot, '_, ConfigEditError>,
-    ) -> OResult<'slot, ContainerInfo> {
-        let Some(info) = self.context.index.info(path) else {
-            return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
-        };
-        if info.kind != kind {
-            return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidContainer)));
-        }
-        let Some(span) = info.span else {
-            return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::ValueNotExplicit)));
-        };
-        Ok(ContainerInfo { span, kind })
-    }
-
-    fn container_info_any<'slot>(
-        &self,
-        path: &ConfigPath,
-        out: Out<'slot, '_, ConfigEditError>,
-    ) -> OResult<'slot, ContainerInfo> {
-        let Some(info) = self.context.index.info(path) else {
-            return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
-        };
-        if !matches!(
-            info.kind,
-            PathValueKind::Structure | PathValueKind::Map | PathValueKind::Array
-        ) {
-            return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidContainer)));
-        }
-        let Some(span) = info.span else {
-            return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::ValueNotExplicit)));
-        };
-        Ok(ContainerInfo {
-            span,
-            kind: info.kind,
-        })
-    }
-
-    fn child_spans<'slot>(
-        &self,
-        container: &ConfigPath,
-        kind: PathValueKind,
-        mut out: Out<'slot, '_, ConfigEditError>,
-    ) -> OResult<'slot, ChargedVec<Span>> {
-        self.container_info(container, kind, out.reborrow())?;
-        let Some(children) = self.context.index.direct_children(container) else {
-            return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
-        };
-        let mut spans = ChargedVec::new(self.context.budget, out.reborrow())?;
-        for child in children {
-            if let Some(span) = child.span {
-                spans.try_push(span, out.reborrow())?;
-            }
-        }
-        spans.sort_unstable_by_key(|span| span.start());
-        Ok(spans)
-    }
-
-    fn entry_colon_spacing<'slot>(
-        &self,
-        container: &ConfigPath,
-        kind: PathValueKind,
-        mut out: Out<'slot, '_, ConfigEditError>,
-    ) -> OResult<'slot, &'a str> {
-        let info = self.container_info(container, kind, out.reborrow())?;
-        let bounds = SourceSyntax::scan_container(self.context.source, info.span, kind)
-            .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
-        let children = self.child_spans(container, kind, out.reborrow())?;
-        let layout = SourceSyntax::layout_for_insertion(
-            self.context.source,
-            bounds,
-            children.as_slice(),
-            children.len(),
-        )
-        .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
-        Ok(layout.colon_spacing)
-    }
-
-    fn removes_child(&self, edits: &[ConfigEdit<'_>], container: &ConfigPath, span: Span) -> bool {
-        edits.iter().any(|edit| {
-            let ConfigEdit::Remove { path } = edit else {
-                return false;
-            };
-            path.parent_path().as_ref() == Some(container)
-                && self
-                    .context
-                    .index
-                    .info(path)
-                    .is_some_and(|info| info.span == Some(span))
         })
     }
 
@@ -626,17 +587,10 @@ fn append_charged(
     let mut errors = ErrSlot::<BudgetError>::new();
     errors
         .try_call(|out| output.try_push_str(text, out))
-        .map_err(|caught| edit_budget_error(caught.take()))?;
+        .map_err(|caught| ConfigEditError::budget_kind(caught.take()))?;
     Ok(())
 }
 
-fn edit_budget_error(error: BudgetError) -> ConfigEditErrorKind {
-    match error {
-        BudgetError::Resource | BudgetError::CapacityExceeded => {
-            ConfigEditErrorKind::ResourceLimitExceeded
-        }
-        BudgetError::Allocation | BudgetError::InvariantViolation(_) => {
-            ConfigEditErrorKind::AllocationFailed
-        }
-    }
+fn binary_search_bound(length: usize) -> usize {
+    (usize::BITS - length.leading_zeros()) as usize
 }
