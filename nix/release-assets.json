@@ -1,0 +1,18 @@
+{
+  "assets": {
+    "aarch64-darwin": {
+      "archive": "typol-cli-aarch64-apple-darwin-v0.1.0.tar.gz",
+      "hash": "sha256-MBZL180YHJzbTymtbwRFQ29bJmRUJd/ryAhP2jWdR8o="
+    },
+    "aarch64-linux": {
+      "archive": "typol-cli-aarch64-unknown-linux-musl-v0.1.0.tar.gz",
+      "hash": "sha256-it5ecqoMITiDaBSC/Sa7MHSClle+EmdUfWPz49MV858="
+    },
+    "x86_64-linux": {
+      "archive": "typol-cli-x86_64-unknown-linux-musl-v0.1.0.tar.gz",
+      "hash": "sha256-GjPV+GHQW7F6HXuaThMHW2Yan0MuYtP3zrFPEqzlkD4="
+    }
+  },
+  "tag": "typol-cli-v0.1.0",
+  "version": "0.1.0"
+}
