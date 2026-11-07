@@ -3,6 +3,11 @@ name = "typol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Schema-driven configuration parsing and validation for Rust."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 autotests = false
 
 [features]

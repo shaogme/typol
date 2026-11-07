@@ -3,6 +3,11 @@ name = "typol-semantic"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Compiled Schema model, constraints, and evaluation engine for Typol."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 
 [features]
 compiler = []

@@ -3,6 +3,12 @@ name = "typol-opeo-test-support"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Shared OPEO test utilities for Typol workspace crates."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = false
 
 [dependencies]
 opeo.workspace = true

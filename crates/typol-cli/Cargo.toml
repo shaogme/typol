@@ -3,6 +3,11 @@ name = "typol-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Command-line tools for checking, formatting, and exporting Typol files."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 
 [[bin]]
 name = "typol"

@@ -3,6 +3,11 @@ name = "typol-model"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Shared Schema operators and built-in type definitions for Typol."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 
 [lints]
 workspace = true

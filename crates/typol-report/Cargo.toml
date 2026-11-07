@@ -3,6 +3,11 @@ name = "typol-report"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Localized diagnostic report formatting for Typol."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 
 [dependencies]
 typol-core.workspace = true

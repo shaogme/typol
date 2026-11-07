@@ -3,6 +3,11 @@ name = "typol-macros"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Procedural derive macro for mapping Typol schemas to Rust types."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 
 [lib]
 proc-macro = true
