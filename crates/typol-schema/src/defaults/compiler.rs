@@ -651,7 +651,6 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
             self.data.diagnostics.push(schema_internal!(value.span));
             return Err(out.fail(BuildFailure::empty()));
         };
-        let execution = self.data.context.execution();
         let scratch = &mut self.data.regex_scratch;
         let result = {
             let mut errors = self.regex_errors.borrow_mut();
@@ -660,8 +659,8 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
                     regex,
                     RegexMatchOptions {
                         value: Some(text),
-                        limits: self.data.limits.regex(),
-                        budget: Some(execution),
+                        limits: self.data.context.regex_limits(),
+                        budget: self.data.context.regex_execution(),
                     },
                     regex_out,
                 )

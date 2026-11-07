@@ -1,7 +1,5 @@
 #![no_std]
 
-use core::ops::{Deref, DerefMut};
-
 pub use typol_core::ExcerptLimits;
 
 /// Shared tree limits for configuration values and semantic evaluation.
@@ -76,7 +74,6 @@ pub struct RegexLimits {
     max_regex_ranges_per_pattern: usize,
     max_regex_instructions_total: usize,
     max_regex_ranges_total: usize,
-    max_regex_search_steps: usize,
     max_regex_scratch_states: usize,
 }
 
@@ -111,10 +108,6 @@ impl RegexLimits {
 
     pub const fn max_regex_ranges_total(&self) -> usize {
         self.max_regex_ranges_total
-    }
-
-    pub const fn max_regex_search_steps(&self) -> usize {
-        self.max_regex_search_steps
     }
 
     pub const fn max_regex_scratch_states(&self) -> usize {
@@ -153,10 +146,6 @@ impl RegexLimits {
         self.max_regex_ranges_total = value;
     }
 
-    pub fn set_max_regex_search_steps(&mut self, value: usize) {
-        self.max_regex_search_steps = value;
-    }
-
     pub fn set_max_regex_scratch_states(&mut self, value: usize) {
         self.max_regex_scratch_states = value;
     }
@@ -173,47 +162,99 @@ impl Default for RegexLimits {
             max_regex_ranges_per_pattern: 4_096,
             max_regex_instructions_total: 16_384,
             max_regex_ranges_total: 16_384,
-            max_regex_search_steps: 67_108_864,
             max_regex_scratch_states: 4_096,
         }
     }
 }
 
-/// Shared diagnostic excerpt and regular-expression resource policies.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ResourceLimits {
-    excerpts: ExcerptLimits,
-    regex: RegexLimits,
+/// Runtime quotas for cumulative Regex work, one NFA search, and live Regex-owned capacity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegexExecutionLimits {
+    max_steps: usize,
+    max_search_steps: usize,
+    max_workspace_bytes: usize,
 }
 
-impl ResourceLimits {
-    pub const fn excerpts(&self) -> &ExcerptLimits {
-        &self.excerpts
+impl RegexExecutionLimits {
+    pub const fn new(
+        max_steps: usize,
+        max_search_steps: usize,
+        max_workspace_bytes: usize,
+    ) -> Self {
+        Self {
+            max_steps,
+            max_search_steps,
+            max_workspace_bytes,
+        }
     }
 
-    pub fn set_excerpts(&mut self, limits: ExcerptLimits) {
-        self.excerpts = limits;
+    pub const fn max_steps(&self) -> usize {
+        self.max_steps
     }
 
-    pub const fn regex(&self) -> &RegexLimits {
-        &self.regex
+    pub const fn max_search_steps(&self) -> usize {
+        self.max_search_steps
     }
 
-    pub fn regex_mut(&mut self) -> &mut RegexLimits {
-        &mut self.regex
+    pub const fn max_workspace_bytes(&self) -> usize {
+        self.max_workspace_bytes
+    }
+
+    pub const fn with_max_steps(mut self, value: usize) -> Self {
+        self.max_steps = value;
+        self
+    }
+
+    pub const fn with_max_search_steps(mut self, value: usize) -> Self {
+        self.max_search_steps = value;
+        self
+    }
+
+    pub const fn with_max_workspace_bytes(mut self, value: usize) -> Self {
+        self.max_workspace_bytes = value;
+        self
     }
 }
 
-impl Deref for ResourceLimits {
-    type Target = RegexLimits;
-
-    fn deref(&self) -> &Self::Target {
-        &self.regex
+impl Default for RegexExecutionLimits {
+    fn default() -> Self {
+        Self::new(67_108_864, 67_108_864, 67_108_864)
     }
 }
 
-impl DerefMut for ResourceLimits {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.regex
+/// Structural Regex bounds and a separate runtime execution budget.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegexOptions {
+    limits: RegexLimits,
+    execution: RegexExecutionLimits,
+}
+
+impl RegexOptions {
+    pub const fn new(limits: RegexLimits, execution: RegexExecutionLimits) -> Self {
+        Self { limits, execution }
+    }
+
+    pub const fn limits(&self) -> &RegexLimits {
+        &self.limits
+    }
+
+    pub const fn execution(&self) -> &RegexExecutionLimits {
+        &self.execution
+    }
+
+    pub const fn with_limits(mut self, limits: RegexLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    pub const fn with_execution(mut self, execution: RegexExecutionLimits) -> Self {
+        self.execution = execution;
+        self
+    }
+}
+
+impl Default for RegexOptions {
+    fn default() -> Self {
+        Self::new(RegexLimits::default(), RegexExecutionLimits::default())
     }
 }

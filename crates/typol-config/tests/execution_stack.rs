@@ -13,7 +13,7 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{ExecutionLimits, Read, SliceSource, ValueKind};
-use typol_policy::{RegexLimits, ResourceLimits, ValueLimits};
+use typol_policy::{ExcerptLimits, RegexLimits, RegexOptions, ValueLimits};
 use typol_schema::{SchemaCompileOptions, SchemaLimits, SchemaSource};
 use typol_semantic::{
     ComparisonOptions, CompiledSchema, SchemaComparison, SchemaEvaluator as Evaluator,
@@ -200,7 +200,8 @@ fn config_request<'a>(
         source.0,
         source.1,
         ConfigParseOptions::new(
-            ResourceLimits::default(),
+            ExcerptLimits::default(),
+            RegexOptions::default(),
             *limits,
             ExecutionLimits::new(1_000_000_000, 268_435_456),
         ),

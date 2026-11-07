@@ -16,8 +16,8 @@ use opeo::{ErrSlot, OResult, Out};
 use core::cell::RefCell;
 
 use typol_core::{
-    BudgetError, ChargedVec, ConfigValue, Diagnostic, ExecutionBudget, Read, SecretRange,
-    SourceCapture, SourceId, SourceReadError, SourceSpan, SpanLocation,
+    BudgetError, ChargedVec, ConfigValue, Diagnostic, ExecutionBudget, Read, RegexExecutionBudget,
+    SecretRange, SourceCapture, SourceId, SourceReadError, SourceSpan, SpanLocation,
 };
 use typol_policy::{RegexLimits, ValueLimits};
 use typol_semantic::{
@@ -33,6 +33,7 @@ pub(crate) struct ValidationResources<'a> {
     pub(crate) scratch: RegexExecutor,
     pub(crate) value_limits: &'a ValueLimits,
     pub(crate) regex_limits: &'a RegexLimits,
+    pub(crate) regex_execution: RegexExecutionBudget,
     pub(crate) budget: ExecutionBudget,
     pub(crate) budget_errors: ErrSlot<BudgetError>,
     pub(crate) schema_access_errors: ErrSlot<SchemaAccessError>,
@@ -150,7 +151,20 @@ impl<'a> ConfigSession<'a> {
         E: From<BudgetError>,
     {
         let value_limits = options.config().values();
-        let regex_limits = options.resources().regex();
+        let regex_limits = options.regex().limits();
+        let mut regex_budget_errors = ErrSlot::new();
+        let regex_execution = match regex_budget_errors.try_call(|budget_out| {
+            let limits = options.regex().execution();
+            RegexExecutionBudget::new(
+                limits.max_steps(),
+                limits.max_search_steps(),
+                limits.max_workspace_bytes(),
+                budget_out,
+            )
+        }) {
+            Ok(budget) => budget,
+            Err(caught) => return Err(out.fail(E::from(caught.take()))),
+        };
         let cache = EnvironmentCache::new(budget, *options.config(), out.reborrow())?;
         let validation_budget = budget.try_clone(out.reborrow())?;
         let session_budget = budget.try_clone(out.reborrow())?;
@@ -164,6 +178,7 @@ impl<'a> ConfigSession<'a> {
                     scratch: RegexExecutor::new(),
                     value_limits,
                     regex_limits,
+                    regex_execution,
                     budget: validation_budget,
                     budget_errors: ErrSlot::new(),
                     schema_access_errors: ErrSlot::new(),

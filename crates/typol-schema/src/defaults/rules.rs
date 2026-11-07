@@ -80,7 +80,7 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
         let evaluator = Evaluator::new(
             &model,
             self.data.limits.values(),
-            self.data.limits.regex(),
+            self.data.context.regex_limits(),
             Some(execution),
         );
         let element = match self
@@ -181,7 +181,7 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
         let evaluator = Evaluator::new(
             &model,
             self.data.limits.values(),
-            self.data.limits.regex(),
+            self.data.context.regex_limits(),
             Some(execution),
         );
         let element = match self.data.types.type_use(target).map(|use_| use_.kind()) {
@@ -311,7 +311,7 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
         let evaluator = Evaluator::new(
             &model,
             self.data.limits.values(),
-            self.data.limits.regex(),
+            self.data.context.regex_limits(),
             Some(execution),
         );
         let element = match self

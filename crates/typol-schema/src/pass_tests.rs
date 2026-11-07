@@ -1,8 +1,9 @@
 use alloc::{format, string::String, vec::Vec};
 use typol_core::{
-    BudgetError, ChargedVec, DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId,
-    SourceSpan, Span,
+    BudgetError, ChargedVec, DiagnosticCode, ExecutionBudget, ExecutionLimits,
+    RegexExecutionBudget, SourceId, SourceSpan, Span,
 };
+use typol_policy::{RegexExecutionLimits, RegexOptions};
 use typol_semantic::{EvalError, ExecutionModel};
 
 use crate::{
@@ -68,8 +69,28 @@ fn context(
     limits: SchemaLimits,
     execution: &ExecutionBudget,
 ) -> TestResult<CompileContext> {
+    let regex_options = RegexOptions::default();
+    let regex_limits = RegexExecutionLimits::default();
+    let regex_execution = operations
+        .budget(|out| {
+            RegexExecutionBudget::new(
+                regex_limits.max_steps(),
+                regex_limits.max_search_steps(),
+                regex_limits.max_workspace_bytes(),
+                out,
+            )
+        })
+        .into_test_value()?;
     operations
-        .budget(|out| CompileContext::new(limits, execution, out))
+        .budget(|out| {
+            CompileContext::new(
+                limits,
+                regex_options.limits(),
+                execution,
+                &regex_execution,
+                out,
+            )
+        })
         .into_test_value()
 }
 
@@ -89,8 +110,20 @@ fn compile_budget(
     limits: SchemaLimits,
     execution: &ExecutionBudget,
 ) -> TestResult<CompileBudget> {
+    let regex_options = RegexOptions::default();
+    let regex_limits = RegexExecutionLimits::default();
+    let regex_execution = operations
+        .budget(|out| {
+            RegexExecutionBudget::new(
+                regex_limits.max_steps(),
+                regex_limits.max_search_steps(),
+                regex_limits.max_workspace_bytes(),
+                out,
+            )
+        })
+        .into_test_value()?;
     operations
-        .budget(|out| CompileBudget::new(limits, execution, out))
+        .budget(|out| CompileBudget::new(limits, &regex_options, execution, &regex_execution, out))
         .into_test_value()
 }
 

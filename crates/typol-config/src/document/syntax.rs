@@ -442,9 +442,11 @@ fn skip_block_comment(source: &str, start: usize) -> Result<usize, ConfigEditErr
 
 fn edit_budget_error(error: BudgetError) -> ConfigEditErrorKind {
     match error {
-        BudgetError::Resource | BudgetError::CapacityExceeded => {
-            ConfigEditErrorKind::ResourceLimitExceeded
-        }
+        BudgetError::Resource
+        | BudgetError::RegexSteps
+        | BudgetError::RegexSearchSteps
+        | BudgetError::RegexWorkspace
+        | BudgetError::CapacityExceeded => ConfigEditErrorKind::ResourceLimitExceeded,
         BudgetError::Allocation | BudgetError::InvariantViolation(_) => {
             ConfigEditErrorKind::AllocationFailed
         }

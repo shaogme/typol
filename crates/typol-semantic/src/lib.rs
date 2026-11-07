@@ -51,7 +51,7 @@ pub use {
     views::*,
 };
 
-pub use typol_core::SpanLocation;
+pub use typol_core::{RegexExecutionBudget, SpanLocation};
 
 #[cfg(feature = "compiler")]
 pub use builder::{

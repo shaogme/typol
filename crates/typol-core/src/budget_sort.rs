@@ -1,4 +1,4 @@
-use crate::{BudgetError, DiagnosticContext, ExecutionBudget, diagnostic_context};
+use crate::{BudgetError, DiagnosticContext, diagnostic_context, storage::WorkspaceCharge};
 use core::cmp::Ordering;
 use opeo::{OResult, Out, ResultOutExt};
 
@@ -12,32 +12,19 @@ static SORT_CHILD: DiagnosticContext =
     diagnostic_context!("typol-core", "budget-sort", "sort-child-index-missing");
 
 pub(crate) struct FallibleSort {
-    execution: Option<ExecutionBudget>,
+    charge: WorkspaceCharge,
 }
 
 impl FallibleSort {
-    pub(crate) fn new<'slot, E>(
-        execution: Option<&ExecutionBudget>,
-        mut out: Out<'slot, '_, E>,
-    ) -> OResult<'slot, Self>
-    where
-        E: From<BudgetError>,
-    {
-        let execution = match execution {
-            Some(execution) => Some(execution.try_clone(out.reborrow())?),
-            None => None,
-        };
-        Ok(Self { execution })
+    pub(crate) const fn new(charge: WorkspaceCharge) -> Self {
+        Self { charge }
     }
 
     fn consume<'slot, E>(&self, steps: usize, out: Out<'slot, '_, E>) -> OResult<'slot, ()>
     where
         E: From<BudgetError>,
     {
-        if let Some(execution) = &self.execution {
-            execution.consume(steps, out)?;
-        }
-        Ok(())
+        self.charge.consume(steps, out)
     }
 
     /// In-place heapsort allocates no additional payload, and each comparison or swap can propagate a budget failure.

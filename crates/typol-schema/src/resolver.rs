@@ -1,10 +1,9 @@
-use core::ops::{Deref, DerefMut};
 use opeo::{OResult, Out};
 use typol_core::{
     Diagnostic, DiagnosticContext, ExcerptLimits, ExecutionLimits, LocatedSpan, Read, SliceSource,
     SourceId, SourceReadError, SourceSpan, Span, diagnostic_context,
 };
-use typol_policy::{RegexLimits, ResourceLimits, ValueLimits};
+use typol_policy::{RegexOptions, ValueLimits};
 use typol_syntax::{StreamLimits, SyntaxLimits};
 
 use crate::SchemaCompileContext;
@@ -169,7 +168,7 @@ pub trait SourceObserver {
 /// Resource ceilings for Schema loading, syntax trees, and default-value validation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SchemaLimits {
-    resources: ResourceLimits,
+    excerpts: ExcerptLimits,
     syntax: SyntaxLimits,
     stream: StreamLimits,
     values: ValueLimits,
@@ -178,20 +177,8 @@ pub struct SchemaLimits {
 }
 
 impl SchemaLimits {
-    pub const fn resources(&self) -> &ResourceLimits {
-        &self.resources
-    }
-
     pub const fn excerpts(&self) -> &ExcerptLimits {
-        self.resources.excerpts()
-    }
-
-    pub const fn regex(&self) -> &RegexLimits {
-        self.resources.regex()
-    }
-
-    pub fn regex_mut(&mut self) -> &mut RegexLimits {
-        self.resources.regex_mut()
+        &self.excerpts
     }
 
     pub const fn syntax(&self) -> &SyntaxLimits {
@@ -244,17 +231,13 @@ impl SchemaLimits {
         self.values.max_value_nodes()
     }
 
-    pub fn set_resources(&mut self, resources: ResourceLimits) {
-        self.resources = resources;
-    }
-
     /// Sets the input window and token length limits for Schema lexing.
     pub fn set_stream_limits(&mut self, stream: StreamLimits) {
         self.stream = stream;
     }
 
     pub fn set_excerpts(&mut self, limits: ExcerptLimits) {
-        self.resources.set_excerpts(limits);
+        self.excerpts = limits;
     }
 
     pub fn set_max_source_bytes(&mut self, value: usize) {
@@ -297,24 +280,10 @@ impl SchemaLimits {
     }
 }
 
-impl Deref for SchemaLimits {
-    type Target = RegexLimits;
-
-    fn deref(&self) -> &Self::Target {
-        self.resources.regex()
-    }
-}
-
-impl DerefMut for SchemaLimits {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.resources.regex_mut()
-    }
-}
-
 impl Default for SchemaLimits {
     fn default() -> Self {
         Self {
-            resources: ResourceLimits::default(),
+            excerpts: ExcerptLimits::default(),
             syntax: SyntaxLimits::default(),
             stream: StreamLimits::default(),
             values: ValueLimits::default(),
@@ -328,19 +297,30 @@ impl Default for SchemaLimits {
 #[derive(Clone, Copy, Debug)]
 pub struct SchemaCompileOptions {
     limits: SchemaLimits,
+    regex: RegexOptions,
     execution: ExecutionLimits,
 }
 
 impl SchemaCompileOptions {
-    pub const fn new(limits: SchemaLimits) -> Self {
+    pub fn new(limits: SchemaLimits) -> Self {
         Self {
             limits,
+            regex: RegexOptions::default(),
             execution: ExecutionLimits::new(67_108_864, 67_108_864),
         }
     }
 
     pub const fn limits(&self) -> &SchemaLimits {
         &self.limits
+    }
+
+    pub const fn regex(&self) -> &RegexOptions {
+        &self.regex
+    }
+
+    pub const fn with_regex(mut self, regex: RegexOptions) -> Self {
+        self.regex = regex;
+        self
     }
 
     pub const fn execution(&self) -> ExecutionLimits {

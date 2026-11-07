@@ -200,6 +200,21 @@ impl Drop for Scope {
     }
 }
 
+fn regex_budget_state_bytes() -> Result<usize, Box<dyn Error>> {
+    let scope = Scope::start(None, false);
+    let compiler = ErrSlot::<SchemaCompileErrors>::new()
+        .call(|out| SchemaCompiler::new(SchemaCompileOptions::default(), out))
+        .map_err(|errors| IoError::other(format!("Schema initialization failed: {errors:?}")))?;
+    let context = ErrSlot::<BudgetError>::new()
+        .call(|out| compiler.context(out))
+        .map_err(|error| HostError::budget(HostOperation::SourceNames, error))?;
+    let bytes = STATE.with(Cell::get).live_bytes as usize - context.usage().workspace_bytes;
+    drop(context);
+    drop(compiler);
+    ensure_eq!(scope.finish().live_bytes, 0);
+    Ok(bytes)
+}
+
 fn exercise(path: &Path) -> Result<usize, HostError> {
     let compiler = ErrSlot::<SchemaCompileErrors>::new()
         .call(|out| SchemaCompiler::new(SchemaCompileOptions::default(), out))
@@ -766,6 +781,7 @@ fn environment_native_storage_is_charged_and_conversion_failures_are_recoverable
 
 #[test]
 fn shared_host_storage_matches_live_layout_payloads() -> Result<(), Box<dyn Error>> {
+    let regex_state_bytes = regex_budget_state_bytes()?;
     let source_file = AllocationSourceFile::new()?;
     let scope = Scope::start(None, false);
     let compiler = ErrSlot::<SchemaCompileErrors>::new()
@@ -794,7 +810,7 @@ fn shared_host_storage_matches_live_layout_payloads() -> Result<(), Box<dyn Erro
             })?;
         ensure_eq!(
             STATE.with(Cell::get).live_bytes as usize,
-            context.usage().workspace_bytes
+            context.usage().workspace_bytes + regex_state_bytes
         );
     }
     let mut input = ErrSlot::<HostError>::new().call(|out| {
@@ -810,14 +826,14 @@ fn shared_host_storage_matches_live_layout_payloads() -> Result<(), Box<dyn Erro
     ensure_eq!(stream_source_len(&mut input)?, 32_769);
     ensure_eq!(
         STATE.with(Cell::get).live_bytes as usize,
-        context.usage().workspace_bytes
+        context.usage().workspace_bytes + regex_state_bytes
     );
     let held = context.usage().workspace_bytes;
     drop(input);
     ensure_eq!(context.usage().workspace_bytes, held);
     ensure_eq!(
         STATE.with(Cell::get).live_bytes as usize,
-        context.usage().workspace_bytes
+        context.usage().workspace_bytes + regex_state_bytes
     );
     drop(names);
     drop(context);
@@ -848,13 +864,16 @@ fn file_entry_initialization_oom_precedes_native_io() -> Result<(), Box<dyn Erro
             ensure!(error.names().is_none());
             let usage = error.usage();
             ensure_eq!(usage.last_stage, SchemaCompileStage::Initialization);
-            ensure_eq!(usage.failure, Some(BudgetError::Allocation));
             if index == 0 {
+                ensure_eq!(usage.failure, Some(BudgetError::Allocation));
+                ensure_eq!(usage.regex_failure, None);
                 ensure_eq!(usage.workspace_bytes, 0);
                 ensure_eq!(usage.peak_workspace_bytes, 0);
             } else {
-                ensure!(usage.workspace_bytes > 0);
-                ensure!(usage.peak_workspace_bytes >= usage.workspace_bytes);
+                ensure_eq!(usage.failure, None);
+                ensure_eq!(usage.regex_failure, Some(BudgetError::Allocation));
+                ensure_eq!(usage.regex_workspace_bytes, 0);
+                ensure_eq!(usage.regex_peak_workspace_bytes, 0);
             }
             drop(error);
             ensure_eq!(scope.finish().live_bytes, 0);

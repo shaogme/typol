@@ -9,7 +9,7 @@ use typol_core::{
     AllocationError, BudgetError, ConfigValue, DiagnosticCode, ExecutionBudget, ExecutionLimits,
     SliceSource, ValueError, ValueKind, ValuePayloadView, ValueSource,
 };
-use typol_policy::ResourceLimits;
+use typol_policy::{ExcerptLimits, RegexOptions};
 use typol_schema::{
     ResolverError, SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaResolveRequest,
     SchemaResolver, SchemaSource,
@@ -448,7 +448,8 @@ fn shared_budget_and_diagnostic_terminal_slots_are_preserved() -> TestResult<()>
         let mut config = ConfigLimits::default();
         config = config.with_max_diagnostics(limit);
         let options = ConfigValidationOptions::new(
-            ResourceLimits::default(),
+            ExcerptLimits::default(),
+            RegexOptions::default(),
             config,
             *ConfigValidationOptions::default().execution(),
         );
@@ -621,8 +622,12 @@ fn exact_nodes_text_and_shared_execution_limits_are_enforced() -> TestResult<()>
     for nodes in [4, 3] {
         let mut limits = ConfigLimits::default();
         limits = limits.with_max_value_nodes(nodes);
-        let options =
-            ConfigValidationOptions::new(*defaults.resources(), limits, *defaults.execution());
+        let options = ConfigValidationOptions::new(
+            *defaults.excerpts(),
+            *defaults.regex(),
+            limits,
+            *defaults.execution(),
+        );
         let budget = test.budget(&options)?;
         test_eq!(
             test.validate(&schema, &value, &options, &budget).is_ok(),
@@ -631,7 +636,8 @@ fn exact_nodes_text_and_shared_execution_limits_are_enforced() -> TestResult<()>
     }
     for bytes in [12, 11] {
         let options = ConfigValidationOptions::new(
-            *defaults.resources(),
+            *defaults.excerpts(),
+            *defaults.regex(),
             ConfigLimits::default()
                 .with_max_environment_entries(0)
                 .with_max_environment_bytes(0)
@@ -653,7 +659,8 @@ fn exact_nodes_text_and_shared_execution_limits_are_enforced() -> TestResult<()>
     let steps = budget.steps();
     for maximum in [steps, steps - 1] {
         let options = ConfigValidationOptions::new(
-            *defaults.resources(),
+            *defaults.excerpts(),
+            *defaults.regex(),
             *defaults.config(),
             ExecutionLimits::new(maximum, 67_108_864),
         );
@@ -707,9 +714,15 @@ fn secret_element_struct_assertions_hide_messages_before_path_copy() -> TestResu
     let secret_values = test.map(vec![secret_entry])?;
     let input = test.object(vec![("values", secret_values)])?;
     let defaults = ConfigValidationOptions::default();
-    let mut limits = *defaults.resources();
-    limits.set_max_regex_scratch_states(0);
-    let options = ConfigValidationOptions::new(limits, *defaults.config(), *defaults.execution());
+    let mut regex_limits = *defaults.regex().limits();
+    regex_limits.set_max_regex_scratch_states(0);
+    let regex = defaults.regex().with_limits(regex_limits);
+    let options = ConfigValidationOptions::new(
+        *defaults.excerpts(),
+        regex,
+        *defaults.config(),
+        *defaults.execution(),
+    );
     let budget = test.budget(&options)?;
     let errors = test
         .validate(&schema, &input, &options, &budget)

@@ -41,7 +41,12 @@ pub struct ProcessEnvironment {
 impl EnvironmentFailure {
     const fn public_error(self) -> EnvironmentError {
         match self {
-            Self::Budget(BudgetError::Resource) => EnvironmentError::ResourceLimitExceeded,
+            Self::Budget(
+                BudgetError::Resource
+                | BudgetError::RegexSteps
+                | BudgetError::RegexSearchSteps
+                | BudgetError::RegexWorkspace,
+            ) => EnvironmentError::ResourceLimitExceeded,
             Self::Budget(BudgetError::Allocation) => EnvironmentError::AllocationFailed,
             Self::Budget(BudgetError::CapacityExceeded) => EnvironmentError::CapacityExceeded,
             Self::Budget(BudgetError::InvariantViolation(_)) => EnvironmentError::InternalError,

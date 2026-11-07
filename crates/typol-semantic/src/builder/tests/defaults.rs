@@ -8,8 +8,8 @@ use core::fmt::{Debug, Formatter, Result as FmtResult};
 use opeo::{OResult, Out};
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, ConfigValue, ConfigValueBuilder, ExecutionBudget,
-    ExecutionLimits, SourceId, SourceLocation, SourceSpan, Span, SpanError, ValueError, ValueId,
-    ValueSource,
+    ExecutionLimits, RegexExecutionBudget, SourceId, SourceLocation, SourceSpan, Span, SpanError,
+    ValueError, ValueId, ValueSource,
 };
 use typol_model::BuiltinType;
 use typol_policy::{RegexLimits, ValueLimits};
@@ -173,11 +173,14 @@ fn scalar(slots: &mut TestSlots, model: &mut Builder, builtin: BuiltinType) -> T
 fn base(slots: &mut TestSlots) -> TestResult<(Builder, TypeId)> {
     let execution = slots
         .budget(|out| ExecutionBudget::new(ExecutionLimits::new(67_108_864, 67_108_864), out))?;
+    let regex_execution =
+        slots.budget(|out| RegexExecutionBudget::new(67_108_864, 67_108_864, 67_108_864, out))?;
     let mut model = slots.build(|out| {
         Builder::new(
             &execution,
             ValueLimits::default(),
             RegexLimits::default(),
+            &regex_execution,
             out,
         )
     })?;

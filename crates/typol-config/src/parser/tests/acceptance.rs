@@ -16,7 +16,7 @@ use typol_core::{
     BudgetError, Diagnostic, ExecutionLimits, SliceSource, SourceId, Span, SpanError, ValueKind,
     ValuePayloadView, ValueSource, ValueView,
 };
-use typol_policy::ResourceLimits;
+use typol_policy::{ExcerptLimits, RegexOptions};
 use typol_schema::{
     ResolverError, SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaResolveRequest,
     SchemaResolver, SchemaSource,
@@ -793,7 +793,8 @@ fn specification_config_blocks_use_the_private_streaming_parser() -> TestResult<
 
 fn session_options(limits: &ConfigLimits) -> ConfigParseOptions {
     ConfigParseOptions::new(
-        ResourceLimits::default(),
+        ExcerptLimits::default(),
+        RegexOptions::default(),
         *limits,
         ExecutionLimits::new(1_000_000_000, 268_435_456),
     )

@@ -8,8 +8,8 @@ use typol_core::{
 };
 use typol_report::{DiagnosticReport, ReportContext};
 use typol_schema::{
-    DiagnosticList, SchemaCompileContext, SchemaCompileErrors, SchemaCompileOptions,
-    SchemaCompileStage, SchemaCompileUsage, SchemaCompiler,
+    DiagnosticList, SchemaCompileBudgetDomain, SchemaCompileContext, SchemaCompileErrors,
+    SchemaCompileOptions, SchemaCompileStage, SchemaCompileUsage, SchemaCompiler,
 };
 use typol_semantic::CompiledSchema;
 
@@ -119,12 +119,21 @@ impl FileSchemaCompileErrors {
     }
 
     fn initialization_usage(errors: &SchemaCompileErrors, peak: usize) -> SchemaCompileUsage {
+        let failure = Self::failure_from_errors(errors);
+        let (failure, regex_failure) = match errors.budget_domain() {
+            Some(SchemaCompileBudgetDomain::Regex) => (None, Some(failure)),
+            Some(SchemaCompileBudgetDomain::Execution) | None => (Some(failure), None),
+        };
         SchemaCompileUsage {
             steps: 0,
             peak_workspace_bytes: peak,
             workspace_bytes: 0,
             last_stage: SchemaCompileStage::Initialization,
-            failure: Some(Self::failure_from_errors(errors)),
+            failure,
+            regex_steps: 0,
+            regex_workspace_bytes: 0,
+            regex_peak_workspace_bytes: 0,
+            regex_failure,
         }
     }
 
@@ -132,8 +141,18 @@ impl FileSchemaCompileErrors {
         errors: &SchemaCompileErrors,
         mut usage: SchemaCompileUsage,
     ) -> SchemaCompileUsage {
-        if usage.failure.is_none() {
-            usage.failure = Some(Self::failure_from_errors(errors));
+        let failure = Self::failure_from_errors(errors);
+        match errors.budget_domain() {
+            Some(SchemaCompileBudgetDomain::Regex) => {
+                if usage.regex_failure.is_none() {
+                    usage.regex_failure = Some(failure);
+                }
+            }
+            Some(SchemaCompileBudgetDomain::Execution) | None => {
+                if usage.failure.is_none() {
+                    usage.failure = Some(failure);
+                }
+            }
         }
         usage
     }

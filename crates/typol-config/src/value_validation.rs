@@ -15,7 +15,10 @@ use crate::{
     value_validation::tree::TreeTraversal,
 };
 use opeo::{ErrSlot, OResult, Out};
-use typol_core::{ChargedVec, ConfigValue, Diagnostic, ExecutionBudget, InstancePath, LocatedSpan};
+use typol_core::{
+    BudgetError, ChargedVec, ConfigValue, Diagnostic, ExecutionBudget, InstancePath, LocatedSpan,
+    RegexExecutionBudget,
+};
 use typol_semantic::{
     CompiledSchema, ConstraintList, FieldView, RegexExecutor, TypeView, VariantView,
 };
@@ -82,6 +85,24 @@ impl ValueValidation {
             options,
             budget,
         } = request;
+        let mut regex_budget_errors = ErrSlot::<BudgetError>::new();
+        let regex_execution = match regex_budget_errors.try_call(|budget_out| {
+            let limits = options.regex().execution();
+            RegexExecutionBudget::new(
+                limits.max_steps(),
+                limits.max_search_steps(),
+                limits.max_workspace_bytes(),
+                budget_out,
+            )
+        }) {
+            Ok(budget) => budget,
+            Err(caught) => {
+                return Err(out.fail(ConfigParseErrors::emergency(
+                    BudgetDiagnostic::from_error(caught.take()),
+                    None,
+                )));
+            }
+        };
         let mut operation_errors = ErrSlot::new();
         let mut budget_errors = ErrSlot::new();
         let mut diagnostics = match operation_errors.try_call(|diagnostic_out| {
@@ -175,7 +196,8 @@ impl ValueValidation {
         let mut resources = ValidationResources {
             scratch: RegexExecutor::new(),
             value_limits: options.config().values(),
-            regex_limits: options.resources().regex(),
+            regex_limits: options.regex().limits(),
+            regex_execution,
             budget: validation_budget,
             budget_errors: ErrSlot::new(),
             schema_access_errors: ErrSlot::new(),

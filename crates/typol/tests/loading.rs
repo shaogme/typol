@@ -365,7 +365,8 @@ fn bound_write_inherits_loaded_conversion_limits_unless_explicitly_overridden() 
 
     let validation_defaults = default_options();
     let restrictive_validation = ConfigValidationOptions::new(
-        *validation_defaults.config().resources(),
+        *validation_defaults.config().excerpts(),
+        *validation_defaults.config().regex(),
         ConfigLimits::default().with_max_nesting_depth(0),
         *validation_defaults.config().execution(),
     );
@@ -995,7 +996,8 @@ fn typed_loading_keeps_parser_and_conversion_on_one_budget() -> TestResult {
     let limited = load(
         text,
         default_options().with_config(ConfigParseOptions::new(
-            *defaults.resources(),
+            *defaults.excerpts(),
+            *defaults.regex(),
             *defaults.config(),
             ExecutionLimits::new(budget.steps(), defaults.execution().max_workspace_bytes()),
         )),
@@ -1448,7 +1450,8 @@ fn reader_budget_and_parse_limits_keep_distinct_error_stages() -> TestResult {
     let loaded = load(
         "entry struct Root { value: u8, optional: option<string> }",
         default_options().with_config(ConfigParseOptions::new(
-            *defaults.resources(),
+            *defaults.excerpts(),
+            *defaults.regex(),
             *defaults.config(),
             ExecutionLimits::new(10_000, defaults.execution().max_workspace_bytes()),
         )),
@@ -1465,7 +1468,8 @@ fn reader_budget_and_parse_limits_keep_distinct_error_stages() -> TestResult {
     let mut config = *defaults.config();
     config = config.with_max_value_nodes(0);
     let options = default_options().with_config(ConfigParseOptions::new(
-        *defaults.resources(),
+        *defaults.excerpts(),
+        *defaults.regex(),
         config,
         *defaults.execution(),
     ));
@@ -1500,7 +1504,8 @@ fn reader_source_limit_maps_to_host_resource_error() -> TestResult {
     let loaded = load(
         "entry struct Root { value: u8 = 3, optional: option<string> }",
         default_options().with_config(ConfigParseOptions::new(
-            *defaults.resources(),
+            *defaults.excerpts(),
+            *defaults.regex(),
             config,
             *defaults.execution(),
         )),

@@ -1,7 +1,7 @@
 use core::fmt;
 use opeo::{OResult, Out};
-use typol_core::{BudgetError, ExecutionBudget, ExecutionLimits, Read};
-use typol_policy::{ResourceLimits, ValueLimits};
+use typol_core::{BudgetError, ExcerptLimits, ExecutionBudget, ExecutionLimits, Read};
+use typol_policy::{RegexOptions, ValueLimits};
 use typol_syntax::{InputLimits, StreamLimits};
 
 /// Configuration-specific cumulative limits with finite defaults that hosts can tune.
@@ -142,7 +142,8 @@ impl Default for ConfigLimits {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConfigParseOptions {
-    resources: ResourceLimits,
+    excerpts: ExcerptLimits,
+    regex: RegexOptions,
     config: ConfigLimits,
     execution: ExecutionLimits,
     stream: StreamLimits,
@@ -150,12 +151,14 @@ pub struct ConfigParseOptions {
 
 impl ConfigParseOptions {
     pub const fn new(
-        resources: ResourceLimits,
+        excerpts: ExcerptLimits,
+        regex: RegexOptions,
         config: ConfigLimits,
         execution: ExecutionLimits,
     ) -> Self {
         Self {
-            resources,
+            excerpts,
+            regex,
             config,
             execution,
             stream: StreamLimits::DEFAULT,
@@ -167,8 +170,13 @@ impl ConfigParseOptions {
         self
     }
 
-    pub const fn with_resources(mut self, resources: ResourceLimits) -> Self {
-        self.resources = resources;
+    pub const fn with_excerpts(mut self, excerpts: ExcerptLimits) -> Self {
+        self.excerpts = excerpts;
+        self
+    }
+
+    pub const fn with_regex(mut self, regex: RegexOptions) -> Self {
+        self.regex = regex;
         self
     }
 
@@ -186,8 +194,12 @@ impl ConfigParseOptions {
         self.stream
     }
 
-    pub const fn resources(&self) -> &ResourceLimits {
-        &self.resources
+    pub const fn excerpts(&self) -> &ExcerptLimits {
+        &self.excerpts
+    }
+
+    pub const fn regex(&self) -> &RegexOptions {
+        &self.regex
     }
 
     pub const fn config(&self) -> &ConfigLimits {
@@ -202,7 +214,8 @@ impl ConfigParseOptions {
 impl Default for ConfigParseOptions {
     fn default() -> Self {
         Self::new(
-            ResourceLimits::default(),
+            ExcerptLimits::default(),
+            RegexOptions::default(),
             ConfigLimits::default(),
             ExecutionLimits::new(16_777_216, 67_108_864),
         )
@@ -212,26 +225,34 @@ impl Default for ConfigParseOptions {
 /// Shared resource, configuration, and execution limits for external value normalization and validation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConfigValidationOptions {
-    resources: ResourceLimits,
+    excerpts: ExcerptLimits,
+    regex: RegexOptions,
     config: ConfigLimits,
     execution: ExecutionLimits,
 }
 
 impl ConfigValidationOptions {
     pub const fn new(
-        resources: ResourceLimits,
+        excerpts: ExcerptLimits,
+        regex: RegexOptions,
         config: ConfigLimits,
         execution: ExecutionLimits,
     ) -> Self {
         Self {
-            resources,
+            excerpts,
+            regex,
             config,
             execution,
         }
     }
 
-    pub const fn with_resources(mut self, resources: ResourceLimits) -> Self {
-        self.resources = resources;
+    pub const fn with_excerpts(mut self, excerpts: ExcerptLimits) -> Self {
+        self.excerpts = excerpts;
+        self
+    }
+
+    pub const fn with_regex(mut self, regex: RegexOptions) -> Self {
+        self.regex = regex;
         self
     }
 
@@ -245,8 +266,12 @@ impl ConfigValidationOptions {
         self
     }
 
-    pub const fn resources(&self) -> &ResourceLimits {
-        &self.resources
+    pub const fn excerpts(&self) -> &ExcerptLimits {
+        &self.excerpts
+    }
+
+    pub const fn regex(&self) -> &RegexOptions {
+        &self.regex
     }
 
     pub const fn config(&self) -> &ConfigLimits {
@@ -261,7 +286,8 @@ impl ConfigValidationOptions {
 impl Default for ConfigValidationOptions {
     fn default() -> Self {
         Self::new(
-            ResourceLimits::default(),
+            ExcerptLimits::default(),
+            RegexOptions::default(),
             ConfigLimits::default(),
             ExecutionLimits::new(16_777_216, 67_108_864),
         )

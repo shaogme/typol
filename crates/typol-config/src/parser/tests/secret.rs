@@ -9,7 +9,7 @@ use opeo::{OResult, Out};
 use typol_core::{
     ConfigValue, DiagnosticCode, ExecutionLimits, SliceSource, ValueKind, ValueSource,
 };
-use typol_policy::ResourceLimits;
+use typol_policy::{ExcerptLimits, RegexOptions};
 use typol_schema::{
     ResolverError, SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaResolveRequest,
     SchemaResolver, SchemaSource,
@@ -454,7 +454,8 @@ fn secret_single_payload_assertions_hide_messages_without_a_payload_path() -> Te
 
 fn session_options(limits: &ConfigLimits) -> ConfigParseOptions {
     ConfigParseOptions::new(
-        ResourceLimits::default(),
+        ExcerptLimits::default(),
+        RegexOptions::default(),
         *limits,
         ExecutionLimits::new(1_000_000_000, 268_435_456),
     )

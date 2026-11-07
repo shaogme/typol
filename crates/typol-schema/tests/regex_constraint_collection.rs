@@ -2,6 +2,7 @@
 mod schema_support;
 
 use typol_core::DiagnosticCode;
+use typol_policy::{RegexExecutionLimits, RegexLimits, RegexOptions};
 use typol_schema::{
     ResolverError, SchemaCompileOptions, SchemaLimits, SchemaResolveRequest, SchemaResolver,
     SchemaSource,
@@ -86,10 +87,13 @@ fn aggregate_regex_limits_include_imported_schema_programs() -> TestResult {
     .test_value()?;
     test_verify_eq!(baseline.regex_counts().programs, 3);
 
-    let mut limits = defaults;
-    limits.set_max_regex_count(baseline.regex_counts().programs - 1);
+    let mut regex_limits = RegexLimits::default();
+    regex_limits.set_max_regex_count(baseline.regex_counts().programs - 1);
     let errors = schema_support::SchemaCompileTestSupport::run(
-        SchemaCompileOptions::new(limits),
+        SchemaCompileOptions::new(defaults).with_regex(RegexOptions::new(
+            regex_limits,
+            RegexExecutionLimits::default(),
+        )),
         SchemaSource::from_str(b"root", source),
         &mut Imports::default(),
         None,

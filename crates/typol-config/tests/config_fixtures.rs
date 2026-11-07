@@ -7,10 +7,10 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{
-    ConfigValue, DiagnosticCode, ExecutionLimits, Read, SliceSource, SourceId, SourceReadError,
-    SourceReadErrorKind, ValueKind, ValuePayloadView, ValueSource, ValueView,
+    ConfigValue, DiagnosticCode, ExcerptLimits, ExecutionLimits, Read, SliceSource, SourceId,
+    SourceReadError, SourceReadErrorKind, ValueKind, ValuePayloadView, ValueSource, ValueView,
 };
-use typol_policy::ResourceLimits;
+use typol_policy::RegexOptions;
 use typol_schema::{
     ResolverError, SchemaCompileOptions, SchemaResolveRequest, SchemaResolver, SchemaSource,
 };
@@ -19,14 +19,20 @@ use typol_test_support::*;
 
 type ConfigLimitBuilder = (fn(ConfigLimits, usize) -> ConfigLimits, usize);
 
+#[derive(Clone, Copy, Default)]
+struct TestResources {
+    excerpts: ExcerptLimits,
+    regex: RegexOptions,
+}
+
 #[derive(Clone, Copy)]
 struct TestLimits {
-    resources: ResourceLimits,
+    resources: TestResources,
     config: ConfigLimits,
 }
 
-impl From<&ResourceLimits> for TestLimits {
-    fn from(resources: &ResourceLimits) -> Self {
+impl From<&TestResources> for TestLimits {
+    fn from(resources: &TestResources) -> Self {
         Self {
             resources: *resources,
             config: ConfigLimits::default(),
@@ -37,14 +43,14 @@ impl From<&ResourceLimits> for TestLimits {
 impl From<&ConfigLimits> for TestLimits {
     fn from(config: &ConfigLimits) -> Self {
         Self {
-            resources: ResourceLimits::default(),
+            resources: TestResources::default(),
             config: *config,
         }
     }
 }
 
-impl From<&(&ResourceLimits, &ConfigLimits)> for TestLimits {
-    fn from(limits: &(&ResourceLimits, &ConfigLimits)) -> Self {
+impl From<&(&TestResources, &ConfigLimits)> for TestLimits {
+    fn from(limits: &(&TestResources, &ConfigLimits)) -> Self {
         Self {
             resources: *limits.0,
             config: *limits.1,
@@ -53,8 +59,12 @@ impl From<&(&ResourceLimits, &ConfigLimits)> for TestLimits {
 }
 
 impl TestLimits {
-    fn resources(self) -> ResourceLimits {
-        self.resources
+    fn excerpts(self) -> ExcerptLimits {
+        self.resources.excerpts
+    }
+
+    fn regex(self) -> RegexOptions {
+        self.resources.regex
     }
 
     fn config(self) -> ConfigLimits {
@@ -91,7 +101,7 @@ struct Counterexample {
 }
 
 struct ResourceLimitSetter {
-    set: fn(&mut ResourceLimits, usize),
+    set: fn(&mut TestResources, usize),
     upper: usize,
 }
 
@@ -274,7 +284,7 @@ fn original_fixtures_return_owned_values_with_fallback_default_and_none() -> Tes
                 &schema,
                 &text,
                 &mut provider,
-                &ResourceLimits::default(),
+                &TestResources::default(),
             )
             .test_value()?;
             provider.assert_cached(fixture)?;
@@ -340,7 +350,7 @@ fn missing_required_environment_fails_all_original_fixtures_safely() -> TestResu
                 &schema,
                 &text,
                 &mut provider,
-                &ResourceLimits::default(),
+                &TestResources::default(),
             )
             .test_error()?;
             provider.assert_cached(fixture)?;
@@ -408,7 +418,7 @@ fn legal_environment_overrides_preserve_types_and_validate_shared_references() -
             &schema,
             fixture.config,
             &mut provider,
-            &ResourceLimits::default(),
+            &TestResources::default(),
         )
         .test_value()?;
         provider.assert_cached(fixture)?;
@@ -440,7 +450,7 @@ fn legal_environment_overrides_preserve_types_and_validate_shared_references() -
                     &schema,
                     fixture.config,
                     &mut provider,
-                    &ResourceLimits::default(),
+                    &TestResources::default(),
                 )
                 .test_value()?;
                 test_assert!(provider.calls.values().all(|count| *count == 2))?;
@@ -550,7 +560,7 @@ fn illegal_environment_never_uses_valid_fallback_or_exposes_secret_text() -> Tes
             &schema,
             case.fixture.config,
             &mut provider,
-            &ResourceLimits::default(),
+            &TestResources::default(),
         )
         .test_error()?;
         assert_code(&errors, case.code)?;
@@ -590,7 +600,7 @@ fn shared_environment_is_read_once_but_each_field_checks_its_own_rules() -> Test
             &schema,
             SERVER.config,
             &mut provider,
-            &ResourceLimits::default(),
+            &TestResources::default(),
         )
         .test_error()?;
         assert_code(&errors, DiagnosticCode::CONFIG_VALIDATION_ERROR)?;
@@ -651,7 +661,7 @@ fn unauthorized_names_and_invalid_fallbacks_fail_before_environment_reads() -> T
             &schema,
             &text,
             &mut provider,
-            &ResourceLimits::default(),
+            &TestResources::default(),
         )
         .test_error()?;
         assert_code(&errors, case.code)?;
@@ -745,7 +755,7 @@ fn fixture_counterexamples_reject_collections_and_complete_tree_assertions() -> 
             &schema,
             &text,
             &mut provider,
-            &ResourceLimits::default(),
+            &TestResources::default(),
         )
         .test_error()?;
         assert_code(&errors, DiagnosticCode::CONFIG_VALIDATION_ERROR)?;
@@ -840,7 +850,7 @@ fn imported_schema_labels_and_provider_failures_use_public_owned_errors() -> Tes
         &schema,
         SERVER.config,
         &mut provider,
-        &ResourceLimits::default(),
+        &TestResources::default(),
     )
     .test_error()?;
     let diagnostic = TestCheck::item(errors.diagnostics(), 0)?;
@@ -879,7 +889,7 @@ fn imported_schema_labels_and_provider_failures_use_public_owned_errors() -> Tes
                 &schema,
                 fixture.config,
                 &mut provider,
-                &ResourceLimits::default(),
+                &TestResources::default(),
             )
             .test_error()?;
             assert_code(&errors, code)?;
@@ -905,7 +915,7 @@ fn fixture_resource_boundaries_accept_exact_limit_and_reject_one_less() -> TestR
         for (with_limit, upper) in config_builders {
             let run = |bound| {
                 let config = with_limit(ConfigLimits::default(), bound);
-                let resources = ResourceLimits::default();
+                let resources = TestResources::default();
                 parse(
                     fixture,
                     &schema,
@@ -935,18 +945,26 @@ fn fixture_resource_boundaries_accept_exact_limit_and_reject_one_less() -> TestR
         }
         let resource_setters = [
             ResourceLimitSetter {
-                set: |limits, value| limits.regex_mut().set_max_regex_search_steps(value),
+                set: |limits, value| {
+                    limits.regex = limits
+                        .regex
+                        .with_execution(limits.regex.execution().with_max_search_steps(value))
+                },
                 upper: 4096,
             },
             ResourceLimitSetter {
-                set: |limits, value| limits.regex_mut().set_max_regex_scratch_states(value),
+                set: |limits, value| {
+                    let mut regex_limits = *limits.regex.limits();
+                    regex_limits.set_max_regex_scratch_states(value);
+                    limits.regex = limits.regex.with_limits(regex_limits);
+                },
                 upper: 4096,
             },
         ];
         for setter in resource_setters {
             let run = |bound| {
                 let config = ConfigLimits::default();
-                let mut resources = ResourceLimits::default();
+                let mut resources = TestResources::default();
                 (setter.set)(&mut resources, bound);
                 parse(
                     fixture,
@@ -996,7 +1014,8 @@ fn config_request<'a>(
         source.0,
         source.1,
         ConfigParseOptions::new(
-            limits.resources(),
+            limits.excerpts(),
+            limits.regex(),
             limits.config(),
             ExecutionLimits::new(1_000_000_000, 268_435_456),
         ),
@@ -1121,7 +1140,7 @@ fn original_fixtures_preserve_values_origins_and_environment_cache_at_every_spli
             &schema,
             fixture.config,
             &mut MemoryEnvironment::required(fixture),
-            &ResourceLimits::default(),
+            &TestResources::default(),
         )
         .test_value()?;
         let expected = snapshot(&baseline);

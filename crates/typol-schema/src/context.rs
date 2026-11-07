@@ -2,7 +2,8 @@ use core::{cell::RefCell, cmp::Ordering};
 use typol_i18n::diagnostic_message;
 
 use opeo::{ErrSlot, OResult, Out};
-use typol_core::{BudgetError, Diagnostic, ExecutionBudget, SourceSpan};
+use typol_core::{BudgetError, Diagnostic, ExecutionBudget, RegexExecutionBudget, SourceSpan};
+use typol_policy::RegexLimits;
 use typol_semantic::{BuildError, EvalFailure};
 use typol_syntax::AstAccessError;
 
@@ -21,7 +22,9 @@ use typol_test_support::*;
 /// All compilation phases explicitly share one execution budget; the diagnostic collector only receives failures.
 pub(crate) struct CompileContext {
     limits: SchemaLimits,
+    regex_limits: RegexLimits,
     execution: ExecutionBudget,
+    regex_execution: RegexExecutionBudget,
     ast_access_errors: RefCell<ErrSlot<AstAccessError>>,
     budget_errors: RefCell<ErrSlot<BudgetError>>,
     builder_errors: RefCell<ErrSlot<BuildError>>,
@@ -30,16 +33,21 @@ pub(crate) struct CompileContext {
 impl CompileContext {
     pub(crate) fn new<'slot, E>(
         limits: SchemaLimits,
+        regex_limits: &RegexLimits,
         execution: &ExecutionBudget,
+        regex_execution: &RegexExecutionBudget,
         mut out: Out<'slot, '_, E>,
     ) -> OResult<'slot, Self>
     where
         E: From<BudgetError>,
     {
         let execution = execution.try_clone(out.reborrow())?;
+        let regex_execution = regex_execution.try_clone(out.reborrow())?;
         Ok(Self {
             limits,
+            regex_limits: *regex_limits,
             execution,
+            regex_execution,
             ast_access_errors: RefCell::new(ErrSlot::new()),
             budget_errors: RefCell::new(ErrSlot::new()),
             builder_errors: RefCell::new(ErrSlot::new()),
@@ -52,6 +60,14 @@ impl CompileContext {
 
     pub(crate) fn execution(&self) -> &ExecutionBudget {
         &self.execution
+    }
+
+    pub(crate) fn regex_limits(&self) -> &RegexLimits {
+        &self.regex_limits
+    }
+
+    pub(crate) fn regex_execution(&self) -> &RegexExecutionBudget {
+        &self.regex_execution
     }
 
     pub(crate) fn ast_access<'slot, 'borrow, T, E>(

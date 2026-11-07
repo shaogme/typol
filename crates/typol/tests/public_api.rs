@@ -537,7 +537,8 @@ fn parsing_and_final_target_share_the_same_step_limit() -> TestResult {
         )
     })?);
     let options = ConfigParseOptions::new(
-        *defaults.resources(),
+        *defaults.excerpts(),
+        *defaults.regex(),
         *defaults.config(),
         ExecutionLimits::new(budget.steps(), defaults.execution().max_workspace_bytes()),
     );
@@ -564,7 +565,8 @@ fn parsing_and_final_target_share_the_same_step_limit() -> TestResult {
     );
     let options = WriteOptions::new(0)
         .with_validation(ConfigValidationOptions::new(
-            *defaults.resources(),
+            *defaults.excerpts(),
+            *defaults.regex(),
             ConfigLimits::default()
                 .with_max_environment_entries(0)
                 .with_max_environment_bytes(0)

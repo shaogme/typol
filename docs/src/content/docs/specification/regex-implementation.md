@@ -21,7 +21,7 @@ This document describes Typol's current implementation of the Schema `@regex` an
 
 ## 1. Scope
 
-`typol-regex` is an independent `no_std + alloc` regex compiler and execution crate. It does not access Schema files, configuration environments, or host resources. Compile and match entry points receive `RegexLimits` and an `ExecutionBudget`; Schema and Config expose these regex limits through their respective options.
+`typol-regex` is an independent `no_std + alloc` regex compiler and execution crate. It does not access Schema files, configuration environments, or host resources. Compile and match entry points require a `RegexExecutionBudget`; high-level Schema and Config callers create that budget from `RegexOptions` for each compile or runtime call. The generic `ExecutionBudget` accounts for non-Regex work only.
 
 | Responsibility | Source location |
 | --- | --- |
@@ -58,11 +58,11 @@ The compiled program consists of an instruction array and a start instruction in
 
 The executor scans input Unicode scalar values. At every input position it adds the pattern's start state to the active set, implementing search rather than whole-string matching by default. `^` succeeds only at input start and `$` only at input end; they are not multiline anchors. Empty patterns and expressions that can match an empty string may succeed at any input position. Callers use both anchors when whole-string matching is required.
 
-NFA states advance as deduplicated sets, with no backtracking. Alternation and repetition therefore do not create path-based exponential backtracking. Character-set membership uses binary search over sorted intervals. Each match has an independent instruction-step limit; exhausting it returns a structured resource error, not a partial match result.
+NFA states advance as deduplicated sets, with no backtracking. Alternation and repetition therefore do not create path-based exponential backtracking. Character-set membership uses binary search over sorted intervals. Each match has an independent `max_search_steps` limit counting NFA states processed by that search. Cumulative Regex compilation and matching work shares `max_steps`; exhausting either limit returns a structured resource error, not a partial match result.
 
 ## 5. Resource limits
 
-Current regex-related defaults from `RegexLimits::default()` are below. Callers may change them using the corresponding setters. These are implementation policies, not permanent DSL semantics.
+`RegexLimits::default()` supplies structural bounds. Callers configure them separately from the execution quotas in `RegexExecutionLimits`, both of which are composed by `RegexOptions`. These defaults are implementation policies, not permanent DSL semantics.
 
 | Limit | Default | Scope |
 | --- | ---: | --- |
@@ -75,17 +75,24 @@ Current regex-related defaults from `RegexLimits::default()` are below. Callers 
 | `max_regex_instructions_total` | 16,384 | Total instructions across programs in one Schema |
 | `max_regex_ranges_total` | 16,384 | Total character intervals across programs in one Schema |
 | `max_regex_scratch_states` | 4,096 | State slots in one execution workspace |
-| `max_regex_search_steps` | 67,108,864 | Maximum NFA state processing for one match |
 
-Pattern size counts UTF-8 bytes, not characters. Attempted pattern bytes bound compilation work and are not refunded for invalid syntax. Public pattern-byte, range, and instruction statistics include only saved programs, so an invalid pattern does not affect artifact statistics. Quantifier expansion increases instruction and range use. Both per-program and remaining Schema-wide limits constrain parsing and program construction; exceeding either fails compilation or execution.
+Regex execution defaults from `RegexExecutionLimits::default()` are:
 
-Containers for AST, NFA, character sets, and workspaces use `BudgetVec`/`EvaluationVec` and are charged to the shared execution budget for workspace bytes and operations. Budget or capacity exhaustion is a resource error; allocator rejection is an allocation error. Errors do not include the pattern or input.
+| Limit | Default | Scope |
+| --- | ---: | --- |
+| `max_steps` | 67,108,864 | Cumulative explicitly metered Regex compiler and matcher work in one call |
+| `max_search_steps` | 67,108,864 | NFA states processed by one search |
+| `max_workspace_bytes` | 67,108,864 | Live Regex-owned capacity in one call |
+
+Pattern size counts UTF-8 bytes, not characters. Attempted pattern bytes bound compilation work and are not refunded for invalid syntax. Public pattern-byte, range, and instruction statistics include only saved programs, so an invalid pattern does not affect artifact statistics. Quantifier expansion increases instruction and range use. Both per-program and remaining Schema-wide limits constrain parsing and program construction; exceeding either fails compilation or execution. A Schema compile shares one Regex budget across pattern compilation and default-value Regex checks. A Config parse or external-value validation creates its own shared Regex budget even when it reuses a caller's generic execution budget. Normalize-only operations do not create or consume a Regex budget.
+
+Containers for AST, NFA, character sets, and workspaces use fallible charged vectors and are charged to the Regex budget for steps and live workspace. The regex budget's fixed bookkeeping is excluded from its workspace limit. Capacity exhaustion is a resource error; allocator rejection is an allocation error. Errors do not include the pattern or input.
 
 ## 6. Workspace lifecycle and errors
 
-`RegexScratch` holds active states, next states, a traversal stack, and deduplication marks for one NFA search. Initial use allocates for the program instruction count. Later growth occurs before matching under the current execution budget; matching itself does not grow the workspace. A growth failure keeps its specific error category and does not proactively discard existing storage. Allocation failure does not exhaust the shared budget, so the previous workspace remains usable. Insufficient shared workspace budget terminates that execution budget. If the scratch limit is lowered, cached storage above the limit is released first.
+`RegexScratch` holds active states, next states, a traversal stack, and deduplication marks for one NFA search. Initial use allocates for the program instruction count. Later growth occurs before matching under the current Regex budget; matching itself does not grow the workspace. A growth failure keeps its specific error category and does not proactively discard existing storage. Allocation failure does not exhaust the Regex budget, so the previous workspace remains usable. Insufficient Regex workspace terminates that Regex budget. If the scratch limit is lowered, cached storage above the limit is released first.
 
-The semantic `RegexExecutor` reuses and grows scratch across multiple constraints. When called with a new execution budget it discards the old workspace so capacity from the previous call is not charged to the new one. For an empty optional value, it first clears stale or over-limit workspace associated with a changed budget, then passes without creating scratch for the new budget.
+The semantic `RegexExecutor` reuses and grows scratch across multiple constraints. When called with a new Regex budget it discards the old workspace so capacity from the previous call is not charged to the new one. For an empty optional value, it first clears stale or over-limit workspace associated with a changed budget, then passes without creating scratch for the new budget.
 
 Regex failures are syntax errors, resource-limit errors, or allocation errors. Match failures report resource exhaustion only. The Schema diagnostic layer maps the low-level category to a stable diagnostic code and annotation location. A syntax error also carries its in-pattern `PatternSpan` for direct `typol-regex` callers that need finer locations.
 

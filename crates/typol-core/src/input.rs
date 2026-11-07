@@ -342,7 +342,10 @@ impl From<BudgetError> for SourceReadError {
     fn from(error: BudgetError) -> Self {
         let context = error.context();
         let kind = match error {
-            BudgetError::Resource => SourceReadErrorKind::ResourceLimitExceeded,
+            BudgetError::Resource
+            | BudgetError::RegexSteps
+            | BudgetError::RegexSearchSteps
+            | BudgetError::RegexWorkspace => SourceReadErrorKind::ResourceLimitExceeded,
             BudgetError::Allocation => SourceReadErrorKind::AllocationFailed,
             BudgetError::CapacityExceeded => SourceReadErrorKind::CapacityExceeded,
             BudgetError::InvariantViolation(_) => SourceReadErrorKind::InternalInvariantFailure,

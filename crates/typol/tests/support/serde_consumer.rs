@@ -399,7 +399,8 @@ fn shared_budget_and_snapshots() {
         out,
     ));
     let options = ConfigParseOptions::new(
-        *defaults.resources(),
+        *defaults.excerpts(),
+        *defaults.regex(),
         *defaults.config(),
         ExecutionLimits::new(budget.steps(), defaults.execution().max_workspace_bytes()),
     );
@@ -577,7 +578,8 @@ fn loaded_serde() {
         out,
     ));
     let limited = invoke(|out| SchemaLoader::new(TypolOptions::default().with_config(ConfigParseOptions::new(
-        *defaults.resources(),
+        *defaults.excerpts(),
+        *defaults.regex(),
         *defaults.config(),
         ExecutionLimits::new(budget.steps(), defaults.execution().max_workspace_bytes()),
     )))

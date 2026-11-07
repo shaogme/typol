@@ -11,7 +11,7 @@ use typol_core::{
     ValueSource, ValueView,
 };
 use typol_i18n::{Language, Translator};
-use typol_policy::ResourceLimits;
+use typol_policy::{ExcerptLimits, RegexOptions};
 use typol_schema::{SchemaCompileOptions, SchemaSource};
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
@@ -497,7 +497,8 @@ fn config_request<'a>(
         source.0,
         source.1,
         ConfigParseOptions::new(
-            ResourceLimits::default(),
+            ExcerptLimits::default(),
+            RegexOptions::default(),
             *limits,
             ExecutionLimits::new(1_000_000_000, 268_435_456),
         ),

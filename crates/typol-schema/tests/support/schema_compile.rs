@@ -2,6 +2,7 @@ use typol_core::{
     BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read, SourceId,
     SourceReadError, Span, SpanError,
 };
+use typol_policy::RegexLimits;
 use typol_schema::{
     LocationFailure, LocationStatus, ResolverError, SchemaCompileContext,
     SchemaCompileContextFailure, SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler,
@@ -108,8 +109,16 @@ impl SchemaCompileTestSupport {
         source: &str,
         limits: &SchemaLimits,
     ) -> TestOpeoOutcome<CompiledSchema, SchemaCompileErrors> {
+        Self::compile_with_options(_source_id, source, SchemaCompileOptions::new(*limits))
+    }
+
+    pub(super) fn compile_with_options(
+        _source_id: u32,
+        source: &str,
+        options: SchemaCompileOptions,
+    ) -> TestOpeoOutcome<CompiledSchema, SchemaCompileErrors> {
         Self::run(
-            SchemaCompileOptions::new(*limits),
+            options,
             SchemaSource::from_str(b"test", source),
             &mut NoImports,
             None,
@@ -326,7 +335,8 @@ fn check_schema_compile_test_support_helpers() -> TestResult {
         1
     );
 
-    let evaluator = SchemaEvaluator::new(&schema, limits.values(), limits.regex(), None);
+    let regex_limits = RegexLimits::default();
+    let evaluator = SchemaEvaluator::new(&schema, limits.values(), &regex_limits, None);
     let host = SchemaCompileTestSupport::evaluation(|out| evaluator.host(ty, out));
     test_verify!(*host.value().test_expect("host evaluation should succeed")?);
 

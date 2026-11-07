@@ -105,7 +105,10 @@ impl Error for ValueError {}
 impl From<BudgetError> for ValueError {
     fn from(error: BudgetError) -> Self {
         let kind = match error {
-            BudgetError::Resource => ValueErrorKind::ResourceLimitExceeded,
+            BudgetError::Resource
+            | BudgetError::RegexSteps
+            | BudgetError::RegexSearchSteps
+            | BudgetError::RegexWorkspace => ValueErrorKind::ResourceLimitExceeded,
             BudgetError::Allocation => ValueErrorKind::AllocationFailed,
             BudgetError::CapacityExceeded => ValueErrorKind::CapacityExceeded,
             BudgetError::InvariantViolation(_) => ValueErrorKind::InternalInvariantFailure,

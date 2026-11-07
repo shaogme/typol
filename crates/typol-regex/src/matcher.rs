@@ -11,13 +11,14 @@ use crate::{
 };
 use core::{mem::swap, str::Chars};
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
-use typol_core::{BudgetError, ChargedVec, DiagnosticContext, ExecutionBudget};
+use typol_core::{BudgetError, ChargedVec, DiagnosticContext, RegexExecutionBudget};
 use typol_policy::RegexLimits;
 
 /// A reusable, bounded Thompson NFA search workspace.
 pub struct RegexScratch {
     capacity: usize,
     allocation_ceiling: usize,
+    budget: RegexExecutionBudget,
     active: ChargedVec<StateId>,
     next: ChargedVec<StateId>,
     stack: ChargedVec<StateId>,
@@ -34,10 +35,10 @@ impl RegexMatcher {
         regex: &Regex,
         input: &str,
         scratch: &mut RegexScratch,
-        limits: (usize, Option<&ExecutionBudget>),
+        budget: &RegexExecutionBudget,
         mut out: Out<'slot, '_, RegexMatchError>,
     ) -> OResult<'slot, bool> {
-        let (max_steps, budget) = limits;
+        let max_search_steps = budget.max_search_steps();
         if regex.state_count() > scratch.capacity() {
             return Err(out.fail(RegexMatchError::ResourceLimitExceeded(
                 RegexResource::ScratchStateCount,
@@ -79,10 +80,8 @@ impl RegexMatcher {
             enqueue(scratch, regex.start(), out.reborrow())?;
 
             while let Some(state) = scratch.stack.pop() {
-                if steps >= max_steps {
-                    return Err(out.fail(RegexMatchError::ResourceLimitExceeded(
-                        RegexResource::SearchSteps,
-                    )));
+                if steps >= max_search_steps {
+                    return Err(out.fail(RegexMatchError::from(budget.search_limit_error())));
                 }
                 consume(budget, 1, out.reborrow())?;
                 steps = steps
@@ -212,19 +211,16 @@ fn enqueue_next<'slot>(
 }
 
 fn consume<'slot>(
-    budget: Option<&ExecutionBudget>,
+    budget: &RegexExecutionBudget,
     steps: usize,
     mut out: Out<'slot, '_, RegexMatchError>,
 ) -> OResult<'slot, ()> {
-    if let Some(budget) = budget {
-        budget.consume_with(steps, out.reborrow(), RegexMatcher::match_budget_error)?;
-    }
-    Ok(())
+    budget.consume_with(steps, out.reborrow(), RegexMatcher::match_budget_error)
 }
 
 fn next_scalar<'slot>(
     chars: &mut Chars<'_>,
-    budget: Option<&ExecutionBudget>,
+    budget: &RegexExecutionBudget,
     mut out: Out<'slot, '_, RegexMatchError>,
 ) -> OResult<'slot, Option<char>> {
     let Some(first) = chars.as_str().as_bytes().first() else {
@@ -246,18 +242,10 @@ fn next_scalar<'slot>(
 
 impl RegexScratch {
     /// Creates a workspace sized for the regex states; no buffers grow during a search.
-    pub fn new<'slot, 'borrow>(
+    pub fn new<'slot>(
         regex: &Regex,
         limits: &RegexLimits,
-        out: Out<'slot, 'borrow, RegexScratchError>,
-    ) -> OResult<'slot, Self> {
-        Self::new_budgeted(regex, limits, None, out)
-    }
-
-    pub fn new_budgeted<'slot>(
-        regex: &Regex,
-        limits: &RegexLimits,
-        budget: Option<&ExecutionBudget>,
+        budget: &RegexExecutionBudget,
         mut out: Out<'slot, '_, RegexScratchError>,
     ) -> OResult<'slot, Self> {
         let capacity = regex.scratch_state_count();
@@ -268,14 +256,16 @@ impl RegexScratch {
         }
 
         let mut budget_errors = ErrSlot::<BudgetError>::new();
-        let active = state_buffer(capacity, budget, &mut budget_errors, out.reborrow())?;
-        let next = state_buffer(capacity, budget, &mut budget_errors, out.reborrow())?;
-        let stack = state_buffer(capacity, budget, &mut budget_errors, out.reborrow())?;
-        let visited = mark_buffer(capacity, budget, &mut budget_errors, out.reborrow())?;
-        let next_seen = mark_buffer(capacity, budget, &mut budget_errors, out.reborrow())?;
+        let budget = budget.try_clone(out.reborrow())?;
+        let active = state_buffer(capacity, &budget, &mut budget_errors, out.reborrow())?;
+        let next = state_buffer(capacity, &budget, &mut budget_errors, out.reborrow())?;
+        let stack = state_buffer(capacity, &budget, &mut budget_errors, out.reborrow())?;
+        let visited = mark_buffer(capacity, &budget, &mut budget_errors, out.reborrow())?;
+        let next_seen = mark_buffer(capacity, &budget, &mut budget_errors, out.reborrow())?;
         Ok(Self {
             capacity,
             allocation_ceiling: capacity,
+            budget,
             active,
             next,
             stack,
@@ -293,11 +283,16 @@ impl RegexScratch {
         self.allocation_ceiling
     }
 
-    /// Grows existing buffers under the execution budget before matching starts.
+    pub fn execution_budget(&self) -> &RegexExecutionBudget {
+        &self.budget
+    }
+
+    /// Grows existing buffers under their Regex budget before matching starts.
     pub fn grow<'slot>(
         &mut self,
         regex: &Regex,
         limits: &RegexLimits,
+        budget: &RegexExecutionBudget,
         mut out: Out<'slot, '_, RegexScratchError>,
     ) -> OResult<'slot, ()> {
         let required = regex.scratch_state_count();
@@ -308,6 +303,11 @@ impl RegexScratch {
         }
         if required <= self.capacity {
             return Ok(());
+        }
+        if !self.budget.same_call(budget) {
+            return Err(out.fail(RegexScratchError::InternalInvariantFailure(
+                RegexErrorContext::new(SCRATCH_STATE_BUFFER_GROWTH),
+            )));
         }
 
         grow_state_buffer(
@@ -366,6 +366,15 @@ impl RegexScratch {
             BudgetError::Resource => {
                 RegexScratchError::ResourceLimitExceeded(RegexResource::ScratchStateCount)
             }
+            BudgetError::RegexWorkspace => {
+                RegexScratchError::ResourceLimitExceeded(RegexResource::WorkspaceBytes)
+            }
+            BudgetError::RegexSteps => {
+                RegexScratchError::ResourceLimitExceeded(RegexResource::ExecutionSteps)
+            }
+            BudgetError::RegexSearchSteps => {
+                RegexScratchError::ResourceLimitExceeded(RegexResource::SearchSteps)
+            }
             BudgetError::CapacityExceeded => RegexScratchError::CapacityExceeded,
             BudgetError::InvariantViolation(source_context) => {
                 RegexScratchError::InternalInvariantFailure(
@@ -407,7 +416,7 @@ fn grow_mark_buffer<'slot>(
 
 fn state_buffer<'slot>(
     capacity: usize,
-    budget: Option<&ExecutionBudget>,
+    budget: &RegexExecutionBudget,
     errors: &mut ErrSlot<BudgetError>,
     mut out: Out<'slot, '_, RegexScratchError>,
 ) -> OResult<'slot, ChargedVec<StateId>> {
@@ -415,7 +424,7 @@ fn state_buffer<'slot>(
         errors,
         out.reborrow(),
         |error| RegexScratch::scratch_error(error, SCRATCH_STATE_BUFFER_INITIALIZATION),
-        |out| ChargedVec::new(budget, out),
+        |out| ChargedVec::new_regex(Some(budget), out),
     )?;
     budget_operation(
         errors,
@@ -428,7 +437,7 @@ fn state_buffer<'slot>(
 
 fn mark_buffer<'slot>(
     capacity: usize,
-    budget: Option<&ExecutionBudget>,
+    budget: &RegexExecutionBudget,
     errors: &mut ErrSlot<BudgetError>,
     mut out: Out<'slot, '_, RegexScratchError>,
 ) -> OResult<'slot, ChargedVec<bool>> {
@@ -436,7 +445,7 @@ fn mark_buffer<'slot>(
         errors,
         out.reborrow(),
         |error| RegexScratch::scratch_error(error, SCRATCH_MARK_BUFFER_INITIALIZATION),
-        |out| ChargedVec::new(budget, out),
+        |out| ChargedVec::new_regex(Some(budget), out),
     )?;
     budget_operation(
         errors,
@@ -471,10 +480,8 @@ mod tests {
     use core::fmt::Debug;
     use opeo::{ErrSlot, OResult, Out};
 
-    use typol_core::{
-        BudgetError, DiagnosticContext, ExecutionBudget, ExecutionLimits, diagnostic_context,
-    };
-    use typol_policy::ResourceLimits;
+    use typol_core::{BudgetError, DiagnosticContext, RegexExecutionBudget, diagnostic_context};
+    use typol_policy::RegexLimits;
 
     use crate::{
         RegexCompileError, RegexCompiler, RegexMatchError, RegexScratch, RegexScratchError,
@@ -555,14 +562,14 @@ mod tests {
 
     #[test]
     fn match_invariant_is_returned_as_an_error_with_context() -> Result<(), String> {
-        let limits = ResourceLimits::default();
+        let limits = RegexLimits::default();
         let mut budget_errors = ErrSlot::<BudgetError>::new();
         let mut compile_errors = ErrSlot::<RegexCompileError>::new();
         let mut scratch_errors = ErrSlot::<RegexScratchError>::new();
         let mut match_errors = ErrSlot::<RegexMatchError>::new();
         let execution = succeed(
             attempt(&mut budget_errors, |out| {
-                ExecutionBudget::new(ExecutionLimits::new(100_000, 1_000_000), out)
+                RegexExecutionBudget::new(100_000, 100_000, 1_000_000, out)
             }),
             "failed to create execution budget",
         )?;
@@ -574,14 +581,14 @@ mod tests {
         )?;
         let mut scratch = succeed(
             attempt(&mut scratch_errors, |out| {
-                RegexScratch::new(&regex, &limits, out)
+                RegexScratch::new(&regex, &limits, &execution, out)
             }),
             "failed to create scratch space",
         )?;
         scratch.visited.clear();
 
         let result = attempt(&mut match_errors, |out| {
-            regex.is_match("sensitive-subject", &mut scratch, 100, out)
+            regex.is_match("sensitive-subject", &mut scratch, &execution, out)
         });
         let context = match result {
             Attempt::Failure(RegexMatchError::InternalInvariantFailure(context)) => context,

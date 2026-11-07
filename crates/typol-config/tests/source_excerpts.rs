@@ -11,7 +11,6 @@ use typol_core::{
     SourceCapture, SourceExcerptSet, SourceId, SourceReadError, SourceReadErrorKind, SourceSpan,
     Span, SpanError, SpanLocation,
 };
-use typol_policy::ResourceLimits;
 use typol_schema::{SchemaCompileOptions, SchemaSource};
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
@@ -112,14 +111,12 @@ fn parse(
     source: &str,
     limits: ExcerptLimits,
 ) -> TestResult<ConfigParseErrors> {
-    let mut resources = ResourceLimits::default();
-    resources.set_excerpts(limits);
     Support::parse(
         schema,
         ConfigParseRequest::new(
             &mut SliceSource::new(source.as_bytes()),
             "configuration",
-            ConfigParseOptions::default().with_resources(resources),
+            ConfigParseOptions::default().with_excerpts(limits),
         ),
         &mut NoEnvironment,
     )
@@ -573,14 +570,14 @@ fn missing_window_candidates_and_diagnostic_limit_keep_original_errors() -> Test
 
     let mut config = ConfigLimits::default();
     config = config.with_max_diagnostics(1);
-    let resources = ResourceLimits::default();
+    let resources = ExcerptLimits::default();
     let errors = Support::parse(
         &schema,
         ConfigParseRequest::new(
             &mut SliceSource::new(b"{values: [1,1]}"),
             "configuration",
             ConfigParseOptions::default()
-                .with_resources(resources)
+                .with_excerpts(resources)
                 .with_config(config),
         ),
         &mut NoEnvironment,

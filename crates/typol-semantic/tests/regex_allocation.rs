@@ -5,8 +5,8 @@ use std::{
 };
 
 use core::fmt::{Debug, Formatter, Result as FmtResult};
-use typol_core::{BudgetError, ExecutionBudget, ExecutionLimits};
-use typol_policy::ResourceLimits;
+use typol_core::{BudgetError, RegexExecutionBudget};
+use typol_policy::RegexLimits;
 use typol_regex::{RegexCompileError, RegexCompiler, RegexScratchError};
 use typol_semantic::{RegexExecutionError, RegexExecutor, RegexMatchOptions};
 use typol_test_support::{TestOpeo, TestOpeoOutcome, TestSlot};
@@ -93,9 +93,9 @@ macro_rules! check_eq {
 #[test]
 fn scratch_allocation_failure_is_structured() -> TestResult<()> {
     let compilation = TestOpeo::call::<BudgetError, _>(|out| {
-        ExecutionBudget::new(ExecutionLimits::new(67_108_864, 67_108_864), out)
+        RegexExecutionBudget::new(67_108_864, 67_108_864, 67_108_864, out)
     })?;
-    let limits = ResourceLimits::default();
+    let limits = RegexLimits::default();
     let regex = TestOpeo::call::<RegexCompileError, _>(|out| {
         RegexCompiler::compile("^secret$", &limits, &compilation, out)
     })?;
@@ -103,7 +103,17 @@ fn scratch_allocation_failure_is_structured() -> TestResult<()> {
     let mut execution_errors = TestSlot::<RegexExecutionError>::default();
 
     FAIL_NEXT_ALLOCATION.store(true, Ordering::SeqCst);
-    match execution_errors.run(|out| pool.is_match(&regex, Some("private-input"), &limits, out)) {
+    match execution_errors.run(|out| {
+        pool.is_match_budgeted(
+            &regex,
+            RegexMatchOptions {
+                value: Some("private-input"),
+                limits: &limits,
+                budget: &compilation,
+            },
+            out,
+        )
+    }) {
         TestOpeoOutcome::Value(_) => return Err(TestError::MissingExpectedError),
         TestOpeoOutcome::Error(error) => check_eq!(
             error,
@@ -118,7 +128,7 @@ fn scratch_allocation_failure_is_structured() -> TestResult<()> {
                 RegexMatchOptions {
                     value: Some("secret"),
                     limits: &limits,
-                    budget: Some(&compilation),
+                    budget: &compilation,
                 },
                 out,
             )
@@ -137,7 +147,7 @@ fn scratch_allocation_failure_is_structured() -> TestResult<()> {
             RegexMatchOptions {
                 value: Some("xxxxxxxxxxxxxxxxxxxx"),
                 limits: &limits,
-                budget: Some(&compilation),
+                budget: &compilation,
             },
             out,
         )
@@ -156,7 +166,7 @@ fn scratch_allocation_failure_is_structured() -> TestResult<()> {
                 RegexMatchOptions {
                     value: Some("secret"),
                     limits: &limits,
-                    budget: Some(&compilation),
+                    budget: &compilation,
                 },
                 out,
             )

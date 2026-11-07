@@ -2,6 +2,7 @@
 mod schema_support;
 
 use typol_core::{DiagnosticCode, ExecutionBudget, ExecutionLimits, SliceSource, SourceId};
+use typol_policy::{RegexExecutionLimits, RegexOptions};
 use typol_schema::{
     LocationFailure, LocationStatus, ResolverError, SchemaCompileErrors, SchemaCompileOptions,
     SchemaLimits, SchemaResolveRequest, SchemaResolver, SchemaSource, SourceLoadedRequest,
@@ -306,6 +307,24 @@ fn compile_with_execution(
     }
 }
 
+fn compile_with_regex_execution(
+    source: &str,
+    execution: RegexExecutionLimits,
+) -> schema_support::TestOpeoOutcome<(), SchemaCompileErrors> {
+    match schema_support::SchemaCompileTestSupport::run(
+        SchemaCompileOptions::default()
+            .with_regex(RegexOptions::default().with_execution(execution)),
+        SchemaSource::from_str(b"root", source),
+        &mut NoImports,
+        None,
+    ) {
+        schema_support::TestOpeoOutcome::Value(_) => schema_support::TestOpeoOutcome::Value(()),
+        schema_support::TestOpeoOutcome::Error(error) => {
+            schema_support::TestOpeoOutcome::Error(error)
+        }
+    }
+}
+
 #[test]
 fn compiler_execution_is_independent_of_source_byte_limits() -> TestResult {
     let source = "entry struct Root {}";
@@ -384,15 +403,15 @@ fn default_regex_searches_share_one_cumulative_budget() -> TestResult {
         &mut NoImports,
     )
     .test_value()?;
-    let single_steps = single_run.context.usage().steps;
+    let single_steps = single_run.context.usage().regex_steps;
     test_verify!(single_run.result.is_ok());
     drop(single_run);
     let second_default = multiple.rfind("= \"").test_value()? + 2;
     // Increase the quota until the first default passes and the second hits the shared budget.
     let mut allowance = 10_000_usize;
     let (execution, errors) = loop {
-        let execution = ExecutionLimits::new(single_steps + allowance, 67_108_864);
-        match compile_with_execution(&multiple, execution) {
+        let execution = RegexExecutionLimits::new(single_steps + allowance, 67_108_864, 67_108_864);
+        match compile_with_regex_execution(&multiple, execution) {
             schema_support::TestOpeoOutcome::Value(()) => {
                 return Err(TestFailure::new(
                     "two regex defaults did not trigger the cumulative execution budget",
@@ -411,14 +430,14 @@ fn default_regex_searches_share_one_cumulative_budget() -> TestResult {
             .checked_mul(2)
             .ok_or_else(|| TestFailure::new("cumulative-budget search exceeded its step limit"))?;
     };
-    compile_with_execution(&single, execution).test_value()?;
+    compile_with_regex_execution(&single, execution).test_value()?;
     let diagnostic = errors.diagnostics().last().test_value()?;
     test_verify_eq!(diagnostic.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED);
     test_verify_eq!(
         diagnostic.primary().test_value()?.span().start(),
         second_default
     );
-    compile_with_execution(&multiple, ExecutionLimits::new(67_108_864, 67_108_864)).test_value()?;
+    compile_with_regex_execution(&multiple, RegexExecutionLimits::default()).test_value()?;
 
     Ok(())
 }

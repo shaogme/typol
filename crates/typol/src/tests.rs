@@ -18,7 +18,7 @@ use std::{any::TypeId, cmp::Ordering, mem::size_of};
 use typol_config::{ConfigLimits, ConfigValidationOptions};
 use typol_core::{BudgetError, DiagnosticContext, ExecutionLimits, diagnostic_context};
 use typol_model::BuiltinType;
-use typol_policy::ResourceLimits;
+use typol_policy::{ExcerptLimits, RegexOptions};
 use typol_test_support::{
     TestExpect, TestExtract, TestResult, test_verify as assert, test_verify_eq as assert_eq,
 };
@@ -544,7 +544,8 @@ fn diagnostic_limits_preserve_nonempty_terminal_and_real_failure_codes() -> Test
         9,
     )?;
     let options = ConfigValidationOptions::new(
-        ResourceLimits::default(),
+        ExcerptLimits::default(),
+        RegexOptions::default(),
         ConfigLimits::default()
             .with_max_environment_entries(0)
             .with_max_environment_bytes(0)

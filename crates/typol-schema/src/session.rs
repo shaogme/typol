@@ -2,9 +2,10 @@ use opeo::{OResult, Out, ResultOutExt};
 use typol_semantic::SourceLookup;
 
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, Read, SourceId,
-    SourceReadError, SourceSpan, Span,
+    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, Read,
+    RegexExecutionBudget, SourceId, SourceReadError, SourceSpan, Span,
 };
+use typol_policy::{RegexLimits, RegexOptions};
 
 use crate::{
     SchemaCompileContext, SchemaCompileStage, SchemaLimits,
@@ -63,9 +64,11 @@ pub(crate) enum ObjectState {
 /// Tracks session resources and charges successful and syntactically invalid sources alike.
 pub(crate) struct CompileBudget {
     limits: SchemaLimits,
+    regex_options: RegexOptions,
     source_bytes: usize,
     source_files: usize,
     execution: ExecutionBudget,
+    regex_execution: RegexExecutionBudget,
 }
 
 /// Loading and all semantic passes share the source directory, diagnostic budget, and terminal state.
@@ -135,7 +138,13 @@ impl CompileSession {
         let limits = context.resources();
         let mut diagnostics =
             DiagnosticCollector::new(limits.max_diagnostics(), span, execution, out.reborrow())?;
-        let mut budget = CompileBudget::new(*limits, execution, out.reborrow())?;
+        let mut budget = CompileBudget::new(
+            *limits,
+            context.regex(),
+            execution,
+            context.regex_execution(),
+            out.reborrow(),
+        )?;
         let sources = SourceLoader::load(root, resolver, &mut budget, &mut diagnostics, observer)
             .map_err(SchemaCompileErrors::inline)
             .store_err_into(out.reborrow())?;
@@ -150,23 +159,40 @@ impl CompileSession {
 impl CompileBudget {
     pub(crate) fn new<'slot, E>(
         limits: SchemaLimits,
+        regex_options: &RegexOptions,
         execution: &ExecutionBudget,
+        regex_execution: &RegexExecutionBudget,
         mut out: Out<'slot, '_, E>,
     ) -> OResult<'slot, Self>
     where
         E: From<BudgetError>,
     {
         let execution = execution.try_clone(out.reborrow())?;
+        let regex_execution = regex_execution.try_clone(out.reborrow())?;
         Ok(Self {
             limits,
+            regex_options: *regex_options,
             source_bytes: 0,
             source_files: 0,
             execution,
+            regex_execution,
         })
     }
 
     pub(crate) fn execution(&self) -> &ExecutionBudget {
         &self.execution
+    }
+
+    pub(crate) fn regex_limits(&self) -> &RegexLimits {
+        self.regex_options.limits()
+    }
+
+    pub(crate) fn regex_options(&self) -> &RegexOptions {
+        &self.regex_options
+    }
+
+    pub(crate) fn regex_execution(&self) -> &RegexExecutionBudget {
+        &self.regex_execution
     }
 
     pub(crate) const fn limits(&self) -> &SchemaLimits {

@@ -1,5 +1,5 @@
 use opeo::{OResult, Out, ResultOutExt};
-use typol_core::{ChargedVec, ExecutionBudget};
+use typol_core::{ChargedVec, RegexExecutionBudget};
 use typol_policy::RegexLimits;
 
 use crate::{
@@ -98,7 +98,7 @@ struct Compiler<'a> {
     range_count: usize,
     max_instructions: usize,
     max_ranges: usize,
-    execution: &'a ExecutionBudget,
+    execution: &'a RegexExecutionBudget,
 }
 
 /// An immutable Thompson NFA produced by compilation.
@@ -115,7 +115,7 @@ pub struct RegexCompiler;
 #[derive(Clone, Copy)]
 pub struct RegexCompileOptions<'a> {
     limits: &'a RegexLimits,
-    execution: &'a ExecutionBudget,
+    execution: &'a RegexExecutionBudget,
     max_instructions: usize,
     max_ranges: usize,
 }
@@ -123,7 +123,7 @@ pub struct RegexCompileOptions<'a> {
 impl<'a> RegexCompileOptions<'a> {
     pub const fn new(
         limits: &'a RegexLimits,
-        execution: &'a ExecutionBudget,
+        execution: &'a RegexExecutionBudget,
         max_instructions: usize,
         max_ranges: usize,
     ) -> Self {
@@ -140,7 +140,7 @@ impl RegexCompiler {
     pub fn compile<'slot>(
         pattern: &str,
         limits: &RegexLimits,
-        execution: &ExecutionBudget,
+        execution: &RegexExecutionBudget,
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, Regex> {
         Self::compile_with_options(
@@ -172,7 +172,7 @@ impl RegexCompiler {
             Parser::parse_with_range_limit(pattern, limits, execution, max_ranges, out.reborrow())?;
         let mut compiler = Compiler {
             ast: &ast,
-            instructions: ChargedVec::new(Some(execution), out.reborrow())?,
+            instructions: ChargedVec::new_regex(Some(execution), out.reborrow())?,
             range_count: 0,
             max_instructions,
             max_ranges,
@@ -198,7 +198,7 @@ impl Compiler<'_> {
         root: NodeId,
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, Fragment> {
-        let mut frames = ChargedVec::new(Some(self.execution), out.reborrow())?;
+        let mut frames = ChargedVec::new_regex(Some(self.execution), out.reborrow())?;
         frames.try_push(
             CompileFrame {
                 node: root,
@@ -436,7 +436,7 @@ impl Compiler<'_> {
         field: PatchField,
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, Fragment> {
-        let mut outs = ChargedVec::new(Some(self.execution), out.reborrow())?;
+        let mut outs = ChargedVec::new_regex(Some(self.execution), out.reborrow())?;
         outs.try_reserve_exact(1, out.reborrow())?;
         outs.try_push(Patch { instruction, field }, out.reborrow())?;
         Ok(Fragment {
@@ -574,20 +574,10 @@ impl Regex {
         &self,
         input: &str,
         scratch: &mut RegexScratch,
-        max_steps: usize,
+        budget: &RegexExecutionBudget,
         out: Out<'slot, 'borrow, RegexMatchError>,
     ) -> OResult<'slot, bool> {
-        RegexMatcher::is_match(self, input, scratch, (max_steps, None), out)
-    }
-
-    pub fn is_match_budgeted<'slot, 'borrow>(
-        &self,
-        input: &str,
-        scratch: &mut RegexScratch,
-        limits: (usize, &ExecutionBudget),
-        out: Out<'slot, 'borrow, RegexMatchError>,
-    ) -> OResult<'slot, bool> {
-        RegexMatcher::is_match(self, input, scratch, (limits.0, Some(limits.1)), out)
+        RegexMatcher::is_match(self, input, scratch, budget, out)
     }
 }
 
@@ -597,8 +587,8 @@ mod tests {
     use core::fmt::Debug;
     use opeo::{ErrSlot, OResult, Out};
 
-    use typol_core::{BudgetError, ExecutionBudget, ExecutionLimits};
-    use typol_policy::ResourceLimits;
+    use typol_core::{BudgetError, RegexExecutionBudget};
+    use typol_policy::RegexLimits;
 
     use crate::{RegexCompileError, RegexResource};
 
@@ -642,12 +632,12 @@ mod tests {
 
     fn compile(
         pattern: &str,
-        limits: &ResourceLimits,
+        limits: &RegexLimits,
         execution_errors: &mut ErrSlot<BudgetError>,
         compile_errors: &mut ErrSlot<RegexCompileError>,
     ) -> Attempt<Regex, RegexCompileError> {
         let execution = match attempt(execution_errors, |out| {
-            ExecutionBudget::new(ExecutionLimits::new(67_108_864, 67_108_864), out)
+            RegexExecutionBudget::new(67_108_864, 67_108_864, 67_108_864, out)
         }) {
             Attempt::Success(execution) => execution,
             Attempt::Failure(error) => {
@@ -661,7 +651,7 @@ mod tests {
 
     fn compiled(
         pattern: &str,
-        limits: &ResourceLimits,
+        limits: &RegexLimits,
         execution_errors: &mut ErrSlot<BudgetError>,
         compile_errors: &mut ErrSlot<RegexCompileError>,
     ) -> Result<Regex, String> {
@@ -673,7 +663,7 @@ mod tests {
 
     #[test]
     fn compiles_empty_pattern_and_alternation() -> Result<(), String> {
-        let limits = ResourceLimits::default();
+        let limits = RegexLimits::default();
         let mut execution_errors = ErrSlot::<BudgetError>::new();
         let mut compile_errors = ErrSlot::<RegexCompileError>::new();
         let empty = compiled("", &limits, &mut execution_errors, &mut compile_errors)?;
@@ -703,7 +693,7 @@ mod tests {
 
     #[test]
     fn counts_repeated_classes_after_expansion() -> Result<(), String> {
-        let limits = ResourceLimits::default();
+        let limits = RegexLimits::default();
         let mut execution_errors = ErrSlot::<BudgetError>::new();
         let mut compile_errors = ErrSlot::<RegexCompileError>::new();
         let regex = compiled(
@@ -731,7 +721,7 @@ mod tests {
 
     #[test]
     fn enforces_instruction_limit_at_exact_boundary() -> Result<(), String> {
-        let mut limits = ResourceLimits::default();
+        let mut limits = RegexLimits::default();
         let mut execution_errors = ErrSlot::<BudgetError>::new();
         let mut compile_errors = ErrSlot::<RegexCompileError>::new();
         limits.set_max_regex_instructions_per_pattern(256);
@@ -761,7 +751,7 @@ mod tests {
 
     #[test]
     fn enforces_range_limit_after_repetition_expansion() -> Result<(), String> {
-        let mut limits = ResourceLimits::default();
+        let mut limits = RegexLimits::default();
         let mut execution_errors = ErrSlot::<BudgetError>::new();
         let mut compile_errors = ErrSlot::<RegexCompileError>::new();
         limits.set_max_regex_ranges_per_pattern(2);
@@ -783,7 +773,7 @@ mod tests {
 
     #[test]
     fn dot_uses_three_scalar_ranges_and_rejects_two_available_ranges() {
-        let mut limits = ResourceLimits::default();
+        let mut limits = RegexLimits::default();
         limits.set_max_regex_ranges_per_pattern(3);
         let mut execution_errors = ErrSlot::<BudgetError>::new();
         let mut compile_errors = ErrSlot::<RegexCompileError>::new();

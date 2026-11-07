@@ -36,12 +36,11 @@ impl<'a> RegexConstraintCompiler<'a> {
 
     pub(crate) fn new<'slot>(
         context: &'a CompileContext,
-        diagnostics: &mut DiagnosticCollector,
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, Self> {
-        let constraints = diagnostics.new_vec(context.execution(), out.reborrow())?;
+        let constraints = ChargedVec::new_regex(Some(context.regex_execution()), out.reborrow())?;
         Ok(RegexConstraintCompiler {
-            limits: context.limits().regex(),
+            limits: context.regex_limits(),
             context,
             constraints,
             attempted_pattern_bytes: 0,
@@ -159,7 +158,7 @@ impl<'a> RegexConstraintCompiler<'a> {
                 pattern,
                 RegexCompileOptions::new(
                     self.limits,
-                    self.context.execution(),
+                    self.context.regex_execution(),
                     remaining_instructions,
                     remaining_ranges,
                 ),

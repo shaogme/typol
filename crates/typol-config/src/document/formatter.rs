@@ -88,9 +88,11 @@ impl ConfigFormatError {
 impl From<BudgetError> for ConfigFormatError {
     fn from(error: BudgetError) -> Self {
         Self::new(match error {
-            BudgetError::Resource | BudgetError::CapacityExceeded => {
-                ConfigFormatErrorKind::ResourceLimitExceeded
-            }
+            BudgetError::Resource
+            | BudgetError::RegexSteps
+            | BudgetError::RegexSearchSteps
+            | BudgetError::RegexWorkspace
+            | BudgetError::CapacityExceeded => ConfigFormatErrorKind::ResourceLimitExceeded,
             BudgetError::Allocation => ConfigFormatErrorKind::AllocationFailed,
             BudgetError::InvariantViolation(_) => ConfigFormatErrorKind::InvalidStructure,
         })

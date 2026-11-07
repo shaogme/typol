@@ -175,7 +175,8 @@ pub use typol_core::{
 pub use api::{binding, config, core, model, policy, schema, semantic};
 pub use typol_macros::Typol;
 pub use typol_schema::{
-    SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaResolver, SchemaSource,
+    SchemaCompileBudgetDomain, SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler,
+    SchemaResolver, SchemaSource,
 };
 pub use typol_syntax::{
     FormattedSchema, SchemaDocument, SchemaFormatError, SchemaFormatErrorKind, SchemaFormatOptions,

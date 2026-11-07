@@ -225,7 +225,9 @@ impl<'a> SymbolTable<'a> {
             symbols: {
                 let internal_context = CompileContext::new::<BuildFailure>(
                     *context.limits(),
+                    context.regex_limits(),
                     context.execution(),
+                    context.regex_execution(),
                     out.reborrow(),
                 )?;
                 Self {

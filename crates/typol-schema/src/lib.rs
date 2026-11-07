@@ -35,8 +35,8 @@ pub(crate) use types::TypeGraphCompiler;
 pub use opeo;
 
 pub use compiled::{
-    LocationFailure, LocationStatus, SchemaCompileContextFailure, SchemaCompileErrors,
-    SchemaInternalCause,
+    LocationFailure, LocationStatus, SchemaCompileBudgetDomain, SchemaCompileContextFailure,
+    SchemaCompileErrors, SchemaInternalCause,
 };
 pub use compiler::{SchemaCompileContext, SchemaCompileStage, SchemaCompileUsage, SchemaCompiler};
 pub use diagnostics::DiagnosticList;

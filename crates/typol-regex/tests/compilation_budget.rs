@@ -4,7 +4,7 @@ mod clippy;
 use std::{env, process::Command, thread};
 use typol_core::{BudgetError, ExecutionLimits};
 use typol_opeo_test_support::TestSlot;
-use typol_policy::{RegexLimits, ResourceLimits};
+use typol_policy::RegexLimits;
 use typol_regex::{
     RegexCompileError, RegexCompiler, RegexResource, RegexScratch, RegexScratchError,
 };
@@ -15,7 +15,10 @@ const LIMIT: usize = 67_108_864;
 fn compiled_program_retains_payloads_and_shares_cumulative_work() {
     let mut budget_errors = TestSlot::<BudgetError>::default();
     let Some(budget) = clippy::Clippy::succeed_opeo(
-        clippy::Clippy::execution_budget(&mut budget_errors, ExecutionLimits::new(LIMIT, LIMIT)),
+        clippy::Clippy::regex_execution_budget(
+            &mut budget_errors,
+            ExecutionLimits::new(LIMIT, LIMIT),
+        ),
         "compilation budget should be created",
     ) else {
         return;
@@ -54,7 +57,7 @@ fn parsing_and_repeat_expansion_stop_at_the_shared_step_boundary() {
     let mut compile_errors = TestSlot::<RegexCompileError>::default();
     for pattern in ["(ab|[a-z]){2,8}", "a{255}"] {
         let Some(budget) = clippy::Clippy::succeed_opeo(
-            clippy::Clippy::execution_budget(
+            clippy::Clippy::regex_execution_budget(
                 &mut budget_errors,
                 ExecutionLimits::new(LIMIT, LIMIT),
             ),
@@ -64,7 +67,7 @@ fn parsing_and_repeat_expansion_stop_at_the_shared_step_boundary() {
         };
         let Some(regex) = clippy::Clippy::succeed_opeo(
             clippy::Clippy::attempt(&mut compile_errors, |out| {
-                RegexCompiler::compile(pattern, &ResourceLimits::default(), &budget, out)
+                RegexCompiler::compile(pattern, &RegexLimits::default(), &budget, out)
             }),
             "baseline compilation should succeed",
         ) else {
@@ -73,7 +76,7 @@ fn parsing_and_repeat_expansion_stop_at_the_shared_step_boundary() {
         drop(regex);
         let required = budget.steps();
         let Some(limited) = clippy::Clippy::succeed_opeo(
-            clippy::Clippy::execution_budget(
+            clippy::Clippy::regex_execution_budget(
                 &mut budget_errors,
                 ExecutionLimits::new(required.saturating_sub(1), LIMIT),
             ),
@@ -84,7 +87,7 @@ fn parsing_and_repeat_expansion_stop_at_the_shared_step_boundary() {
         let initial = limited.workspace_bytes();
         assert!(matches!(
             clippy::Clippy::attempt(&mut compile_errors, |out| {
-                RegexCompiler::compile(pattern, &ResourceLimits::default(), &limited, out)
+                RegexCompiler::compile(pattern, &RegexLimits::default(), &limited, out)
             }),
             clippy::Attempt::Failure(RegexCompileError::ResourceLimitExceeded(
                 RegexResource::CompilationBudget
@@ -94,7 +97,7 @@ fn parsing_and_repeat_expansion_stop_at_the_shared_step_boundary() {
         assert_eq!(limited.workspace_bytes(), initial);
         assert!(matches!(
             clippy::Clippy::attempt(&mut compile_errors, |out| {
-                RegexCompiler::compile("a", &ResourceLimits::default(), &limited, out)
+                RegexCompiler::compile("a", &RegexLimits::default(), &limited, out)
             }),
             clippy::Attempt::Failure(RegexCompileError::ResourceLimitExceeded(
                 RegexResource::CompilationBudget
@@ -107,7 +110,10 @@ fn parsing_and_repeat_expansion_stop_at_the_shared_step_boundary() {
 fn scratch_uses_the_same_precise_capacity_budget() {
     let mut budget_errors = TestSlot::<BudgetError>::default();
     let Some(budget) = clippy::Clippy::succeed_opeo(
-        clippy::Clippy::execution_budget(&mut budget_errors, ExecutionLimits::new(LIMIT, LIMIT)),
+        clippy::Clippy::regex_execution_budget(
+            &mut budget_errors,
+            ExecutionLimits::new(LIMIT, LIMIT),
+        ),
         "scratch budget should be created",
     ) else {
         return;
@@ -126,7 +132,7 @@ fn scratch_uses_the_same_precise_capacity_budget() {
     let mut scratch_errors = TestSlot::<RegexScratchError>::default();
     let Some(scratch) = clippy::Clippy::succeed_opeo(
         clippy::Clippy::attempt(&mut scratch_errors, |out| {
-            RegexScratch::new_budgeted(&regex, &limits, Some(&budget), out)
+            RegexScratch::new(&regex, &limits, &budget, out)
         }),
         "scratch space should be created",
     ) else {
@@ -147,14 +153,14 @@ fn regex_stack_child() {
     }
     let spawned = thread::Builder::new().stack_size(128 * 1024).spawn(|| {
         let depth = 4096;
-        let mut limits = ResourceLimits::default();
+        let mut limits = RegexLimits::default();
         limits.set_max_regex_nesting_depth(depth + 16);
         limits.set_max_regex_pattern_bytes(depth * 2 + 1);
         let pattern = format!("{}a{}", "(".repeat(depth), ")".repeat(depth));
         let mut budget_errors = TestSlot::<BudgetError>::default();
         let mut compile_errors = TestSlot::<RegexCompileError>::default();
         let Some(budget) = clippy::Clippy::succeed_opeo(
-            clippy::Clippy::execution_budget(
+            clippy::Clippy::regex_execution_budget(
                 &mut budget_errors,
                 ExecutionLimits::new(LIMIT, LIMIT),
             ),
@@ -185,7 +191,7 @@ fn regex_stack_child() {
         limits.set_max_regex_nesting_depth(depth + 16);
         limits.set_max_regex_pattern_bytes(depth * 2 + 1);
         let Some(small) = clippy::Clippy::succeed_opeo(
-            clippy::Clippy::execution_budget(
+            clippy::Clippy::regex_execution_budget(
                 &mut budget_errors,
                 ExecutionLimits::new(30_000, LIMIT),
             ),
@@ -244,7 +250,10 @@ fn deep_regex_compilation_and_cleanup_have_bounded_host_stack() {
 fn independent_capacity_limit_rejects_compilation_and_releases_partial_ast() {
     let mut budget_errors = TestSlot::<BudgetError>::default();
     let Some(budget) = clippy::Clippy::succeed_opeo(
-        clippy::Clippy::execution_budget(&mut budget_errors, ExecutionLimits::new(LIMIT, 512)),
+        clippy::Clippy::regex_execution_budget(
+            &mut budget_errors,
+            ExecutionLimits::new(LIMIT, 512),
+        ),
         "capacity budget should be created",
     ) else {
         return;
@@ -253,10 +262,10 @@ fn independent_capacity_limit_rejects_compilation_and_releases_partial_ast() {
     let mut compile_errors = TestSlot::<RegexCompileError>::default();
     assert!(matches!(
         clippy::Clippy::attempt(&mut compile_errors, |out| {
-            RegexCompiler::compile("(ab|[a-z]){2,8}", &ResourceLimits::default(), &budget, out)
+            RegexCompiler::compile("(ab|[a-z]){2,8}", &RegexLimits::default(), &budget, out)
         }),
         clippy::Attempt::Failure(RegexCompileError::ResourceLimitExceeded(
-            RegexResource::CompilationBudget
+            RegexResource::WorkspaceBytes
         ))
     ));
     assert!(budget.exhausted());

@@ -7,7 +7,7 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{ExecutionLimits, SliceSource};
-use typol_policy::ResourceLimits;
+use typol_policy::{ExcerptLimits, RegexOptions};
 use typol_schema::{SchemaCompileOptions, SchemaSource};
 use typol_test_support::*;
 
@@ -98,7 +98,8 @@ fn deterministic_value_mutations_terminate_with_owned_safe_results_under_small_b
                     &mut SliceSource::new(source.as_bytes()),
                     "mutations",
                     ConfigParseOptions::new(
-                        ResourceLimits::default(),
+                        ExcerptLimits::default(),
+                        RegexOptions::default(),
                         ConfigLimits::default(),
                         ExecutionLimits::new(steps, workspace),
                     ),

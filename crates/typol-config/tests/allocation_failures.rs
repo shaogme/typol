@@ -19,7 +19,7 @@ use typol_core::{
     LocationError, Read, SliceSource, SourceCapture, SourceExcerptSet, SourceId, SourceSpan, Span,
     SpanError, SpanLocation, ValueError,
 };
-use typol_policy::ResourceLimits;
+use typol_policy::RegexOptions;
 use typol_schema::{SchemaCompileOptions, SchemaSource};
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
@@ -27,12 +27,12 @@ use typol_test_support::{ConfigTestSupport as Support, TestOpeoOutcome};
 
 #[derive(Clone, Copy)]
 struct TestLimits {
-    resources: ResourceLimits,
+    resources: ExcerptLimits,
     config: ConfigLimits,
 }
 
-impl From<&ResourceLimits> for TestLimits {
-    fn from(resources: &ResourceLimits) -> Self {
+impl From<&ExcerptLimits> for TestLimits {
+    fn from(resources: &ExcerptLimits) -> Self {
         Self {
             resources: *resources,
             config: ConfigLimits::default(),
@@ -43,14 +43,14 @@ impl From<&ResourceLimits> for TestLimits {
 impl From<&ConfigLimits> for TestLimits {
     fn from(config: &ConfigLimits) -> Self {
         Self {
-            resources: ResourceLimits::default(),
+            resources: ExcerptLimits::default(),
             config: *config,
         }
     }
 }
 
-impl From<&(&ResourceLimits, &ConfigLimits)> for TestLimits {
-    fn from(limits: &(&ResourceLimits, &ConfigLimits)) -> Self {
+impl From<&(&ExcerptLimits, &ConfigLimits)> for TestLimits {
+    fn from(limits: &(&ExcerptLimits, &ConfigLimits)) -> Self {
         Self {
             resources: *limits.0,
             config: *limits.1,
@@ -59,7 +59,7 @@ impl From<&(&ResourceLimits, &ConfigLimits)> for TestLimits {
 }
 
 impl TestLimits {
-    fn resources(self) -> ResourceLimits {
+    fn resources(self) -> ExcerptLimits {
         self.resources
     }
 
@@ -385,8 +385,7 @@ fn allocation_failures_are_fatal_and_release_all_temporary_values() -> TestResul
         }
     "#,
     )?;
-    let mut limits = ResourceLimits::default();
-    limits.set_excerpts(ExcerptLimits::new(0, 0, 0, 0));
+    let limits = ExcerptLimits::new(0, 0, 0, 0);
     for source in [
         r#"{ child: {}, dict: { "one": "first", "two": "second" }, array: ["text", none], variant: .Single("payload") }"#,
         r#"{ child: {}, dict: { "o\u{00E9}": "first\n", "two": "second" }, array: ["te\txt", none], variant: .Single("pay\nload") }"#,
@@ -429,8 +428,7 @@ fn session_cache_labels_snapshots_and_name_failures_release_every_allocation() -
         }
     "#,
     )?;
-    let mut limits = ResourceLimits::default();
-    limits.set_excerpts(ExcerptLimits::new(0, 0, 0, 0));
+    let limits = ExcerptLimits::new(0, 0, 0, 0);
     let source = "{ first: env(\"X\"), second: env(\"X\") }";
     let mut baseline_attempts = None;
     for fail_at in once(None).chain((0..usize::MAX).map(Some)) {
@@ -512,8 +510,7 @@ fn real_environment_conversion_and_fallback_allocations_fail_atomically() -> Tes
     let schema =
         compile(r#"entry struct Root { a: option<string> @env("X"), b: string @env("X"), }"#)?;
     let source = r#"{ a: env("X", "fallback-a"), b: env("X", "fallback-b") }"#;
-    let mut limits = ResourceLimits::default();
-    limits.set_excerpts(ExcerptLimits::new(0, 0, 0, 0));
+    let limits = ExcerptLimits::new(0, 0, 0, 0);
     for bytes in [None, Some(&b"set-value"[..]), Some(&b"\xff"[..])] {
         let mut baseline_attempts = None;
         for fail_at in once(None).chain((0..usize::MAX).map(Some)) {
@@ -553,8 +550,7 @@ fn real_local_constraints_and_regex_failures_release_every_allocation() -> TestR
         }
     "#,
     )?;
-    let mut limits = ResourceLimits::default();
-    limits.set_excerpts(ExcerptLimits::new(0, 0, 0, 0));
+    let limits = ExcerptLimits::new(0, 0, 0, 0);
     for (source, bytes) in [
         (
             r#"{ first: env("X", "abc"), second: env("X", "abc") }"#,
@@ -601,8 +597,7 @@ fn expression_work_stack_allocation_failure_is_structured() -> TestResult<()> {
     let schema = compile(
         "entry struct Root { values: [[i8]] } @assert(self.values.all(|v| v.sum() == 127 && v.any(|v| v == 127)), \"rule\")",
     )?;
-    let mut limits = ResourceLimits::default();
-    limits.set_excerpts(ExcerptLimits::new(0, 0, 0, 0));
+    let limits = ExcerptLimits::new(0, 0, 0, 0);
     let scope = AllocationScope::start(Some(0));
     let result = parse(&schema, "{values: [[127, 1, -1], [127]]}", &limits);
     let state = scope.finish();
@@ -630,8 +625,7 @@ fn collection_and_full_tree_assertion_allocations_fail_atomically() -> TestResul
         } @assert(self.limit < 0, "root")
     "#,
     )?;
-    let mut limits = ResourceLimits::default();
-    limits.set_excerpts(ExcerptLimits::new(0, 0, 0, 0));
+    let limits = ExcerptLimits::new(0, 0, 0, 0);
     for source in [
         r#"{ a: [1, 1, -1], dict: { "z": -1, "a": -2 }, limit: 0 }"#,
         r#"{ a: [1, 2], dict: { "z": 1 }, limit: 3 }"#,
@@ -671,8 +665,7 @@ fn secret_paths_labels_cache_defaults_and_error_storage_fail_atomically() -> Tes
         }
     "#,
     )?;
-    let mut limits = ResourceLimits::default();
-    limits.set_excerpts(ExcerptLimits::new(0, 0, 0, 0));
+    let limits = ExcerptLimits::new(0, 0, 0, 0);
     for (source, bytes) in [
         (
             r#"{ first: env("X"), second: env("X"), dict: { "private-key": [-1] }, limit: 2 }"#,
@@ -754,8 +747,7 @@ fn conversion_redaction_allocation_failure_discards_the_original_path() -> TestR
 fn persistent_allocation_failure_returns_safe_nonempty_owned_errors() -> TestResult<()> {
     let schema = compile(r#"entry struct Root { value: map<string, u8> @secret, }"#)?;
     let source = r#"{ value: { "private-key": 999 } }"#;
-    let mut limits = ResourceLimits::default();
-    limits.set_excerpts(ExcerptLimits::new(0, 0, 0, 0));
+    let limits = ExcerptLimits::new(0, 0, 0, 0);
     let scope = AllocationScope::start(None);
     drop(parse(&schema, source, &limits));
     let baseline = scope.finish();
@@ -791,8 +783,7 @@ fn public_entry_allocations_fail_atomically_including_source_name() -> TestResul
             values: [u8] @unique,
         } @assert(self.values.len() == 2, "root")"#,
     )?;
-    let mut limits = ResourceLimits::default();
-    limits.set_excerpts(ExcerptLimits::new(0, 0, 0, 0));
+    let limits = ExcerptLimits::new(0, 0, 0, 0);
     for text in [
         r#"{ a: env("X"), b: env("X"), values: [1, 2] }"#,
         r#"{ a: env("X"), b: env("X"), values: [1] }"#,
@@ -856,8 +847,7 @@ fn nested_parser_frames_fail_atomically_on_single_and_persistent_oom() -> TestRe
     let schema = compile(&text)?;
     let source =
         format!("{{ready:[\"already-built\"],deep:{prefix}{{n:\"leaf\"}}{suffix},tail:\"last\"}}");
-    let mut limits = ResourceLimits::default();
-    limits.set_excerpts(ExcerptLimits::new(0, 0, 0, 0));
+    let limits = ExcerptLimits::new(0, 0, 0, 0);
     let mut provider = Provider {
         calls: 0,
         result: Ok(None),
@@ -945,6 +935,7 @@ fn config_request<'a>(
         source.1,
         ConfigParseOptions::new(
             limits.resources(),
+            RegexOptions::default(),
             limits.config(),
             ExecutionLimits::new(1_000_000_000, 268_435_456),
         ),
@@ -955,6 +946,7 @@ fn session_options(limits: impl Into<TestLimits>) -> ConfigParseOptions {
     let limits = limits.into();
     ConfigParseOptions::new(
         limits.resources(),
+        RegexOptions::default(),
         limits.config(),
         ExecutionLimits::new(1_000_000_000, 268_435_456),
     )
@@ -978,7 +970,8 @@ fn known_resource_failures_precede_allocator_and_provider_side_effects() -> Test
     let schema = compile("entry struct Root {}")?;
     let cases = [
         ConfigParseOptions::new(
-            ResourceLimits::default(),
+            ExcerptLimits::default(),
+            RegexOptions::default(),
             ConfigLimits::default()
                 .with_max_environment_entries(1)
                 .with_max_environment_bytes(100)
@@ -987,7 +980,8 @@ fn known_resource_failures_precede_allocator_and_provider_side_effects() -> Test
             ExecutionLimits::new(1_000, 1_048_576),
         ),
         ConfigParseOptions::new(
-            ResourceLimits::default(),
+            ExcerptLimits::default(),
+            RegexOptions::default(),
             ConfigLimits::default()
                 .with_max_environment_entries(1)
                 .with_max_environment_bytes(100)

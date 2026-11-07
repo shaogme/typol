@@ -24,10 +24,10 @@ use crate::{
 use alloc::{format, vec, vec::Vec};
 use opeo::{OResult, Out};
 use typol_core::{
-    ConfigValue, Diagnostic, DiagnosticCode, ExecutionLimits, Read, SliceSource, ValueKind,
-    ValueSource,
+    ConfigValue, Diagnostic, DiagnosticCode, ExcerptLimits, ExecutionLimits, Read, SliceSource,
+    ValueKind, ValueSource,
 };
-use typol_policy::ResourceLimits;
+use typol_policy::RegexOptions;
 use typol_schema::{
     ResolverError, SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaResolveRequest,
     SchemaResolver, SchemaSource,
@@ -105,14 +105,30 @@ fn compile(text: &str) -> TestResult<CompiledSchema> {
 
 #[derive(Clone, Copy)]
 pub struct ParserLimits {
-    resources: ResourceLimits,
+    excerpts: ExcerptLimits,
+    regex: RegexOptions,
     config: ConfigLimits,
 }
 
-impl From<&ResourceLimits> for ParserLimits {
-    fn from(resources: &ResourceLimits) -> Self {
+impl From<&ExcerptLimits> for ParserLimits {
+    fn from(excerpts: &ExcerptLimits) -> Self {
         Self {
-            resources: *resources,
+            excerpts: *excerpts,
+            regex: RegexOptions::default(),
+            config: ConfigLimits::default()
+                .with_max_environment_entries(100_000)
+                .with_max_environment_bytes(268_435_456)
+                .with_max_constructed_text_bytes(268_435_456)
+                .with_max_display_name_bytes(1_048_576),
+        }
+    }
+}
+
+impl From<&RegexOptions> for ParserLimits {
+    fn from(regex: &RegexOptions) -> Self {
+        Self {
+            excerpts: ExcerptLimits::default(),
+            regex: *regex,
             config: ConfigLimits::default()
                 .with_max_environment_entries(100_000)
                 .with_max_environment_bytes(268_435_456)
@@ -125,24 +141,40 @@ impl From<&ResourceLimits> for ParserLimits {
 impl From<&ConfigLimits> for ParserLimits {
     fn from(config: &ConfigLimits) -> Self {
         Self {
-            resources: ResourceLimits::default(),
+            excerpts: ExcerptLimits::default(),
+            regex: RegexOptions::default(),
             config: *config,
         }
     }
 }
 
-impl From<&(&ResourceLimits, &ConfigLimits)> for ParserLimits {
-    fn from(limits: &(&ResourceLimits, &ConfigLimits)) -> Self {
+impl From<&(&ExcerptLimits, &ConfigLimits)> for ParserLimits {
+    fn from(limits: &(&ExcerptLimits, &ConfigLimits)) -> Self {
         Self {
-            resources: *limits.0,
+            excerpts: *limits.0,
+            regex: RegexOptions::default(),
+            config: *limits.1,
+        }
+    }
+}
+
+impl From<&(&RegexOptions, &ConfigLimits)> for ParserLimits {
+    fn from(limits: &(&RegexOptions, &ConfigLimits)) -> Self {
+        Self {
+            excerpts: ExcerptLimits::default(),
+            regex: *limits.0,
             config: *limits.1,
         }
     }
 }
 
 impl ParserLimits {
-    fn resources(&self) -> ResourceLimits {
-        self.resources
+    fn excerpts(&self) -> ExcerptLimits {
+        self.excerpts
+    }
+
+    fn regex(&self) -> RegexOptions {
+        self.regex
     }
 
     fn config(&self) -> ConfigLimits {
@@ -766,7 +798,8 @@ fn config_request<'a>(
         source.0,
         source.1,
         ConfigParseOptions::new(
-            limits.resources(),
+            limits.excerpts(),
+            limits.regex(),
             limits.config(),
             ExecutionLimits::new(1_000_000_000, 268_435_456),
         ),
@@ -776,7 +809,8 @@ fn config_request<'a>(
 fn session_options(limits: impl Into<ParserLimits>) -> ConfigParseOptions {
     let limits = limits.into();
     ConfigParseOptions::new(
-        limits.resources(),
+        limits.excerpts(),
+        limits.regex(),
         limits.config(),
         ExecutionLimits::new(1_000_000_000, 268_435_456),
     )

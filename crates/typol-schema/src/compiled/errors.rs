@@ -68,6 +68,15 @@ impl SchemaCompileContextFailure {
     }
 }
 
+/// Identifies which independent execution budget caused a Schema compilation failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SchemaCompileBudgetDomain {
+    /// Non-Regex Schema parsing, compilation, or diagnostic work.
+    Execution,
+    /// Regex parsing, compilation, matching, or Regex-owned workspace.
+    Regex,
+}
+
 enum SchemaErrorStorage {
     Inline(Diagnostic),
     Collected {
@@ -82,6 +91,7 @@ enum SchemaErrorStorage {
 pub struct SchemaCompileErrors {
     storage: SchemaErrorStorage,
     context_failure: Option<SchemaCompileContextFailure>,
+    budget_domain: Option<SchemaCompileBudgetDomain>,
 }
 
 impl SchemaCompileErrors {
@@ -103,12 +113,33 @@ impl SchemaCompileErrors {
     }
 
     pub fn budget_failure(error: BudgetError) -> Self {
+        let budget_domain = match error {
+            BudgetError::RegexSteps
+            | BudgetError::RegexSearchSteps
+            | BudgetError::RegexWorkspace => SchemaCompileBudgetDomain::Regex,
+            BudgetError::Resource
+            | BudgetError::Allocation
+            | BudgetError::CapacityExceeded
+            | BudgetError::InvariantViolation(_) => SchemaCompileBudgetDomain::Execution,
+        };
+        Self::budget_failure_in_domain(error, budget_domain)
+    }
+
+    pub(crate) fn regex_budget_failure(error: BudgetError) -> Self {
+        Self::budget_failure_in_domain(error, SchemaCompileBudgetDomain::Regex)
+    }
+
+    fn budget_failure_in_domain(
+        error: BudgetError,
+        budget_domain: SchemaCompileBudgetDomain,
+    ) -> Self {
         let code = error.diagnostic_code();
         let mut diagnostic = Diagnostic::emergency(code);
         diagnostic.set_context(error.context());
         Self {
             storage: SchemaErrorStorage::Inline(diagnostic),
             context_failure: None,
+            budget_domain: Some(budget_domain),
         }
     }
 
@@ -116,6 +147,7 @@ impl SchemaCompileErrors {
         Self {
             storage: SchemaErrorStorage::Inline(diagnostic),
             context_failure: None,
+            budget_domain: None,
         }
     }
 
@@ -126,6 +158,7 @@ impl SchemaCompileErrors {
         Self {
             storage: SchemaErrorStorage::Inline(diagnostic),
             context_failure: Some(failure),
+            budget_domain: None,
         }
     }
 
@@ -142,6 +175,7 @@ impl SchemaCompileErrors {
                 excerpts: SourceExcerptSet::unavailable(),
             },
             context_failure: None,
+            budget_domain: None,
         }
     }
 
@@ -157,7 +191,13 @@ impl SchemaCompileErrors {
                 excerpts: SourceExcerptSet::unavailable(),
             },
             context_failure: None,
+            budget_domain: None,
         }
+    }
+
+    /// Returns the budget domain attached to an allocation-free budget failure.
+    pub const fn budget_domain(&self) -> Option<SchemaCompileBudgetDomain> {
+        self.budget_domain
     }
 
     /// Returns a structured reason when the root context or session lifecycle is invalid.

@@ -44,10 +44,16 @@ impl RecordBuilder {
             .set_stage(SchemaCompileStage::Records as usize);
         let execution = context.execution();
         let value_limits = *context.limits().values();
-        let regex_limits = *context.limits().regex();
+        let regex_limits = *context.regex_limits();
         let mut model =
             context.builder_access(out.reborrow(), fallback, diagnostics, |builder_out| {
-                Builder::new(execution, value_limits, regex_limits, builder_out)
+                Builder::new(
+                    execution,
+                    value_limits,
+                    regex_limits,
+                    context.regex_execution(),
+                    builder_out,
+                )
             })?;
         for _ in types.semantic_types() {
             execution.consume(1, out.reborrow())?;

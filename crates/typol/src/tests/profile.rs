@@ -187,7 +187,12 @@ impl<const N: usize> Typol for Wide<N> {
 
 fn options(limits: ExecutionLimits) -> ConfigParseOptions {
     let defaults = ConfigParseOptions::default();
-    ConfigParseOptions::new(*defaults.resources(), *defaults.config(), limits)
+    ConfigParseOptions::new(
+        *defaults.excerpts(),
+        *defaults.regex(),
+        *defaults.config(),
+        limits,
+    )
 }
 
 fn minimum(mut operation: impl FnMut(usize) -> bool, upper: usize) -> TestResult<usize> {

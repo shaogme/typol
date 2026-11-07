@@ -6,24 +6,36 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{
-    BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, InstancePath, Read,
-    SliceSource, SourceSpan, ValueKind, ValueSource, ValueView,
+    BudgetError, Diagnostic, DiagnosticCode, ExcerptLimits, ExecutionBudget, ExecutionLimits,
+    InstancePath, Read, SliceSource, SourceSpan, ValueKind, ValueSource, ValueView,
 };
-use typol_policy::ResourceLimits;
+use typol_policy::{RegexExecutionLimits, RegexOptions};
 use typol_schema::{SchemaCompileOptions, SchemaSource};
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
 
 #[derive(Clone, Copy)]
 struct TestLimits {
-    resources: ResourceLimits,
+    excerpts: ExcerptLimits,
+    regex: RegexOptions,
     config: ConfigLimits,
 }
 
-impl From<&ResourceLimits> for TestLimits {
-    fn from(resources: &ResourceLimits) -> Self {
+impl From<&ExcerptLimits> for TestLimits {
+    fn from(excerpts: &ExcerptLimits) -> Self {
         Self {
-            resources: *resources,
+            excerpts: *excerpts,
+            regex: RegexOptions::default(),
+            config: ConfigLimits::default(),
+        }
+    }
+}
+
+impl From<&RegexOptions> for TestLimits {
+    fn from(regex: &RegexOptions) -> Self {
+        Self {
+            excerpts: ExcerptLimits::default(),
+            regex: *regex,
             config: ConfigLimits::default(),
         }
     }
@@ -32,24 +44,30 @@ impl From<&ResourceLimits> for TestLimits {
 impl From<&ConfigLimits> for TestLimits {
     fn from(config: &ConfigLimits) -> Self {
         Self {
-            resources: ResourceLimits::default(),
+            excerpts: ExcerptLimits::default(),
+            regex: RegexOptions::default(),
             config: *config,
         }
     }
 }
 
-impl From<&(&ResourceLimits, &ConfigLimits)> for TestLimits {
-    fn from(limits: &(&ResourceLimits, &ConfigLimits)) -> Self {
+impl From<&(&ExcerptLimits, &ConfigLimits)> for TestLimits {
+    fn from(limits: &(&ExcerptLimits, &ConfigLimits)) -> Self {
         Self {
-            resources: *limits.0,
+            excerpts: *limits.0,
+            regex: RegexOptions::default(),
             config: *limits.1,
         }
     }
 }
 
 impl TestLimits {
-    fn resources(self) -> ResourceLimits {
-        self.resources
+    fn excerpts(self) -> ExcerptLimits {
+        self.excerpts
+    }
+
+    fn regex(self) -> RegexOptions {
+        self.regex
     }
 
     fn config(self) -> ConfigLimits {
@@ -134,8 +152,8 @@ fn config_regex_diagnostic_hides_secret_map_key() -> TestResult<()> {
         entry struct Root { values: map<string, Item> @secret }"#,
     )?;
     let text = r#"{values: {"PRIVATE-KEY": "x"}}"#;
-    let mut limits = ResourceLimits::default();
-    limits.set_max_regex_search_steps(0);
+    let limits = RegexOptions::default()
+        .with_execution(RegexExecutionLimits::default().with_max_search_steps(0));
     let mut provider = Provider {
         bytes: None,
         names: vec![],
@@ -268,7 +286,7 @@ fn fallback_errors_point_to_literal_before_provider_read() -> TestResult<()> {
                 &schema,
                 config_request(
                     (&mut SliceSource::new(text.as_bytes()), "fallback"),
-                    &ResourceLimits::default(),
+                    &ExcerptLimits::default(),
                 ),
                 &mut provider,
             )
@@ -348,10 +366,10 @@ fn single_regex_limit_is_independent_of_shared_budget() -> TestResult<()> {
         bytes: None,
         names: vec![],
     };
-    let mut limits = ResourceLimits::default();
+    let mut limits = RegexOptions::default();
     let minimum = (0..128)
         .find(|steps| {
-            limits.set_max_regex_search_steps(*steps);
+            limits = limits.with_execution(limits.execution().with_max_search_steps(*steps));
             Support::parse(
                 &schema,
                 config_request(
@@ -367,7 +385,7 @@ fn single_regex_limit_is_independent_of_shared_budget() -> TestResult<()> {
         })
         .test_expect("simple mode should finish within a bounded number of steps")?;
     test_assert!(minimum > 0)?;
-    limits.set_max_regex_search_steps(minimum);
+    limits = limits.with_execution(limits.execution().with_max_search_steps(minimum));
     let value = Support::parse(
         &schema,
         config_request(
@@ -384,7 +402,7 @@ fn single_regex_limit_is_independent_of_shared_budget() -> TestResult<()> {
         return Err(TestFailure::new("values field should be an array"));
     };
     test_eq!(items.len(), 4)?;
-    limits.set_max_regex_search_steps(minimum - 1);
+    limits = limits.with_execution(limits.execution().with_max_search_steps(minimum - 1));
     let errors = Support::parse(
         &schema,
         config_request(
@@ -418,7 +436,7 @@ fn maximum_diagnostic_limit_accepts_valid_empty_config() -> TestResult<()> {
             &schema,
             config_request(
                 (&mut SliceSource::new(("{}").as_bytes()), "valid"),
-                &ResourceLimits::default()
+                &ExcerptLimits::default()
             ),
             &mut provider
         )
@@ -506,7 +524,7 @@ fn inherited_option_rules_keep_identity_order_and_each_instance_runs_once() -> T
         &schema,
         config_request(
             (&mut SliceSource::new((text).as_bytes()), "rules"),
-            &ResourceLimits::default(),
+            &ExcerptLimits::default(),
         ),
         &mut provider,
     )
@@ -611,7 +629,7 @@ fn schema_label_locations_survive_schema_drop() -> TestResult<()> {
         &schema,
         config_request(
             (&mut SliceSource::new(("{value: 1}").as_bytes()), "location"),
-            &ResourceLimits::default(),
+            &ExcerptLimits::default(),
         ),
         &mut provider,
     )
@@ -639,7 +657,8 @@ fn config_request<'a>(
         source.0,
         source.1,
         ConfigParseOptions::new(
-            limits.resources(),
+            limits.excerpts(),
+            limits.regex(),
             limits.config(),
             ExecutionLimits::new(1_000_000_000, 268_435_456),
         ),

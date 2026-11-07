@@ -16,7 +16,7 @@ use typol_core::{
     ExecutionBudget, ExecutionLimits, InstancePath, LineIndex, LocatedSpan, LocationError,
     PathSegment, Read, SliceSource, SourceId, Span, SpanError, SpanLocation,
 };
-use typol_policy::ResourceLimits;
+use typol_policy::{ExcerptLimits, RegexOptions};
 use typol_semantic::{ConstraintKind, TypeKind};
 use typol_test_support::*;
 
@@ -723,7 +723,8 @@ fn config_request<'a>(
         source.0,
         source.1,
         ConfigParseOptions::new(
-            ResourceLimits::default(),
+            ExcerptLimits::default(),
+            RegexOptions::default(),
             *limits,
             ExecutionLimits::new(1_000_000_000, 268_435_456),
         ),
@@ -732,7 +733,8 @@ fn config_request<'a>(
 
 fn session_options(limits: &ConfigLimits) -> ConfigParseOptions {
     ConfigParseOptions::new(
-        ResourceLimits::default(),
+        ExcerptLimits::default(),
+        RegexOptions::default(),
         *limits,
         ExecutionLimits::new(1_000_000_000, 268_435_456),
     )

@@ -186,6 +186,8 @@ impl RegexSyntaxError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegexResource {
     CompilationBudget,
+    ExecutionSteps,
+    WorkspaceBytes,
     PatternBytes,
     NestingDepth,
     InstructionCount,
@@ -234,6 +236,28 @@ impl RegexScratchError {
     }
 }
 
+impl From<BudgetError> for RegexScratchError {
+    fn from(error: BudgetError) -> Self {
+        match error {
+            BudgetError::Resource | BudgetError::RegexSteps => {
+                Self::ResourceLimitExceeded(RegexResource::ExecutionSteps)
+            }
+            BudgetError::RegexWorkspace => {
+                Self::ResourceLimitExceeded(RegexResource::WorkspaceBytes)
+            }
+            BudgetError::RegexSearchSteps => {
+                Self::ResourceLimitExceeded(RegexResource::SearchSteps)
+            }
+            BudgetError::Allocation => Self::AllocationFailed,
+            BudgetError::CapacityExceeded => Self::CapacityExceeded,
+            BudgetError::InvariantViolation(source_context) => Self::InternalInvariantFailure(
+                RegexErrorContext::new(SCRATCH_STATE_BUFFER_INITIALIZATION)
+                    .with_source_context(*source_context),
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegexMatchError {
     ResourceLimitExceeded(RegexResource),
@@ -256,7 +280,15 @@ impl RegexMatchError {
 impl From<BudgetError> for RegexCompileError {
     fn from(error: BudgetError) -> Self {
         match error {
-            BudgetError::Resource => Self::ResourceLimitExceeded(RegexResource::CompilationBudget),
+            BudgetError::Resource | BudgetError::RegexSteps => {
+                Self::ResourceLimitExceeded(RegexResource::CompilationBudget)
+            }
+            BudgetError::RegexWorkspace => {
+                Self::ResourceLimitExceeded(RegexResource::WorkspaceBytes)
+            }
+            BudgetError::RegexSearchSteps => {
+                Self::ResourceLimitExceeded(RegexResource::SearchSteps)
+            }
             BudgetError::Allocation => Self::AllocationFailed,
             BudgetError::CapacityExceeded => Self::CapacityExceeded,
             BudgetError::InvariantViolation(source_context) => Self::InternalInvariantFailure(
@@ -269,7 +301,15 @@ impl From<BudgetError> for RegexCompileError {
 impl From<BudgetError> for RegexMatchError {
     fn from(error: BudgetError) -> Self {
         match error {
-            BudgetError::Resource => Self::ResourceLimitExceeded(RegexResource::SearchSteps),
+            BudgetError::Resource | BudgetError::RegexSteps => {
+                Self::ResourceLimitExceeded(RegexResource::ExecutionSteps)
+            }
+            BudgetError::RegexSearchSteps => {
+                Self::ResourceLimitExceeded(RegexResource::SearchSteps)
+            }
+            BudgetError::RegexWorkspace => {
+                Self::ResourceLimitExceeded(RegexResource::WorkspaceBytes)
+            }
             BudgetError::Allocation => Self::AllocationFailed,
             BudgetError::CapacityExceeded => Self::CapacityExceeded,
             BudgetError::InvariantViolation(source_context) => Self::InternalInvariantFailure(

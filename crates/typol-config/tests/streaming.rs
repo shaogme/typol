@@ -293,8 +293,13 @@ fn source_limit_requires_exactly_one_byte_eof_probe() -> TestResult<()> {
         let mut options = ConfigParseOptions::default();
         let mut config = *options.config();
         config = config.with_max_source_bytes(length);
-        options = ConfigParseOptions::new(*options.resources(), config, *options.execution())
-            .with_stream(StreamLimits::try_new(7, 1024).test_value()?);
+        options = ConfigParseOptions::new(
+            *options.excerpts(),
+            *options.regex(),
+            config,
+            *options.execution(),
+        )
+        .with_stream(StreamLimits::try_new(7, 1024).test_value()?);
         let result = Support::parse(
             &schema,
             ConfigParseRequest::new(&mut source, "probe", options),
@@ -367,8 +372,13 @@ fn diagnostic_limit_and_token_limit_stop_reads_and_environment_calls() -> TestRe
     let defaults = ConfigParseOptions::default();
     let mut config = *defaults.config();
     config = config.with_max_diagnostics(1);
-    let options = ConfigParseOptions::new(*defaults.resources(), config, *defaults.execution())
-        .with_stream(StreamLimits::try_new(1, 1024).test_value()?);
+    let options = ConfigParseOptions::new(
+        *defaults.excerpts(),
+        *defaults.regex(),
+        config,
+        *defaults.execution(),
+    )
+    .with_stream(StreamLimits::try_new(1, 1024).test_value()?);
     let errors = Support::parse(
         &schema,
         ConfigParseRequest::new(&mut source, "capped", options),
@@ -415,14 +425,14 @@ fn long_comments_and_dense_newlines_do_not_accumulate_source_storage() -> TestRe
         for length in [1, 1000, 100_000] {
             let text = format!("/*{}*/{{}}//{}", "\n".repeat(length), "ø".repeat(length));
             let defaults = ConfigParseOptions::default();
-            let mut resources = *defaults.resources();
-            resources.set_excerpts(if enabled {
+            let excerpts = if enabled {
                 limits
             } else {
                 limits.with_max_bytes(0)
-            });
+            };
             let options = ConfigParseOptions::new(
-                resources,
+                excerpts,
+                *defaults.regex(),
                 *defaults.config(),
                 ExecutionLimits::new(16_777_216, 65536),
             )

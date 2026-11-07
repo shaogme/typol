@@ -12,8 +12,8 @@ use crate::{
 use core::cmp::Ordering;
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
-    BudgetError, ChargedVec, DiagnosticContext, ExecutionBudget, SourceId, SourceSpan,
-    diagnostic_context,
+    BudgetError, ChargedVec, DiagnosticContext, ExecutionBudget, RegexExecutionBudget, SourceId,
+    SourceSpan, diagnostic_context,
 };
 use typol_policy::{RegexLimits, ValueLimits};
 
@@ -120,7 +120,10 @@ impl BuildError {
 impl From<BudgetError> for BuildError {
     fn from(error: BudgetError) -> Self {
         match error {
-            BudgetError::Resource => Self::Resource,
+            BudgetError::Resource
+            | BudgetError::RegexSteps
+            | BudgetError::RegexSearchSteps
+            | BudgetError::RegexWorkspace => Self::Resource,
             BudgetError::Allocation => Self::Allocation,
             BudgetError::CapacityExceeded => Self::Capacity,
             BudgetError::InvariantViolation(context) => Self::internal(*context),
@@ -215,6 +218,7 @@ pub struct Builder {
     schema: CompiledSchema,
     shape_index: ChargedVec<(ShapeKind, ShapeId)>,
     execution: ExecutionBudget,
+    regex_execution: RegexExecutionBudget,
     value_limits: ValueLimits,
     regex_limits: RegexLimits,
 }
@@ -228,13 +232,16 @@ impl Builder {
         execution: &ExecutionBudget,
         value_limits: ValueLimits,
         regex_limits: RegexLimits,
+        regex_execution: &RegexExecutionBudget,
         mut out: Out<'slot, '_, BuildError>,
     ) -> OResult<'slot, Self> {
         let execution = execution.try_clone(out.reborrow())?;
+        let regex_execution = regex_execution.try_clone(out.reborrow())?;
         Ok(Self {
             schema: CompiledSchema::empty(&execution, out.reborrow())?,
             shape_index: ChargedVec::new(Some(&execution), out.reborrow())?,
             execution,
+            regex_execution,
             value_limits,
             regex_limits,
         })
@@ -634,6 +641,7 @@ impl Builder {
                 schema: &self.schema,
                 sources,
                 execution,
+                regex_execution: &self.regex_execution,
                 value_limits: &self.value_limits,
                 regex_limits: &self.regex_limits,
                 validate_defaults,

@@ -20,6 +20,9 @@ static COUNTER_UNDERFLOW: DiagnosticContext =
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BudgetError {
     Resource,
+    RegexSteps,
+    RegexSearchSteps,
+    RegexWorkspace,
     Allocation,
     CapacityExceeded,
     InvariantViolation(&'static DiagnosticContext),
@@ -33,6 +36,9 @@ impl BudgetError {
     pub const fn diagnostic_code(self) -> DiagnosticCode {
         match self {
             Self::Resource => DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+            Self::RegexSteps | Self::RegexSearchSteps | Self::RegexWorkspace => {
+                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+            }
             Self::Allocation => DiagnosticCode::ALLOCATION_FAILED,
             Self::CapacityExceeded => DiagnosticCode::CAPACITY_EXCEEDED,
             Self::InvariantViolation(_) => DiagnosticCode::INTERNAL_ERROR,
@@ -42,7 +48,12 @@ impl BudgetError {
     pub const fn context(self) -> Option<DiagnosticContext> {
         match self {
             Self::InvariantViolation(context) => Some(*context),
-            Self::Resource | Self::Allocation | Self::CapacityExceeded => None,
+            Self::Resource
+            | Self::RegexSteps
+            | Self::RegexSearchSteps
+            | Self::RegexWorkspace
+            | Self::Allocation
+            | Self::CapacityExceeded => None,
         }
     }
 }
@@ -51,6 +62,9 @@ impl fmt::Display for BudgetError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::Resource => "execution resource limit exceeded",
+            Self::RegexSteps => "regular-expression step limit exceeded",
+            Self::RegexSearchSteps => "regular-expression search limit exceeded",
+            Self::RegexWorkspace => "regular-expression workspace limit exceeded",
             Self::Allocation => "memory allocation failed",
             Self::CapacityExceeded => "workspace capacity exceeded",
             Self::InvariantViolation(_) => "internal state invariant violated",
@@ -76,11 +90,11 @@ impl ExecutionLimits {
         }
     }
 
-    pub const fn max_steps(&self) -> usize {
+    pub fn max_steps(&self) -> usize {
         self.max_steps
     }
 
-    pub const fn max_workspace_bytes(&self) -> usize {
+    pub fn max_workspace_bytes(&self) -> usize {
         self.max_workspace_bytes
     }
 }
@@ -182,12 +196,14 @@ struct State {
     steps: Counter,
     workspace: Counter,
     peak: Counter,
+    // Regex sessions reuse this otherwise idle counter for their immutable per-search limit.
     text: Counter,
     exhausted: AtomicBool,
     stage: AtomicUsize,
     failure: AtomicUsize,
     failure_context: AtomicPtr<DiagnosticContext>,
     finished: AtomicBool,
+    regex: bool,
 }
 
 /// A fallibly created atomic shared budget; handles explicitly increment the atomic reference count through `try_clone`.
@@ -195,13 +211,28 @@ pub struct ExecutionBudget {
     state: NonNull<State>,
 }
 
+/// A separately accounted Regex execution session. Its fixed bookkeeping allocation is excluded
+/// from `max_workspace_bytes`; only Regex-owned buffers and retained compiled storage are charged.
+pub struct RegexExecutionBudget {
+    execution: ExecutionBudget,
+}
+
 impl ExecutionBudget {
     pub fn new<'slot>(
         limits: ExecutionLimits,
+        out: Out<'slot, '_, BudgetError>,
+    ) -> OResult<'slot, Self> {
+        Self::new_inner(limits, true, None, out)
+    }
+
+    fn new_inner<'slot>(
+        limits: ExecutionLimits,
+        charge_state: bool,
+        regex_search_steps: Option<usize>,
         mut out: Out<'slot, '_, BudgetError>,
     ) -> OResult<'slot, Self> {
         let bytes = Layout::new::<State>().size();
-        if bytes > limits.max_workspace_bytes {
+        if charge_state && bytes > limits.max_workspace_bytes {
             return Err(out.fail(BudgetError::Resource));
         }
         // SAFETY: Allocates with the `State` layout, checks for a null pointer, then initializes uniquely owned storage.
@@ -214,14 +245,15 @@ impl ExecutionBudget {
                 references: Counter::new(1),
                 limits,
                 steps: Counter::new(0),
-                workspace: Counter::new(bytes),
-                peak: Counter::new(bytes),
-                text: Counter::new(0),
+                workspace: Counter::new(if charge_state { bytes } else { 0 }),
+                peak: Counter::new(if charge_state { bytes } else { 0 }),
+                text: Counter::new(regex_search_steps.unwrap_or(0)),
                 exhausted: AtomicBool::new(false),
                 stage: AtomicUsize::new(0),
                 failure: AtomicUsize::new(0),
                 failure_context: AtomicPtr::new(ptr::null_mut()),
                 finished: AtomicBool::new(false),
+                regex: regex_search_steps.is_some(),
             });
         }
         Ok(Self { state })
@@ -282,6 +314,9 @@ impl ExecutionBudget {
     pub fn record_failure(&self, error: BudgetError) {
         let (value, context) = match error {
             BudgetError::Resource => (1, None),
+            BudgetError::RegexSteps => (5, None),
+            BudgetError::RegexSearchSteps => (6, None),
+            BudgetError::RegexWorkspace => (7, None),
             BudgetError::Allocation => (2, None),
             BudgetError::CapacityExceeded => (3, None),
             BudgetError::InvariantViolation(context) => (4, Some(context)),
@@ -324,6 +359,9 @@ impl ExecutionBudget {
                 // SAFETY: This pointer can refer only to the static context supplied when the invariant error is created.
                 unsafe { context.as_ref() }.map(BudgetError::invariant)
             }
+            5 => Some(BudgetError::RegexSteps),
+            6 => Some(BudgetError::RegexSearchSteps),
+            7 => Some(BudgetError::RegexWorkspace),
             _ => None,
         }
     }
@@ -345,9 +383,14 @@ impl ExecutionBudget {
     }
 
     pub fn resource_error(&self) -> BudgetError {
-        self.record_failure(BudgetError::Resource);
+        let error = if self.state().regex {
+            BudgetError::RegexSteps
+        } else {
+            BudgetError::Resource
+        };
+        self.record_failure(error);
         self.state().exhausted.store(true, AtomicOrdering::Relaxed);
-        BudgetError::Resource
+        error
     }
 
     pub fn invariant_error(&self, context: &'static DiagnosticContext) -> BudgetError {
@@ -441,6 +484,9 @@ impl ExecutionBudget {
         let Some(total) =
             self.increase_optional(&state.workspace, bytes, state.limits.max_workspace_bytes)
         else {
+            if state.regex {
+                self.workspace_error();
+            }
             return false;
         };
         state.peak.0.fetch_max(total, AtomicOrdering::Relaxed);
@@ -469,20 +515,19 @@ impl ExecutionBudget {
     pub(crate) fn reserve_workspace<'slot, E>(
         &self,
         bytes: usize,
-        mut out: Out<'slot, '_, E>,
+        out: Out<'slot, '_, E>,
     ) -> OResult<'slot, ()>
     where
         E: From<BudgetError>,
     {
         let state = self.state();
-        let total = self.increase(
-            &state.workspace,
-            bytes,
-            state.limits.max_workspace_bytes,
-            out.reborrow(),
-        )?;
-        state.peak.0.fetch_max(total, AtomicOrdering::Relaxed);
-        Ok(())
+        match self.increase_optional(&state.workspace, bytes, state.limits.max_workspace_bytes) {
+            Some(total) => {
+                state.peak.0.fetch_max(total, AtomicOrdering::Relaxed);
+                Ok(())
+            }
+            None => Err(out.fail(E::from(self.workspace_error()))),
+        }
     }
 
     pub fn reserve_workspace_with<'slot, 'borrow, E>(
@@ -497,7 +542,7 @@ impl ExecutionBudget {
                 state.peak.0.fetch_max(total, AtomicOrdering::Relaxed);
                 Ok(())
             }
-            None => Err(out.fail(convert(self.resource_error()))),
+            None => Err(out.fail(convert(self.workspace_error()))),
         }
     }
 
@@ -515,6 +560,35 @@ impl ExecutionBudget {
 
     pub(crate) fn return_workspace_optional(&self, bytes: usize) -> bool {
         self.state().workspace.decrease_optional(bytes).is_some()
+    }
+
+    fn workspace_error(&self) -> BudgetError {
+        let error = if self.state().regex {
+            BudgetError::RegexWorkspace
+        } else {
+            BudgetError::Resource
+        };
+        self.record_failure(error);
+        self.state().exhausted.store(true, AtomicOrdering::Relaxed);
+        error
+    }
+
+    pub(crate) fn is_regex(&self) -> bool {
+        self.state().regex
+    }
+
+    pub(crate) fn try_regex_clone<'slot, E>(
+        &self,
+        mut out: Out<'slot, '_, E>,
+    ) -> OResult<'slot, RegexExecutionBudget>
+    where
+        E: From<BudgetError>,
+    {
+        if !self.is_regex() {
+            return Err(out.fail(E::from(BudgetError::CapacityExceeded)));
+        }
+        let execution = self.try_clone(out.reborrow())?;
+        Ok(RegexExecutionBudget { execution })
     }
 
     pub fn compare_text<'slot, E>(
@@ -549,6 +623,115 @@ impl ExecutionBudget {
             }
         };
         Ok(order)
+    }
+}
+
+impl RegexExecutionBudget {
+    pub fn new<'slot>(
+        max_steps: usize,
+        max_search_steps: usize,
+        max_workspace_bytes: usize,
+        out: Out<'slot, '_, BudgetError>,
+    ) -> OResult<'slot, Self> {
+        let execution = ExecutionBudget::new_inner(
+            ExecutionLimits::new(max_steps, max_workspace_bytes),
+            false,
+            Some(max_search_steps),
+            out,
+        )?;
+        Ok(Self { execution })
+    }
+
+    pub fn try_clone<'slot, E>(&self, mut out: Out<'slot, '_, E>) -> OResult<'slot, Self>
+    where
+        E: From<BudgetError>,
+    {
+        let execution = self.execution.try_clone(out.reborrow())?;
+        Ok(Self { execution })
+    }
+
+    pub fn same_call(&self, other: &Self) -> bool {
+        self.execution.same_call(&other.execution)
+    }
+
+    pub fn max_steps(&self) -> usize {
+        self.execution.limits().max_steps
+    }
+
+    pub fn max_search_steps(&self) -> usize {
+        self.execution.state().text.get()
+    }
+
+    pub fn max_workspace_bytes(&self) -> usize {
+        self.execution.limits().max_workspace_bytes
+    }
+
+    pub fn steps(&self) -> usize {
+        self.execution.steps()
+    }
+
+    pub fn workspace_bytes(&self) -> usize {
+        self.execution.workspace_bytes()
+    }
+
+    pub fn peak_workspace_bytes(&self) -> usize {
+        self.execution.peak_workspace_bytes()
+    }
+
+    pub fn failure(&self) -> Option<BudgetError> {
+        self.execution.failure()
+    }
+
+    pub fn exhausted(&self) -> bool {
+        self.execution.exhausted()
+    }
+
+    pub fn consume<'slot, E>(&self, steps: usize, out: Out<'slot, '_, E>) -> OResult<'slot, ()>
+    where
+        E: From<BudgetError>,
+    {
+        self.execution.consume(steps, out)
+    }
+
+    pub fn consume_with<'slot, 'borrow, E>(
+        &self,
+        steps: usize,
+        out: Out<'slot, 'borrow, E>,
+        convert: impl FnOnce(BudgetError) -> E,
+    ) -> OResult<'slot, ()> {
+        self.execution.consume_with(steps, out, convert)
+    }
+
+    pub fn consume_optional(&self, steps: usize) -> bool {
+        self.execution.consume_optional(steps)
+    }
+
+    pub fn search_limit_error(&self) -> BudgetError {
+        self.fail(BudgetError::RegexSearchSteps)
+    }
+
+    pub fn reserve_workspace<'slot, E>(
+        &self,
+        bytes: usize,
+        out: Out<'slot, '_, E>,
+    ) -> OResult<'slot, ()>
+    where
+        E: From<BudgetError>,
+    {
+        self.execution.reserve_workspace(bytes, out)
+    }
+
+    pub(crate) fn execution(&self) -> &ExecutionBudget {
+        &self.execution
+    }
+
+    fn fail(&self, error: BudgetError) -> BudgetError {
+        self.execution.record_failure(error);
+        self.execution
+            .state()
+            .exhausted
+            .store(true, AtomicOrdering::Relaxed);
+        error
     }
 }
 

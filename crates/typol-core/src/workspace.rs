@@ -1,4 +1,7 @@
-use crate::{BudgetError, ExecutionBudget, budget_sort::FallibleSort, storage::WorkspaceCharge};
+use crate::{
+    BudgetError, ExecutionBudget, RegexExecutionBudget, budget_sort::FallibleSort,
+    storage::WorkspaceCharge,
+};
 use alloc::{
     alloc::Layout,
     vec::{Drain, IntoIter, Vec},
@@ -64,6 +67,21 @@ impl<T> WorkspaceVec<T> {
         })
     }
 
+    /// Creates storage charged to a dedicated Regex execution session.
+    pub fn new_regex<'slot, E>(
+        budget: Option<&RegexExecutionBudget>,
+        mut out: Out<'slot, '_, E>,
+    ) -> OResult<'slot, Self>
+    where
+        E: From<BudgetError>,
+    {
+        let charge = WorkspaceCharge::new_regex(budget, out.reborrow())?;
+        Ok(Self {
+            values: Vec::new(),
+            charge,
+        })
+    }
+
     pub(crate) fn new_optional(budget: Option<&ExecutionBudget>) -> Option<Self> {
         let charge = WorkspaceCharge::new_optional(budget)?;
         Some(Self {
@@ -95,7 +113,7 @@ impl<T> WorkspaceVec<T> {
         let Some(old_capacity_bytes) = self.values.capacity().checked_mul(size_of::<T>()) else {
             return false;
         };
-        let Some(mut replacement_charge) = WorkspaceCharge::new_optional(self.budget()) else {
+        let Some(mut replacement_charge) = self.charge.try_clone_optional() else {
             return false;
         };
         if !replacement_charge.add_optional(layout.size()) {
@@ -116,10 +134,8 @@ impl<T> WorkspaceVec<T> {
         {
             return false;
         }
-        if let Some(budget) = replacement_charge.budget() {
-            if !budget.consume_optional(self.values.len()) {
-                return false;
-            }
+        if !replacement_charge.consume_optional(self.values.len()) {
+            return false;
         }
         if !replacement_charge.transfer_optional_into(&mut self.charge) {
             return false;
@@ -189,13 +205,13 @@ impl<T> WorkspaceVec<T> {
             .checked_mul(size_of::<T>())
             .ok_or(BudgetError::CapacityExceeded)
             .store_err_into(out.reborrow())?;
-        let mut replacement_charge = WorkspaceCharge::new(self.budget(), out.reborrow())?;
+        let mut replacement_charge = self.charge.try_clone(out.reborrow())?;
         replacement_charge.add(layout.size(), out.reborrow())?;
         let mut replacement = Vec::new();
-        replacement
-            .try_reserve_exact(capacity)
-            .map_err(|_| BudgetError::Allocation)
-            .store_err_into(out.reborrow())?;
+        if replacement.try_reserve_exact(capacity).is_err() {
+            replacement_charge.record_failure(BudgetError::Allocation);
+            return Err(out.fail(E::from(BudgetError::Allocation)));
+        }
         let actual = replacement
             .capacity()
             .checked_mul(size_of::<T>())
@@ -204,9 +220,7 @@ impl<T> WorkspaceVec<T> {
         if actual > layout.size() {
             replacement_charge.add(actual - layout.size(), out.reborrow())?;
         }
-        if let Some(budget) = replacement_charge.budget() {
-            budget.consume(self.values.len(), out.reborrow())?;
-        }
+        replacement_charge.consume(self.values.len(), out.reborrow())?;
 
         replacement_charge.transfer_all_into(&mut self.charge, out.reborrow())?;
         replacement.append(&mut self.values);
@@ -221,9 +235,7 @@ impl<T> WorkspaceVec<T> {
     where
         E: From<BudgetError>,
     {
-        if let Some(budget) = self.budget() {
-            budget.consume(1, out.reborrow())?;
-        }
+        self.charge.consume(1, out.reborrow())?;
         if self.values.len() == self.values.capacity() {
             self.try_reserve(1, out.reborrow())?;
         }
@@ -251,9 +263,7 @@ impl<T> WorkspaceVec<T> {
         E: From<BudgetError>,
     {
         for value in values {
-            if let Some(budget) = self.budget() {
-                budget.consume(1, out.reborrow())?;
-            }
+            self.charge.consume(1, out.reborrow())?;
             if self.values.len() == self.values.capacity() {
                 self.try_reserve(1, out.reborrow())?;
             }
@@ -325,9 +335,7 @@ impl<T> WorkspaceVec<T> {
     {
         if length > self.values.len() {
             let additional = length - self.values.len();
-            if let Some(budget) = self.budget() {
-                budget.consume(additional, out.reborrow())?;
-            }
+            self.charge.consume(additional, out.reborrow())?;
             self.try_reserve(additional, out.reborrow())?;
         }
         self.values.resize_with(length, make);
@@ -346,9 +354,7 @@ impl<T> WorkspaceVec<T> {
     {
         if length > self.values.len() {
             let additional = length - self.values.len();
-            if let Some(budget) = self.budget() {
-                budget.consume(additional, out.reborrow())?;
-            }
+            self.charge.consume(additional, out.reborrow())?;
             self.try_reserve(additional, out.reborrow())?;
         }
         self.values.resize(length, value);
@@ -364,9 +370,7 @@ impl<T> WorkspaceVec<T> {
         T: Clone,
         E: From<BudgetError>,
     {
-        if let Some(budget) = self.budget() {
-            budget.consume(values.len(), out.reborrow())?;
-        }
+        self.charge.consume(values.len(), out.reborrow())?;
         self.try_reserve(values.len(), out.reborrow())?;
         self.values.extend_from_slice(values);
         Ok(())
@@ -383,6 +387,16 @@ impl<T> WorkspaceVec<T> {
         self.charge.budget()
     }
 
+    pub fn regex_budget<'slot, E>(
+        &self,
+        out: Out<'slot, '_, E>,
+    ) -> OResult<'slot, Option<RegexExecutionBudget>>
+    where
+        E: From<BudgetError>,
+    {
+        self.charge.regex_budget(out)
+    }
+
     /// Abortable heapsort that avoids a standard-library comparison closure, which cannot propagate resource errors outward.
     pub fn sort_by<'slot, E>(
         &mut self,
@@ -392,7 +406,7 @@ impl<T> WorkspaceVec<T> {
     where
         E: From<BudgetError>,
     {
-        let sorter = FallibleSort::new(self.budget(), out.reborrow())?;
+        let sorter = FallibleSort::new(self.charge.try_clone(out.reborrow())?);
         sorter.sort(&mut self.values, compare, out.reborrow())
     }
 }

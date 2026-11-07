@@ -66,7 +66,7 @@ ConfigParser::new(schema).parse(request, environment)
 
 解析成功返回 `ValidatedConfigValue`，明确表示值约束和完整树断言均已通过。调用方可只读借用其中的 `ConfigValue`；只有需要不带验证标记的拥有值时才调用 `into_config_value()`。
 
-`ConfigParseRequest` 包含可读 `Read`、显示名称和 `ConfigParseOptions`。选项由四部分组成：共享 `ResourceLimits`、配置专属 `ConfigLimits`、执行/工作区 `ExecutionLimits` 和词法流 `StreamLimits`。显示名称仅用于诊断元数据，不是配置文本的一部分。
+`ConfigParseRequest` 包含可读 `Read`、显示名称和 `ConfigParseOptions`。选项分别持有 `ExcerptLimits` 和 `RegexOptions`，并配置 `ConfigLimits`、通用执行/工作区 `ExecutionLimits` 和词法流 `StreamLimits`。显示名称仅用于诊断元数据，不是配置文本的一部分。
 
 `ConfigParser::parse_document` 和 `LoadedSchema::read_document` 会保留 parser 的 UTF-8 源缓冲区及语义定位索引。文档直接接管该缓冲区作为源文本，不再复制第二份完整内容。首次编辑前，源文本本身也用于 `DocumentSnapshot` 写入期望值；首次编辑成功时，旧源缓冲区会直接转为计费快照，不再分配第二份文本。写入成功后，期望值更新为当前源文本，并释放独立快照。
 
@@ -78,17 +78,17 @@ ConfigParser::new(schema).parse(request, environment)
 
 `LoadedSchema::read_file` 返回 `ConfigDocument`；只需要原有已校验值结果时使用 `read_file_value`。启用 `std` 后，`LoadedSchema::write_file` 使用文档快照期望值，并同时限制源字节和文件输入字节。普通文件系统不能把按字节比较与路径替换作为一个原子操作，因此本地 adapter 对 `ExactSnapshot` 返回 `AtomicReplaceUnsupported`。新目标使用 `write_file_with_expectation` 和 `MustBeAbsent`；有意覆盖时显式选择 `ReplaceAny`。Unix 通过同目录硬链接原子创建新目标；Windows 使用同卷且不允许覆盖的写穿透移动，两者都不会覆盖并发创建的目标。`ReplaceAny` 使用原子替换；Unix 在提交后同步父目录，若无法确认持久性则返回专门错误。Windows 使用同卷写穿透移动。no_std 调用方为自己的目标实现 `SourceWriter`，并负责提供所选期望值要求的原子语义。
 
-`ConfigValueProcessor::validate` 与 `ConfigValueProcessor::normalize` 接收 `ConfigValidationRequest`，其 `ConfigValidationOptions` 只配置共享 `ResourceLimits`、`ConfigLimits` 和 `ExecutionLimits`，不包含词法流选项。校验与规范化不会读取配置输入或环境 提供器；两者的额度与文本解析分开配置。
+`ConfigValueProcessor::validate` 与 `ConfigValueProcessor::normalize` 接收 `ConfigValidationRequest`，其 `ConfigValidationOptions` 分别配置 `ExcerptLimits`、`RegexOptions`、`ConfigLimits` 和通用 `ExecutionLimits`，不包含词法流选项。校验与规范化不会读取配置输入或环境提供器；两者的额度与文本解析分开配置。
 
 no_std 与 std 构建共用 `TypolOptions` 和 `SchemaLoader::new(TypolOptions)`。`LoadedSchema::read_value` 和 `BoundSchema` 的读取方法接收泛型 `ReadRequest<R>`；reader 实现 lexer 使用的同一 `typol_core::Read` 契约。内存文本可用 `ReadRequest::from_text`，no_std 调用方也可传入 `SliceSource` 或自定义 reader。所有读取都显式接收 `Environment` 提供器。启用 `std` 后，`read_file` 通过 `FileConfigInput` 打开配置文件，`read_io` 通过 `ReadSource` 适配标准 I/O reader；`SchemaLoader::compile_file` 会将文件 Schema 接入同一编译流程。需要访问进程环境时，请创建带所需 `ProcessEnvironmentLimits` 的 `ProcessEnvironment`，再传给读取方法。
 
 启用 `std` 后，同一个 `TypolOptions` 也携带宿主限制。配置文件输入额度通过 `with_file_input_limits` 设置；文件 Schema、来源名称及名称编辑额度分别使用 `with_files`、`with_names` 和 `with_name_edits`。配置解析与绑定额度分别通过 `with_config_limits` 和 `with_binding_limits` 调整。配置策略类型可从 `typol::config` 获取，宿主适配类型可从 `typol::host` 获取。`FileConfigInputLimits` 只控制配置文件与路径字节数，`ProcessEnvironmentLimits` 由 `ProcessEnvironment` 持有，用于限制环境名称和值字节数；Schema 导入额度由 `FileSchemaLimits` 管理，执行额度仍由 Schema/Config 选项管理。`ConfigLimits` 以 `ConfigLimits::default()` 提供有限默认额度，并为每项额度提供唯一的具名链式 `with_max_*` 更新方法；它不公开位置参数构造器或可变 setter，字段保持私有，外部通过只读 getter 查询。配置可传给 `ConfigParseOptions::with_config`。编解码选项也提供具名更新方法。
 
-`ConfigParser::parse` 为本次调用建立 `ExecutionBudget`。需要和外层加载、绑定或编解码流程共用执行余额时，调用 `ConfigParser::parse_with_budget`；传入余额的 limits 必须与请求选项中的执行 limits 完全相同，否则返回内部配置错误。一个调用内部的解析、环境处理、值校验和诊断路径处理共用该余额。
+`ConfigParser::parse` 为本次调用建立通用 `ExecutionBudget`。需要和外层加载、绑定或编解码流程共用非正则执行余额时，调用 `ConfigParser::parse_with_budget`；传入余额的 limits 必须与请求选项中的通用执行 limits 完全相同，否则返回内部配置错误。一次调用内的解析、环境处理、值校验和诊断路径处理共用该通用余额；所有正则检查则共用从 `ConfigParseOptions::regex()` 创建的独立 `RegexExecutionBudget`。
 
 ### 2.2 外来值校验
 
-`ConfigValueProcessor::validate` 接收拥有型 `ConfigValue`，复制并按 Schema 规范化后执行与文本路径相同的完整约束和断言校验。它不接收 `Environment`，因此不读取环境变量。需要沿用调用余额时使用 `ConfigValueProcessor::validate_with_budget`。
+`ConfigValueProcessor::validate` 接收拥有型 `ConfigValue`，复制并按 Schema 规范化后执行与文本路径相同的完整约束和断言校验。它不接收 `Environment`，因此不读取环境变量。需要沿用通用调用余额时使用 `ConfigValueProcessor::validate_with_budget`；正则检查仍使用 `ConfigValidationOptions::regex()` 创建的独立预算。仅规范化的操作不会创建或消耗正则预算。
 
 值规范化会检查每层值形态、字段名、枚举载荷和目标标量；按 Schema 字段顺序重建结构体，补齐 Schema 默认值和无默认值的可选字段，并为输出创建新的拥有树。缺少必填字段、未知或重复字段、无效 map 键/值及错误载荷形态均失败。map 不具有 DSL 层面的顺序语义；外来值路径为了稳定重建会按键排序。
 
@@ -179,12 +179,13 @@ Schema 编译期为授权名称建立规范化槽位；同名授权共享一个�
 
 ## 7. 资源额度和分配边界
 
-配置调用同时受共享快照/正则策略 `ResourceLimits`、配置专属 `ConfigLimits`、`StreamLimits` 和 `ExecutionLimits` 限制：
+配置调用分别使用源码片段、正则、配置、词法流和通用执行策略。`ConfigParseOptions` 与 `ConfigValidationOptions` 独立公开 `ExcerptLimits` 和 `RegexOptions`；复用通用 `ExecutionBudget` 不会跳过正则计量。
 
 | 额度 | 控制范围 |
 | --- | --- |
-| `ResourceLimits::excerpts()` | 源码快照总字节、单行字节、记录数量和上下文行数 |
-| `ResourceLimits::regex()` | 正则编译和匹配使用的 `RegexLimits` |
+| `ExcerptLimits` | 源码快照总字节、单行字节、记录数量和上下文行数 |
+| `RegexOptions::limits()` | 正则结构边界：模式字节/数量、嵌套、指令、字符区间和 scratch 状态 |
+| `RegexOptions::execution()` | 正则步数、单次搜索 NFA 状态数和正则自有工作区；默认值均为 67,108,864 |
 | `ConfigLimits::max_source_bytes` | 单个配置源允许读取的最大字节数 |
 | `ConfigLimits::max_string_bytes` | 解码字符串、字段/变体名、map 键和环境文本的字节上限 |
 | `ConfigLimits::max_value_nodes` | 解析值和外来值规范化期间的值节点上限 |
@@ -199,9 +200,9 @@ Schema 编译期为授权名称建立规范化槽位；同名授权共享一个�
 | `ConfigLimits::max_display_name_bytes` | 诊断显示名称的长度上限 |
 | `StreamLimits::chunk_bytes` | 流式输入窗口大小；`StreamLimits::try_new` 在限制构造时拒绝零值 |
 | `StreamLimits::max_token_bytes` | 单个 token 的源文本长度上限 |
-| `ExecutionLimits` | 本次调用累计执行步数和工作区字节 |
+| `ExecutionLimits` | 本次调用非正则工作的累计步数和工作区字节 |
 
-当前 `ConfigLimits::default()` 为单源 1 MiB、100 条诊断、嵌套深度 128、字符串 256 KiB、值节点 100,000 个、1024 个环境项、8 MiB 环境字节、16 MiB 构造文本和 4096 字节显示名称；默认 `StreamLimits` 为 8192 字节窗口及 1 MiB token。快照与正则策略分别由 `typol-policy` 中的 `ResourceLimits` 和 `RegexLimits` 定义；共享执行额度的默认值由 `ConfigParseOptions::default()` 定义。以上均是可覆盖的运行策略，不属于 DSL 语义。
+当前 `ConfigLimits::default()` 为单源 1 MiB、100 条诊断、嵌套深度 128、字符串 256 KiB、值节点 100,000 个、1024 个环境项、8 MiB 环境字节、16 MiB 构造文本和 4096 字节显示名称；默认 `StreamLimits` 为 8192 字节窗口及 1 MiB token。源码片段默认值来自 `ExcerptLimits`，正则结构默认值来自 `RegexLimits`，正则执行默认值来自 `RegexExecutionLimits`，通用执行默认值由 `ConfigParseOptions::default()` 提供。以上均是可覆盖的运行策略，不属于 DSL 语义。
 
 `ConfigLimits` 的九项额度均可通过对应的具名更新方法单独覆盖：
 
@@ -229,7 +230,7 @@ let limits = ConfigLimits::default()
 
 未显式覆盖的额度保留 `ConfigLimits::default()` 中的值；额度为零时仍按各自原有语义处理。
 
-默认 `ExcerptLimits` 为 65,536 字节、单行 512 字节、128 条记录及每个跨度额外两行上下文。可用 `ResourceLimits::set_excerpts` 覆盖；任一必要容量设为零会关闭源码片段，不会关闭错误诊断。解析期间使用的候选窗口、遮罩范围和最终快照受独立字节额度及会话工作区额度约束；超限或可选分配失败只会降级片段状态。
+默认 `ExcerptLimits` 为 65,536 字节、单行 512 字节、128 条记录及每个跨度额外两行上下文。可在解析或校验选项中直接设置；任一必要容量设为零会关闭源码片段，不会关闭错误诊断。解析期间使用的候选窗口、遮罩范围和最终快照受独立字节额度及通用会话工作区额度约束；超限或可选分配失败只会降级片段状态。
 
 深度按值树层级计算：根值深度为 0，每条父子值边增加一层；可选值的有值载荷和枚举单载荷各增加一层。枚举匿名结构体载荷在载荷结构与其字段之间也计一层，即枚举值深度为 `d` 时，载荷字段从 `d + 2` 开始。空容器按其自身深度检查，不要求存在子项才触发上限检查。恢复扫描按根对象分隔符对应的基准槽位换算分隔符栈上限，避免把绝对分隔符数量直接当作值树深度。
 
@@ -255,7 +256,7 @@ let limits = ConfigLimits::default()
 
 启用 `typol` 的 `config-ir` feature 后，Rust 调用方可通过 `ConfigIr::serialize` 导出 Config IR v1，格式定义见 [Config IR v1 规范](../config-ir/)。默认模式先补齐默认值并执行完整 Schema 校验；需要跳过约束校验时，必须显式选择 `AsProvided`。类型和值遍历、秘密标记、确定性排序、输出/排序工作区/嵌套深度额度及序列化错误分类由 facade 实现；输出超限与排序工作区超限使用独立错误类别。默认嵌套深度为 128，可由 `ConfigIrOptions` 降低，序列化器不会允许提高该上限。`typol-cli` 在配置读取阶段已完成校验，因此以 `AsProvided` 编码已校验值，避免重复校验；它只选择环境模式、加载值、调用该 API 并将完整结果写入 stdout。其 `config fmt` 命令则读取 `ConfigDocument`、格式化保留源文并原子替换同一文件；`--check` 只比较格式化结果，不写文件。它不会把环境解析结果或补齐的默认值序列化回源文。命令用法见 [CLI 使用指南](../../guides/cli/)。IR 中 `secret: true` 仍保留对应真实值，调用方须按敏感数据处理。
 
-`TypedSchema::deserialize` 先复用同一个配置解析和完整校验，再将拥有型值转换为 Rust 类型。`typol` 编解码器和上下文 serde 对外来/序列化值调用 `ConfigValueProcessor::validate_with_budget`，再编码或解码；绑定、配置解析和转换可共享外层执行余额。没有 Schema 上下文的普通 serde trait 调用不属于此配置校验保证。
+`TypedSchema::deserialize` 先复用同一个配置解析和完整校验，再将拥有型值转换为 Rust 类型。`typol` 编解码器和上下文 serde 对外来/序列化值调用 `ConfigValueProcessor::validate_with_budget`，再编码或解码；绑定、配置解析和转换可共享外层通用执行余额，每次校验仍根据自身选项创建正则预算。没有 Schema 上下文的普通 serde trait 调用不属于此配置校验保证。
 
 ## 10. 验收与维护
 
@@ -265,6 +266,6 @@ let limits = ConfigLimits::default()
 
 ## 11. 有界诊断源码快照
 
-`ResourceLimits::excerpts()` 提供独立的 `ExcerptLimits`：总存储字节、单行字节、记录数量和每个跨度的上下文行数。零额度关闭片段。每个跨度从起始行选取有限窗口，超出窗口的跨行范围标记为截断；上下文行总数在起始行前后各分配一半。候选窗口、脱敏范围缓冲和最终快照各自受字节上限约束，全部计入调用工作区；可选申请失败不改变业务诊断。片段通过 `SourceExcerptSet` 拥有，状态为 `Complete`、`Truncated` 或 `Unavailable`；缺失记录不得回退读取或显示原文。列使用 Unicode 标量计数，制表符占一列，CRLF 不进入行内容；裁剪只能落在 UTF-8 边界，裁剪行带省略标记。
+`ExcerptLimits` 独立限制总存储字节、单行字节、记录数量和每个跨度的上下文行数。零额度关闭片段。每个跨度从起始行选取有限窗口，超出窗口的跨行范围标记为截断；上下文行总数在起始行前后各分配一半。候选窗口、脱敏范围缓冲和最终快照各自受字节上限约束，全部计入通用调用工作区；可选申请失败不改变业务诊断。片段通过 `SourceExcerptSet` 拥有，状态为 `Complete`、`Truncated` 或 `Unavailable`；缺失记录不得回退读取或显示原文。列使用 Unicode 标量计数，制表符占一列，CRLF 不进入行内容；裁剪只能落在 UTF-8 边界，裁剪行带省略标记。
 
 配置流式输入维护受限候选和近期行窗口，诊断引用的窗口行固定至调用结束；延迟诊断只能使用仍保留的候选。解析结束只发布实际诊断及其上下文引用的安全行。已知秘密值和秘密 map 的源范围进入遮罩，未完成秘密值遮罩延伸到输入末尾。恢复跳过或尚未绑定的内容保守隐藏；范围记录失败则片段不可用。环境原值不进入行窗口。Schema 只在源目录存活时提取诊断及编译记录引用行，默认值范围统一遮罩（包括尚未解析秘密别名的默认值）；缺少完整 AST 时省略该源片段。错误及编译产物不保存完整源，所有新增类型的 `Debug` 仅显示状态及数量。

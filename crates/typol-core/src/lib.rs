@@ -21,7 +21,10 @@ use core::{error::Error, fmt};
 
 pub use opeo;
 
-pub use budget::{BudgetError, ExecutionBudget, ExecutionLimits, FilledTerminalSlot, TerminalSlot};
+pub use budget::{
+    BudgetError, ExecutionBudget, ExecutionLimits, FilledTerminalSlot, RegexExecutionBudget,
+    TerminalSlot,
+};
 pub use diagnostic::{
     Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticContextDescriptor, DiagnosticLabel,
     DiagnosticMessage, DiagnosticMessageKey, DiagnosticTranslationError,

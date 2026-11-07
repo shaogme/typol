@@ -250,7 +250,10 @@ fn attached_location(diagnostics: &ErrorDiagnostics, span: SourceSpan) -> Option
 
 fn location_failure(error: BudgetError) -> LocationFailure {
     match error {
-        BudgetError::Resource => LocationFailure::ResourceLimitExceeded,
+        BudgetError::Resource
+        | BudgetError::RegexSteps
+        | BudgetError::RegexSearchSteps
+        | BudgetError::RegexWorkspace => LocationFailure::ResourceLimitExceeded,
         BudgetError::Allocation => LocationFailure::AllocationFailure,
         BudgetError::CapacityExceeded => LocationFailure::CapacityExceeded,
         BudgetError::InvariantViolation(_) => LocationFailure::InternalError,

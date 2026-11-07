@@ -13,7 +13,7 @@ use crate::{
 use alloc::{format, string::String, vec::Vec};
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{BudgetError, Diagnostic, ExecutionLimits, PathSegment, SliceSource, ValueKind};
-use typol_policy::ResourceLimits;
+use typol_policy::{ExcerptLimits, RegexOptions};
 use typol_semantic::{SchemaAccessError, TypeKind};
 use typol_test_support::*;
 
@@ -339,7 +339,8 @@ fn anonymous_variants_keep_source_preorder_then_default_declaration_order() -> T
 
 fn session_options(limits: &ConfigLimits) -> ConfigParseOptions {
     ConfigParseOptions::new(
-        ResourceLimits::default(),
+        ExcerptLimits::default(),
+        RegexOptions::default(),
         *limits,
         ExecutionLimits::new(1_000_000_000, 268_435_456),
     )

@@ -382,7 +382,7 @@ impl ScalarValidator {
                                 RegexMatchOptions {
                                     value: Some(text),
                                     limits: resources.regex_limits,
-                                    budget: Some(&resources.budget),
+                                    budget: &resources.regex_execution,
                                 },
                                 regex_out,
                             )

@@ -146,11 +146,11 @@ fn format_schema(source: &str) -> Result<String, Box<dyn Error>> {
 
 ### 3.3 一次调用共享预算
 
-编译会话对源加载、解析、语义 pass、记录生成、索引、位置映射和冻结共用 `ExecutionBudget`。除语言资源上限外还有执行步骤与工作区字节额度；超限和分配失败是不同错误。阶段标签记录当前正在进行的工作阶段，以支持宿主观测。
+源加载、解析、非正则语义工作、记录生成、索引、位置映射和冻结共用通用 `ExecutionBudget`。Schema 编译器另从 `SchemaCompileOptions::regex()` 创建 `RegexExecutionBudget`，供模式编译及 Schema 默认值中的正则检查共享。两种预算分别报告步数、工作区和失败来源。`SchemaCompileUsage.steps`、`workspace_bytes`、`peak_workspace_bytes` 和 `failure` 继续表示通用额度；对应的 `regex_*` 字段报告正则用量及失败。资源超限与分配失败是不同错误；阶段标签记录当前通用编译阶段，以支持宿主观测。
 
 冻结索引按声明槽位保存字段和变体的排序名称查找表，索引分配与比较均消耗同一预算。索引只保存槽位，记录中的字段和变体仍保持 Schema 声明顺序；只读变体查询可使用预算化二分查找。
 
-默认策略由不同职责的类型分别提供：`SchemaLimits` 限制单源 1 MiB、Schema 总源 8 MiB 和 64 个源；其 `SyntaxLimits` 限制嵌套深度 128、100 条诊断、解码字符串 256 KiB 和每文件 100,000 个 AST 节点；其 `StreamLimits` 默认使用 8192 字节窗口和 1 MiB token 上限；Schema 默认值验证使用 100,000 个值节点。正则的模式字节、数量、嵌套、指令、字符范围、搜索步数和 scratch 状态额度由 `RegexLimits` 提供。源码诊断快照的默认值为 65,536 字节、单行 512 字节、128 条记录及每跨度额外两行上下文。数值是运行策略，可以由调用方覆盖，不属于 DSL 语义；默认值分别定义在 `typol-schema::SchemaLimits`、`typol-syntax::SyntaxLimits`、`typol-syntax::StreamLimits`、`typol-policy::ValueLimits`、`RegexLimits` 和 `ExcerptLimits`。
+默认策略由不同职责的类型分别提供：`SchemaLimits` 限制单源 1 MiB、Schema 总源 8 MiB 和 64 个源；其 `SyntaxLimits` 限制嵌套深度 128、100 条诊断、解码字符串 256 KiB 和每文件 100,000 个 AST 节点；其 `StreamLimits` 默认使用 8192 字节窗口和 1 MiB token 上限；Schema 默认值验证使用 100,000 个值节点。`RegexLimits` 提供模式字节、数量、嵌套、指令、字符区间和 scratch 状态的结构上限。`RegexExecutionLimits` 独立限制累计正则步数、单次搜索 NFA 状态数和正则工作区，默认分别为 67,108,864。Schema 通用执行额度仍单独配置。源码诊断快照的默认值为 65,536 字节、单行 512 字节、128 条记录及每跨度额外两行上下文。数值是运行策略，可以由调用方覆盖，不属于 DSL 语义；默认值分别定义在 `typol-schema::SchemaLimits`、`typol-syntax::SyntaxLimits`、`typol-syntax::StreamLimits`、`typol-policy::ValueLimits`、`RegexLimits`、`RegexExecutionLimits` 和 `ExcerptLimits`。
 
 ## 4. 静态编译流水线
 
@@ -194,7 +194,7 @@ loader 对根源和每个新导入源调用 `SchemaParser`。解析错误保留�
 
 默认值编译以字段已解析类型为上下文，将语法节点构造成 `ConfigValue`：检查目标标量形态、数值范围和有限浮点，递归构造数组/map/对象/枚举载荷。整数类型默认值只接受整数 token，浮点类型默认值只接受浮点 token，与配置字面值一致；`f32` 浮点 token 直接解析到 binary32，避免先转 `f64` 再舍入。`{...}` 根据目标是结构体还是 map 判型；对象字段未知/重复或必填字段缺失均使 Schema 无效。
 
-对象默认值可以省略由字段默认值或 option 规则可补足的字段。字段默认值依赖以显式帧解析，并检测依赖环；即使 Schema 类型本身合法递归，也不会放过省略字段造成的默认值无限展开。编译后的嵌套默认值会复制到适用字段。Schema 默认值不会访问环境。默认值构造阶段递归检查目标形状以及局部、别名继承、字段和活动枚举载荷约束，并保留错误恢复、元素位置和标签。校验成功时会产生 `SchemaDefaultValidation` 结果；完整 Schema 编译将该结果随同同批默认值传入 `Builder::freeze_with_validated_defaults`，从而省去冻结时的重复遍历。普通 `Builder::freeze` 不接受校验结果，仍对任意直接构造的输入完整校验。值节点、深度、字符串、正则执行和规则工作均沿用 Schema 编译配置的 `ValueLimits`、`RegexLimits` 与共享 `ExecutionBudget`。违反约束会阻止产生校验结果，不会冻结出无效默认值。跨字段 `@assert` 依赖完整配置实例和 `root` 上下文，仍在配置值构造后执行。
+对象默认值可以省略由字段默认值或 option 规则可补足的字段。字段默认值依赖以显式帧解析，并检测依赖环；即使 Schema 类型本身合法递归，也不会放过省略字段造成的默认值无限展开。编译后的嵌套默认值会复制到适用字段。Schema 默认值不会访问环境。默认值构造阶段递归检查目标形状以及局部、别名继承、字段和活动枚举载荷约束，并保留错误恢复、元素位置和标签。校验成功时会产生 `SchemaDefaultValidation` 结果；完整 Schema 编译将该结果随同同批默认值传入 `Builder::freeze_with_validated_defaults`，从而省去冻结时的重复遍历。普通 `Builder::freeze` 不接受校验结果，仍对任意直接构造的输入完整校验。值节点、深度和字符串使用 Schema 编译配置的 `ValueLimits` 与通用 `ExecutionBudget`；正则检查与模式编译共用本次编译的 `RegexExecutionBudget`。违反约束会阻止产生校验结果，不会冻结出无效默认值。跨字段 `@assert` 依赖完整配置实例和 `root` 上下文，仍在配置值构造后执行。
 
 ### 4.7 记录冻结与返回
 

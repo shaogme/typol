@@ -3,7 +3,7 @@ mod character_class;
 use core::{fmt, mem::replace};
 
 use opeo::{OResult, Out, ResultOutExt};
-use typol_core::{ChargedVec, ExecutionBudget};
+use typol_core::{ChargedVec, RegexExecutionBudget};
 use typol_policy::RegexLimits;
 
 use crate::{
@@ -73,7 +73,7 @@ pub(crate) struct Parser<'a> {
     max_ranges: usize,
     range_count: usize,
     nodes: ChargedVec<Node>,
-    execution: &'a ExecutionBudget,
+    execution: &'a RegexExecutionBudget,
 }
 
 impl Ast {
@@ -109,7 +109,7 @@ impl Parser<'_> {
     pub(crate) fn parse_with_range_limit<'slot>(
         pattern: &str,
         limits: &RegexLimits,
-        execution: &ExecutionBudget,
+        execution: &RegexExecutionBudget,
         max_ranges: usize,
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, Ast> {
@@ -119,7 +119,7 @@ impl Parser<'_> {
             )));
         }
 
-        let nodes = ChargedVec::new(Some(execution), out.reborrow())?;
+        let nodes = ChargedVec::new_regex(Some(execution), out.reborrow())?;
         let mut parser = Parser {
             pattern,
             position: 0,
@@ -280,7 +280,7 @@ impl Parser<'_> {
                     ))
                     .store_err_into(out.reborrow())?;
                 let start = self.node(first_child, out.reborrow())?.span.start();
-                let empty = ChargedVec::new(Some(self.execution), out.reborrow())?;
+                let empty = ChargedVec::new_regex(Some(self.execution), out.reborrow())?;
                 let owned = replace(children, empty);
                 self.push_node(
                     NodeKind::Concatenation(owned),
@@ -786,11 +786,11 @@ impl EscapeValue {
 
 impl GroupFrames {
     fn new<'slot>(
-        execution: &ExecutionBudget,
+        execution: &RegexExecutionBudget,
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, Self> {
         Ok(Self {
-            values: ChargedVec::new(Some(execution), out.reborrow())?,
+            values: ChargedVec::new_regex(Some(execution), out.reborrow())?,
         })
     }
 
@@ -839,13 +839,13 @@ impl GroupFrames {
 impl GroupFrame {
     fn new<'slot>(
         start: usize,
-        execution: &ExecutionBudget,
+        execution: &RegexExecutionBudget,
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, Self> {
         Ok(Self {
             start,
-            children: ChargedVec::new(Some(execution), out.reborrow())?,
-            branches: ChargedVec::new(Some(execution), out.reborrow())?,
+            children: ChargedVec::new_regex(Some(execution), out.reborrow())?,
+            branches: ChargedVec::new_regex(Some(execution), out.reborrow())?,
             after_bar: false,
         })
     }
@@ -857,8 +857,8 @@ mod tests {
     use core::fmt::{Debug, Display, Formatter, Result as FmtResult};
     use opeo::{ErrSlot, OResult, Out};
 
-    use typol_core::{BudgetError, ExecutionBudget, ExecutionLimits};
-    use typol_policy::ResourceLimits;
+    use typol_core::{BudgetError, RegexExecutionBudget};
+    use typol_policy::RegexLimits;
 
     use crate::{
         RegexCompileError, RegexResource, RegexSyntaxErrorKind,
@@ -940,11 +940,11 @@ mod tests {
 
     fn parse(
         pattern: &str,
-        limits: &ResourceLimits,
+        limits: &RegexLimits,
         errors: &mut ParseErrors,
     ) -> Attempt<Ast, RegexCompileError> {
         let execution = match attempt(&mut errors.budget, |out| {
-            ExecutionBudget::new(ExecutionLimits::new(67_108_864, 67_108_864), out)
+            RegexExecutionBudget::new(67_108_864, 67_108_864, 67_108_864, out)
         }) {
             Attempt::Success(execution) => execution,
             Attempt::Failure(error) => {
@@ -964,7 +964,7 @@ mod tests {
 
     fn parse_success(
         pattern: &str,
-        limits: &ResourceLimits,
+        limits: &RegexLimits,
         errors: &mut ParseErrors,
     ) -> Result<Ast, TestFailure> {
         match parse(pattern, limits, errors) {
@@ -1004,7 +1004,7 @@ mod tests {
         kind: RegexSyntaxErrorKind,
         span: (usize, usize),
     ) -> Result<(), TestFailure> {
-        match parse(pattern, &ResourceLimits::default(), errors) {
+        match parse(pattern, &RegexLimits::default(), errors) {
             Attempt::Failure(RegexCompileError::Syntax(error)) => {
                 check_eq(error.kind(), kind, "syntax error kind does not match")?;
                 check_eq(
@@ -1029,7 +1029,7 @@ mod tests {
     #[test]
     fn parses_empty_expressions_groups_and_alternation() -> Result<(), TestFailure> {
         let mut errors = ParseErrors::new();
-        let empty = parse_success("", &ResourceLimits::default(), &mut errors)?;
+        let empty = parse_success("", &RegexLimits::default(), &mut errors)?;
         check(
             matches!(
                 &node(&empty, empty.root(), &mut errors)?.kind,
@@ -1038,7 +1038,7 @@ mod tests {
             "empty pattern should produce an empty node",
         )?;
 
-        let grouped = parse_success("()", &ResourceLimits::default(), &mut errors)?;
+        let grouped = parse_success("()", &RegexLimits::default(), &mut errors)?;
         check(
             matches!(
                 &node(&grouped, grouped.root(), &mut errors)?.kind,
@@ -1047,7 +1047,7 @@ mod tests {
             "empty group should produce a group node",
         )?;
 
-        let alternatives = parse_success("a|bc", &ResourceLimits::default(), &mut errors)?;
+        let alternatives = parse_success("a|bc", &RegexLimits::default(), &mut errors)?;
         let NodeKind::Alternation(branches) =
             &node(&alternatives, alternatives.root(), &mut errors)?.kind
         else {
@@ -1110,7 +1110,7 @@ mod tests {
         for pattern in patterns {
             check(
                 matches!(
-                    parse(pattern, &ResourceLimits::default(), &mut errors),
+                    parse(pattern, &RegexLimits::default(), &mut errors),
                     Attempt::Success(_)
                 ),
                 &format!("pattern should be valid: {pattern:?}"),
@@ -1124,7 +1124,7 @@ mod tests {
         let mut errors = ParseErrors::new();
         let ast = parse_success(
             "^a*b+c?d{2}e{2,}f{1,3}$",
-            &ResourceLimits::default(),
+            &RegexLimits::default(),
             &mut errors,
         )?;
         let repetitions: Vec<_> = ast
@@ -1180,7 +1180,7 @@ mod tests {
         let mut errors = ParseErrors::new();
         let ast = parse_success(
             r"\n\r\t\.\-\d\D\w\W\s\S.[^a-cb-d]",
-            &ResourceLimits::default(),
+            &RegexLimits::default(),
             &mut errors,
         )?;
         let classes: Vec<_> = all_classes(&ast).collect();
@@ -1248,7 +1248,7 @@ mod tests {
         pattern.push('-');
         pattern.push('\u{E000}');
         pattern.push(']');
-        let ast = parse_success(&pattern, &ResourceLimits::default(), &mut errors)?;
+        let ast = parse_success(&pattern, &RegexLimits::default(), &mut errors)?;
         let class = require(all_classes(&ast).next(), "expected a character class")?;
         check_eq(
             class.ranges(),
@@ -1423,14 +1423,14 @@ mod tests {
     #[test]
     fn checks_pattern_nesting_and_character_range_limits() -> Result<(), TestFailure> {
         let mut errors = ParseErrors::new();
-        let mut limits = ResourceLimits::default();
+        let mut limits = RegexLimits::default();
         limits.set_max_regex_pattern_bytes(1);
         assert_resource(
             parse("ab", &limits, &mut errors),
             RegexResource::PatternBytes,
         )?;
 
-        let mut at_limit = ResourceLimits::default();
+        let mut at_limit = RegexLimits::default();
         at_limit.set_max_regex_nesting_depth(64);
         let nested = format!("{}a{}", "(".repeat(64), ")".repeat(64));
         check(
@@ -1439,18 +1439,18 @@ mod tests {
         )?;
         let too_deep = format!("{}a{}", "(".repeat(65), ")".repeat(65));
         assert_resource(
-            parse(&too_deep, &ResourceLimits::default(), &mut errors),
+            parse(&too_deep, &RegexLimits::default(), &mut errors),
             RegexResource::NestingDepth,
         )?;
 
-        let mut no_ranges = ResourceLimits::default();
+        let mut no_ranges = RegexLimits::default();
         no_ranges.set_max_regex_ranges_per_pattern(0);
         assert_resource(
             parse("[a]", &no_ranges, &mut errors),
             RegexResource::CharacterRangeCount,
         )?;
 
-        let mut one_range = ResourceLimits::default();
+        let mut one_range = RegexLimits::default();
         one_range.set_max_regex_ranges_per_pattern(1);
         check(
             matches!(
@@ -1460,7 +1460,7 @@ mod tests {
             "a single merged range should be accepted",
         )?;
 
-        let mut two_ranges = ResourceLimits::default();
+        let mut two_ranges = RegexLimits::default();
         two_ranges.set_max_regex_ranges_per_pattern(2);
         check(
             matches!(

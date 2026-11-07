@@ -194,9 +194,15 @@ impl SourceLoader {
             Ok(loaded) => loaded,
             Err(caught) => return Err(BudgetDiagnostics::make(caught.take(), root_span)),
         };
-        let session = match budget_errors
-            .try_call(|out| SchemaCompileContext::new(*limits, &execution, out))
-        {
+        let session = match budget_errors.try_call(|out| {
+            SchemaCompileContext::new(
+                *limits,
+                *budget.regex_options(),
+                &execution,
+                budget.regex_execution(),
+                out,
+            )
+        }) {
             Ok(session) => session,
             Err(caught) => return Err(BudgetDiagnostics::make(caught.take(), root_span)),
         };

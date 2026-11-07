@@ -129,7 +129,10 @@ impl DisplayError {
 impl From<BudgetError> for DisplayError {
     fn from(error: BudgetError) -> Self {
         match error {
-            BudgetError::Resource => Self::ResourceLimitExceeded,
+            BudgetError::Resource
+            | BudgetError::RegexSteps
+            | BudgetError::RegexSearchSteps
+            | BudgetError::RegexWorkspace => Self::ResourceLimitExceeded,
             BudgetError::Allocation => Self::AllocationFailed,
             BudgetError::CapacityExceeded => Self::CapacityExceeded,
             BudgetError::InvariantViolation(context) => {

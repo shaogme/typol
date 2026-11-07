@@ -1,9 +1,9 @@
 #[path = "support/clippy.rs"]
 mod clippy;
 
-use typol_core::{BudgetError, ExecutionBudget, ExecutionLimits};
+use typol_core::{BudgetError, ExecutionLimits, RegexExecutionBudget};
 use typol_opeo_test_support::TestSlot;
-use typol_policy::ResourceLimits;
+use typol_policy::RegexLimits;
 use typol_regex::{
     Regex, RegexCompileError, RegexCompiler, RegexMatchError, RegexResource, RegexScratch,
     RegexScratchError, RegexSyntaxErrorKind,
@@ -30,11 +30,12 @@ struct RegexErrors {
     compile: TestSlot<RegexCompileError>,
     scratch: TestSlot<RegexScratchError>,
     matching: TestSlot<RegexMatchError>,
+    active_budget: Option<RegexExecutionBudget>,
 }
 
-fn compilation_budget(errors: &mut RegexErrors) -> Option<ExecutionBudget> {
+fn compilation_budget(errors: &mut RegexErrors) -> Option<RegexExecutionBudget> {
     clippy::Clippy::succeed_opeo(
-        clippy::Clippy::execution_budget(
+        clippy::Clippy::regex_execution_budget(
             &mut errors.budget,
             ExecutionLimits::new(67_108_864, 67_108_864),
         ),
@@ -49,14 +50,15 @@ impl RegexErrors {
             compile: TestSlot::default(),
             scratch: TestSlot::default(),
             matching: TestSlot::default(),
+            active_budget: None,
         }
     }
 
     fn compile(
         &mut self,
         pattern: &str,
-        limits: &ResourceLimits,
-        execution: &ExecutionBudget,
+        limits: &RegexLimits,
+        execution: &RegexExecutionBudget,
     ) -> clippy::Attempt<Regex, RegexCompileError> {
         clippy::Clippy::attempt(&mut self.compile, |out| {
             RegexCompiler::compile(pattern, limits, execution, out)
@@ -66,21 +68,28 @@ impl RegexErrors {
     fn scratch(
         &mut self,
         regex: &Regex,
-        limits: &ResourceLimits,
+        limits: &RegexLimits,
     ) -> clippy::Attempt<RegexScratch, RegexScratchError> {
-        clippy::Clippy::attempt(&mut self.scratch, |out| {
-            RegexScratch::new(regex, limits, out)
-        })
+        let Some(budget) = compilation_budget(self) else {
+            return clippy::Attempt::Failure(RegexScratchError::AllocationFailed);
+        };
+        let result = clippy::Clippy::attempt(&mut self.scratch, |out| {
+            RegexScratch::new(regex, limits, &budget, out)
+        });
+        if result.is_success() {
+            self.active_budget = Some(budget);
+        }
+        result
     }
 
     fn scratch_budgeted(
         &mut self,
         regex: &Regex,
-        limits: &ResourceLimits,
-        budget: Option<&ExecutionBudget>,
+        limits: &RegexLimits,
+        budget: &RegexExecutionBudget,
     ) -> clippy::Attempt<RegexScratch, RegexScratchError> {
         clippy::Clippy::attempt(&mut self.scratch, |out| {
-            RegexScratch::new_budgeted(regex, limits, budget, out)
+            RegexScratch::new(regex, limits, budget, out)
         })
     }
 
@@ -89,10 +98,12 @@ impl RegexErrors {
         regex: &Regex,
         input: &str,
         scratch: &mut RegexScratch,
-        max_steps: usize,
     ) -> clippy::Attempt<bool, RegexMatchError> {
+        let Some(budget) = self.active_budget.as_ref() else {
+            return clippy::Attempt::Failure(RegexMatchError::CapacityExceeded);
+        };
         clippy::Clippy::attempt(&mut self.matching, |out| {
-            regex.is_match(input, scratch, max_steps, out)
+            regex.is_match(input, scratch, budget, out)
         })
     }
 
@@ -101,18 +112,18 @@ impl RegexErrors {
         regex: &Regex,
         input: &str,
         scratch: &mut RegexScratch,
-        limits: (usize, &ExecutionBudget),
+        budget: &RegexExecutionBudget,
     ) -> clippy::Attempt<bool, RegexMatchError> {
         clippy::Clippy::attempt(&mut self.matching, |out| {
-            regex.is_match_budgeted(input, scratch, limits, out)
+            regex.is_match(input, scratch, budget, out)
         })
     }
 }
 
 fn compile_pattern(
     pattern: &str,
-    limits: &ResourceLimits,
-    compilation: &ExecutionBudget,
+    limits: &RegexLimits,
+    compilation: &RegexExecutionBudget,
     errors: &mut RegexErrors,
 ) -> Option<Regex> {
     clippy::Clippy::succeed_opeo(
@@ -125,7 +136,7 @@ fn assert_search(errors: &mut RegexErrors, pattern: &str, input: &str, expected:
     let Some(compilation) = compilation_budget(errors) else {
         return;
     };
-    let limits = ResourceLimits::default();
+    let limits = RegexLimits::default();
     let Some(regex) = compile_pattern(pattern, &limits, &compilation, errors) else {
         return;
     };
@@ -136,7 +147,7 @@ fn assert_search(errors: &mut RegexErrors, pattern: &str, input: &str, expected:
         return;
     };
     assert_eq!(
-        errors.is_match(&regex, input, &mut scratch, limits.max_regex_search_steps(),),
+        errors.is_match(&regex, input, &mut scratch),
         clippy::Attempt::Success(expected),
         "pattern {pattern:?}, input {input:?}"
     );
@@ -276,7 +287,7 @@ fn reports_resource_failures_without_echoing_pattern_or_input() {
     let Some(compilation) = compilation_budget(&mut errors) else {
         return;
     };
-    let mut limits = ResourceLimits::default();
+    let mut limits = RegexLimits::default();
     limits.set_max_regex_pattern_bytes(1);
     let compile_result = errors.compile("sensitive", &limits, &compilation);
     assert!(
@@ -296,17 +307,26 @@ fn reports_resource_failures_without_echoing_pattern_or_input() {
     };
     assert!(!format!("{compile_error:?}").contains("sensitive"));
 
-    let limits = ResourceLimits::default();
+    let limits = RegexLimits::default();
     let Some(regex) = compile_pattern("^secret$", &limits, &compilation, &mut errors) else {
         return;
     };
-    let Some(mut scratch) = clippy::Clippy::succeed_opeo(
-        errors.scratch(&regex, &limits),
+    let zero_search = clippy::Clippy::attempt(&mut errors.budget, |out| {
+        RegexExecutionBudget::new(67_108_864, 0, 67_108_864, out)
+    });
+    let Some(zero_search) =
+        clippy::Clippy::succeed_opeo(zero_search, "zero-search budget should be created")
+    else {
+        return;
+    };
+    let Some(mut zero_scratch) = clippy::Clippy::succeed_opeo(
+        errors.scratch_budgeted(&regex, &limits, &zero_search),
         "matcher workspace should be created",
     ) else {
         return;
     };
-    let match_result = errors.is_match(&regex, "private-input", &mut scratch, 0);
+    let match_result =
+        errors.is_match_budgeted(&regex, "private-input", &mut zero_scratch, &zero_search);
     assert!(
         matches!(
             &match_result,
@@ -332,7 +352,7 @@ fn enforces_compile_scratch_and_search_boundaries() {
     let Some(compilation) = compilation_budget(&mut errors) else {
         return;
     };
-    let mut limits = ResourceLimits::default();
+    let mut limits = RegexLimits::default();
     limits.set_max_regex_pattern_bytes(2);
     assert!(matches!(
         errors.compile("é", &limits, &compilation),
@@ -346,7 +366,7 @@ fn enforces_compile_scratch_and_search_boundaries() {
         ))
     ));
 
-    let mut limits = ResourceLimits::default();
+    let mut limits = RegexLimits::default();
     limits.set_max_regex_nesting_depth(64);
     let at_depth_limit = format!("{}a{}", "(".repeat(64), ")".repeat(64));
     assert!(matches!(
@@ -361,7 +381,7 @@ fn enforces_compile_scratch_and_search_boundaries() {
         ))
     ));
 
-    let mut limits = ResourceLimits::default();
+    let mut limits = RegexLimits::default();
     limits.set_max_regex_instructions_per_pattern(2);
     limits.set_max_regex_ranges_per_pattern(1);
     let Some(regex) = compile_pattern("a", &limits, &compilation, &mut errors) else {
@@ -386,13 +406,13 @@ fn enforces_compile_scratch_and_search_boundaries() {
         ))
     ));
 
-    let limits = ResourceLimits::default();
+    let limits = RegexLimits::default();
     let Some(regex) = compile_pattern("a", &limits, &compilation, &mut errors) else {
         return;
     };
     let mut exact_scratch_limit = limits;
     exact_scratch_limit.set_max_regex_scratch_states(2);
-    let Some(mut scratch) = clippy::Clippy::succeed_opeo(
+    let Some(_scratch) = clippy::Clippy::succeed_opeo(
         errors.scratch(&regex, &exact_scratch_limit),
         "boundary scratch capacity should be accepted",
     ) else {
@@ -406,24 +426,51 @@ fn enforces_compile_scratch_and_search_boundaries() {
         ))
     ));
 
+    let search_three = clippy::Clippy::succeed_opeo(
+        clippy::Clippy::attempt(&mut errors.budget, |out| {
+            RegexExecutionBudget::new(67_108_864, 3, 67_108_864, out)
+        }),
+        "three-step search budget should be created",
+    );
+    let Some(search_three) = search_three else {
+        return;
+    };
+    let Some(mut scratch_three) = clippy::Clippy::succeed_opeo(
+        errors.scratch_budgeted(&regex, &limits, &search_three),
+        "scratch should be created for a three-step search",
+    ) else {
+        return;
+    };
     assert_eq!(
-        errors.is_match(&regex, "a", &mut scratch, 3),
+        errors.is_match_budgeted(&regex, "a", &mut scratch_three, &search_three),
         clippy::Attempt::Success(true)
     );
     assert_eq!(
-        errors.is_match(&regex, "b", &mut scratch, 2),
+        errors.is_match_budgeted(&regex, "b", &mut scratch_three, &search_three),
         clippy::Attempt::Success(false)
     );
-    assert_eq!(
-        errors.is_match(&regex, "a", &mut scratch, 3),
-        clippy::Attempt::Success(true)
+
+    let search_two = clippy::Clippy::succeed_opeo(
+        clippy::Clippy::attempt(&mut errors.budget, |out| {
+            RegexExecutionBudget::new(67_108_864, 2, 67_108_864, out)
+        }),
+        "two-step search budget should be created",
     );
-    assert!(matches!(
-        errors.is_match(&regex, "a", &mut scratch, 2),
+    let Some(search_two) = search_two else {
+        return;
+    };
+    let Some(mut scratch_two) = clippy::Clippy::succeed_opeo(
+        errors.scratch_budgeted(&regex, &limits, &search_two),
+        "scratch should be created for a two-step search",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        errors.is_match_budgeted(&regex, "a", &mut scratch_two, &search_two),
         clippy::Attempt::Failure(RegexMatchError::ResourceLimitExceeded(
             RegexResource::SearchSteps
         ))
-    ));
+    );
 }
 
 #[test]
@@ -432,7 +479,7 @@ fn reuses_scratch_across_regexes_and_rejects_insufficient_capacity() {
     let Some(compilation) = compilation_budget(&mut errors) else {
         return;
     };
-    let limits = ResourceLimits::default();
+    let limits = RegexLimits::default();
     let Some(small) = compile_pattern("a", &limits, &compilation, &mut errors) else {
         return;
     };
@@ -447,15 +494,15 @@ fn reuses_scratch_across_regexes_and_rejects_insufficient_capacity() {
     };
 
     assert_eq!(
-        errors.is_match(&small, "cat", &mut scratch, 100),
+        errors.is_match(&small, "cat", &mut scratch),
         clippy::Attempt::Success(true)
     );
     assert_eq!(
-        errors.is_match(&large, "aaa", &mut scratch, 100),
+        errors.is_match(&large, "aaa", &mut scratch),
         clippy::Attempt::Success(true)
     );
     assert_eq!(
-        errors.is_match(&small, "dog", &mut scratch, 100),
+        errors.is_match(&small, "dog", &mut scratch),
         clippy::Attempt::Success(false)
     );
 
@@ -466,7 +513,7 @@ fn reuses_scratch_across_regexes_and_rejects_insufficient_capacity() {
         return;
     };
     assert!(matches!(
-        errors.is_match(&large, "aaa", &mut small_scratch, 100),
+        errors.is_match(&large, "aaa", &mut small_scratch),
         clippy::Attempt::Failure(RegexMatchError::ResourceLimitExceeded(
             RegexResource::ScratchStateCount
         ))
@@ -479,7 +526,7 @@ fn syntax_errors_keep_only_kind_and_pattern_span() {
     let Some(compilation) = compilation_budget(&mut errors) else {
         return;
     };
-    let result = errors.compile("classified\\q", &ResourceLimits::default(), &compilation);
+    let result = errors.compile("classified\\q", &RegexLimits::default(), &compilation);
     assert!(
         matches!(
             &result,
@@ -527,7 +574,7 @@ fn rejects_syntax_outside_the_schema_grammar() {
     for pattern in unsupported {
         assert!(
             matches!(
-                errors.compile(pattern, &ResourceLimits::default(), &compilation),
+                errors.compile(pattern, &RegexLimits::default(), &compilation),
                 clippy::Attempt::Failure(RegexCompileError::Syntax(_))
             ),
             "out-of-spec or invalid syntax must be rejected at compile time: {pattern:?}"
@@ -536,94 +583,79 @@ fn rejects_syntax_outside_the_schema_grammar() {
 }
 
 #[test]
-fn shared_budget_keeps_balance_across_searches_and_single_search_limit() {
+fn regex_budget_separates_cumulative_steps_and_single_search_limit() {
     let mut errors = RegexErrors::new();
     let Some(compilation) = compilation_budget(&mut errors) else {
         return;
     };
-    let limits = ResourceLimits::default();
+    let limits = RegexLimits::default();
     let Some(regex) = compile_pattern("^x$", &limits, &compilation, &mut errors) else {
         return;
     };
     let Some(generous) = clippy::Clippy::succeed_opeo(
-        clippy::Clippy::execution_budget(
+        clippy::Clippy::regex_execution_budget(
             &mut errors.budget,
             ExecutionLimits::new(100_000, 1_048_576),
         ),
-        "loose search budget should be created",
+        "loose Regex budget should be created",
     ) else {
         return;
     };
     let Some(mut scratch) = clippy::Clippy::succeed_opeo(
-        errors.scratch_budgeted(&regex, &limits, Some(&generous)),
+        errors.scratch_budgeted(&regex, &limits, &generous),
         "scratch space should be created with a loose budget",
     ) else {
         return;
     };
-    let setup_steps = generous.steps();
     assert_eq!(
-        errors.is_match_budgeted(
-            &regex,
-            "x",
-            &mut scratch,
-            (limits.max_regex_search_steps(), &generous)
-        ),
+        errors.is_match_budgeted(&regex, "x", &mut scratch, &generous),
         clippy::Attempt::Success(true)
     );
-    let search_steps = generous.steps() - setup_steps;
-    assert!(search_steps > 0);
+    let single_search_work = generous.steps();
+    assert!(single_search_work > 0);
+
     let Some(shared) = clippy::Clippy::succeed_opeo(
-        clippy::Clippy::execution_budget(
+        clippy::Clippy::regex_execution_budget(
             &mut errors.budget,
-            ExecutionLimits::new(setup_steps + search_steps, 1_048_576),
+            ExecutionLimits::new(single_search_work, 1_048_576),
         ),
-        "shared search budget should be created",
+        "shared Regex budget should be created",
     ) else {
         return;
     };
     let Some(mut scratch) = clippy::Clippy::succeed_opeo(
-        errors.scratch_budgeted(&regex, &limits, Some(&shared)),
+        errors.scratch_budgeted(&regex, &limits, &shared),
         "scratch space should be created with a shared budget",
     ) else {
         return;
     };
     assert_eq!(
-        errors.is_match_budgeted(
-            &regex,
-            "x",
-            &mut scratch,
-            (limits.max_regex_search_steps(), &shared)
-        ),
+        errors.is_match_budgeted(&regex, "x", &mut scratch, &shared),
         clippy::Attempt::Success(true)
     );
     assert_eq!(
-        errors.is_match_budgeted(
-            &regex,
-            "x",
-            &mut scratch,
-            (limits.max_regex_search_steps(), &shared)
-        ),
+        errors.is_match_budgeted(&regex, "x", &mut scratch, &shared),
         clippy::Attempt::Failure(RegexMatchError::ResourceLimitExceeded(
-            RegexResource::SearchSteps
+            RegexResource::ExecutionSteps
         ))
     );
-    let Some(generous) = clippy::Clippy::succeed_opeo(
-        clippy::Clippy::execution_budget(
-            &mut errors.budget,
-            ExecutionLimits::new(100_000, 1_048_576),
-        ),
-        "reset search budget should be created",
-    ) else {
+
+    let zero_search = clippy::Clippy::attempt(&mut errors.budget, |out| {
+        RegexExecutionBudget::new(100_000, 0, 1_048_576, out)
+    });
+    let Some(zero_search) =
+        clippy::Clippy::succeed_opeo(zero_search, "zero-search budget should be created")
+    else {
         return;
     };
     let Some(mut scratch) = clippy::Clippy::succeed_opeo(
-        errors.scratch_budgeted(&regex, &limits, Some(&generous)),
-        "scratch space should be created with a reset budget",
+        errors.scratch_budgeted(&regex, &limits, &zero_search),
+        "scratch space should be created with a zero-search budget",
     ) else {
         return;
     };
     assert_eq!(
-        errors.is_match_budgeted(&regex, "x", &mut scratch, (0, &generous)),
+        errors.is_match_budgeted(&regex, "x", &mut scratch, &zero_search),
         clippy::Attempt::Failure(RegexMatchError::ResourceLimitExceeded(
             RegexResource::SearchSteps
         ))

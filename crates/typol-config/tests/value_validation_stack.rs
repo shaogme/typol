@@ -4,7 +4,7 @@ use typol_config::{
     ConfigValueProcessor,
 };
 use typol_core::{AllocationError, ConfigValue, DiagnosticCode, ValueError};
-use typol_policy::ResourceLimits;
+use typol_policy::ExcerptLimits;
 use typol_schema::{SchemaCompileOptions, SchemaLimits, SchemaSource};
 use typol_test_support::ConfigTestSupport as Support;
 use typol_test_support::*;
@@ -81,7 +81,8 @@ fn deep_dynamic_trees_use_an_explicit_stack_and_cleanup_on_failure() -> TestResu
             .test_value()?;
             let defaults = ConfigValidationOptions::default();
             let options = ConfigValidationOptions::new(
-                ResourceLimits::default(),
+                ExcerptLimits::default(),
+                *defaults.regex(),
                 config_limits,
                 *defaults.execution(),
             );
@@ -104,7 +105,8 @@ fn deep_dynamic_trees_use_an_explicit_stack_and_cleanup_on_failure() -> TestResu
 
             config_limits = config_limits.with_max_nesting_depth(depth);
             let options = ConfigValidationOptions::new(
-                ResourceLimits::default(),
+                ExcerptLimits::default(),
+                *defaults.regex(),
                 config_limits,
                 *defaults.execution(),
             );

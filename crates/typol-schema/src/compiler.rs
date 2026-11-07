@@ -1,5 +1,6 @@
 use opeo::{ErrSlot, OResult, Out};
-use typol_core::{BudgetError, ExecutionBudget, Read, SourceReadError};
+use typol_core::{BudgetError, ExecutionBudget, Read, RegexExecutionBudget, SourceReadError};
+use typol_policy::{RegexLimits, RegexOptions};
 use typol_semantic::CompiledSchema;
 
 use crate::{
@@ -26,6 +27,10 @@ pub struct SchemaCompileUsage {
     pub workspace_bytes: usize,
     pub last_stage: SchemaCompileStage,
     pub failure: Option<BudgetError>,
+    pub regex_steps: usize,
+    pub regex_workspace_bytes: usize,
+    pub regex_peak_workspace_bytes: usize,
+    pub regex_failure: Option<BudgetError>,
 }
 
 struct NoImports;
@@ -43,26 +48,40 @@ impl SchemaResolver for NoImports {
 /// Cloning shares the existing session only; it does not allocate or replenish its budget.
 pub struct SchemaCompileContext {
     resources: SchemaLimits,
+    regex: RegexOptions,
     execution: ExecutionBudget,
+    regex_execution: RegexExecutionBudget,
 }
 
 impl SchemaCompileContext {
     pub(crate) fn new<'slot, E>(
         resources: SchemaLimits,
+        regex: RegexOptions,
         execution: &ExecutionBudget,
+        regex_execution: &RegexExecutionBudget,
         mut out: Out<'slot, '_, E>,
     ) -> OResult<'slot, Self>
     where
         E: From<BudgetError>,
     {
+        let execution = execution.try_clone(out.reborrow())?;
+        let regex_execution = regex_execution.try_clone(out.reborrow())?;
         Ok(Self {
             resources,
-            execution: execution.try_clone(out.reborrow())?,
+            regex,
+            execution,
+            regex_execution,
         })
     }
 
     pub fn try_clone<'slot>(&self, mut out: Out<'slot, '_, BudgetError>) -> OResult<'slot, Self> {
-        let context = Self::new(self.resources, &self.execution, out.reborrow())?;
+        let context = Self::new(
+            self.resources,
+            self.regex,
+            &self.execution,
+            &self.regex_execution,
+            out.reborrow(),
+        )?;
         Ok(context)
     }
 
@@ -74,8 +93,21 @@ impl SchemaCompileContext {
         &self.execution
     }
 
+    pub const fn regex(&self) -> &RegexOptions {
+        &self.regex
+    }
+
+    pub const fn regex_limits(&self) -> &RegexLimits {
+        self.regex.limits()
+    }
+
+    pub const fn regex_execution(&self) -> &RegexExecutionBudget {
+        &self.regex_execution
+    }
+
     pub fn same_session(&self, other: &Self) -> bool {
         self.execution.same_call(&other.execution)
+            && self.regex_execution.same_call(&other.regex_execution)
     }
 
     pub fn set_stage(&self, stage: SchemaCompileStage) {
@@ -98,6 +130,10 @@ impl SchemaCompileContext {
                 _ => SchemaCompileStage::Initialization,
             },
             failure: self.execution.failure(),
+            regex_steps: self.regex_execution.steps(),
+            regex_workspace_bytes: self.regex_execution.workspace_bytes(),
+            regex_peak_workspace_bytes: self.regex_execution.peak_workspace_bytes(),
+            regex_failure: self.regex_execution.failure(),
         }
     }
 }
@@ -121,7 +157,27 @@ impl SchemaCompiler {
                 return Err(out.fail(SchemaCompileErrors::from(caught.take())));
             }
         };
-        let context = SchemaCompileContext::new(*options.limits(), &execution, out.reborrow())?;
+        let regex_execution = match budget_errors.try_call(|budget_out| {
+            let limits = options.regex().execution();
+            RegexExecutionBudget::new(
+                limits.max_steps(),
+                limits.max_search_steps(),
+                limits.max_workspace_bytes(),
+                budget_out,
+            )
+        }) {
+            Ok(execution) => execution,
+            Err(caught) => {
+                return Err(out.fail(SchemaCompileErrors::regex_budget_failure(caught.take())));
+            }
+        };
+        let context = SchemaCompileContext::new(
+            *options.limits(),
+            *options.regex(),
+            &execution,
+            &regex_execution,
+            out.reborrow(),
+        )?;
         Ok(Self { context })
     }
 

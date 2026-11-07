@@ -249,7 +249,8 @@ fn public_serde_validation_cannot_reset_conversion_balance() -> TestResult {
     let validation = defaults.validation();
     let options = WriteOptions::new(defaults.max_output_bytes())
         .with_validation(ConfigValidationOptions::new(
-            *validation.resources(),
+            *validation.excerpts(),
+            *validation.regex(),
             *validation.config(),
             ExecutionLimits::new(
                 call.execution().steps(),

@@ -12,6 +12,7 @@ use typol_test_support::*;
 use typol_core::{
     DiagnosticCode, ExecutionBudget, ExecutionLimits, SliceSource, SourceId, ValueKind,
 };
+use typol_policy::{RegexExecutionLimits, RegexLimits, RegexOptions};
 use typol_schema::{
     LocationFailure, LocationStatus, ResolverError, SchemaCompileErrors, SchemaCompileOptions,
     SchemaLimits, SchemaResolveRequest, SchemaResolver, SchemaSource,
@@ -132,6 +133,20 @@ impl MemoryResolver {
     ) -> schema_support::TestOpeoOutcome<CompiledSchema, SchemaCompileErrors> {
         schema_support::SchemaCompileTestSupport::run(
             SchemaCompileOptions::new(*limits),
+            SchemaSource::from_str(root_identity.as_bytes(), root_text),
+            self,
+            None,
+        )
+    }
+
+    fn compile_with_options(
+        &mut self,
+        root_identity: &str,
+        root_text: &str,
+        options: SchemaCompileOptions,
+    ) -> schema_support::TestOpeoOutcome<CompiledSchema, SchemaCompileErrors> {
+        schema_support::SchemaCompileTestSupport::run(
+            options,
             SchemaSource::from_str(root_identity.as_bytes(), root_text),
             self,
             None,
@@ -661,12 +676,19 @@ fn regex_resources_are_aggregated_across_imported_sources() -> TestResult {
     resolver.add("child.tschem", "child.tschem", child);
     assert_compiles(&mut resolver, "root.tschem", root, &SchemaLimits::default()).test_value()?;
 
-    let mut limits = SchemaLimits::default();
-    limits.set_max_regex_count(1);
+    let mut regex_limits = RegexLimits::default();
+    regex_limits.set_max_regex_count(1);
     let mut limited_resolver = MemoryResolver::new();
     limited_resolver.add("child.tschem", "child.tschem", child);
     let errors = limited_resolver
-        .compile("root.tschem", root, &limits)
+        .compile_with_options(
+            "root.tschem",
+            root,
+            SchemaCompileOptions::new(SchemaLimits::default()).with_regex(RegexOptions::new(
+                regex_limits,
+                RegexExecutionLimits::default(),
+            )),
+        )
         .test_error()?;
     test_verify_eq!(
         diagnostic_codes(&errors),
@@ -1331,11 +1353,19 @@ fn diagnostic_terminal_stays_last_with_its_actual_cross_pass_trigger_span() -> T
 
 #[test]
 fn resource_terminal_stays_after_later_semantic_error_and_stops_import_requests() -> TestResult {
-    let mut limits = SchemaLimits::default();
-    limits.set_max_regex_count(0);
+    let mut regex_limits = RegexLimits::default();
+    regex_limits.set_max_regex_count(0);
     let source = r#"entry struct Root { early: string @regex("x"), later: Missing }"#;
+    let limits = SchemaLimits::default();
     let errors = MemoryResolver::new()
-        .compile("root", source, &limits)
+        .compile_with_options(
+            "root",
+            source,
+            SchemaCompileOptions::new(SchemaLimits::default()).with_regex(RegexOptions::new(
+                regex_limits,
+                RegexExecutionLimits::default(),
+            )),
+        )
         .test_error()?;
     test_verify_eq!(diagnostic_codes(&errors), [7, 1]);
     let ordinary = errors

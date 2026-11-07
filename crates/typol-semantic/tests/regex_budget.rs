@@ -2,8 +2,8 @@ use core::{
     fmt::{Debug, Formatter, Result as FmtResult},
     mem::size_of,
 };
-use typol_core::{BudgetError, ExecutionBudget, ExecutionLimits};
-use typol_policy::ResourceLimits;
+use typol_core::{BudgetError, RegexExecutionBudget};
+use typol_policy::RegexLimits;
 use typol_regex::{RegexCompileError, RegexCompiler, RegexResource, RegexScratchError};
 use typol_semantic::{RegexExecutionError, RegexExecutor, RegexMatchOptions, opeo::ErrSlot};
 
@@ -69,20 +69,11 @@ fn executor_rebinds_scratch_instead_of_reusing_another_calls_free_capacity() -> 
     let mut compile_errors = ErrSlot::<RegexCompileError>::new();
     let mut execution_errors = ErrSlot::<RegexExecutionError>::new();
     let compilation = budget_errors
-        .call(|out| ExecutionBudget::new(ExecutionLimits::new(67_108_864, 67_108_864), out))?;
-    let limits = ResourceLimits::default();
+        .call(|out| RegexExecutionBudget::new(67_108_864, 67_108_864, 67_108_864, out))?;
+    let limits = RegexLimits::default();
     let regex =
         compile_errors.call(|out| RegexCompiler::compile("^x$", &limits, &compilation, out))?;
     let mut executor = RegexExecutor::new();
-    check_eq!(
-        execution_errors.call(|out| executor.is_match(&regex, Some("x"), &limits, out)),
-        Ok(true)
-    );
-    let initial_budget = budget_errors
-        .call(|out| ExecutionBudget::new(ExecutionLimits::new(1_000, 1_048_576), out))?;
-    let initial = initial_budget.workspace_bytes();
-    let small = budget_errors
-        .call(|out| ExecutionBudget::new(ExecutionLimits::new(1_000, initial), out))?;
     check_eq!(
         execution_errors.call(|out| {
             executor.is_match_budgeted(
@@ -90,17 +81,35 @@ fn executor_rebinds_scratch_instead_of_reusing_another_calls_free_capacity() -> 
                 RegexMatchOptions {
                     value: Some("x"),
                     limits: &limits,
-                    budget: Some(&small),
+                    budget: &compilation,
+                },
+                out,
+            )
+        }),
+        Ok(true)
+    );
+    let initial_budget =
+        budget_errors.call(|out| RegexExecutionBudget::new(1_000, 1_000, 1_048_576, out))?;
+    let initial = initial_budget.workspace_bytes();
+    let small = budget_errors.call(|out| RegexExecutionBudget::new(1_000, 1_000, initial, out))?;
+    check_eq!(
+        execution_errors.call(|out| {
+            executor.is_match_budgeted(
+                &regex,
+                RegexMatchOptions {
+                    value: Some("x"),
+                    limits: &limits,
+                    budget: &small,
                 },
                 out,
             )
         }),
         Err(RegexExecutionError::Scratch(
-            RegexScratchError::ResourceLimitExceeded(RegexResource::ScratchStateCount)
+            RegexScratchError::ResourceLimitExceeded(RegexResource::WorkspaceBytes)
         ))
     );
-    let first = budget_errors
-        .call(|out| ExecutionBudget::new(ExecutionLimits::new(1_000, 1_048_576), out))?;
+    let first =
+        budget_errors.call(|out| RegexExecutionBudget::new(1_000, 1_000, 1_048_576, out))?;
     check_eq!(
         execution_errors.call(|out| {
             executor.is_match_budgeted(
@@ -108,7 +117,7 @@ fn executor_rebinds_scratch_instead_of_reusing_another_calls_free_capacity() -> 
                 RegexMatchOptions {
                     value: Some("x"),
                     limits: &limits,
-                    budget: Some(&first),
+                    budget: &first,
                 },
                 out,
             )
@@ -116,8 +125,8 @@ fn executor_rebinds_scratch_instead_of_reusing_another_calls_free_capacity() -> 
         Ok(true)
     );
     check!(first.workspace_bytes() > initial);
-    let second = budget_errors
-        .call(|out| ExecutionBudget::new(ExecutionLimits::new(1_000, 1_048_576), out))?;
+    let second =
+        budget_errors.call(|out| RegexExecutionBudget::new(1_000, 1_000, 1_048_576, out))?;
     check_eq!(
         execution_errors.call(|out| {
             executor.is_match_budgeted(
@@ -125,7 +134,7 @@ fn executor_rebinds_scratch_instead_of_reusing_another_calls_free_capacity() -> 
                 RegexMatchOptions {
                     value: Some("x"),
                     limits: &limits,
-                    budget: Some(&second),
+                    budget: &second,
                 },
                 out,
             )
@@ -145,8 +154,8 @@ fn executor_grows_scratch_and_keeps_the_old_cache_when_growth_fails() -> TestRes
     let mut compile_errors = ErrSlot::<RegexCompileError>::new();
     let mut execution_errors = ErrSlot::<RegexExecutionError>::new();
     let compilation = budget_errors
-        .call(|out| ExecutionBudget::new(ExecutionLimits::new(67_108_864, 67_108_864), out))?;
-    let limits = ResourceLimits::default();
+        .call(|out| RegexExecutionBudget::new(67_108_864, 67_108_864, 67_108_864, out))?;
+    let limits = RegexLimits::default();
     let small =
         compile_errors.call(|out| RegexCompiler::compile("^x$", &limits, &compilation, out))?;
     let large =
@@ -156,11 +165,11 @@ fn executor_grows_scratch_and_keeps_the_old_cache_when_growth_fails() -> TestRes
     let small_capacity = small.scratch_state_count();
     let bytes_per_state = 3 * size_of::<usize>() + 2 * size_of::<bool>();
     let baseline = budget_errors
-        .call(|out| ExecutionBudget::new(ExecutionLimits::new(1_000_000, 1_048_576), out))?
+        .call(|out| RegexExecutionBudget::new(1_000_000, 1_000_000, 1_048_576, out))?
         .workspace_bytes();
     let cached_limit = baseline + small_capacity * bytes_per_state;
     let constrained = budget_errors
-        .call(|out| ExecutionBudget::new(ExecutionLimits::new(1_000_000, cached_limit), out))?;
+        .call(|out| RegexExecutionBudget::new(1_000_000, 1_000_000, cached_limit, out))?;
     let mut executor = RegexExecutor::new();
     check_eq!(
         execution_errors.call(|out| {
@@ -169,7 +178,7 @@ fn executor_grows_scratch_and_keeps_the_old_cache_when_growth_fails() -> TestRes
                 RegexMatchOptions {
                     value: Some("x"),
                     limits: &limits,
-                    budget: Some(&constrained),
+                    budget: &constrained,
                 },
                 out,
             )
@@ -185,13 +194,13 @@ fn executor_grows_scratch_and_keeps_the_old_cache_when_growth_fails() -> TestRes
                 RegexMatchOptions {
                     value: Some("xxxx"),
                     limits: &limits,
-                    budget: Some(&constrained),
+                    budget: &constrained,
                 },
                 out,
             )
         }),
         Err(RegexExecutionError::Scratch(
-            RegexScratchError::ResourceLimitExceeded(RegexResource::ScratchStateCount)
+            RegexScratchError::ResourceLimitExceeded(RegexResource::WorkspaceBytes)
         ))
     );
     check_eq!(constrained.workspace_bytes(), cached_bytes);
@@ -206,7 +215,7 @@ fn executor_grows_scratch_and_keeps_the_old_cache_when_growth_fails() -> TestRes
                 RegexMatchOptions {
                     value: None,
                     limits: &lowered_limits,
-                    budget: Some(&constrained),
+                    budget: &constrained,
                 },
                 out,
             )
@@ -224,14 +233,14 @@ fn empty_value_releases_scratch_when_the_budget_changes_without_allocating_again
     let mut compile_errors = ErrSlot::<RegexCompileError>::new();
     let mut execution_errors = ErrSlot::<RegexExecutionError>::new();
     let compilation = budget_errors
-        .call(|out| ExecutionBudget::new(ExecutionLimits::new(67_108_864, 67_108_864), out))?;
-    let limits = ResourceLimits::default();
+        .call(|out| RegexExecutionBudget::new(67_108_864, 67_108_864, 67_108_864, out))?;
+    let limits = RegexLimits::default();
     let regex =
         compile_errors.call(|out| RegexCompiler::compile("^x$", &limits, &compilation, out))?;
-    let first = budget_errors
-        .call(|out| ExecutionBudget::new(ExecutionLimits::new(1_000, 1_048_576), out))?;
-    let second = budget_errors
-        .call(|out| ExecutionBudget::new(ExecutionLimits::new(1_000, 1_048_576), out))?;
+    let first =
+        budget_errors.call(|out| RegexExecutionBudget::new(1_000, 1_000, 1_048_576, out))?;
+    let second =
+        budget_errors.call(|out| RegexExecutionBudget::new(1_000, 1_000, 1_048_576, out))?;
     let first_initial = first.workspace_bytes();
     let second_initial = second.workspace_bytes();
     let mut executor = RegexExecutor::new();
@@ -242,7 +251,7 @@ fn empty_value_releases_scratch_when_the_budget_changes_without_allocating_again
                 RegexMatchOptions {
                     value: Some("x"),
                     limits: &limits,
-                    budget: Some(&first),
+                    budget: &first,
                 },
                 out,
             )
@@ -257,7 +266,7 @@ fn empty_value_releases_scratch_when_the_budget_changes_without_allocating_again
                 RegexMatchOptions {
                     value: None,
                     limits: &limits,
-                    budget: Some(&second),
+                    budget: &second,
                 },
                 out,
             )

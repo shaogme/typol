@@ -9,9 +9,9 @@ use std::{
     ptr::null_mut,
     thread,
 };
-use typol_core::{BudgetError, ExecutionBudget, ExecutionLimits};
+use typol_core::{BudgetError, ExecutionLimits, RegexExecutionBudget};
 use typol_opeo_test_support::TestSlot;
-use typol_policy::ResourceLimits;
+use typol_policy::RegexLimits;
 use typol_regex::{Regex, RegexCompileError, RegexCompiler, RegexScratch, RegexScratchError};
 
 #[derive(Clone, Copy, Default)]
@@ -92,11 +92,11 @@ enum Failure {
 }
 
 fn run(
-    budget: &ExecutionBudget,
+    budget: &RegexExecutionBudget,
     compile_errors: &mut TestSlot<RegexCompileError>,
     scratch_errors: &mut TestSlot<RegexScratchError>,
 ) -> clippy::Attempt<Artifacts, Failure> {
-    let limits = ResourceLimits::default();
+    let limits = RegexLimits::default();
     let regex = match clippy::Clippy::attempt(compile_errors, |out| {
         RegexCompiler::compile("(ab|[^a-z]){2,8}", &limits, budget, out)
     })
@@ -106,7 +106,7 @@ fn run(
         clippy::Attempt::Failure(failure) => return clippy::Attempt::Failure(failure),
     };
     clippy::Clippy::attempt(scratch_errors, |out| {
-        RegexScratch::new_budgeted(&regex, &limits, Some(budget), out)
+        RegexScratch::new(&regex, &limits, budget, out)
     })
     .map_success(|scratch| Artifacts { regex, scratch })
     .map_failure(Failure::Scratch)
@@ -128,7 +128,7 @@ fn compilation_allocation_child() {
             }
             for persistent in [false, true] {
                 let Some(budget) = clippy::Clippy::succeed_opeo(
-                    clippy::Clippy::execution_budget(
+                    clippy::Clippy::regex_execution_budget(
                         &mut budget_errors,
                         ExecutionLimits::new(67_108_864, 67_108_864),
                     ),

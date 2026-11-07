@@ -13,7 +13,10 @@ use crate::{
 };
 use core::cmp::Ordering;
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
-use typol_core::{ChargedVec, DiagnosticContext, ExecutionBudget, SourceSpan, diagnostic_context};
+use typol_core::{
+    ChargedVec, DiagnosticContext, ExecutionBudget, RegexExecutionBudget, SourceSpan,
+    diagnostic_context,
+};
 use typol_policy::{RegexLimits, ValueLimits};
 
 static SCHEMA_VALIDATION_INTERNAL: DiagnosticContext = diagnostic_context!(
@@ -28,6 +31,7 @@ pub(crate) struct SchemaValidationRequest<'a, S: SourceLookup + ?Sized> {
     pub(crate) schema: &'a CompiledSchema,
     pub(crate) sources: &'a S,
     pub(crate) execution: &'a ExecutionBudget,
+    pub(crate) regex_execution: &'a RegexExecutionBudget,
     pub(crate) value_limits: &'a ValueLimits,
     pub(crate) regex_limits: &'a RegexLimits,
     pub(crate) validate_defaults: bool,
@@ -66,6 +70,7 @@ impl Validation {
             schema,
             sources,
             execution,
+            regex_execution,
             value_limits,
             regex_limits,
             validate_defaults,
@@ -356,6 +361,7 @@ impl Validation {
                             ty: field.record().ty,
                             constraints: ConstraintList::new(schema, field.record().refinement),
                             execution,
+                            regex_execution,
                             value_limits,
                             regex_limits,
                         },

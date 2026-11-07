@@ -1,6 +1,6 @@
 use crate::{
-    LocationFailure, LocationStatus, ResolverError, SchemaCompileOptions, SchemaCompileUsage,
-    SchemaLimits, SchemaResolveRequest, SchemaResolver, SchemaSource,
+    LocationFailure, LocationStatus, ResolverError, SchemaCompileOptions, SchemaLimits,
+    SchemaResolveRequest, SchemaResolver, SchemaSource,
     allocation_support::{CompileRunErrors, TestOperation},
     annotations::{AnnotationCompilation, AnnotationCompileInput, AnnotationCompiler},
     context::CompileContext,
@@ -26,24 +26,25 @@ use std::{
     thread_local,
 };
 use typol_core::{
-    BudgetError, DiagnosticCode, ExcerptLimits, ExcerptStatus, ExecutionBudget, ExecutionLimits,
-    SliceSource, SourceId, SourceSpan, Span,
+    DiagnosticCode, ExcerptLimits, ExcerptStatus, ExecutionBudget, ExecutionLimits,
+    RegexExecutionBudget, SliceSource, SourceId, SourceSpan, Span,
 };
+use typol_policy::{RegexExecutionLimits, RegexLimits, RegexOptions};
 use typol_regex::{Regex, RegexCompiler};
 use typol_test_support::*;
 
 #[derive(Clone, Copy)]
-struct AllocationState {
-    active: bool,
-    fail_at: Option<usize>,
-    persistent: bool,
-    attempts: usize,
-    live_bytes: isize,
-    peak_bytes: isize,
+pub(crate) struct AllocationState {
+    pub(crate) active: bool,
+    pub(crate) fail_at: Option<usize>,
+    pub(crate) persistent: bool,
+    pub(crate) attempts: usize,
+    pub(crate) live_bytes: isize,
+    pub(crate) peak_bytes: isize,
 }
 
 thread_local! {
-    static STATE: Cell<AllocationState> = const { Cell::new(AllocationState {
+    pub(crate) static STATE: Cell<AllocationState> = const { Cell::new(AllocationState {
         active: false, fail_at: None, persistent: false, attempts: 0, live_bytes: 0, peak_bytes: 0,
     }) };
 }
@@ -110,10 +111,10 @@ unsafe impl GlobalAlloc for CheckedAllocator {
 #[global_allocator]
 static ALLOCATOR: CheckedAllocator = CheckedAllocator;
 
-struct AllocationScope;
+pub(crate) struct AllocationScope;
 
 impl AllocationScope {
-    fn start(fail_at: Option<usize>) -> Self {
+    pub(crate) fn start(fail_at: Option<usize>) -> Self {
         STATE.with(|state| {
             state.set(AllocationState {
                 active: true,
@@ -127,7 +128,7 @@ impl AllocationScope {
         Self
     }
 
-    fn finish(self) -> AllocationState {
+    pub(crate) fn finish(self) -> AllocationState {
         STATE.with(Cell::get)
     }
 }
@@ -170,13 +171,49 @@ fn make_execution(
         .into_test_value()
 }
 
+fn make_regex_execution(
+    operations: &mut TestOperation,
+    limits: RegexExecutionLimits,
+) -> TestResult<RegexExecutionBudget> {
+    operations
+        .budget(|out| {
+            RegexExecutionBudget::new(
+                limits.max_steps(),
+                limits.max_search_steps(),
+                limits.max_workspace_bytes(),
+                out,
+            )
+        })
+        .into_test_value()
+}
+
+fn regex_budget_state_bytes() -> TestResult<usize> {
+    let scope = AllocationScope::start(None);
+    let mut operations = TestOperation::new();
+    let budget = make_regex_execution(&mut operations, RegexExecutionLimits::default())?;
+    let bytes = STATE.with(Cell::get).live_bytes as usize;
+    drop(budget);
+    test_verify_eq!(scope.finish().live_bytes, 0);
+    Ok(bytes)
+}
+
 fn make_context(
     operations: &mut TestOperation,
     limits: SchemaLimits,
+    regex_options: &RegexOptions,
     execution: &ExecutionBudget,
+    regex_execution: &RegexExecutionBudget,
 ) -> TestResult<CompileContext> {
     operations
-        .budget(|out| CompileContext::new(limits, execution, out))
+        .budget(|out| {
+            CompileContext::new(
+                limits,
+                regex_options.limits(),
+                execution,
+                regex_execution,
+                out,
+            )
+        })
         .into_test_value()
 }
 
@@ -194,10 +231,12 @@ fn make_diagnostics(
 fn make_budget(
     operations: &mut TestOperation,
     limits: SchemaLimits,
+    regex_options: &RegexOptions,
     execution: &ExecutionBudget,
+    regex_execution: &RegexExecutionBudget,
 ) -> TestResult<CompileBudget> {
     operations
-        .budget(|out| CompileBudget::new(limits, execution, out))
+        .budget(|out| CompileBudget::new(limits, regex_options, execution, regex_execution, out))
         .into_test_value()
 }
 
@@ -263,14 +302,23 @@ fn iterative_schema_passes_fail_atomically_and_release_all_tracked_storage() -> 
         r#"type Text = string @regex("(ab|[a-z]){2,8}") @length(1, 32); type Alias = Text; struct Row { id: u8 } entry struct Root { value: Alias @env("NAME") = "abab", items: [Row] @unique(by = "id") = [{id: 1}, {id: 2}] } @assert(self.items.len() > 0, "nonempty")"#,
     ] {
         let limits = required_limits();
+        let regex_options = RegexOptions::default();
         let span = source_span(&mut operations, 0, source.len())?;
         let execution = make_execution(
             &mut operations,
             ExecutionLimits::new(67_108_864, 67_108_864),
         )?;
+        let regex_execution =
+            make_regex_execution(&mut operations, RegexExecutionLimits::default())?;
         let mut setup =
             make_diagnostics(&mut operations, limits.max_diagnostics(), span, &execution)?;
-        let mut budget = make_budget(&mut operations, limits, &execution)?;
+        let mut budget = make_budget(
+            &mut operations,
+            limits,
+            &regex_options,
+            &execution,
+            &regex_execution,
+        )?;
         let loaded = SourceLoader::load(
             SchemaSource::from_str(b"root", source),
             &mut EmptyResolver,
@@ -279,7 +327,13 @@ fn iterative_schema_passes_fail_atomically_and_release_all_tracked_storage() -> 
             None,
         )
         .into_test_value()?;
-        let context = make_context(&mut operations, limits, &execution)?;
+        let context = make_context(
+            &mut operations,
+            limits,
+            &regex_options,
+            &execution,
+            &regex_execution,
+        )?;
         let tree = module_tree(&mut operations, &loaded, &context, &mut setup).into_test_value()?;
         let symbols =
             symbol_table(&mut operations, &tree, &context, &mut setup).into_test_value()?;
@@ -708,15 +762,29 @@ fn measure_passes(count: usize) -> TestResult<PassMeasurement> {
         "{modules} enum E {{ V {{ {fields} }}, W(u8) }} entry struct Root {{ {fields} value: E }}"
     );
     let limits = required_limits();
+    let regex_options = RegexOptions::default();
     let execution = make_execution(
         &mut operations,
         ExecutionLimits::new(67_108_864, 67_108_864),
     )?;
-    let context = make_context(&mut operations, limits, &execution)?;
+    let regex_execution = make_regex_execution(&mut operations, RegexExecutionLimits::default())?;
+    let context = make_context(
+        &mut operations,
+        limits,
+        &regex_options,
+        &execution,
+        &regex_execution,
+    )?;
     let span = source_span(&mut operations, 0, source.len())?;
     let mut diagnostics =
         make_diagnostics(&mut operations, limits.max_diagnostics(), span, &execution)?;
-    let mut budget = make_budget(&mut operations, limits, &execution)?;
+    let mut budget = make_budget(
+        &mut operations,
+        limits,
+        &regex_options,
+        &execution,
+        &regex_execution,
+    )?;
     let loaded = SourceLoader::load(
         SchemaSource::from_str(b"root", &source),
         &mut EmptyResolver,
@@ -804,17 +872,32 @@ fn measure_compile_pass(pass: CompilePass, count: usize) -> TestResult<PassMeasu
         )
     };
     let pattern = "(ab|[a-z])".repeat(count);
-    let mut limits = required_limits();
-    limits.set_max_regex_pattern_bytes(pattern.len());
+    let limits = required_limits();
+    let mut regex_limits = RegexLimits::default();
+    regex_limits.set_max_regex_pattern_bytes(pattern.len());
+    let regex_options = RegexOptions::new(regex_limits, RegexExecutionLimits::default());
     let execution = make_execution(
         &mut operations,
         ExecutionLimits::new(67_108_864, 67_108_864),
     )?;
-    let context = make_context(&mut operations, limits, &execution)?;
+    let regex_execution = make_regex_execution(&mut operations, *regex_options.execution())?;
+    let context = make_context(
+        &mut operations,
+        limits,
+        &regex_options,
+        &execution,
+        &regex_execution,
+    )?;
     let span = source_span(&mut operations, 0, source.len())?;
     let mut diagnostics =
         make_diagnostics(&mut operations, limits.max_diagnostics(), span, &execution)?;
-    let mut budget = make_budget(&mut operations, limits, &execution)?;
+    let mut budget = make_budget(
+        &mut operations,
+        limits,
+        &regex_options,
+        &execution,
+        &regex_execution,
+    )?;
     let loaded = SourceLoader::load(
         SchemaSource::from_str(b"root", &source),
         &mut EmptyResolver,
@@ -877,8 +960,9 @@ fn measure_compile_pass(pass: CompilePass, count: usize) -> TestResult<PassMeasu
         None
     };
     let initial = execution.workspace_bytes();
-    let old_peak = execution.peak_workspace_bytes();
     let initial_steps = execution.steps();
+    let initial_regex_workspace = regex_execution.workspace_bytes();
+    let initial_regex_steps = regex_execution.steps();
     let scope = AllocationScope::start(None);
     let output = match pass {
         CompilePass::Types => MeasuredOutput::types(
@@ -928,22 +1012,26 @@ fn measure_compile_pass(pass: CompilePass, count: usize) -> TestResult<PassMeasu
         ),
         CompilePass::Regex => MeasuredOutput::regex(
             operations
-                .regex(|out| RegexCompiler::compile(&pattern, &limits, &execution, out))
+                .regex(|out| {
+                    RegexCompiler::compile(&pattern, regex_options.limits(), &regex_execution, out)
+                })
                 .into_test_value()?,
         ),
     };
-    let steps = execution.steps() - initial_steps;
+    let steps = execution.steps() - initial_steps + regex_execution.steps() - initial_regex_steps;
     let allocated = STATE.with(Cell::get);
     test_verify_eq!(
         allocated.live_bytes as usize,
-        execution.workspace_bytes() - initial
+        execution.workspace_bytes() - initial + regex_execution.workspace_bytes()
+            - initial_regex_workspace
     );
-    test_verify_eq!(
-        execution.peak_workspace_bytes(),
-        old_peak.max(initial + allocated.peak_bytes as usize)
+    test_verify!(
+        allocated.peak_bytes as usize
+            <= execution.peak_workspace_bytes() + regex_execution.peak_workspace_bytes()
     );
     output.release();
     test_verify_eq!(execution.workspace_bytes(), initial);
+    test_verify_eq!(regex_execution.workspace_bytes(), initial_regex_workspace);
     test_verify_eq!(scope.finish().live_bytes, 0);
     test_verify!(!diagnostics.has_diagnostics());
     Ok(PassMeasurement {
@@ -1056,6 +1144,7 @@ fn compilation_pass_payloads_and_work_scale_with_input() -> TestResult {
 }
 
 fn measure_artifact(kind: &str, count: usize) -> TestResult<PassMeasurement> {
+    let regex_state_bytes = regex_budget_state_bytes()?;
     let mut source = String::from("entry struct Root {");
     for index in (0..count).rev() {
         if kind == "labels" {
@@ -1085,8 +1174,14 @@ fn measure_artifact(kind: &str, count: usize) -> TestResult<PassMeasurement> {
     test_verify_eq!(result.is_ok(), kind != "labels");
     let usage = context.usage();
     let allocated = STATE.with(Cell::get);
-    test_verify_eq!(allocated.live_bytes as usize, usage.workspace_bytes);
-    test_verify_eq!(allocated.peak_bytes as usize, usage.peak_workspace_bytes);
+    test_verify_eq!(
+        allocated.live_bytes as usize,
+        usage.workspace_bytes + regex_state_bytes
+    );
+    test_verify_eq!(
+        allocated.peak_bytes as usize,
+        usage.peak_workspace_bytes + regex_state_bytes
+    );
     if let Err(errors) = &result {
         test_verify_eq!(errors.location_status(), LocationStatus::Complete);
         test_verify!(
@@ -1099,7 +1194,7 @@ fn measure_artifact(kind: &str, count: usize) -> TestResult<PassMeasurement> {
     drop(result);
     test_verify_eq!(
         STATE.with(Cell::get).live_bytes as usize,
-        context.usage().workspace_bytes
+        context.usage().workspace_bytes + regex_state_bytes
     );
     drop(context);
     test_verify_eq!(scope.finish().live_bytes, 0);
@@ -1108,6 +1203,12 @@ fn measure_artifact(kind: &str, count: usize) -> TestResult<PassMeasurement> {
         bytes: allocated.live_bytes as usize,
         peak: allocated.peak_bytes as usize,
     })
+}
+
+fn required_limits() -> SchemaLimits {
+    let mut limits = SchemaLimits::default();
+    limits.set_excerpts(ExcerptLimits::new(0, 0, 0, 0));
+    limits
 }
 
 #[cfg(test)]
@@ -1132,6 +1233,7 @@ fn returned_artifacts_and_errors_match_real_live_and_peak_payloads() -> TestResu
 #[cfg(test)]
 #[test]
 fn location_oom_keeps_existing_messages_labels_and_first_terminal_reason() -> TestResult {
+    let regex_state_bytes = regex_budget_state_bytes()?;
     let source = "entry struct Root { duplicate: u8, duplicate: u8 }";
     let run = |fail_at, persistent| {
         let scope = AllocationScope::start(fail_at);
@@ -1154,7 +1256,7 @@ fn location_oom_keeps_existing_messages_labels_and_first_terminal_reason() -> Te
         let usage = context.usage();
         test_verify_eq!(
             STATE.with(Cell::get).live_bytes as usize,
-            usage.workspace_bytes
+            usage.workspace_bytes + regex_state_bytes
         );
         test_verify_eq!(
             errors.diagnostics().first().into_test_value()?.code(),
@@ -1203,7 +1305,10 @@ fn location_oom_keeps_existing_messages_labels_and_first_terminal_reason() -> Te
         } else {
             test_verify_eq!(errors.location_status(), LocationStatus::Complete);
         }
-        test_verify!(STATE.with(Cell::get).peak_bytes as usize <= usage.peak_workspace_bytes);
+        test_verify!(
+            STATE.with(Cell::get).peak_bytes as usize
+                <= usage.peak_workspace_bytes + regex_state_bytes
+        );
         drop(errors);
         drop(context);
         let state = scope.finish();
@@ -1216,160 +1321,4 @@ fn location_oom_keeps_existing_messages_labels_and_first_terminal_reason() -> Te
     }
 
     Ok(())
-}
-
-const ACCEPTANCE_KINDS: [&str; 10] = [
-    "fields",
-    "prefixes",
-    "aliases",
-    "shapes",
-    "annotations",
-    "expressions",
-    "regex",
-    "numbers",
-    "labels",
-    "endpoints",
-];
-
-fn acceptance_source(kind: &str, count: usize) -> String {
-    let mut source = String::new();
-    if kind == "aliases" {
-        source.push_str("type Base = u8;");
-        for index in 0..count {
-            source.push_str(&format!("type Alias_{index:06} = Base;"));
-        }
-    }
-    if kind == "regex" {
-        source.push_str(&format!(
-            "type Text = string @regex(\"{}\");",
-            "(a|b){32}".repeat(count / 32)
-        ));
-    }
-    if kind == "endpoints" {
-        source.push_str(&" // Unicode comment🙂\r\n".repeat(count));
-    }
-    source.push_str("struct Item { values: [u8] = [1, 2, 3, 4] } entry struct Root {");
-    for index in (0..count).rev() {
-        let name = if kind == "labels" {
-            String::from("duplicate")
-        } else if kind == "prefixes" {
-            format!("{}_field_{index:06}", "common_prefix_".repeat(16))
-        } else {
-            format!("field_{index:06}")
-        };
-        let definition = match kind {
-            "aliases" => format!("Alias_{index:06}"),
-            "shapes" => format!("[u8; {}]", index + 1),
-            "annotations" => String::from("u8 @min(0) @max(255)"),
-            "expressions" => String::from("[u8] @all(item > 0 && item < 255, \"range\") = [1]"),
-            "regex" => String::from("Text"),
-            "numbers" => String::from("f64 = 123456789.012345678901234567890123456789"),
-            "fields" | "prefixes" | "endpoints" => String::from("Item = {}"),
-            _ => String::from("u8"),
-        };
-        source.push_str(&format!("{name}: {definition},"));
-    }
-    source.push('}');
-    source
-}
-
-struct AcceptanceMeasurement {
-    usage: SchemaCompileUsage,
-    succeeded: bool,
-}
-
-fn acceptance_measure(
-    source: &str,
-    kind: &str,
-    count: usize,
-    quota: ExecutionLimits,
-) -> TestResult<AcceptanceMeasurement> {
-    let mut limits = required_limits();
-    if kind == "labels" {
-        limits.set_max_diagnostics(count * 2 + 2);
-    }
-    let scope = AllocationScope::start(None);
-    let mut compile_errors = CompileRunErrors::new();
-    let run = CompileRunErrors::run_with_context(
-        SchemaCompileOptions::new(limits).with_execution(quota),
-        SchemaSource::from_str(b"root", source),
-        &mut EmptyResolver,
-        None,
-        &mut compile_errors,
-    )
-    .into_test_value()?;
-    let context = run.context;
-    let result = run.result;
-    let usage = context.usage();
-    let state = STATE.with(Cell::get);
-    test_verify_eq!(
-        state.live_bytes as usize,
-        usage.workspace_bytes,
-        "{kind}/{count}"
-    );
-    test_verify_eq!(
-        state.peak_bytes as usize,
-        usage.peak_workspace_bytes,
-        "{kind}/{count}"
-    );
-    let succeeded = result.is_ok();
-    if let Err(errors) = &result {
-        test_verify!(!errors.diagnostics().is_empty());
-        if usage.failure.is_some() {
-            test_verify_eq!(
-                errors.diagnostics().last().into_test_value()?.code(),
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
-            );
-        }
-    }
-    drop(result);
-    drop(context);
-    test_verify_eq!(scope.finish().live_bytes, 0);
-    Ok(AcceptanceMeasurement { usage, succeeded })
-}
-
-#[cfg(test)]
-#[test]
-fn complete_public_compilation_scales_and_stops_at_exact_shared_limits() -> TestResult {
-    for kind in ACCEPTANCE_KINDS {
-        let mut previous = 0;
-        for count in [128, 256, 512] {
-            let source = acceptance_source(kind, count);
-            let sample = acceptance_measure(
-                &source,
-                kind,
-                count,
-                ExecutionLimits::new(67_108_864, 67_108_864),
-            )
-            .into_test_value()?;
-            test_verify_eq!(sample.succeeded, kind != "labels", "{kind}/{count}");
-            test_verify!(sample.usage.steps > previous);
-            previous = sample.usage.steps;
-            let exact = acceptance_measure(
-                &source,
-                kind,
-                count,
-                ExecutionLimits::new(sample.usage.steps, sample.usage.peak_workspace_bytes),
-            )
-            .into_test_value()?;
-            test_verify_eq!(exact.succeeded, sample.succeeded);
-            test_verify_eq!(exact.usage, sample.usage);
-            for quota in [
-                ExecutionLimits::new(sample.usage.steps - 1, 67_108_864),
-                ExecutionLimits::new(67_108_864, sample.usage.peak_workspace_bytes - 1),
-            ] {
-                let failure = acceptance_measure(&source, kind, count, quota).into_test_value()?;
-                test_verify!(!failure.succeeded);
-                test_verify_eq!(failure.usage.failure, Some(BudgetError::Resource));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn required_limits() -> SchemaLimits {
-    let mut limits = SchemaLimits::default();
-    limits.set_excerpts(ExcerptLimits::new(0, 0, 0, 0));
-    limits
 }

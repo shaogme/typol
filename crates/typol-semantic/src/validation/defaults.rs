@@ -7,8 +7,8 @@ use crate::{
 use core::cell::RefCell;
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 use typol_core::{
-    ChargedVec, ConfigValue, DiagnosticContext, ExecutionBudget, SourceSpan, ValueEntries,
-    ValueKind, ValuePayloadView, ValueView, diagnostic_context,
+    ChargedVec, ConfigValue, DiagnosticContext, ExecutionBudget, RegexExecutionBudget, SourceSpan,
+    ValueEntries, ValueKind, ValuePayloadView, ValueView, diagnostic_context,
 };
 use typol_model::BuiltinType;
 use typol_policy::{RegexLimits, ValueLimits};
@@ -31,6 +31,7 @@ pub(crate) struct DefaultValidationInput<'a> {
     pub(crate) ty: TypeId,
     pub(crate) constraints: ConstraintList<'a>,
     pub(crate) execution: &'a ExecutionBudget,
+    pub(crate) regex_execution: &'a RegexExecutionBudget,
     pub(crate) value_limits: &'a ValueLimits,
     pub(crate) regex_limits: &'a RegexLimits,
 }
@@ -77,6 +78,7 @@ struct AllValidationRequest<'value, 'schema> {
 struct RuleExecution<'a> {
     schema: &'a CompiledSchema,
     execution: &'a ExecutionBudget,
+    regex_execution: &'a RegexExecutionBudget,
     evaluator: Evaluator<'a>,
     regex_limits: &'a RegexLimits,
     regex_executor: RegexExecutor,
@@ -97,6 +99,7 @@ impl DefaultValidation {
             ty,
             constraints,
             execution,
+            regex_execution,
             value_limits,
             regex_limits,
         } = input;
@@ -104,6 +107,7 @@ impl DefaultValidation {
         let mut rules = RuleExecution {
             schema,
             execution,
+            regex_execution,
             evaluator,
             regex_limits,
             regex_executor: RegexExecutor::new(),
@@ -567,14 +571,14 @@ impl RuleExecution<'_> {
             .store_err_into(out.reborrow())?
             .regex();
         let regex_limits = self.regex_limits;
-        let execution = self.execution;
+        let regex_execution = self.regex_execution;
         let result = self.regex_errors.try_call(|regex_out| {
             self.regex_executor.is_match_budgeted(
                 regex,
                 RegexMatchOptions {
                     value: Some(text),
                     limits: regex_limits,
-                    budget: Some(execution),
+                    budget: regex_execution,
                 },
                 regex_out,
             )

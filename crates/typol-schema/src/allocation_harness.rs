@@ -26,6 +26,10 @@ mod allocation_support;
 #[path = "allocation_harness/allocation_tests.rs"]
 mod allocation_tests;
 
+#[cfg(test)]
+#[path = "allocation_harness/acceptance_tests.rs"]
+mod acceptance_tests;
+
 mod test_support;
 
 pub(crate) use annotations::{AnnotationCompileInput, AnnotationCompiler};
@@ -35,7 +39,9 @@ pub(crate) use types::TypeGraphCompiler;
 
 pub use opeo;
 
-pub use compiled::{LocationFailure, LocationStatus, SchemaCompileErrors};
+pub use compiled::{
+    LocationFailure, LocationStatus, SchemaCompileBudgetDomain, SchemaCompileErrors,
+};
 pub use compiler::{SchemaCompileContext, SchemaCompileStage, SchemaCompileUsage, SchemaCompiler};
 pub use resolver::{
     ResolverError, SchemaCompileOptions, SchemaLimits, SchemaResolveRequest, SchemaResolver,

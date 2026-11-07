@@ -7,7 +7,7 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{ConfigValue, DiagnosticCode, ExecutionLimits, SliceSource};
-use typol_policy::ResourceLimits;
+use typol_policy::{ExcerptLimits, RegexOptions};
 use typol_schema::{SchemaCompileOptions, SchemaSource};
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
@@ -40,7 +40,12 @@ fn compile(text: &str) -> TestResult<CompiledSchema> {
 }
 
 fn options(config: ConfigLimits, execution: ExecutionLimits) -> ConfigParseOptions {
-    ConfigParseOptions::new(ResourceLimits::default(), config, execution)
+    ConfigParseOptions::new(
+        ExcerptLimits::default(),
+        RegexOptions::default(),
+        config,
+        execution,
+    )
 }
 
 fn generous_config() -> ConfigLimits {
@@ -86,7 +91,12 @@ fn parse(
 }
 
 fn validation_options(config: ConfigLimits) -> ConfigValidationOptions {
-    ConfigValidationOptions::new(ResourceLimits::default(), config, generous_execution())
+    ConfigValidationOptions::new(
+        ExcerptLimits::default(),
+        RegexOptions::default(),
+        config,
+        generous_execution(),
+    )
 }
 
 fn external_value(schema: &CompiledSchema, source: &str) -> TestResult<ConfigValue> {

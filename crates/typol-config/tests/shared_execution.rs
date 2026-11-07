@@ -8,7 +8,7 @@ use typol_config::{
 use typol_core::{
     BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read, SliceSource,
 };
-use typol_policy::ResourceLimits;
+use typol_policy::{ExcerptLimits, RegexExecutionLimits, RegexOptions};
 use typol_schema::{SchemaCompileOptions, SchemaSource};
 use typol_semantic::{CompiledSchema, SchemaAccessError};
 use typol_test_support::*;
@@ -18,6 +18,13 @@ struct SharedExecutionCase {
     value_type: &'static str,
     value: &'static str,
     expected: bool,
+}
+
+struct RegexBudgetObservation {
+    diagnostic: Option<DiagnosticCode>,
+    steps: usize,
+    peak_workspace: usize,
+    failure: Option<BudgetError>,
 }
 
 struct NoHost;
@@ -66,6 +73,213 @@ fn parse_variant_with_budget(
     });
     let succeeded = parsed.is_ok();
     Ok((succeeded, budget.steps()))
+}
+
+fn observe_regex_parse(
+    schema: &CompiledSchema,
+    config: &str,
+    regex: RegexOptions,
+    execution: ExecutionLimits,
+) -> TestResult<RegexBudgetObservation> {
+    let options = ConfigParseOptions::default()
+        .with_regex(regex)
+        .with_execution(execution);
+    let mut budget_errors = TestSlot::<BudgetError>::default();
+    let budget = test_opeo(&mut budget_errors, |out| {
+        ExecutionBudget::new(*options.execution(), out)
+    })?;
+    let mut input = SliceSource::new(config.as_bytes());
+    let mut parse_errors = TestSlot::default();
+    let parsed = parse_errors.access(|out| {
+        ConfigParser::new(schema).parse_with_budget(
+            ConfigParseRequest::new(&mut input, "regex budget", options),
+            &mut NoHost,
+            &budget,
+            out,
+        )
+    });
+    let diagnostic = parsed.err().and_then(|errors| {
+        errors
+            .diagnostics()
+            .last()
+            .map(|diagnostic| diagnostic.code())
+    });
+    Ok(RegexBudgetObservation {
+        diagnostic,
+        steps: budget.steps(),
+        peak_workspace: budget.peak_workspace_bytes(),
+        failure: budget.failure(),
+    })
+}
+
+fn minimum_regex_steps(
+    schema: &CompiledSchema,
+    config: &str,
+    execution: ExecutionLimits,
+) -> TestResult<usize> {
+    let mut high = 1;
+    loop {
+        let regex = RegexOptions::default()
+            .with_execution(RegexExecutionLimits::default().with_max_steps(high));
+        if observe_regex_parse(schema, config, regex, execution)?
+            .diagnostic
+            .is_none()
+        {
+            break;
+        }
+        high = high
+            .checked_mul(2)
+            .ok_or_else(|| TestFailure::new("Regex step threshold overflowed"))?;
+    }
+    let mut low = 0;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let regex = RegexOptions::default()
+            .with_execution(RegexExecutionLimits::default().with_max_steps(middle));
+        if observe_regex_parse(schema, config, regex, execution)?
+            .diagnostic
+            .is_none()
+        {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    Ok(low)
+}
+
+fn minimum_regex_workspace(
+    schema: &CompiledSchema,
+    config: &str,
+    execution: ExecutionLimits,
+) -> TestResult<usize> {
+    let mut high = 1;
+    loop {
+        let regex = RegexOptions::default()
+            .with_execution(RegexExecutionLimits::default().with_max_workspace_bytes(high));
+        if observe_regex_parse(schema, config, regex, execution)?
+            .diagnostic
+            .is_none()
+        {
+            break;
+        }
+        high = high
+            .checked_mul(2)
+            .ok_or_else(|| TestFailure::new("Regex workspace threshold overflowed"))?;
+    }
+    let mut low = 0;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let regex = RegexOptions::default()
+            .with_execution(RegexExecutionLimits::default().with_max_workspace_bytes(middle));
+        if observe_regex_parse(schema, config, regex, execution)?
+            .diagnostic
+            .is_none()
+        {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    Ok(low)
+}
+
+#[test]
+fn config_regex_steps_and_workspace_are_isolated_from_caller_budget() -> TestResult<()> {
+    let alternatives = (0..240)
+        .map(|index| format!("a{index:03}"))
+        .collect::<Vec<_>>()
+        .join("|");
+    let pattern = format!("^({alternatives})+$");
+    let schema_text = format!("entry struct Root {{ value: string @regex(\"{pattern}\") }}");
+    let schema = Support::compile_schema(
+        SchemaCompileOptions::default(),
+        SchemaSource::from_str(b"regex-budget", &schema_text),
+        None,
+        None,
+    )
+    .test_value()?;
+    let value = "a000".repeat(12);
+    let config = format!("{{ value: \"{value}\" }}");
+    let generous = ExecutionLimits::new(16_777_216, 67_108_864);
+    let baseline = observe_regex_parse(&schema, &config, RegexOptions::default(), generous)?;
+    test_assert!(baseline.diagnostic.is_none())?;
+    test_assert!(baseline.failure.is_none())?;
+
+    let regex_steps = minimum_regex_steps(&schema, &config, generous)?;
+    let regex_workspace = minimum_regex_workspace(&schema, &config, generous)?;
+    test_assert!(baseline.steps < regex_steps)?;
+    test_assert!(baseline.peak_workspace < regex_workspace)?;
+
+    let bounded_execution = ExecutionLimits::new(baseline.steps, baseline.peak_workspace);
+    let bounded =
+        observe_regex_parse(&schema, &config, RegexOptions::default(), bounded_execution)?;
+    test_assert!(bounded.diagnostic.is_none())?;
+    test_assert!(bounded.failure.is_none())?;
+    test_eq!(bounded.steps, baseline.steps)?;
+    test_eq!(bounded.peak_workspace, baseline.peak_workspace)?;
+
+    let regex_limited =
+        RegexOptions::default().with_execution(RegexExecutionLimits::default().with_max_steps(0));
+    let failed = observe_regex_parse(&schema, &config, regex_limited, generous)?;
+    test_eq!(
+        failed.diagnostic,
+        Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+    )?;
+    test_assert!(failed.failure.is_none())?;
+
+    let workspace_limited = RegexOptions::default().with_execution(
+        RegexExecutionLimits::default().with_max_workspace_bytes(regex_workspace - 1),
+    );
+    let failed = observe_regex_parse(&schema, &config, workspace_limited, generous)?;
+    test_eq!(
+        failed.diagnostic,
+        Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+    )?;
+    test_assert!(failed.failure.is_none())?;
+    Ok(())
+}
+
+#[test]
+fn config_regex_steps_accumulate_across_constraints() -> TestResult<()> {
+    let single_schema = Support::compile_schema(
+        SchemaCompileOptions::default(),
+        SchemaSource::from_str(
+            b"single-regex-budget",
+            r#"entry struct Root { first: string @regex("^a+$") }"#,
+        ),
+        None,
+        None,
+    )
+    .test_value()?;
+    let pair_schema = Support::compile_schema(
+        SchemaCompileOptions::default(),
+        SchemaSource::from_str(
+            b"pair-regex-budget",
+            r#"entry struct Root { first: string @regex("^a+$"), second: string @regex("^a+$") }"#,
+        ),
+        None,
+        None,
+    )
+    .test_value()?;
+    let single_config = r#"{ first: "aaaaaaaaaaaaaaaa" }"#;
+    let pair_config = r#"{ first: "aaaaaaaaaaaaaaaa", second: "aaaaaaaaaaaaaaaa" }"#;
+    let execution = ExecutionLimits::new(16_777_216, 67_108_864);
+    let threshold = minimum_regex_steps(&single_schema, single_config, execution)?;
+    let exact = RegexOptions::default()
+        .with_execution(RegexExecutionLimits::default().with_max_steps(threshold));
+    test_assert!(
+        observe_regex_parse(&single_schema, single_config, exact, execution)?
+            .diagnostic
+            .is_none()
+    )?;
+    let exhausted = observe_regex_parse(&pair_schema, pair_config, exact, execution)?;
+    test_eq!(
+        exhausted.diagnostic,
+        Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+    )?;
+    test_assert!(exhausted.failure.is_none())?;
+    Ok(())
 }
 
 #[test]
@@ -152,7 +366,7 @@ fn compiled_enum_index_bounds_lookup_work_and_preserves_budget_errors() -> TestR
 
 #[test]
 fn independent_examples_have_the_same_default_and_explicit_value_results() -> TestResult<()> {
-    let limits = ResourceLimits::default();
+    let limits = ExcerptLimits::default();
     let cases = [
         SharedExecutionCase {
             prefix: "",
@@ -349,7 +563,7 @@ fn independent_examples_have_the_same_default_and_explicit_value_results() -> Te
 
 #[test]
 fn defaults_skip_assertions_and_runtime_uses_the_real_root() -> TestResult<()> {
-    let limits = ResourceLimits::default();
+    let limits = ExcerptLimits::default();
     let source = "struct Child { n: u8 = 1 } @assert(self.n > root.limit, \"child rule\") entry struct Root { child: Child = {}, limit: u8 = 2 }";
     let schema = Support::compile_schema(
         SchemaCompileOptions::default(),
@@ -386,7 +600,7 @@ fn defaults_skip_assertions_and_runtime_uses_the_real_root() -> TestResult<()> {
 
 #[test]
 fn shared_all_keeps_phase_specific_messages_and_element_locations() -> TestResult<()> {
-    let limits = ResourceLimits::default();
+    let limits = ExcerptLimits::default();
     for secret in ["", "@secret"] {
         let source = format!(
             "entry struct Root {{ values: [u8] {secret} @all(item > 0, \"PRIVATE\") = [0, 0] }}"
@@ -504,13 +718,14 @@ fn large_array_and_map_all_constraints_fit_default_execution_budget() -> TestRes
 
 fn config_request<'a>(
     source: (&'a mut impl Read, &'a str),
-    limits: &ResourceLimits,
+    limits: &ExcerptLimits,
 ) -> ConfigParseRequest<'a> {
     ConfigParseRequest::new(
         source.0,
         source.1,
         ConfigParseOptions::new(
             *limits,
+            RegexOptions::default(),
             ConfigLimits::default()
                 .with_max_environment_entries(100_000)
                 .with_max_environment_bytes(268_435_456)

@@ -7,8 +7,8 @@ use typol_core::{Read, SourceReadError};
 use typol_semantic::{CompiledSchema, SchemaFreezeInput};
 
 pub use errors::{
-    LocationFailure, LocationStatus, SchemaCompileContextFailure, SchemaCompileErrors,
-    SchemaInternalCause,
+    LocationFailure, LocationStatus, SchemaCompileBudgetDomain, SchemaCompileContextFailure,
+    SchemaCompileErrors, SchemaInternalCause,
 };
 
 use crate::{
@@ -64,7 +64,9 @@ impl SchemaCompilation {
         let limits = budget.limits();
         let context = CompileContext::new::<SchemaCompileErrors>(
             *limits,
+            budget.regex_limits(),
             budget.execution(),
+            budget.regex_execution(),
             out.reborrow(),
         )?;
         let mut stage_errors = ErrSlot::<BuildFailure>::new();

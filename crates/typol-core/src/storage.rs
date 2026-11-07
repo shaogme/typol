@@ -1,5 +1,6 @@
 use crate::{
-    BudgetError, DiagnosticContext, ExecutionBudget, diagnostic_context, workspace::WorkspaceVec,
+    BudgetError, DiagnosticContext, ExecutionBudget, RegexExecutionBudget, diagnostic_context,
+    workspace::WorkspaceVec,
 };
 use alloc::{
     alloc::{Layout, alloc},
@@ -50,6 +51,20 @@ impl WorkspaceCharge {
     {
         let budget = match budget {
             Some(budget) => Some(budget.try_clone(out.reborrow())?),
+            None => None,
+        };
+        Ok(Self { budget, bytes: 0 })
+    }
+
+    pub(crate) fn new_regex<'slot, E>(
+        budget: Option<&RegexExecutionBudget>,
+        mut out: Out<'slot, '_, E>,
+    ) -> OResult<'slot, Self>
+    where
+        E: From<BudgetError>,
+    {
+        let budget = match budget {
+            Some(budget) => Some(budget.execution().try_clone(out.reborrow())?),
             None => None,
         };
         Ok(Self { budget, bytes: 0 })
@@ -181,7 +196,66 @@ impl WorkspaceCharge {
     }
 
     pub fn budget(&self) -> Option<&ExecutionBudget> {
-        self.budget.as_ref()
+        self.budget.as_ref().filter(|budget| !budget.is_regex())
+    }
+
+    pub(crate) fn regex_budget<'slot, E>(
+        &self,
+        mut out: Out<'slot, '_, E>,
+    ) -> OResult<'slot, Option<RegexExecutionBudget>>
+    where
+        E: From<BudgetError>,
+    {
+        match &self.budget {
+            Some(budget) if budget.is_regex() => Ok(Some(budget.try_regex_clone(out.reborrow())?)),
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn try_clone<'slot, E>(&self, out: Out<'slot, '_, E>) -> OResult<'slot, Self>
+    where
+        E: From<BudgetError>,
+    {
+        let budget = self
+            .budget
+            .as_ref()
+            .map(|budget| budget.try_clone(out))
+            .transpose()?;
+        Ok(Self { budget, bytes: 0 })
+    }
+
+    pub(crate) fn try_clone_optional(&self) -> Option<Self> {
+        let budget = match &self.budget {
+            Some(budget) => Some(budget.try_clone_optional()?),
+            None => None,
+        };
+        Some(Self { budget, bytes: 0 })
+    }
+
+    pub(crate) fn consume<'slot, E>(
+        &self,
+        steps: usize,
+        out: Out<'slot, '_, E>,
+    ) -> OResult<'slot, ()>
+    where
+        E: From<BudgetError>,
+    {
+        if let Some(budget) = &self.budget {
+            budget.consume(steps, out)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn consume_optional(&self, steps: usize) -> bool {
+        self.budget
+            .as_ref()
+            .is_none_or(|budget| budget.consume_optional(steps))
+    }
+
+    pub(crate) fn record_failure(&self, error: BudgetError) {
+        if let Some(budget) = &self.budget {
+            budget.record_failure(error);
+        }
     }
 
     pub(crate) const fn bytes(&self) -> usize {

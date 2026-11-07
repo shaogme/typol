@@ -319,14 +319,20 @@ impl HostError {
             BudgetError::InvariantViolation(context) => {
                 (HostFailureStep::BudgetInvariant, Some(context))
             }
-            BudgetError::Resource | BudgetError::Allocation | BudgetError::CapacityExceeded => {
-                (HostFailureStep::BudgetAccounting, None)
-            }
+            BudgetError::Resource
+            | BudgetError::RegexSteps
+            | BudgetError::RegexSearchSteps
+            | BudgetError::RegexWorkspace
+            | BudgetError::Allocation
+            | BudgetError::CapacityExceeded => (HostFailureStep::BudgetAccounting, None),
         };
         let mut host_error = Self::with_step(
             operation,
             match error {
-                BudgetError::Resource => HostErrorKind::ResourceLimitExceeded,
+                BudgetError::Resource
+                | BudgetError::RegexSteps
+                | BudgetError::RegexSearchSteps
+                | BudgetError::RegexWorkspace => HostErrorKind::ResourceLimitExceeded,
                 BudgetError::Allocation => HostErrorKind::AllocationFailed,
                 BudgetError::CapacityExceeded => HostErrorKind::CapacityExceeded,
                 BudgetError::InvariantViolation(_) => HostErrorKind::InternalError,

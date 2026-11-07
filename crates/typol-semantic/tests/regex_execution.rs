@@ -1,10 +1,10 @@
 use core::fmt::{Debug, Formatter, Result as FmtResult};
-use typol_core::{BudgetError, ExecutionBudget, ExecutionLimits};
-use typol_policy::ResourceLimits;
+use typol_core::{BudgetError, RegexExecutionBudget};
+use typol_policy::RegexLimits;
 use typol_regex::{
     RegexCompileError, RegexCompiler, RegexMatchError, RegexResource, RegexScratchError,
 };
-use typol_semantic::{RegexExecutionError, RegexExecutor, opeo::ErrSlot};
+use typol_semantic::{RegexExecutionError, RegexExecutor, RegexMatchOptions, opeo::ErrSlot};
 
 enum TestError {
     Budget(BudgetError),
@@ -70,8 +70,8 @@ fn matches_independent_patterns_and_reuses_larger_scratch() -> TestResult<()> {
     let mut compile_errors = ErrSlot::<RegexCompileError>::new();
     let mut execution_errors = ErrSlot::<RegexExecutionError>::new();
     let compilation = budget_errors
-        .call(|out| ExecutionBudget::new(ExecutionLimits::new(67_108_864, 67_108_864), out))?;
-    let limits = ResourceLimits::default();
+        .call(|out| RegexExecutionBudget::new(67_108_864, 67_108_864, 67_108_864, out))?;
+    let limits = RegexLimits::default();
     let mut executor = RegexExecutor::new();
     for (pattern, cases) in [
         (
@@ -89,7 +89,17 @@ fn matches_independent_patterns_and_reuses_larger_scratch() -> TestResult<()> {
             .call(|out| RegexCompiler::compile(pattern, &limits, &compilation, out))?;
         for (input, expected) in cases {
             check_eq!(
-                execution_errors.call(|out| executor.is_match(&regex, Some(input), &limits, out)),
+                execution_errors.call(|out| {
+                    executor.is_match_budgeted(
+                        &regex,
+                        RegexMatchOptions {
+                            value: Some(input),
+                            limits: &limits,
+                            budget: &compilation,
+                        },
+                        out,
+                    )
+                }),
                 Ok(expected)
             );
         }
@@ -103,28 +113,58 @@ fn none_skips_scratch_and_resource_errors_stay_structured() -> TestResult<()> {
     let mut compile_errors = ErrSlot::<RegexCompileError>::new();
     let mut execution_errors = ErrSlot::<RegexExecutionError>::new();
     let compilation = budget_errors
-        .call(|out| ExecutionBudget::new(ExecutionLimits::new(67_108_864, 67_108_864), out))?;
-    let defaults = ResourceLimits::default();
+        .call(|out| RegexExecutionBudget::new(67_108_864, 67_108_864, 67_108_864, out))?;
+    let defaults = RegexLimits::default();
     let regex = compile_errors
         .call(|out| RegexCompiler::compile("^secret$", &defaults, &compilation, out))?;
     let mut executor = RegexExecutor::new();
     let mut limits = defaults;
     limits.set_max_regex_scratch_states(0);
     check_eq!(
-        execution_errors.call(|out| executor.is_match(&regex, None, &limits, out)),
+        execution_errors.call(|out| {
+            executor.is_match_budgeted(
+                &regex,
+                RegexMatchOptions {
+                    value: None,
+                    limits: &limits,
+                    budget: &compilation,
+                },
+                out,
+            )
+        }),
         Ok(true)
     );
     check_eq!(
-        execution_errors
-            .call(|out| { executor.is_match(&regex, Some("private-input"), &limits, out) }),
+        execution_errors.call(|out| {
+            executor.is_match_budgeted(
+                &regex,
+                RegexMatchOptions {
+                    value: Some("private-input"),
+                    limits: &limits,
+                    budget: &compilation,
+                },
+                out,
+            )
+        }),
         Err(RegexExecutionError::Scratch(
             RegexScratchError::ResourceLimitExceeded(RegexResource::ScratchStateCount)
         ))
     );
     limits = defaults;
-    limits.set_max_regex_search_steps(0);
+    let zero_search =
+        budget_errors.call(|out| RegexExecutionBudget::new(67_108_864, 0, 67_108_864, out))?;
     let error = execution_errors
-        .call(|out| executor.is_match(&regex, Some("private-input"), &limits, out))
+        .call(|out| {
+            executor.is_match_budgeted(
+                &regex,
+                RegexMatchOptions {
+                    value: Some("private-input"),
+                    limits: &limits,
+                    budget: &zero_search,
+                },
+                out,
+            )
+        })
         .err()
         .ok_or(TestError::MissingExpectedError)?;
     check!(matches!(

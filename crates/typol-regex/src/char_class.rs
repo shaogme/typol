@@ -8,7 +8,7 @@ use crate::{
     matcher::RegexMatcher,
 };
 use opeo::{OResult, Out, ResultOutExt};
-use typol_core::{ChargedVec, ExecutionBudget};
+use typol_core::{ChargedVec, RegexExecutionBudget};
 
 const SURROGATE_START: u32 = 0xD800;
 const SURROGATE_END: u32 = 0xDFFF;
@@ -27,10 +27,10 @@ pub(crate) struct CharClass {
 impl CharClass {
     pub(crate) fn singleton<'slot>(
         scalar: char,
-        budget: &ExecutionBudget,
+        budget: &RegexExecutionBudget,
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, Self> {
-        let mut ranges = ChargedVec::new(Some(budget), out.reborrow())?;
+        let mut ranges = ChargedVec::new_regex(Some(budget), out.reborrow())?;
         ranges.try_reserve_exact(1, out.reborrow())?;
         ranges.try_push(
             ScalarRange {
@@ -46,7 +46,14 @@ impl CharClass {
         &self,
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, Self> {
-        let mut ranges = ChargedVec::new(self.ranges.budget(), out.reborrow())?;
+        let budget = self
+            .ranges
+            .regex_budget(out.reborrow())?
+            .ok_or(RegexCompileError::InternalInvariantFailure(
+                RegexErrorContext::new(CHARACTER_CLASS_BUDGET_MISSING),
+            ))
+            .store_err_into(out.reborrow())?;
+        let mut ranges = ChargedVec::new_regex(Some(&budget), out.reborrow())?;
         ranges.try_reserve_exact(self.ranges.len(), out.reborrow())?;
         ranges.extend_from_slice(&self.ranges, out.reborrow())?;
         Ok(Self { ranges })
@@ -63,16 +70,14 @@ impl CharClass {
     pub(crate) fn matches<'slot>(
         &self,
         scalar: char,
-        budget: Option<&ExecutionBudget>,
+        budget: &RegexExecutionBudget,
         mut out: Out<'slot, '_, RegexMatchError>,
     ) -> OResult<'slot, bool> {
         let value = scalar as u32;
         let mut low = 0;
         let mut high = self.ranges.len();
         while low < high {
-            if let Some(budget) = budget {
-                budget.consume_with(1, out.reborrow(), RegexMatcher::match_budget_error)?;
-            }
+            budget.consume_with(1, out.reborrow(), RegexMatcher::match_budget_error)?;
             let middle = low + (high - low) / 2;
             let range = self
                 .ranges
@@ -102,11 +107,11 @@ pub(crate) struct CharClassBuilder {
 impl CharClassBuilder {
     pub(crate) fn new<'slot>(
         temporary_limit: usize,
-        budget: &ExecutionBudget,
+        budget: &RegexExecutionBudget,
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, Self> {
         Ok(Self {
-            ranges: ChargedVec::new(Some(budget), out.reborrow())?,
+            ranges: ChargedVec::new_regex(Some(budget), out.reborrow())?,
             temporary_limit,
         })
     }
@@ -144,7 +149,7 @@ impl CharClassBuilder {
     ) -> OResult<'slot, ()> {
         let budget = self
             .ranges
-            .budget()
+            .regex_budget(out.reborrow())?
             .ok_or(RegexCompileError::InternalInvariantFailure(
                 RegexErrorContext::new(CHARACTER_CLASS_BUDGET_MISSING),
             ))
@@ -167,12 +172,12 @@ impl CharClassBuilder {
         if negated {
             let budget = self
                 .ranges
-                .budget()
+                .regex_budget(out.reborrow())?
                 .ok_or(RegexCompileError::InternalInvariantFailure(
                     RegexErrorContext::new(CHARACTER_CLASS_BUDGET_MISSING),
                 ))
                 .store_err_into(out.reborrow())?;
-            self.ranges = complement(&self.ranges, available_ranges, budget, out.reborrow())?;
+            self.ranges = complement(&self.ranges, available_ranges, &budget, out.reborrow())?;
         } else if self.ranges.len() > available_ranges {
             return Err(out.fail(RegexCompileError::ResourceLimitExceeded(
                 RegexResource::CharacterRangeCount,
@@ -205,7 +210,7 @@ impl CharClass {
     pub(crate) fn shortcut<'slot>(
         escape: char,
         available_ranges: usize,
-        budget: &ExecutionBudget,
+        budget: &RegexExecutionBudget,
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, Option<CharClass>> {
         let range_count = match escape {
@@ -248,7 +253,7 @@ impl CharClass {
 
     pub(crate) fn dot_class<'slot>(
         available_ranges: usize,
-        budget: &ExecutionBudget,
+        budget: &RegexExecutionBudget,
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, CharClass> {
         if available_ranges < 2 {
@@ -268,7 +273,7 @@ fn normalize<'slot>(
     mut out: Out<'slot, '_, RegexCompileError>,
 ) -> OResult<'slot, ()> {
     let budget = ranges
-        .budget()
+        .regex_budget(out.reborrow())?
         .ok_or(RegexCompileError::InternalInvariantFailure(
             RegexErrorContext::new(CHARACTER_CLASS_BUDGET_MISSING),
         ))
@@ -332,7 +337,7 @@ fn normalize<'slot>(
 fn complement<'slot>(
     ranges: &[ScalarRange],
     available_ranges: usize,
-    budget: &ExecutionBudget,
+    budget: &RegexExecutionBudget,
     mut out: Out<'slot, '_, RegexCompileError>,
 ) -> OResult<'slot, ChargedVec<ScalarRange>> {
     let mut count =
@@ -356,7 +361,7 @@ fn complement<'slot>(
         )));
     }
 
-    let mut result = ChargedVec::new(Some(budget), out.reborrow())?;
+    let mut result = ChargedVec::new_regex(Some(budget), out.reborrow())?;
     result.try_reserve_exact(count, out.reborrow())?;
     append_complement_segment(
         &mut result,
@@ -385,7 +390,7 @@ fn complement_segment_count<'slot>(
     ranges: &[ScalarRange],
     segment_start: u32,
     segment_end: u32,
-    budget: &ExecutionBudget,
+    budget: &RegexExecutionBudget,
     mut out: Out<'slot, '_, RegexCompileError>,
 ) -> OResult<'slot, usize> {
     let mut cursor = segment_start;
@@ -424,7 +429,7 @@ fn append_complement_segment<'slot>(
     output: &mut ChargedVec<ScalarRange>,
     ranges: &[ScalarRange],
     segment: ScalarRange,
-    budget: &ExecutionBudget,
+    budget: &RegexExecutionBudget,
     mut out: Out<'slot, '_, RegexCompileError>,
 ) -> OResult<'slot, ()> {
     let mut cursor = segment.start;

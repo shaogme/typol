@@ -1,5 +1,7 @@
 use opeo::{ErrSlot, OResult, Out};
-use typol_core::{BudgetError, DiagnosticContext, ExecutionBudget, SourceSpan, diagnostic_context};
+use typol_core::{
+    BudgetError, DiagnosticContext, RegexExecutionBudget, SourceSpan, diagnostic_context,
+};
 use typol_policy::RegexLimits;
 use typol_regex::{
     Regex, RegexErrorContext, RegexMatchError, RegexResource, RegexScratch, RegexScratchError,
@@ -16,7 +18,7 @@ static REGEX_EXECUTOR_INTERNAL: DiagnosticContext = diagnostic_context!(
 pub struct RegexMatchOptions<'a> {
     pub value: Option<&'a str>,
     pub limits: &'a RegexLimits,
-    pub budget: Option<&'a ExecutionBudget>,
+    pub budget: &'a RegexExecutionBudget,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,7 +134,7 @@ impl RegexExecutionError {
 pub struct RegexExecutor {
     scratch: Option<RegexScratch>,
     capacity: usize,
-    budget: Option<ExecutionBudget>,
+    budget: Option<RegexExecutionBudget>,
     budget_errors: ErrSlot<BudgetError>,
     scratch_errors: ErrSlot<RegexScratchError>,
     match_errors: ErrSlot<RegexMatchError>,
@@ -142,7 +144,7 @@ struct MatchRequest<'a> {
     regex: &'a Regex,
     value: Option<&'a str>,
     limits: &'a RegexLimits,
-    budget: Option<&'a ExecutionBudget>,
+    budget: &'a RegexExecutionBudget,
     source_span: Option<SourceSpan>,
 }
 
@@ -166,25 +168,6 @@ impl RegexExecutor {
             scratch_errors: ErrSlot::new(),
             match_errors: ErrSlot::new(),
         }
-    }
-
-    pub fn is_match<'slot>(
-        &mut self,
-        regex: &Regex,
-        value: Option<&str>,
-        limits: &RegexLimits,
-        mut out: Out<'slot, '_, RegexExecutionError>,
-    ) -> OResult<'slot, bool> {
-        self.is_match_inner(
-            MatchRequest {
-                regex,
-                value,
-                limits,
-                budget: None,
-                source_span: None,
-            },
-            out.reborrow(),
-        )
     }
 
     pub fn is_match_budgeted<'slot>(
@@ -228,11 +211,10 @@ impl RegexExecutor {
         request: MatchRequest<'_>,
         out: Out<'slot, '_, RegexExecutionError>,
     ) -> OResult<'slot, bool> {
-        let same_call = match (self.budget.as_ref(), request.budget) {
-            (None, None) => true,
-            (Some(old), Some(new)) => old.same_call(new),
-            _ => false,
-        };
+        let same_call = self
+            .budget
+            .as_ref()
+            .is_some_and(|old| old.same_call(request.budget));
         if !same_call {
             self.scratch = None;
             self.capacity = 0;
@@ -247,29 +229,23 @@ impl RegexExecutor {
             self.scratch = None;
             self.capacity = 0;
         }
+        if !same_call {
+            self.budget = match self
+                .budget_errors
+                .try_call(|budget_out| request.budget.try_clone(budget_out))
+            {
+                Ok(budget) => Some(budget),
+                Err(caught) => {
+                    return Err(out.fail(with_source_span(
+                        RegexExecutionError::Budget(caught.take()),
+                        request.source_span,
+                    )));
+                }
+            };
+        }
         let Some(value) = request.value else {
             return Ok(true);
         };
-        if !same_call {
-            self.budget = match request.budget {
-                Some(budget) => {
-                    let cloned = match self
-                        .budget_errors
-                        .try_call(|budget_out| budget.try_clone(budget_out))
-                    {
-                        Ok(budget) => budget,
-                        Err(caught) => {
-                            return Err(out.fail(with_source_span(
-                                RegexExecutionError::Budget(caught.take()),
-                                request.source_span,
-                            )));
-                        }
-                    };
-                    Some(cloned)
-                }
-                None => None,
-            };
-        }
         let required = request.regex.scratch_state_count();
         if required > request.limits.max_regex_scratch_states() {
             return Err(out.fail(with_source_span(
@@ -282,7 +258,7 @@ impl RegexExecutor {
         if self.capacity < required {
             if let Some(scratch) = self.scratch.as_mut() {
                 if let Err(caught) = self.scratch_errors.try_call(|scratch_out| {
-                    scratch.grow(request.regex, request.limits, scratch_out)
+                    scratch.grow(request.regex, request.limits, request.budget, scratch_out)
                 }) {
                     return Err(out.fail(with_source_span(
                         RegexExecutionError::Scratch(caught.take()),
@@ -292,12 +268,7 @@ impl RegexExecutor {
                 self.capacity = required;
             } else {
                 let scratch = match self.scratch_errors.try_call(|scratch_out| {
-                    RegexScratch::new_budgeted(
-                        request.regex,
-                        request.limits,
-                        request.budget,
-                        scratch_out,
-                    )
+                    RegexScratch::new(request.regex, request.limits, request.budget, scratch_out)
                 }) {
                     Ok(scratch) => scratch,
                     Err(caught) => {
@@ -320,24 +291,11 @@ impl RegexExecutor {
                 request.source_span,
             )));
         };
-        let result = match request.budget {
-            Some(budget) => self.match_errors.try_call(|match_out| {
-                request.regex.is_match_budgeted(
-                    value,
-                    scratch,
-                    (request.limits.max_regex_search_steps(), budget),
-                    match_out,
-                )
-            }),
-            None => self.match_errors.try_call(|match_out| {
-                request.regex.is_match(
-                    value,
-                    scratch,
-                    request.limits.max_regex_search_steps(),
-                    match_out,
-                )
-            }),
-        };
+        let result = self.match_errors.try_call(|match_out| {
+            request
+                .regex
+                .is_match(value, scratch, request.budget, match_out)
+        });
         match result {
             Ok(matched) => Ok(matched),
             Err(caught) => Err(out.fail(with_source_span(

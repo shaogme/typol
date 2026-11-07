@@ -1,6 +1,6 @@
 use std::sync::{Mutex, PoisonError};
 
-use typol_core::{BudgetError, ExecutionBudget, ExecutionLimits};
+use typol_core::{BudgetError, ExecutionLimits, RegexExecutionBudget};
 use typol_opeo_test_support::TestSlot;
 use typol_regex::opeo::{OResult, Out};
 
@@ -77,11 +77,18 @@ impl Clippy {
         }
     }
 
-    pub(crate) fn execution_budget(
+    pub(crate) fn regex_execution_budget(
         errors: &mut TestSlot<BudgetError>,
         limits: ExecutionLimits,
-    ) -> Attempt<ExecutionBudget, BudgetError> {
-        Self::attempt(errors, |out| ExecutionBudget::new(limits, out))
+    ) -> Attempt<RegexExecutionBudget, BudgetError> {
+        Self::attempt(errors, |out| {
+            RegexExecutionBudget::new(
+                limits.max_steps(),
+                limits.max_steps(),
+                limits.max_workspace_bytes(),
+                out,
+            )
+        })
     }
 
     pub(crate) fn succeed_opeo<T, E>(attempt: Attempt<T, E>, message: &str) -> Option<T> {

@@ -13,7 +13,6 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{ExcerptLimits, SliceSource};
-use typol_policy::ResourceLimits;
 use typol_schema::{SchemaCompileOptions, SchemaLimits, SchemaSource};
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
@@ -136,9 +135,7 @@ fn build_many_diagnostic_error() -> TestResult<ConfigParseErrors> {
     declarations.push('}');
     input.push('}');
 
-    let mut resources = ResourceLimits::default();
     let excerpts = ExcerptLimits::new(16_384, 512, 32, 0);
-    resources.set_excerpts(excerpts);
     let mut config = ConfigLimits::default();
     config = config.with_max_diagnostics(128);
     let schema = compile(&declarations, SchemaLimits::default())?;
@@ -149,7 +146,7 @@ fn build_many_diagnostic_error() -> TestResult<ConfigParseErrors> {
             &mut source,
             "allocation-test",
             ConfigParseOptions::default()
-                .with_resources(resources)
+                .with_excerpts(excerpts)
                 .with_config(config),
         ),
         &mut NoEnvironment,

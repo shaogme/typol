@@ -474,7 +474,8 @@ impl TypolOptions {
 
     pub const fn validation(&self) -> ConfigValidationOptions {
         ConfigValidationOptions::new(
-            *self.config.resources(),
+            *self.config.excerpts(),
+            *self.config.regex(),
             *self.config.config(),
             *self.config.execution(),
         )

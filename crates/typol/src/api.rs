@@ -41,10 +41,10 @@ pub mod core {
         AllocationError, BudgetError, ChargedString, ChargedVec, ConfigValue, ConfigValueBuilder,
         Diagnostic, DiagnosticCode, DiagnosticContext as ErrorContext, ExcerptLimits,
         ExecutionBudget, ExecutionLimits, LocatedSpan, NamedValue, NamedValueEntryView, Read,
-        SliceSource, SourceCapture, SourceCommitError, SourceExcerptSet, SourceExpectation,
-        SourceId, SourceLocation, SourceReadError, SourceRevision, SourceSpan, SourceWriter,
-        ValueCopyLimits, ValueEntries, ValueEntryView, ValueError, ValueId, ValueKind,
-        ValuePayload, ValuePayloadView, ValueSource, ValueView,
+        RegexExecutionBudget, SliceSource, SourceCapture, SourceCommitError, SourceExcerptSet,
+        SourceExpectation, SourceId, SourceLocation, SourceReadError, SourceRevision, SourceSpan,
+        SourceWriter, ValueCopyLimits, ValueEntries, ValueEntryView, ValueError, ValueId,
+        ValueKind, ValuePayload, ValuePayloadView, ValueSource, ValueView,
     };
 
     pub use crate::loading::SourceNames;
@@ -55,7 +55,7 @@ pub mod model {
 }
 
 pub mod policy {
-    pub use typol_policy::{RegexLimits, ResourceLimits, ValueLimits};
+    pub use typol_policy::{RegexExecutionLimits, RegexLimits, RegexOptions, ValueLimits};
 }
 
 #[cfg(feature = "std")]
@@ -76,10 +76,10 @@ pub mod host {
 
 pub mod schema {
     pub use typol_schema::{
-        ResolverError, SchemaCompileContext, SchemaCompileContextFailure, SchemaCompileErrors,
-        SchemaCompileOptions, SchemaCompileStage, SchemaCompileUsage, SchemaCompiler, SchemaLimits,
-        SchemaResolveRequest, SchemaResolver, SchemaSource, SourceLoadedRequest, SourceObserver,
-        SourceObserverError,
+        ResolverError, SchemaCompileBudgetDomain, SchemaCompileContext,
+        SchemaCompileContextFailure, SchemaCompileErrors, SchemaCompileOptions, SchemaCompileStage,
+        SchemaCompileUsage, SchemaCompiler, SchemaLimits, SchemaResolveRequest, SchemaResolver,
+        SchemaSource, SourceLoadedRequest, SourceObserver, SourceObserverError,
     };
     pub use typol_syntax::{
         FormattedSchema, SchemaDocument, SchemaFormatError, SchemaFormatErrorKind,

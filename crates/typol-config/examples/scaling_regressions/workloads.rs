@@ -8,7 +8,7 @@ use typol_config::{
     opeo::{ErrSlot, OResult, Out, ResultOutExt},
 };
 use typol_core::{ConfigValue, ExecutionLimits, SliceSource};
-use typol_policy::ResourceLimits;
+use typol_policy::{ExcerptLimits, RegexOptions};
 use typol_schema::{
     ResolverError, SchemaCompileOptions, SchemaCompiler, SchemaLimits, SchemaResolveRequest,
     SchemaResolver, SchemaSource,
@@ -278,7 +278,12 @@ impl Workload {
         let limits = ConfigLimits::default()
             .with_max_nesting_depth(8192)
             .with_max_diagnostics(self.size + 1);
-        ConfigParseOptions::new(ResourceLimits::default(), limits, execution)
+        ConfigParseOptions::new(
+            ExcerptLimits::default(),
+            RegexOptions::default(),
+            limits,
+            execution,
+        )
     }
 
     pub const fn name(&self) -> &'static str {

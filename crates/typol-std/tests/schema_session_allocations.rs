@@ -11,11 +11,14 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::{Command, id},
+    ptr,
     time::Instant,
 };
 
-use typol_core::{ExcerptLimits, ExecutionLimits, SourceId};
-use typol_schema::{SchemaCompileOptions, SchemaCompileUsage, SchemaLimits};
+use typol_core::{
+    BudgetError, DiagnosticCode, ExcerptLimits, ExecutionLimits, RegexExecutionBudget, SourceId,
+};
+use typol_schema::{SchemaCompileOptions, SchemaCompileStage, SchemaCompileUsage, SchemaLimits};
 use typol_std::{
     FileSchemaCompileErrors, FileSchemaCompileOptions, FileSchemaCompiler, FileSchemaLimits,
     SourceNameLimits, opeo::ErrSlot,
@@ -26,10 +29,12 @@ struct AllocationState {
     active: bool,
     live: isize,
     peak: isize,
+    allocation_attempts: usize,
+    fail_on_attempt: Option<usize>,
 }
 
 thread_local! {
-    static STATE: Cell<AllocationState> = const { Cell::new(AllocationState { active: false, live: 0, peak: 0 }) };
+    static STATE: Cell<AllocationState> = const { Cell::new(AllocationState { active: false, live: 0, peak: 0, allocation_attempts: 0, fail_on_attempt: None }) };
 }
 
 struct Allocator;
@@ -45,9 +50,27 @@ fn account(bytes: isize) {
     });
 }
 
+fn should_fail_allocation() -> bool {
+    STATE
+        .try_with(|state| {
+            let mut current = state.get();
+            if !current.active {
+                return false;
+            }
+            current.allocation_attempts += 1;
+            let should_fail = current.fail_on_attempt == Some(current.allocation_attempts);
+            state.set(current);
+            should_fail
+        })
+        .unwrap_or(false)
+}
+
 // SAFETY: Always delegates allocations and deallocations to `System` with their original layouts; only the current thread’s payload is recorded.
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if should_fail_allocation() {
+            return ptr::null_mut();
+        }
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() {
             account(layout.size() as isize);
@@ -74,6 +97,46 @@ static ALLOCATOR: Allocator = Allocator;
 
 struct Directory {
     path: PathBuf,
+}
+
+fn regex_budget_state_bytes() -> Result<usize, Box<dyn Error>> {
+    STATE.with(|state| {
+        state.set(AllocationState {
+            active: true,
+            live: 0,
+            peak: 0,
+            allocation_attempts: 0,
+            fail_on_attempt: None,
+        })
+    });
+    let budget = ErrSlot::<BudgetError>::new().call(|out| RegexExecutionBudget::new(1, 1, 1, out));
+    let bytes = match budget {
+        Ok(budget) => {
+            let bytes = STATE.with(Cell::get).live as usize;
+            drop(budget);
+            bytes
+        }
+        Err(error) => {
+            STATE.with(|state| {
+                state.set(AllocationState {
+                    active: false,
+                    ..state.get()
+                })
+            });
+            return Err(
+                io::Error::other(format!("Regex budget initialization failed: {error:?}")).into(),
+            );
+        }
+    };
+    let state = STATE.with(Cell::get);
+    STATE.with(|state| {
+        state.set(AllocationState {
+            active: false,
+            ..state.get()
+        })
+    });
+    ensure_eq!(state.live, 0);
+    Ok(bytes)
 }
 
 impl Directory {
@@ -112,11 +175,14 @@ struct Measurement {
 
 fn measure(path: &Path, count: usize) -> Result<Measurement, Box<dyn Error>> {
     let expected = format!("schema#{count}");
+    let regex_state_bytes = regex_budget_state_bytes()?;
     STATE.with(|state| {
         state.set(AllocationState {
             active: true,
             live: 0,
             peak: 0,
+            allocation_attempts: 0,
+            fail_on_attempt: None,
         })
     });
     let start = Instant::now();
@@ -149,8 +215,63 @@ fn measure(path: &Path, count: usize) -> Result<Measurement, Box<dyn Error>> {
         elapsed_ns,
         name_matches,
         fully_released: finished.live == 0,
-        retained_matches_usage: retained.live as usize == usage.workspace_bytes,
+        retained_matches_usage: retained.live as usize
+            == usage.workspace_bytes + usage.regex_workspace_bytes + regex_state_bytes,
     })
+}
+
+#[test]
+fn regex_budget_initialization_allocation_failure_is_reported_in_regex_usage()
+-> Result<(), Box<dyn Error>> {
+    STATE.with(|state| {
+        state.set(AllocationState {
+            active: true,
+            live: 0,
+            peak: 0,
+            allocation_attempts: 0,
+            fail_on_attempt: Some(2),
+        })
+    });
+    let result = ErrSlot::<FileSchemaCompileErrors>::new().call(|out| {
+        FileSchemaCompiler::compile(
+            Path::new("/path-does-not-exist/regex-budget-init.tschem"),
+            FileSchemaCompileOptions::new(
+                SchemaCompileOptions::default(),
+                FileSchemaLimits::default(),
+                SourceNameLimits::default(),
+            ),
+            out,
+        )
+    });
+    let allocation = STATE.with(Cell::get);
+    STATE.with(|state| {
+        state.set(AllocationState {
+            active: false,
+            ..state.get()
+        })
+    });
+
+    ensure!(result.is_err());
+    ensure_eq!(allocation.allocation_attempts, 2);
+    ensure_eq!(allocation.live, 0);
+    let error = result
+        .err()
+        .ok_or_else(|| io::Error::other("the Regex budget state allocation should have failed"))?;
+    let usage = error.usage();
+    ensure_eq!(usage.last_stage, SchemaCompileStage::Initialization);
+    ensure_eq!(usage.failure, None);
+    ensure_eq!(usage.regex_failure, Some(BudgetError::Allocation));
+    ensure_eq!(usage.workspace_bytes, 0);
+    ensure_eq!(usage.regex_workspace_bytes, 0);
+    ensure_eq!(
+        error
+            .diagnostics()
+            .ok_or_else(|| io::Error::other("compilation diagnostics are missing"))?
+            .first()
+            .map(|diagnostic| diagnostic.code()),
+        Some(DiagnosticCode::ALLOCATION_FAILED)
+    );
+    Ok(())
 }
 
 #[test]

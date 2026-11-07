@@ -127,8 +127,7 @@ impl AnnotationCompiler {
             },
             out.reborrow(),
         )?;
-        let mut regex_compiler =
-            RegexConstraintCompiler::new(context, diagnostics, out.reborrow())?;
+        let mut regex_compiler = RegexConstraintCompiler::new(context, out.reborrow())?;
         let annotation_context = AnnotationContext {
             symbols,
             types,

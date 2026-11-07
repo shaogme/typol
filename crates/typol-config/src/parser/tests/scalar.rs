@@ -2,7 +2,7 @@ use super::{ConfigLimits, ParserTestSupport, environment::EnvironmentTest, found
 use crate::diagnostics::ConfigParseErrors;
 use alloc::{format, vec::Vec};
 use typol_core::{ConfigValue, ValueKind, ValueSource};
-use typol_policy::ResourceLimits;
+use typol_policy::{ExcerptLimits, RegexExecutionLimits, RegexOptions};
 use typol_semantic::{CompiledSchema, SchemaAccessError};
 use typol_test_support::*;
 
@@ -32,7 +32,7 @@ fn parse(schema: &CompiledSchema, source: &str) -> TestOpeoOutcome<ConfigValue, 
         schema,
         source,
         &mut Provider::new(Ok(None)),
-        &ResourceLimits::default(),
+        &ExcerptLimits::default(),
     )
 }
 
@@ -247,8 +247,9 @@ fn absent_options_skip_regex_even_with_zero_scratch_budget() -> TestResult<()> {
     let schema = ParserTestSupport::compile(
         r#"type A = string @regex("^a") @length(2, 4) @host; entry struct Root { value: option<A>, }"#,
     )?;
-    let mut limits = ResourceLimits::default();
-    limits.set_max_regex_scratch_states(0);
+    let mut regex_limits = *RegexOptions::default().limits();
+    regex_limits.set_max_regex_scratch_states(0);
+    let limits = RegexOptions::default().with_limits(regex_limits);
     for source in ["{}", "{ value: none }"] {
         validate(&schema, source, &mut Provider::new(Ok(None)), &limits).test_value()?;
     }
@@ -278,14 +279,18 @@ fn regex_mismatch_and_resource_exhaustion_are_distinct_and_budgeted() -> TestRes
         test_eq!(error.value_source(), Some(ValueSource::ConfigLiteral))?;
         test_eq!(error.labels().len(), 1)?;
     }
-    let mut limits = ResourceLimits::default();
-    limits.set_max_regex_search_steps(0);
+    let mut limits = RegexOptions::default()
+        .with_execution(RegexExecutionLimits::default().with_max_search_steps(0));
     let errors = validate(&schema, source, &mut Provider::new(Ok(None)), &limits).test_error()?;
     test_eq!(ParserTestSupport::codes(&errors), [1])?;
     test_eq!(TestCheck::item(errors.diagnostics(), 0)?.labels().len(), 1)?;
     let mut config_limits = ConfigLimits::default();
     for (budget, expected) in [(0, &[12][..]), (1, &[12][..]), (2, &[12, 5][..])] {
-        limits.set_max_regex_search_steps(ResourceLimits::default().max_regex_search_steps());
+        limits = limits.with_execution(
+            limits
+                .execution()
+                .with_max_search_steps(RegexExecutionLimits::default().max_search_steps()),
+        );
         config_limits = config_limits.with_max_diagnostics(budget);
         let combined = (&limits, &config_limits);
         let errors =
@@ -307,7 +312,7 @@ fn environment_fallbacks_validate_before_reads_and_set_values_do_not_fall_back()
         &schema,
         r#"{ value: env("X", "01.2.3.4") }"#,
         &mut provider,
-        &ResourceLimits::default(),
+        &ExcerptLimits::default(),
     )
     .test_error()?;
     test_eq!(ParserTestSupport::codes(&errors), [12])?;
@@ -321,7 +326,7 @@ fn environment_fallbacks_validate_before_reads_and_set_values_do_not_fall_back()
         &schema,
         r#"{ value: env("X", "example.com") }"#,
         &mut provider,
-        &ResourceLimits::default(),
+        &ExcerptLimits::default(),
     )
     .test_error()?;
     test_eq!(ParserTestSupport::codes(&errors), [12])?;
@@ -335,7 +340,7 @@ fn environment_fallbacks_validate_before_reads_and_set_values_do_not_fall_back()
         &schema,
         r#"{ value: env("X", "Example.COM.") }"#,
         &mut provider,
-        &ResourceLimits::default(),
+        &ExcerptLimits::default(),
     )
     .test_value()?;
     let ValueKind::Structure(mut fields) = value.as_ref() else {
@@ -361,8 +366,8 @@ fn nested_defaults_run_real_regex_validation_at_the_owning_schema_span() -> Test
     "#,
     )?;
     parse(&schema, "{}").test_value()?;
-    let mut limits = ResourceLimits::default();
-    limits.set_max_regex_search_steps(0);
+    let limits = RegexOptions::default()
+        .with_execution(RegexExecutionLimits::default().with_max_search_steps(0));
     let errors = validate(&schema, "{}", &mut Provider::new(Ok(None)), &limits).test_error()?;
     test_eq!(ParserTestSupport::codes(&errors), [1])?;
     let mut schema_errors = TestSlot::<SchemaAccessError>::default();

@@ -1,8 +1,10 @@
 use alloc::{format, string::String, vec::Vec};
 
 use typol_core::{
-    Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId, SourceSpan, Span,
+    Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, RegexExecutionBudget, SourceId,
+    SourceSpan, Span,
 };
+use typol_policy::RegexOptions;
 
 use crate::{
     ResolverError, SchemaLimits, SchemaResolveRequest, SchemaResolver, SchemaSource,
@@ -63,14 +65,33 @@ fn type_graph_with_step_budget(
     let execution = operations
         .budget(|out| ExecutionBudget::new(ExecutionLimits::new(max_steps, 67_108_864), out))
         .into_test_value()?;
+    let regex_options = RegexOptions::default();
+    let regex_execution = operations
+        .budget(|out| {
+            RegexExecutionBudget::new(
+                regex_options.execution().max_steps(),
+                regex_options.execution().max_search_steps(),
+                regex_options.execution().max_workspace_bytes(),
+                out,
+            )
+        })
+        .into_test_value()?;
     let mut collector = diagnostics(&mut operations, &limits, source, &execution)?;
     let mut budget = operations
-        .budget(|out| CompileBudget::new(limits, &execution, out))
+        .budget(|out| CompileBudget::new(limits, &regex_options, &execution, &regex_execution, out))
         .into_test_value()?;
     let loaded = SourceLoader::load(root, &mut EmptyResolver, &mut budget, &mut collector, None)
         .into_test_value()?;
     let context = operations
-        .budget(|out| CompileContext::new(limits, &execution, out))
+        .budget(|out| {
+            CompileContext::new(
+                limits,
+                regex_options.limits(),
+                &execution,
+                &regex_execution,
+                out,
+            )
+        })
         .into_test_value()?;
     let tree = operations
         .build(|out| ModuleTree::build(&loaded, &context, &mut collector, out))

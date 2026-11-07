@@ -335,7 +335,7 @@ fn parse_source<'slot, R: Read + ?Sized>(
     let options = &parts.options;
     let capture = RefCell::new(Some(SourceCapture::new(
         source_id,
-        *options.resources().excerpts(),
+        *options.excerpts(),
         Some(budget),
     )));
     let session = ConfigSession::with_budget(environment, options, budget, out.reborrow())?
@@ -363,7 +363,7 @@ fn parse_source<'slot, R: Read + ?Sized>(
             ParseFailureRequest {
                 errors: caught.take(),
                 schema,
-                excerpt_limits: *options.resources().excerpts(),
+                excerpt_limits: *options.excerpts(),
                 budget,
                 capture: capture.borrow_mut().take(),
                 input_failed: input.failed(),
@@ -388,7 +388,7 @@ fn parse_document_source<'slot, 'schema, R: Read + ?Sized>(
     let options = &parts.options;
     let capture = RefCell::new(Some(SourceCapture::new(
         source_id,
-        *options.resources().excerpts(),
+        *options.excerpts(),
         Some(budget),
     )));
     let session = ConfigSession::with_budget(environment, options, budget, out.reborrow())?
@@ -433,7 +433,7 @@ fn parse_document_source<'slot, 'schema, R: Read + ?Sized>(
             ParseFailureRequest {
                 errors: caught.take(),
                 schema,
-                excerpt_limits: *options.resources().excerpts(),
+                excerpt_limits: *options.excerpts(),
                 budget,
                 capture: capture.borrow_mut().take(),
                 input_failed: input.failed(),
@@ -650,8 +650,7 @@ fn normalize_for_schema_with_budget<'slot, 'borrow>(
         Err(caught) => {
             diagnostics.push(caught.take());
             let errors = ConfigParseErrors::finish(diagnostics, schema, None, None);
-            let excerpts =
-                errors.schema_excerpts(schema, *request.options().resources().excerpts(), budget);
+            let excerpts = errors.schema_excerpts(schema, *request.options().excerpts(), budget);
             Err(out.fail(ConfigValueErrors::from_errors(
                 errors.with_excerpts(excerpts),
             )))
@@ -690,8 +689,7 @@ fn validate_for_schema_with_budget<'slot, 'borrow>(
         Ok(value) => Ok(ValidatedConfigValue::from_config_value(value)),
         Err(caught) => {
             let errors = caught.take();
-            let excerpts =
-                errors.schema_excerpts(schema, *request.options().resources().excerpts(), budget);
+            let excerpts = errors.schema_excerpts(schema, *request.options().excerpts(), budget);
             Err(out.fail(ConfigValueErrors::from_errors(
                 errors.with_excerpts(excerpts),
             )))
@@ -734,8 +732,7 @@ fn validate_complete_for_schema_with_budget<'slot, 'borrow>(
         Ok(value) => Ok(ValidatedConfigValue::from_config_value(value)),
         Err(caught) => {
             let errors = caught.take();
-            let excerpts =
-                errors.schema_excerpts(schema, *request.options().resources().excerpts(), budget);
+            let excerpts = errors.schema_excerpts(schema, *request.options().excerpts(), budget);
             Err(out.fail(ConfigValueErrors::from_errors(
                 errors.with_excerpts(excerpts),
             )))

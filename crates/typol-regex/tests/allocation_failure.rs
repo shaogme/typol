@@ -10,7 +10,7 @@ use std::{
 
 use typol_core::{BudgetError, ExecutionLimits};
 use typol_opeo_test_support::TestSlot;
-use typol_policy::ResourceLimits;
+use typol_policy::RegexLimits;
 use typol_regex::{RegexCompileError, RegexCompiler, RegexScratch, RegexScratchError};
 
 struct FailNextAllocation;
@@ -57,7 +57,7 @@ static ALLOCATOR: FailNextAllocation = FailNextAllocation;
 fn reports_compile_and_scratch_allocation_failures() {
     let mut budget_errors = TestSlot::<BudgetError>::default();
     let Some(compilation) = clippy::Clippy::succeed_opeo(
-        clippy::Clippy::execution_budget(
+        clippy::Clippy::regex_execution_budget(
             &mut budget_errors,
             ExecutionLimits::new(67_108_864, 67_108_864),
         ),
@@ -65,7 +65,7 @@ fn reports_compile_and_scratch_allocation_failures() {
     ) else {
         return;
     };
-    let limits = ResourceLimits::default();
+    let limits = RegexLimits::default();
     let mut compile_errors = TestSlot::<RegexCompileError>::default();
     let mut scratch_errors = TestSlot::<RegexScratchError>::default();
 
@@ -88,7 +88,7 @@ fn reports_compile_and_scratch_allocation_failures() {
     FAIL_NEXT_ALLOCATION.with(|fail_next| fail_next.set(true));
     assert!(matches!(
         clippy::Clippy::attempt(&mut scratch_errors, |out| {
-            RegexScratch::new(&regex, &limits, out)
+            RegexScratch::new(&regex, &limits, &compilation, out)
         }),
         clippy::Attempt::Failure(RegexScratchError::AllocationFailed)
     ));

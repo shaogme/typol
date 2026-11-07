@@ -458,7 +458,10 @@ impl<'a> LineIndex<'a> {
     ) -> OResult<'slot, ()> {
         if let Some(budget) = self.line_starts.budget() {
             budget.consume_with(count, out.reborrow(), |error| match error {
-                BudgetError::Resource => {
+                BudgetError::Resource
+                | BudgetError::RegexSteps
+                | BudgetError::RegexSearchSteps
+                | BudgetError::RegexWorkspace => {
                     LocationError::new(LocationErrorKind::ResourceLimitExceeded).with_offset(offset)
                 }
                 BudgetError::Allocation | BudgetError::CapacityExceeded => {

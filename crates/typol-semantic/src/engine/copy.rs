@@ -134,7 +134,10 @@ fn value_error(error: ValueError) -> CopyError {
 impl From<BudgetError> for CopyError {
     fn from(error: BudgetError) -> Self {
         match error {
-            BudgetError::Resource => Self::Resource,
+            BudgetError::Resource
+            | BudgetError::RegexSteps
+            | BudgetError::RegexSearchSteps
+            | BudgetError::RegexWorkspace => Self::Resource,
             BudgetError::Allocation => Self::Allocation,
             BudgetError::CapacityExceeded => Self::Capacity,
             BudgetError::InvariantViolation(context) => Self::internal(*context),
