@@ -143,7 +143,7 @@ Put this in `src/main.rs`. The example compiles the Schema file, binds it to `Se
 use std::{path::Path, process::ExitCode};
 
 use typol::{
-    EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
+    DefaultConfigOptions, EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
     opeo::ErrSlot,
 };
 
@@ -213,6 +213,17 @@ The methods in this path are:
 | `binding.read_file(path, environment, out)` | Reads, applies defaults, validates, and converts one file to `ServiceConfig`. |
 
 `SchemaLoader::new` is an associated function: it is called on the type. `compile_file`, `bind`, and `read_file` are methods called on values. Fallible methods take an `Out` error context and return an OPEO result; `ErrSlot::try_call` provides that context and captures the resulting `TypolError`.
+
+If you need a starter `.tconf` without creating a Rust struct, generate it directly from the loaded Schema:
+
+```rust
+let defaults = loaded.default_config_to_string(
+    DefaultConfigOptions::default().with_pretty(true),
+    out.reborrow(),
+)?;
+```
+
+The entry's required fields need explicit Schema defaults. An omitted `option<T>` becomes `none`; nested structs, arrays, maps, and enum variants are generated only when their field has an explicit default. Generation does not read `@env` values. The default policy includes actual `@secret` values in the text, so protect the result as sensitive data. See the [advanced tutorial](../advanced/) for output limits, secret rejection, and sink behavior.
 
 A `LoadedSchema` and its binding can be kept and reused to read many configurations. The binding checks the Rust type once; each read still parses and validates its input. If you need Typol's validated value tree instead of a Rust type, use `LoadedSchema::read_value`.
 

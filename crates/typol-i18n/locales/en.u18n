@@ -180,6 +180,7 @@ message diagnostic.binding.array_length_unrepresentable = "fixed array length ca
 message diagnostic.binding.type_mismatch = "Rust type description is incompatible with the schema";
 message diagnostic.conversion.failed = "Rust value conversion failed";
 message diagnostic.encoding.unrepresentable = "value cannot be expressed in the configuration grammar";
+message diagnostic.encoding.secret_output_rejected = "secret values are not allowed in generated configuration output";
 message diagnostic.emergency.resource_limit_exceeded = "resource limit exceeded";
 message diagnostic.emergency.allocation_failed = "memory allocation failed";
 message diagnostic.emergency.capacity_exceeded = "workspace capacity exceeded";

@@ -156,6 +156,7 @@ message diagnostic.binding.array_length_unrepresentable();
 message diagnostic.binding.type_mismatch();
 message diagnostic.conversion.failed();
 message diagnostic.encoding.unrepresentable();
+message diagnostic.encoding.secret_output_rejected();
 message diagnostic.emergency.resource_limit_exceeded();
 message diagnostic.emergency.allocation_failed();
 message diagnostic.emergency.capacity_exceeded();

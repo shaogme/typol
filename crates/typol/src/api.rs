@@ -17,7 +17,7 @@ pub mod binding {
         loading::{BoundRead, BoundSchema, LoadedSchema, TrustedBoundSchema},
         options::{
             BindOptions, BindingLimitError, BindingLimits, ConversionLimitError, ConversionLimits,
-            MAX_CONVERSION_DEPTH, WriteOptions,
+            DefaultConfigOptions, MAX_CONVERSION_DEPTH, WriteOptions,
         },
     };
 }

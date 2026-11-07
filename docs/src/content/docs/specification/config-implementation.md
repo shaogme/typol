@@ -83,6 +83,16 @@ With `std`, the same `TypolOptions` also carries host limits. Configure file inp
 
 Normalization checks each value shape, field name, enum payload, and scalar target, rebuilds structs in Schema field order, and fills Schema defaults and optional fields without defaults. It creates a new owned tree. Missing required fields, unknown or duplicate fields, invalid map keys/values, and incorrect payload shapes fail. Maps have no DSL ordering; the foreign-value path sorts keys for stable reconstruction.
 
+### 2.3 Generating configuration from Schema defaults
+
+`LoadedSchema::default_config_to_string` and `LoadedSchema::write_default_config` generate `.tconf` from the compiled entry Schema without binding a Rust type or receiving an `Environment`. The facade creates an empty structure root and calls `ConfigValueProcessor::validate_with_budget` once, so default filling, field and collection constraints, and full-tree assertions use the same validation pipeline as other external values. Generation errors are returned through `TypolError` with stage `Encoding`; value diagnostics remain available through `codec_errors().config_value_errors()`.
+
+For each missing field, the shared completion rule selects its explicit Schema default first, then `none` for an `option<T>`, otherwise a required-field diagnostic with the field path and Schema definition location. An entry struct is the only synthesized structure root. A nested struct, array, map, or enum is not created because its contents look constructible; the field itself needs an explicit default. A selected nested object or enum payload is then completed recursively. `@env` only authorizes expressions in input text: generation never evaluates `env(...)` or consults a provider.
+
+`DefaultConfigOptions` defaults to compact output, a 1 MiB UTF-8 byte limit, and allowing actual `@secret` values. It can select pretty formatting and reject values marked secret; rejection finishes before the first sink write and returns a stable encoding diagnostic without the value text. Generated secrets remain plaintext when allowed and must be protected as sensitive configuration. The string API returns only after complete validation and encoding; the sink API can leave a prefix if encoding, sink I/O, execution budget, or output limit fails.
+
+For atomic file creation or replacement, generate the complete string first and pass its bytes to `FileSourceWriter::replace_atomically` with an explicit `SourceExpectation`. `LoadedSchema::write_file` operates on a `ConfigDocument` source snapshot and is not the default-generation file API.
+
 ## 3. Streaming parse and value construction
 
 ### 3.1 Input and root value

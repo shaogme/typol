@@ -7,15 +7,16 @@ use value_support::ValueSupport;
 
 use std::{collections::HashMap, fmt::Debug, io::Cursor, marker::PhantomData, ptr::eq};
 use typol::{
-    ConfigParseOptions, ConfigParser, ConfigValue, ConfigValueProcessor, EmptyEnvironment,
-    Environment, EnvironmentError, EnvironmentReadContext, SchemaLoader, Sourced, Typol,
-    TypolOptions, ValidatedConfigValue, WriteOptions,
+    ConfigParseOptions, ConfigParser, ConfigValue, ConfigValueProcessor, DefaultConfigOptions,
+    EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext, LoadedSchema,
+    SchemaLoader, Sourced, Typol, TypolOptions, TypolStage, ValidatedConfigValue, WriteOptions,
     binding::{
         BindOptions, BindingLimitError, BindingLimits, BindingMismatchKind, BindingShape,
         BudgetedTypol, CodecStage, ConversionLimits, MAX_CONVERSION_DEPTH, TypedSchema,
     },
     config::{ConfigLimits, ConfigParseRequest, ConfigValidationOptions, ConfigValidationRequest},
     core::{BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, ValueKind, ValueSource},
+    host::{Language, RenderOptions, Translator},
     io::ReadRequest,
     opeo::{OResult, Out},
     schema::{SchemaCompileOptions, SchemaCompiler, SchemaSource},
@@ -50,6 +51,23 @@ fn compile(text: &str) -> TestResult<CompiledSchema> {
 
 fn request<'a>(input: &'a mut SliceSource<'_>) -> ConfigParseRequest<'a> {
     ConfigParseRequest::new(input, "config", ConfigParseOptions::default())
+}
+
+fn compile_loaded(text: &str) -> TestResult<LoadedSchema> {
+    let loader = SchemaLoader::new(TypolOptions::default());
+    match TestOpeo::outcome(|out| loader.compile_text(b"default-config", text, out)) {
+        TestOpeoOutcome::Value(schema) => Ok(schema),
+        TestOpeoOutcome::Error(error) => {
+            let rendered = TestOpeo::value(|out| {
+                error.render(
+                    Translator::new(Language::English),
+                    RenderOptions::default(),
+                    out,
+                )
+            })?;
+            Err(TestFailure::new(rendered))
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Typol)]
@@ -670,6 +688,155 @@ fn facade_reads_text_and_reader_with_one_reusable_binding() -> TestResult {
         dynamic.as_config_value().as_ref(),
         ValueKind::Structure(_)
     ));
+    Ok(())
+}
+
+#[test]
+fn loaded_schema_generates_defaults_without_a_rust_binding() -> TestResult {
+    let loaded = compile_loaded(
+        r#"
+        enum Mode { Ready, Custom { port: u16 = 9000 } }
+        struct Nested { active: bool = true, label: string = "nested" }
+        entry struct Root {
+            port: u16 = 8080,
+            description: option<string>,
+            names: [string] = ["alpha", "beta"],
+            labels: map<string, u8> = { "z": 2, "a": 1 },
+            child: Nested = {},
+            mode: Mode = .Custom {},
+            from_environment: string @env("DEFAULT_CONFIG_TEST") = "schema-value",
+        }
+        "#,
+    )?;
+    let compact = TestOpeo::value(|out| {
+        loaded.default_config_to_string(DefaultConfigOptions::default(), out)
+    })?;
+    assert_eq!(
+        compact,
+        "{port: 8080, description: none, names: [\"alpha\", \"beta\"], labels: {\"a\": 1, \"z\": 2}, child: {active: true, label: \"nested\"}, mode: .Custom {port: 9000}, from_environment: \"schema-value\"}"
+    );
+
+    let pretty = TestOpeo::value(|out| {
+        loaded.default_config_to_string(DefaultConfigOptions::default().with_pretty(true), out)
+    })?;
+    assert!(pretty.starts_with("{\n  port: 8080,"));
+    assert!(!pretty.ends_with('\n'));
+
+    let mut environment = EmptyEnvironment;
+    let reread = TestOpeo::value(|out| {
+        loaded.read_value(ReadRequest::from_text(&compact), &mut environment, out)
+    })?;
+    assert!(matches!(
+        reread.as_config_value().as_ref(),
+        ValueKind::Structure(_)
+    ));
+    Ok(())
+}
+
+#[test]
+fn default_generation_requires_explicit_nested_values_and_runs_assertions() -> TestResult {
+    let missing =
+        compile_loaded("struct Nested { value: u8 = 1 } entry struct Root { nested: Nested }")?;
+    let errors = TestOpeo::error(|out| {
+        missing.default_config_to_string(DefaultConfigOptions::default(), out)
+    })?;
+    assert_eq!(errors.stage(), TypolStage::Encoding);
+    assert!(
+        errors
+            .codec_errors()
+            .test_value()?
+            .config_value_errors()
+            .is_some()
+    );
+
+    let invalid = compile_loaded(
+        "entry struct Root { low: u8 = 5, high: u8 = 4 } @assert(self.low < self.high, \"ordered\")",
+    )?;
+    let errors = TestOpeo::error(|out| {
+        invalid.default_config_to_string(DefaultConfigOptions::default(), out)
+    })?;
+    assert_eq!(errors.stage(), TypolStage::Encoding);
+    assert!(
+        errors
+            .codec_errors()
+            .test_value()?
+            .config_value_errors()
+            .is_some()
+    );
+    Ok(())
+}
+
+#[test]
+fn secret_default_output_can_be_rejected_before_writing() -> TestResult {
+    let loaded = compile_loaded(
+        r#"type Secret = string @secret; struct Nested { token: Secret = "PRIVATE-DEFAULT" } entry struct Root { nested: Nested = {} }"#,
+    )?;
+    let allowed = TestOpeo::value(|out| {
+        loaded.default_config_to_string(DefaultConfigOptions::default(), out)
+    })?;
+    assert!(allowed.contains("PRIVATE-DEFAULT"));
+
+    let mut sink = String::new();
+    let errors = TestOpeo::error(|out| {
+        loaded.write_default_config(
+            &mut sink,
+            DefaultConfigOptions::default().with_reject_secret_values(true),
+            out,
+        )
+    })?;
+    assert_eq!(sink, "");
+    assert_eq!(errors.stage(), TypolStage::Encoding);
+    let codec_errors = errors.codec_errors().test_value()?;
+    assert_eq!(codec_errors.stage(), CodecStage::Encoding);
+    assert_eq!(
+        codec_errors
+            .diagnostics()
+            .first()
+            .and_then(|diagnostic| diagnostic.context())
+            .map(|context| context.failure_point()),
+        Some("secret-output-rejected")
+    );
+    let english_report = TestOpeo::value(|out| {
+        errors.render(
+            Translator::new(Language::English),
+            RenderOptions::default(),
+            out,
+        )
+    })?;
+    assert!(
+        english_report.contains("secret values are not allowed in generated configuration output")
+    );
+    let chinese_report = TestOpeo::value(|out| {
+        errors.render(
+            Translator::new(Language::Chinese),
+            RenderOptions::default(),
+            out,
+        )
+    })?;
+    assert!(chinese_report.contains("生成配置中不允许包含秘密值"));
+    assert!(!format!("{errors:?} {errors}").contains("PRIVATE-DEFAULT"));
+
+    let mut partial = String::new();
+    let limited = TestOpeo::error(|out| {
+        loaded.write_default_config(&mut partial, DefaultConfigOptions::new(4), out)
+    })?;
+    assert_eq!(limited.stage(), TypolStage::Encoding);
+    assert!(!partial.is_empty());
+    Ok(())
+}
+
+#[test]
+fn absent_optional_secret_is_allowed_when_secret_output_is_rejected() -> TestResult {
+    let loaded = compile_loaded(
+        "type Secret = string @secret; entry struct Root { token: option<Secret> }",
+    )?;
+    let text = TestOpeo::value(|out| {
+        loaded.default_config_to_string(
+            DefaultConfigOptions::default().with_reject_secret_values(true),
+            out,
+        )
+    })?;
+    assert!(text.contains("token: none"));
     Ok(())
 }
 

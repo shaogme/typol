@@ -46,6 +46,39 @@ let second = binding.read_file(
 
 特别注意，`BoundSchema::read_file` 返回 Rust 类型化值；`LoadedSchema::read_file` 用于保留源格式，便于后续编辑。
 
+## 根据 Schema 默认值生成 `.tconf`
+
+`LoadedSchema` 可以直接根据编译后的 Schema 构建完整配置，无需 Rust 绑定或 `Environment` 提供器：
+
+```rust
+let text = loaded.default_config_to_string(
+    DefaultConfigOptions::default().with_pretty(true),
+    out.reborrow(),
+)?;
+```
+
+生成器将入口结构体视为空根对象。每个字段依次使用 Schema 默认值；若没有默认值且类型为 `option<T>`，则生成 `none`；其他缺失字段会报错，并提供字段路径和 Schema 位置。即使嵌套结构的子字段都有默认值，也不会自动构造该结构：字段自身仍需显式默认值，例如 `{}`。数组、map 和枚举字段也需显式默认值选定具体值。选定值后，其内部缺失字段会按常规规则补齐，随后执行约束和完整树断言。
+
+生成过程不会执行 `env(...)` 或读取进程环境。`@env` 只授权输入 `.tconf` 中的环境表达式。`DefaultConfigOptions` 控制紧凑或 pretty 格式、UTF-8 输出字节上限，以及是否拒绝包含 `@secret` 标记值的结果。默认策略允许秘密值并输出真实文本；请将生成结果作为敏感数据保护。启用拒绝策略时，会在 sink 收到首字节前检查完整值树。
+
+字符串方法失败时不会返回部分字符串。若编码、sink 或输出限额失败，`write_default_config` 可能已向调用方 sink 写入前缀。要原子创建新文件，应先生成完整字符串，再用 `FileSourceWriter` 和 `SourceExpectation::MustBeAbsent` 提交字节；目标文件必须尚不存在：
+
+```rust
+use typol::host::FileSourceWriter;
+use typol::{SourceExpectation, SourceWriter};
+
+let text = loaded.default_config_to_string(DefaultConfigOptions::default(), out.reborrow())?;
+let mut writer = FileSourceWriter::new(4096);
+let commit = writer.replace_atomically(
+    Path::new("service.defaults.tconf"),
+    SourceExpectation::MustBeAbsent,
+    text.as_bytes(),
+    1_048_576,
+);
+```
+
+应用应按自身错误策略处理 `commit`。`LoadedSchema::write_file` 用于编辑保留源文本的 `ConfigDocument`，不是生成文本的文件 API。
+
 ## 将 Schema 拆分到多个文件
 
 使用 `extern mod` 从其他 `.tschem` 文件导入可复用声明：

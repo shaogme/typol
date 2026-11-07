@@ -180,6 +180,7 @@ message diagnostic.binding.array_length_unrepresentable = "无法将固定数组
 message diagnostic.binding.type_mismatch = "Rust 类型描述与 Schema 不兼容";
 message diagnostic.conversion.failed = "Rust 值转换失败";
 message diagnostic.encoding.unrepresentable = "无法在配置语法中表示该值";
+message diagnostic.encoding.secret_output_rejected = "生成配置中不允许包含秘密值";
 message diagnostic.emergency.resource_limit_exceeded = "超出资源限制";
 message diagnostic.emergency.allocation_failed = "内存分配失败";
 message diagnostic.emergency.capacity_exceeded = "超出工作区容量限制";

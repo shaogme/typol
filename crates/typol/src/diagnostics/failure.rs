@@ -21,6 +21,8 @@ static CONVERSION_CONTEXT: DiagnosticContext =
     diagnostic_context!("typol", "conversion", "value-conversion-rejected");
 static ENCODING_CONTEXT: DiagnosticContext =
     diagnostic_context!("typol", "encoding", "value-not-representable");
+static SECRET_OUTPUT_REJECTED_CONTEXT: DiagnosticContext =
+    diagnostic_context!("typol", "encoding", "secret-output-rejected");
 
 static SCHEMA_TYPE_CONTEXT: DiagnosticContext = diagnostic_context!(
     "typol-semantic",
@@ -130,6 +132,7 @@ pub enum Failure {
     Conversion,
     ConversionAt(DiagnosticContext),
     Encoding,
+    SecretOutput,
 }
 
 impl Failure {
@@ -194,7 +197,7 @@ impl Failure {
             Self::BindingMismatch => DiagnosticCode::TYPE_BINDING_ERROR,
             Self::RecursiveType | Self::ArrayLength => DiagnosticCode::TYPE_BINDING_ERROR,
             Self::Conversion | Self::ConversionAt(_) => DiagnosticCode::RUST_CONVERSION_ERROR,
-            Self::Encoding => DiagnosticCode::CONFIG_ENCODING_ERROR,
+            Self::Encoding | Self::SecretOutput => DiagnosticCode::CONFIG_ENCODING_ERROR,
         }
     }
 
@@ -212,6 +215,7 @@ impl Failure {
             Self::Conversion => Some(CONVERSION_CONTEXT),
             Self::ConversionAt(context) => Some(context),
             Self::Encoding => Some(ENCODING_CONTEXT),
+            Self::SecretOutput => Some(SECRET_OUTPUT_REJECTED_CONTEXT),
             Self::Resource | Self::Allocation | Self::Capacity => None,
         }
     }
@@ -225,6 +229,7 @@ impl Failure {
             Self::ArrayLength => "fixed array length cannot be mapped to the schema",
             Self::Conversion | Self::ConversionAt(_) => "Rust value conversion failed",
             Self::Encoding => "value cannot be expressed in the configuration grammar",
+            Self::SecretOutput => "generated output includes a secret value",
             _ => "",
         }
     }

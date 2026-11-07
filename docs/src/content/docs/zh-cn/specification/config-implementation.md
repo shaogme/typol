@@ -92,6 +92,16 @@ no_std 与 std 构建共用 `TypolOptions` 和 `SchemaLoader::new(TypolOptions)`
 
 值规范化会检查每层值形态、字段名、枚举载荷和目标标量；按 Schema 字段顺序重建结构体，补齐 Schema 默认值和无默认值的可选字段，并为输出创建新的拥有树。缺少必填字段、未知或重复字段、无效 map 键/值及错误载荷形态均失败。map 不具有 DSL 层面的顺序语义；外来值路径为了稳定重建会按键排序。
 
+### 2.3 根据 Schema 默认值生成配置
+
+`LoadedSchema::default_config_to_string` 和 `LoadedSchema::write_default_config` 会根据编译后的入口 Schema 生成 `.tconf`，无需绑定 Rust 类型或接收 `Environment`。Facade 创建空结构体根值，并只调用一次 `ConfigValueProcessor::validate_with_budget`，因此默认补齐、字段和集合约束、完整树断言都沿用其他外来值的验证流水线。生成错误通过 `TypolError` 返回，阶段为 `Encoding`；值诊断仍可通过 `codec_errors().config_value_errors()` 检查。
+
+对每个缺失字段，共用的补齐规则依次选择显式 Schema 默认值、无默认值 `option<T>` 的 `none`，或带字段路径和 Schema 定义位置的必填缺失诊断。只有入口结构体会被合成为根值。不会仅因嵌套结构、数组、map 或枚举的内容看似可构造就自动生成它们；字段自身需要显式默认值。选定嵌套对象或枚举载荷后，再递归补齐其字段。`@env` 只授权输入文本中的环境表达式；生成过程不会执行 `env(...)` 或查询环境提供器。
+
+`DefaultConfigOptions` 默认选择紧凑格式、1 MiB UTF-8 字节输出上限，并允许输出真实 `@secret` 值。可选择 pretty 格式，或拒绝包含秘密标记值的结果；拒绝检查会在 sink 写入首字节前完成，并返回不含值文本的稳定编码诊断。允许输出时，秘密仍以明文形式存在，必须按敏感配置保护。字符串 API 只有在完整校验和编码成功后才返回；sink API 在编码、sink I/O、执行预算或输出限额失败时可能已写入前缀。
+
+若要原子创建或替换文件，应先生成完整字符串，再将字节交给 `FileSourceWriter::replace_atomically`，并显式选择 `SourceExpectation`。`LoadedSchema::write_file` 操作的是 `ConfigDocument` 的源快照，并非默认配置生成的文件 API。
+
 ## 3. 流式解析与值构造
 
 ### 3.1 输入和根值

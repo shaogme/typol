@@ -43,6 +43,8 @@ entry struct ServiceConfig {
 
 `Endpoint` and `ServiceConfig` are Schema structs. `entry` selects the root configuration type. The application may define Rust structs with the same names and matching fields; `#[derive(Typol)]` generates their conversion mapping. Rust methods and field visibility remain under the application's control.
 
+Schema defaults normally fill omitted fields while reading. To generate a complete `.tconf` from those defaults without declaring or binding a Rust type, call `LoadedSchema::default_config_to_string` or `write_default_config`. Every required field must have an explicit Schema default; fields are not guessed from Rust `Default` or empty-container conventions. See the [Quick start](docs/src/content/docs/guides/quickstart.md) and [Advanced tutorial](docs/src/content/docs/guides/advanced.md).
+
 At a glance, common Schema types map to Rust as follows:
 
 | Schema type | Rust type |
@@ -65,6 +67,7 @@ The main path has three stages:
 | Compile | `SchemaLoader::compile_text` or `compile_file` | Check a Schema and produce a `LoadedSchema`. File loading requires `std`. |
 | Bind | `LoadedSchema::bind::<T>()` | Check Rust type `T` against the Schema entry and produce a reusable `BoundSchema<T>`. |
 | Read | `BoundSchema::read` or `read_file` | Parse, apply defaults, validate, and return `T`. Every read receives an explicit `Environment` provider. |
+| Generate defaults | `LoadedSchema::default_config_to_string` or `write_default_config` | Materialize Schema defaults and optional `none` values, validate the complete value, and encode `.tconf` without a Rust binding or environment provider. |
 
 `SchemaLoader::new(options)` is an associated function that creates the loader. The other entries above are methods called on a loader, loaded Schema, or binding. A `LoadedSchema` and its binding can be reused to read multiple configuration values.
 

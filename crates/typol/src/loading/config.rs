@@ -2,16 +2,21 @@ use super::{SourceNames, loader::LoadSupport};
 use crate::{
     BoundSchema, TypolError, TypolOptions, TypolStage,
     binding_impl::TypedSchema,
+    codec::ValidatedValue,
     descriptor::{BudgetedTypol, Typol},
+    diagnostics::{CodecErrors, CodecStage, Failure},
     error::{ErrorNames, ErrorSlot},
     loading::TrustedBoundSchema,
+    options::DefaultConfigOptions,
+    session::SessionBudget,
 };
+use alloc::string::String;
 use opeo::{ErrSlot, OResult, Out};
 use typol_config::{
     ConfigDocument, ConfigParseErrors, ConfigParseRequest, ConfigParser, Environment,
     ValidatedConfigValue,
 };
-use typol_core::{ExecutionBudget, Read, ReadRequest};
+use typol_core::{ExecutionBudget, Read, ReadRequest, Write};
 use typol_semantic::CompiledSchema;
 
 #[cfg(feature = "std")]
@@ -217,6 +222,68 @@ impl LoadedSchema {
 
     pub const fn options(&self) -> &TypolOptions {
         &self.options
+    }
+
+    /// Generates a complete `.tconf` value from Schema defaults and implicit optional values.
+    ///
+    /// This operation does not bind a Rust type or read the host environment. Required fields
+    /// without Schema defaults return validation diagnostics. By default, values marked
+    /// `@secret` are included in the result; treat the returned text as sensitive.
+    pub fn default_config_to_string<'slot>(
+        &self,
+        options: DefaultConfigOptions,
+        out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, String> {
+        let mut output = String::new();
+        self.write_default_config(&mut output, options, out)?;
+        Ok(output)
+    }
+
+    /// Generates and validates the complete default value before writing `.tconf` text.
+    ///
+    /// The API does not bind a Rust type or read the host environment. If secret rejection is
+    /// enabled, the value is checked before the first sink write. Sink, allocation, budget, or
+    /// output-limit errors during encoding can leave a written prefix in the sink.
+    pub fn write_default_config<'slot>(
+        &self,
+        output: &mut dyn Write,
+        options: DefaultConfigOptions,
+        mut out: Out<'slot, '_, TypolError>,
+    ) -> OResult<'slot, ()> {
+        let slot = self.error_slot(out.reborrow())?;
+        let mut codec_errors = ErrSlot::new();
+        let result = codec_errors.try_call(|mut codec_out| {
+            let mut session = SessionBudget::codec_from_budget(
+                CodecStage::Encoding,
+                |budget_out| {
+                    SessionBudget::default_config(
+                        self.options.validation(),
+                        options.max_output_bytes(),
+                        budget_out,
+                    )
+                },
+                codec_out.reborrow(),
+            )?;
+            let mut value = ValidatedValue::default_config(
+                self.schema(),
+                self.options.validation(),
+                &mut session,
+                codec_out.reborrow(),
+            )?;
+            if options.reject_secret_values()
+                && value.contains_secret_values(codec_out.reborrow())?
+            {
+                return Err(codec_out.fail(CodecErrors::emergency(
+                    CodecStage::Encoding,
+                    Failure::SecretOutput,
+                )));
+            }
+            value.encode(output, options.pretty(), codec_out.reborrow())
+        });
+        match result {
+            Ok(()) => Ok(()),
+            Err(caught) => Err(out.fail(slot.encoding(caught.take(), self.error_names()))),
+        }
     }
 
     /// Reads and returns a configuration value validated against this Schema.

@@ -149,6 +149,10 @@ impl<'a> DiagnosticReport<'a> {
                 diagnostic_key!("diagnostic.conversion.failed"),
                 "Rust value conversion failed",
             )),
+            (DiagnosticCode::CONFIG_ENCODING_ERROR, Some("secret-output-rejected")) => Some((
+                diagnostic_key!("diagnostic.encoding.secret_output_rejected"),
+                "secret values are not allowed in generated configuration output",
+            )),
             (DiagnosticCode::CONFIG_ENCODING_ERROR, _) => Some((
                 diagnostic_key!("diagnostic.encoding.unrepresentable"),
                 "value cannot be expressed in the configuration grammar",

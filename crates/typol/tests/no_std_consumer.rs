@@ -22,7 +22,8 @@ use typol::{
 
 #[cfg(not(feature = "std"))]
 use typol::{
-    OrderedMap, SourceExpectation, SourceRevision, SourceWriter, TypolStage, core::SourceId,
+    DefaultConfigOptions, OrderedMap, SourceExpectation, SourceRevision, SourceWriter, TypolStage,
+    core::SourceId,
 };
 
 #[cfg(all(feature = "hashbrown", not(feature = "std")))]
@@ -140,6 +141,23 @@ fn derived_types_compile_without_the_standard_library() {
     };
     assert!(matches!(mode, Mode::Remote { endpoint } if endpoint == "127.0.0.1"));
     assert!(matches!(Mode::Local, Mode::Local));
+}
+
+#[cfg(not(feature = "std"))]
+#[test]
+fn loaded_schema_generates_default_text_without_the_standard_library() {
+    let mut errors = ErrSlot::<TypolError>::new();
+    let result = errors.try_call(|mut out| {
+        let loaded = SchemaLoader::new(TypolOptions::default()).compile_text(
+            b"no-std-default-config",
+            "entry struct Root { port: u16 = 8080, optional: option<string> }",
+            out.reborrow(),
+        )?;
+        let generated = loaded.default_config_to_string(DefaultConfigOptions::default(), out)?;
+        assert_eq!(generated, "{port: 8080, optional: none}");
+        Ok(())
+    });
+    assert!(result.is_ok());
 }
 
 #[cfg(not(feature = "std"))]

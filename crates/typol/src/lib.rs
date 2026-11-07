@@ -50,6 +50,10 @@
 //! [`LoadedSchema::read_value`] when the application needs Typol's validated value model instead
 //! of a Rust type binding.
 //!
+//! To generate `.tconf` from Schema defaults without a Rust type, call
+//! [`LoadedSchema::default_config_to_string`] or [`LoadedSchema::write_default_config`]. The entry
+//! must provide defaults for every required field; optional fields without defaults become `none`.
+//!
 //! # Feature flags
 //!
 //! The crate has no default features. It remains `no_std` internally when `std` is enabled.
@@ -154,7 +158,7 @@ pub use loading::{
     BoundRead, BoundSchema, LoadedSchema, SchemaLoader, SourceNames, TrustedBoundSchema,
 };
 pub use opeo;
-pub use options::{ConversionLimitError, TypolOptions, WriteOptions};
+pub use options::{ConversionLimitError, DefaultConfigOptions, TypolOptions, WriteOptions};
 pub use typol_config::{
     ConfigDocument, ConfigEdit, ConfigEditError, ConfigEditErrorKind, ConfigFormatError,
     ConfigFormatErrorKind, ConfigFormatOptions, ConfigFormatter, ConfigParseErrors,

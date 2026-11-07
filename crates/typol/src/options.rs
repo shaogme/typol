@@ -137,6 +137,63 @@ impl Default for ConversionLimits {
     }
 }
 
+/// Controls output formatting, size, and secret-value policy for generated defaults.
+///
+/// The default is compact output, a one MiB UTF-8 byte limit, and permission to write secret
+/// values, matching [`WriteOptions`] serialization behavior.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DefaultConfigOptions {
+    max_output_bytes: usize,
+    pretty: bool,
+    reject_secret_values: bool,
+}
+
+impl DefaultConfigOptions {
+    /// Creates compact generation options with the provided UTF-8 output byte limit.
+    pub const fn new(max_output_bytes: usize) -> Self {
+        Self {
+            max_output_bytes,
+            pretty: false,
+            reject_secret_values: false,
+        }
+    }
+
+    pub const fn max_output_bytes(self) -> usize {
+        self.max_output_bytes
+    }
+
+    pub const fn pretty(self) -> bool {
+        self.pretty
+    }
+
+    pub const fn reject_secret_values(self) -> bool {
+        self.reject_secret_values
+    }
+
+    pub const fn with_max_output_bytes(mut self, max_output_bytes: usize) -> Self {
+        self.max_output_bytes = max_output_bytes;
+        self
+    }
+
+    /// Selects compact or multi-line output with two-space indentation.
+    pub const fn with_pretty(mut self, pretty: bool) -> Self {
+        self.pretty = pretty;
+        self
+    }
+
+    /// Refuses to write if the generated value tree contains a value marked `@secret`.
+    pub const fn with_reject_secret_values(mut self, reject: bool) -> Self {
+        self.reject_secret_values = reject;
+        self
+    }
+}
+
+impl Default for DefaultConfigOptions {
+    fn default() -> Self {
+        Self::new(1_048_576)
+    }
+}
+
 /// Bounds library-managed type-description nodes, depth, diagnostics, and name storage.
 ///
 /// These limits do not constrain arbitrary Rust work performed by handwritten `Typol::describe` callbacks.

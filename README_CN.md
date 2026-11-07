@@ -43,6 +43,8 @@ entry struct ServiceConfig {
 
 `Endpoint` 和 `ServiceConfig` 是 Schema 结构体。`entry` 选择配置根类型。应用可以定义同名且字段匹配的 Rust 结构体；`#[derive(Typol)]` 会生成它们的转换映射。Rust 方法和字段可见性仍由应用控制。
 
+读取配置时，Schema 默认值会补齐省略字段。若要在不声明或绑定 Rust 类型的情况下，根据这些默认值生成完整 `.tconf`，可调用 `LoadedSchema::default_config_to_string` 或 `write_default_config`。每个必填字段都必须有显式 Schema 默认值；系统不会根据 Rust `Default` 或空容器约定推测值。详见[快速上手](docs/src/content/docs/zh-cn/guides/quickstart.md)和[进阶教程](docs/src/content/docs/zh-cn/guides/advanced.md)。
+
 常见 Schema 类型与 Rust 类型的对应关系：
 
 | Schema 类型 | Rust 类型 |
@@ -65,6 +67,7 @@ Schema 和 Rust 声明中的字段名及类型必须匹配。[快速上手](docs
 | 编译 | `SchemaLoader::compile_text` 或 `compile_file` | 校验 Schema 并生成 `LoadedSchema`。文件加载需要 `std`。 |
 | 绑定 | `LoadedSchema::bind::<T>()` | 检查 Rust 类型 `T` 与 Schema 入口是否一致，并生成可复用的 `BoundSchema<T>`。 |
 | 读取 | `BoundSchema::read` 或 `read_file` | 解析、应用默认值、校验，并返回 `T`。每次读取都显式接收 `Environment` 提供器。 |
+| 生成默认配置 | `LoadedSchema::default_config_to_string` 或 `write_default_config` | 物化 Schema 默认值和 option 的 `none`，校验完整值，并在不绑定 Rust 类型或接收环境提供器的情况下编码 `.tconf`。 |
 
 `SchemaLoader::new(options)` 是创建 loader 的关联函数。表中的其他入口是作用于 loader、已加载 Schema 或绑定对象的方法。`LoadedSchema` 及其 binding 可以重复使用，以读取多份配置。
 

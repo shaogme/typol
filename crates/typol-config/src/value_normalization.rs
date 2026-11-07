@@ -17,8 +17,36 @@ use typol_core::{
     ValuePayloadView, ValueView,
 };
 use typol_policy::ValueLimits;
+use typol_semantic::TypeKind;
 
 pub(crate) use model::NormalizeRequest;
+
+pub(crate) enum MissingFieldDecision<'value> {
+    Provided,
+    SchemaDefault(&'value ConfigValue),
+    OptionalNone,
+    Required,
+}
+
+pub(crate) struct MissingFieldValue;
+
+impl MissingFieldValue {
+    pub(crate) fn decide<'value>(
+        provided: bool,
+        default: Option<&'value ConfigValue>,
+        kind: TypeKind<'_>,
+    ) -> MissingFieldDecision<'value> {
+        if provided {
+            MissingFieldDecision::Provided
+        } else if let Some(default) = default {
+            MissingFieldDecision::SchemaDefault(default)
+        } else if matches!(kind, TypeKind::Option { .. }) {
+            MissingFieldDecision::OptionalNone
+        } else {
+            MissingFieldDecision::Required
+        }
+    }
+}
 
 /// Holds a normalizer-rebuilt value as an internal proof that its full tree shape was checked.
 pub(crate) struct NormalizedValue {

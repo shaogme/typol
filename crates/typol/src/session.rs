@@ -5,7 +5,9 @@ use crate::{
 use alloc::string::String;
 use core::{cell::RefCell, cmp::Ordering, fmt};
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
-use typol_config::{ConfigParseErrors, ConfigParseOptions, ConfigValueErrors};
+use typol_config::{
+    ConfigParseErrors, ConfigParseOptions, ConfigValidationOptions, ConfigValueErrors,
+};
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, ExecutionBudget, ExecutionLimits, ValueError,
 };
@@ -91,6 +93,19 @@ impl SessionBudget {
             out.reborrow(),
         )?;
         Ok(session)
+    }
+
+    pub(crate) fn default_config<'slot>(
+        validation: ConfigValidationOptions,
+        max_output_bytes: usize,
+        out: Out<'slot, '_, BudgetError>,
+    ) -> OResult<'slot, Self> {
+        Self::new(
+            *validation.execution(),
+            validation.config().max_constructed_text_bytes(),
+            max_output_bytes,
+            out,
+        )
     }
 
     pub(crate) fn parsing<'slot>(

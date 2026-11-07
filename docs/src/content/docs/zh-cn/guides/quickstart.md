@@ -143,7 +143,7 @@ impl ServiceConfig {
 use std::{path::Path, process::ExitCode};
 
 use typol::{
-    EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
+    DefaultConfigOptions, EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
     opeo::ErrSlot,
 };
 
@@ -213,6 +213,17 @@ cargo run
 | `binding.read_file(path, environment, out)` | 读取配置、应用默认值、校验并转换为 `ServiceConfig`。 |
 
 `SchemaLoader::new` 是关联函数，通过类型名调用。`compile_file`、`bind` 和 `read_file` 是作用于实例的方法。可能失败的方法接收 `Out` 错误上下文并返回 OPEO 结果；`ErrSlot::try_call` 会提供该上下文并捕获产生的 `TypolError`。
+
+如果需要在不创建 Rust 结构体的情况下生成初始 `.tconf`，可以直接从已加载的 Schema 生成：
+
+```rust
+let defaults = loaded.default_config_to_string(
+    DefaultConfigOptions::default().with_pretty(true),
+    out.reborrow(),
+)?;
+```
+
+入口结构体中的必填字段都需要显式 Schema 默认值；省略的 `option<T>` 会生成为 `none`。嵌套结构、数组、map 和枚举变体只有在其字段声明了显式默认值时才会生成。该 API 不读取 `@env` 值。默认策略会将真实 `@secret` 值写入文本，请按敏感数据保护结果。输出限额、秘密值拒绝和 sink 行为见[进阶教程](../advanced/)。
 
 `LoadedSchema` 及其 binding 可以保留并复用，以读取多份配置。binding 只需检查一次 Rust 类型；每次读取仍会解析和校验输入。如果需要 Typol 的已校验值树，而不是 Rust 类型，请使用 `LoadedSchema::read_value`。
 

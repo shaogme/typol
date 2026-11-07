@@ -9,12 +9,13 @@ use crate::{
         semantics::SubtreeValidator,
     },
     value::{FieldValue, ValueFactory},
+    value_normalization::{MissingFieldDecision, MissingFieldValue},
 };
 use core::mem::replace;
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{ChargedVec, DiagnosticCode, LocatedSpan};
 use typol_i18n::diagnostic_key;
-use typol_semantic::{FieldList, FieldView, TypeKind, TypeView};
+use typol_semantic::{FieldList, FieldView, TypeView};
 use typol_syntax::{Symbol, TokenKind};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -337,48 +338,84 @@ impl<'schema> StructureFrame<'schema> {
                     |schema_out| field.default_value(schema_out),
                     item_out.reborrow(),
                 )?;
-                let value = if let Some(default) = default {
-                    let value = SubtreeValidator::copy_default(
-                        context,
-                        default,
-                        field,
-                        item_out.reborrow(),
-                    )?;
-                    let expected = ParserControl::schema_call(
-                        &mut context.session.validation().schema_access_errors,
-                        |schema_out| field.ty(schema_out),
-                        item_out.reborrow(),
-                    )?;
-                    let field_span = ParserControl::schema_call(
-                        &mut context.session.validation().schema_access_errors,
-                        |schema_out| field.span(schema_out),
-                        item_out.reborrow(),
-                    )?;
-                    SubtreeValidator::validate(
-                        context,
-                        AssignmentTarget {
-                            expected,
-                            field: Some(field_id),
-                            variant: None,
-                            span: field_span.into(),
-                        },
-                        &value,
-                        CompletionState::NeedsTraversalWithKnownShape,
-                        item_out.reborrow(),
-                    )?;
-                    value
-                } else {
-                    let expected = ParserControl::schema_call(
-                        &mut context.session.validation().schema_access_errors,
-                        |schema_out| field.ty(schema_out),
-                        item_out.reborrow(),
-                    )?;
-                    let kind = ParserControl::schema_call(
-                        &mut context.session.validation().schema_access_errors,
-                        |schema_out| expected.kind(schema_out),
-                        item_out.reborrow(),
-                    )?;
-                    if !matches!(kind, TypeKind::Option { .. }) {
+                let expected = ParserControl::schema_call(
+                    &mut context.session.validation().schema_access_errors,
+                    |schema_out| field.ty(schema_out),
+                    item_out.reborrow(),
+                )?;
+                let kind = ParserControl::schema_call(
+                    &mut context.session.validation().schema_access_errors,
+                    |schema_out| expected.kind(schema_out),
+                    item_out.reborrow(),
+                )?;
+                let decision = MissingFieldValue::decide(false, default, kind);
+                let value = match decision {
+                    MissingFieldDecision::SchemaDefault(default) => {
+                        let value = SubtreeValidator::copy_default(
+                            context,
+                            default,
+                            field,
+                            item_out.reborrow(),
+                        )?;
+                        let field_span = ParserControl::schema_call(
+                            &mut context.session.validation().schema_access_errors,
+                            |schema_out| field.span(schema_out),
+                            item_out.reborrow(),
+                        )?;
+                        SubtreeValidator::validate(
+                            context,
+                            AssignmentTarget {
+                                expected,
+                                field: Some(field_id),
+                                variant: None,
+                                span: field_span.into(),
+                            },
+                            &value,
+                            CompletionState::NeedsTraversalWithKnownShape,
+                            item_out.reborrow(),
+                        )?;
+                        value
+                    }
+                    MissingFieldDecision::OptionalNone => {
+                        ParserControl::count_value_node(
+                            context,
+                            close_span,
+                            Some(context.value_source),
+                            item_out.reborrow(),
+                        )?;
+                        let value = ContainerSupport::value_call(
+                            &mut context.value_errors,
+                            |value_out| {
+                                ValueFactory::none(
+                                    context.value_source,
+                                    Some(&context.budget),
+                                    value_out,
+                                )
+                            },
+                            close_span,
+                            context.value_source,
+                            item_out.reborrow(),
+                        )?;
+                        let field_span = ParserControl::schema_call(
+                            &mut context.session.validation().schema_access_errors,
+                            |schema_out| field.span(schema_out),
+                            item_out.reborrow(),
+                        )?;
+                        SubtreeValidator::validate(
+                            context,
+                            AssignmentTarget {
+                                expected,
+                                field: Some(field_id),
+                                variant: None,
+                                span: field_span.into(),
+                            },
+                            &value,
+                            CompletionState::NeedsTraversal,
+                            item_out.reborrow(),
+                        )?;
+                        value
+                    }
+                    MissingFieldDecision::Required => {
                         let diagnostic = ContainerSupport::missing_field_diagnostic(
                             context,
                             close_span,
@@ -386,43 +423,11 @@ impl<'schema> StructureFrame<'schema> {
                         )?;
                         return Err(item_out.fail(diagnostic.into()));
                     }
-                    ParserControl::count_value_node(
-                        context,
-                        close_span,
-                        Some(context.value_source),
-                        item_out.reborrow(),
-                    )?;
-                    let value = ContainerSupport::value_call(
-                        &mut context.value_errors,
-                        |value_out| {
-                            ValueFactory::none(
-                                context.value_source,
-                                Some(&context.budget),
-                                value_out,
-                            )
-                        },
-                        close_span,
-                        context.value_source,
-                        item_out.reborrow(),
-                    )?;
-                    let field_span = ParserControl::schema_call(
-                        &mut context.session.validation().schema_access_errors,
-                        |schema_out| field.span(schema_out),
-                        item_out.reborrow(),
-                    )?;
-                    SubtreeValidator::validate(
-                        context,
-                        AssignmentTarget {
-                            expected,
-                            field: Some(field_id),
-                            variant: None,
-                            span: field_span.into(),
-                        },
-                        &value,
-                        CompletionState::NeedsTraversal,
-                        item_out.reborrow(),
-                    )?;
-                    value
+                    MissingFieldDecision::Provided => {
+                        return Err(
+                            item_out.fail(ContainerSupport::invalid_parser_state(Some(close_span)))
+                        );
+                    }
                 };
                 ParserControl::construct_text(context, field_name.len(), item_out.reborrow())?;
                 let field_value = ParserControl::budget_call(

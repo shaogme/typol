@@ -46,6 +46,39 @@ The read methods depend on which result the application needs:
 
 In particular, `BoundSchema::read_file` returns the typed Rust value. `LoadedSchema::read_file` has a different purpose: it retains the source representation so edits can preserve formatting.
 
+## Generate `.tconf` from Schema defaults
+
+`LoadedSchema` can build a complete configuration from the compiled Schema without a Rust binding or an `Environment` provider:
+
+```rust
+let text = loaded.default_config_to_string(
+    DefaultConfigOptions::default().with_pretty(true),
+    out.reborrow(),
+)?;
+```
+
+The entry struct is treated as an empty root. For each field, generation uses its Schema default, then `none` for an `option<T>` without a default; any other missing field is an error with a field path and Schema location. A nested struct is not constructed just because all its children have defaults: the field itself needs a default such as `{}`. Arrays, maps, and enums likewise need an explicit field default to select a value. Once a value is selected, its missing child fields are completed normally, then constraints and full-tree assertions run.
+
+Generation never evaluates `env(...)` or reads the process environment. `@env` only authorizes expressions in an input `.tconf`. `DefaultConfigOptions` controls compact or pretty output, the UTF-8 output byte limit, and whether to reject values marked `@secret`. The default permits secret values and writes their actual text; treat generated output as sensitive. When rejection is enabled, the entire value tree is checked before the sink receives its first byte.
+
+The string method returns no partial string on failure. `write_default_config` can leave a prefix in a caller sink if encoding, a sink, or an output limit fails. To create a new file atomically, first generate the complete string and then commit its bytes with `FileSourceWriter` and `SourceExpectation::MustBeAbsent`. This succeeds only when the target does not already exist:
+
+```rust
+use typol::host::FileSourceWriter;
+use typol::{SourceExpectation, SourceWriter};
+
+let text = loaded.default_config_to_string(DefaultConfigOptions::default(), out.reborrow())?;
+let mut writer = FileSourceWriter::new(4096);
+let commit = writer.replace_atomically(
+    Path::new("service.defaults.tconf"),
+    SourceExpectation::MustBeAbsent,
+    text.as_bytes(),
+    1_048_576,
+);
+```
+
+Handle `commit` according to the application's error policy. `LoadedSchema::write_file` edits a `ConfigDocument` with retained source; it is not the generated-text file API.
+
 ## Split a Schema across files
 
 Use `extern mod` to import reusable declarations from another `.tschem` file:

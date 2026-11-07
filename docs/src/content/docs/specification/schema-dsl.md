@@ -160,6 +160,8 @@ An object default may omit fields that have their own defaults or optional types
 
 Defaults and all nested default values are checked for type and constraints during Schema validation. An invalid default makes the Schema invalid.
 
+The Rust facade can generate a complete `.tconf` from these declarations through `LoadedSchema::default_config_to_string` or `write_default_config`. Generation uses the entry struct as an empty root, fills fields with their defaults, and uses `none` for optional fields without defaults. Any other required field must have an explicit default. A nested struct, array, map, or enum field is not inferred from its contents; its field needs a default that selects the value. Generation does not evaluate environment expressions, and it still runs the complete value constraints and assertions after filling defaults.
+
 ## 5. Annotations
 
 Annotations may be used on type aliases, fields, anonymous struct variant fields, and the payload type of a single-value variant, subject to the target types in the table below. An annotation may appear at most once on a declaration. Alias and use-site constraints apply together.

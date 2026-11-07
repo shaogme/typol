@@ -6,11 +6,12 @@ use crate::{
         ChildRole, FieldsRequest, Input, NORMALIZE_FIELD_SLOT, NORMALIZE_MAP_CHILD_ROLE,
         NormalizeErrors, NormalizeOps, NormalizeState, Plan, PlanChild, PlanKind,
     },
+    value_normalization::{MissingFieldDecision, MissingFieldValue},
 };
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
-    BudgetError, ChargedVec, ConfigValue, Diagnostic, DiagnosticCode, DiagnosticMessage,
-    InstancePath, ValueKind, ValuePayloadView, ValueSource, ValueView,
+    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticMessage, InstancePath,
+    ValueKind, ValuePayloadView, ValueSource, ValueView,
 };
 use typol_i18n::diagnostic_message;
 use typol_semantic::{TypeKind, VariantPayloadInfo};
@@ -557,6 +558,22 @@ impl NormalizePlanner {
                 |schema_out| field.ty(schema_out),
                 out.reborrow(),
             )?;
+            let kind = NormalizeOps::schema_call(
+                &mut state.errors.schema,
+                |schema_out| ty.kind(schema_out),
+                out.reborrow(),
+            )?;
+            let decision = MissingFieldValue::decide(slot_value.is_some(), default, kind);
+            let (value, is_schema_default) = match (slot_value, decision) {
+                (Some(value), MissingFieldDecision::Provided) => (Some(value), false),
+                (None, MissingFieldDecision::SchemaDefault(default)) => {
+                    (Some(default.root()), true)
+                }
+                (None, MissingFieldDecision::OptionalNone | MissingFieldDecision::Required) => {
+                    (None, false)
+                }
+                _ => return Err(out.fail(NormalizeOps::invariant_error())),
+            };
             let role = match input.value.map(ValueView::as_ref) {
                 Some(ValueKind::Enumeration { variant, .. }) => {
                     ChildRole::VariantField { variant, field }
@@ -569,11 +586,10 @@ impl NormalizePlanner {
                 PlanChild {
                     input: Input {
                         ty,
-                        value: slot_value.or_else(|| default.map(ConfigValue::root)),
+                        value,
                         field: Some(field),
                         hidden: input.hidden,
-                        schema_default: input.schema_default
-                            || (slot_value.is_none() && default.is_some()),
+                        schema_default: input.schema_default || is_schema_default,
                     },
                     role,
                 },
