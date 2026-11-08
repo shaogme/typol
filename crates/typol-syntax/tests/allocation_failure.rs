@@ -473,9 +473,8 @@ fn reading_tree_bound_views_does_not_allocate() -> TestResult {
         })
         .test_value()?
         .test_value()?;
-    let annotations = ast_errors
-        .access(|out| text.annotations(out))
-        .test_value()?;
+    let ty = ast_errors.access(|out| text.ty(out)).test_value()?;
+    let annotations = ast_errors.access(|out| ty.annotations(out)).test_value()?;
     let annotation = ast_errors
         .access(|out| annotations.first(out))
         .test_value()?

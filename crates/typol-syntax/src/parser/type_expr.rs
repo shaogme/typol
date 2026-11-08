@@ -1,8 +1,11 @@
 use crate::{
     Keyword, Symbol, TokenKind,
     error::SyntaxDiagnostic,
-    parser::context::{ParserControl, ParserState},
-    storage::{BuiltinType, Id, TypeBuilder, TypeExpr},
+    parser::{
+        annotation::AnnotationParser,
+        context::{ParserControl, ParserState},
+    },
+    storage::{ArrayTypeExprParts, BuiltinType, Id, TypeBuilder, TypeExpr},
 };
 use opeo::{OResult, Out};
 use typol_core::{Diagnostic, SourceSpan};
@@ -21,21 +24,6 @@ impl TypeParser {
         parser: &mut ParserState<'_>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<TypeExpr>> {
-        let info = ParserControl::peek(parser, out.reborrow())?;
-        if let TokenKind::Keyword(keyword) = info.kind {
-            if let Some(builtin) = builtin_type(keyword) {
-                ParserControl::bump(parser, out.reborrow())?;
-                return TypeBuilder::type_expr_builtin(
-                    &mut parser.ast,
-                    builtin,
-                    info.span,
-                    out.reborrow(),
-                );
-            }
-        }
-        if info.kind == TokenKind::Identifier {
-            return TypeParser::parse_path_type(parser, info.span, out.reborrow());
-        }
         let saved_depth = parser.prefix_frames;
         let result = TypeParser::parse_type_frames(parser, out.reborrow());
         // On failure, unmatched delimiters are left to recovery; angle-bracket frames belong to this type parse.
@@ -91,9 +79,11 @@ impl TypeParser {
                         );
                     };
                     ParserControl::bump(parser, out.reborrow())?;
+                    let annotations = AnnotationParser::parse_annotations(parser, out.reborrow())?;
                     break TypeBuilder::type_expr_builtin(
                         &mut parser.ast,
                         builtin,
+                        annotations,
                         info.span,
                         out.reborrow(),
                     )?;
@@ -125,9 +115,11 @@ impl TypeParser {
                     ParserControl::expect_symbol(parser, Symbol::Greater, out.reborrow())?;
                     ParserControl::leave_prefix_frame(parser, out.reborrow())?;
                     let span = ParserControl::span_from_start(parser, start, out.reborrow())?;
+                    let annotations = AnnotationParser::parse_annotations(parser, out.reborrow())?;
                     TypeBuilder::type_expr_option(
                         &mut parser.ast,
                         expression,
+                        annotations,
                         span,
                         out.reborrow(),
                     )?
@@ -136,7 +128,14 @@ impl TypeParser {
                     ParserControl::expect_symbol(parser, Symbol::Greater, out.reborrow())?;
                     ParserControl::leave_prefix_frame(parser, out.reborrow())?;
                     let span = ParserControl::span_from_start(parser, start, out.reborrow())?;
-                    TypeBuilder::type_expr_map(&mut parser.ast, expression, span, out.reborrow())?
+                    let annotations = AnnotationParser::parse_annotations(parser, out.reborrow())?;
+                    TypeBuilder::type_expr_map(
+                        &mut parser.ast,
+                        expression,
+                        annotations,
+                        span,
+                        out.reborrow(),
+                    )?
                 }
                 TypeFrame::Array(start) => {
                     let length =
@@ -156,10 +155,14 @@ impl TypeParser {
                         };
                     ParserControl::expect_symbol(parser, Symbol::RightBracket, out.reborrow())?;
                     let span = ParserControl::span_from_start(parser, start, out.reborrow())?;
+                    let annotations = AnnotationParser::parse_annotations(parser, out.reborrow())?;
                     TypeBuilder::type_expr_array(
                         &mut parser.ast,
-                        expression,
-                        length,
+                        ArrayTypeExprParts {
+                            element: expression,
+                            length,
+                        },
+                        annotations,
                         span,
                         out.reborrow(),
                     )?
@@ -188,7 +191,8 @@ impl TypeParser {
             ParserControl::try_push(&mut segments, segment, span, out.reborrow())?;
         }
         let span = ParserControl::span_from_start(parser, start, out.reborrow())?;
-        TypeBuilder::type_expr_path(&mut parser.ast, segments, span, out.reborrow())
+        let annotations = AnnotationParser::parse_annotations(parser, out.reborrow())?;
+        TypeBuilder::type_expr_path(&mut parser.ast, segments, annotations, span, out.reborrow())
     }
 }
 

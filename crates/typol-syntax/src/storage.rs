@@ -35,7 +35,7 @@ pub(crate) use records::{
     VariantDeclParams, VariantPayload, VariantPayloadKind,
 };
 pub(crate) use text::{TextRef, TextStorage};
-pub(crate) use type_expr::TypeBuilder;
+pub(crate) use type_expr::{ArrayTypeExprParts, TypeBuilder};
 use typol_core::{
     ChargedString, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, SourceId, SourceSpan,
     Span,
@@ -810,14 +810,11 @@ impl Storage {
     pub(crate) fn variant_payload_single<'slot>(
         &mut self,
         ty: Id<TypeExpr>,
-        annotations: ChargedVec<Id<Annotation>>,
         span: SourceSpan,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<VariantPayload>> {
-        let annotations = self.store_list(annotations, span, out.reborrow())?;
-
         let value = VariantPayload {
-            kind: VariantPayloadKind::Single(SingleVariantPayload { ty, annotations }),
+            kind: VariantPayloadKind::Single(SingleVariantPayload { ty }),
             span,
         };
         self.insert(value, out.reborrow())

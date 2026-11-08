@@ -144,6 +144,14 @@ impl AnnotationValues {
                     summary.include(constraint, diagnostics);
                 }
             }
+            AnnotationOwner::TypeUse(id) => {
+                let constraints =
+                    diagnostics.require(output.type_use_constraints(id), span, out.reborrow())?;
+                for constraint in constraints {
+                    context.consume(1, span, diagnostics, out.reborrow())?;
+                    summary.include(constraint, diagnostics);
+                }
+            }
             AnnotationOwner::Alias(_) => {}
         }
 

@@ -806,6 +806,85 @@ entry struct Root {
 }
 
 #[test]
+fn nested_type_use_constraints_validate_defaults_and_publish_their_layer() -> TestResult {
+    let source = r#"
+entry struct Root {
+    values: [string @length(2, 4)] = ["fine"],
+    matrix: [[u8] @all(item > 0, "members must be positive")] = [[1, 2]],
+}
+"#;
+    let mut resolver = MemoryResolver::new();
+    let schema = assert_compiles(
+        &mut resolver,
+        "root.tschem",
+        source,
+        &SchemaLimits::default(),
+    )
+    .test_value()?;
+
+    let values = field(schema.entry(), "values").test_value()?;
+    let values_type = access(|out| values.ty(out))?;
+    let TypeKind::Array { element, .. } = access(|out| values_type.kind(out))? else {
+        return Err(TestFailure::new("expected an array field"));
+    };
+    let element_rules =
+        schema_support::SchemaCompileTestSupport::collect_constraints(access(|out| {
+            element.constraints(out)
+        })?)?;
+    test_verify!(element_rules.iter().any(|rule| {
+        rule.kind() == ConstraintKind::Length && rule.layer() == ConstraintLayer::TypeUse
+    }));
+
+    let matrix = field(schema.entry(), "matrix").test_value()?;
+    let matrix_type = access(|out| matrix.ty(out))?;
+    let TypeKind::Array { element, .. } = access(|out| matrix_type.kind(out))? else {
+        return Err(TestFailure::new("expected an array field"));
+    };
+    let nested_rules =
+        schema_support::SchemaCompileTestSupport::collect_constraints(access(|out| {
+            element.constraints(out)
+        })?)?;
+    test_verify!(nested_rules.iter().any(|rule| {
+        rule.kind() == ConstraintKind::All && rule.layer() == ConstraintLayer::TypeUse
+    }));
+
+    for invalid_source in [
+        r#"entry struct Root { values: [string @length(2, 4)] = ["x"] }"#,
+        r#"entry struct Root { matrix: [[u8] @all(item > 0, "positive")] = [[0]] }"#,
+    ] {
+        let mut invalid_resolver = MemoryResolver::new();
+        let errors =
+            match invalid_resolver.compile("root.tschem", invalid_source, &SchemaLimits::default())
+            {
+                schema_support::TestOpeoOutcome::Error(errors) => errors,
+                schema_support::TestOpeoOutcome::Value(_) => {
+                    return Err(format!(
+                        "nested refinement did not reject default: {invalid_source}"
+                    )
+                    .into());
+                }
+            };
+        test_verify!(
+            diagnostic_codes(&errors).contains(&DiagnosticCode::SCHEMA_SEMANTIC_ERROR.get())
+        );
+    }
+
+    let mut invalid_env_resolver = MemoryResolver::new();
+    let errors = match invalid_env_resolver.compile(
+        "root.tschem",
+        r#"entry struct Root { values: [string @env("TOKEN")] }"#,
+        &SchemaLimits::default(),
+    ) {
+        schema_support::TestOpeoOutcome::Error(errors) => errors,
+        schema_support::TestOpeoOutcome::Value(_) => {
+            return Err(TestFailure::new("nested @env annotation was accepted"));
+        }
+    };
+    test_verify!(diagnostic_codes(&errors).contains(&DiagnosticCode::SCHEMA_SEMANTIC_ERROR.get()));
+    Ok(())
+}
+
+#[test]
 fn invalid_default_and_type_graph_inputs_return_semantic_diagnostics() -> TestResult {
     for source in [
         "entry struct Root { value: Missing }",

@@ -187,12 +187,18 @@ fn rejected_node_growth_does_not_mutate_tables_text_or_counter() -> TestResult {
         .access(|out| Storage::new(source, 3, &limits, &execution, out))
         .test_value()?;
     let child = diagnostic_errors
-        .access(|out| TypeBuilder::type_expr_builtin(&mut storage, BuiltinType::U8, span, out))
+        .access(|mut out| {
+            let annotations = ChargedVec::new(None, out.reborrow())?;
+            TypeBuilder::type_expr_builtin(&mut storage, BuiltinType::U8, annotations, span, out)
+        })
         .test_value()?;
     storage.type_expr.get_mut(0).test_value()?.height = usize::MAX;
     test_assert_eq!(
         diagnostic_errors
-            .access(|out| TypeBuilder::type_expr_option(&mut storage, child, span, out))
+            .access(|mut out| {
+                let annotations = ChargedVec::new(None, out.reborrow())?;
+                TypeBuilder::type_expr_option(&mut storage, child, annotations, span, out)
+            })
             .test_error()?
             .code(),
         DiagnosticCode::RESOURCE_LIMIT_EXCEEDED

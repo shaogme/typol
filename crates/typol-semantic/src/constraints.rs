@@ -49,6 +49,7 @@ pub enum ConstraintLayer {
     Alias,
     Field,
     VariantPayload,
+    TypeUse,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

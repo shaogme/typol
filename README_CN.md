@@ -36,12 +36,14 @@ struct Endpoint {
 entry struct ServiceConfig {
     name: string,
     endpoint: Endpoint,
-    tags: [string],
+    tags: [string @length(1, 32)],
     note: option<string>,
 }
 ```
 
 `Endpoint` 和 `ServiceConfig` 是 Schema 结构体。`entry` 选择配置根类型。应用可以定义同名且字段匹配的 Rust 结构体；`#[derive(Typol)]` 会生成它们的转换映射。Rust 方法和字段可见性仍由应用控制。
+
+注解作用于其前方紧邻的类型表达式。这里的 `@length` 校验 `tags` 中的每个字符串；若在结束 `]` 后使用 `@size` 等集合注解，则校验整个数组。嵌套类型规则和注解适用范围见 [Schema DSL 规范](docs/src/content/docs/zh-cn/specification/schema-dsl.md)。
 
 读取配置时，Schema 默认值会补齐省略字段。若要在不声明或绑定 Rust 类型的情况下，根据这些默认值生成完整 `.tconf`，可调用 `LoadedSchema::default_config_to_string` 或 `write_default_config`。每个必填字段都必须有显式 Schema 默认值；系统不会根据 Rust `Default` 或空容器约定推测值。详见[快速上手](docs/src/content/docs/zh-cn/guides/quickstart.md)和[进阶教程](docs/src/content/docs/zh-cn/guides/advanced.md)。
 

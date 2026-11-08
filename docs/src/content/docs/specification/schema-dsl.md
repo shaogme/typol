@@ -57,7 +57,7 @@ extern_mod_decl   ::= "extern" "mod" identifier ";"
 entry_decl        ::= "entry" struct_decl
 declaration       ::= module_decl | type_decl | struct_decl | enum_decl
 module_decl       ::= "mod" identifier "{" declaration* "}"
-type_decl         ::= "type" identifier "=" type annotation* ";"
+type_decl         ::= "type" identifier "=" type ";"
 ```
 
 `extern mod name;` introduces a module whose contents come from an external Schema file. Modules may be nested. Module and type declarations share a namespace within their scope, so duplicate names in the same scope are invalid. Declaration order does not affect type resolution.
@@ -79,14 +79,15 @@ entry struct ServiceConfig {
 }
 ```
 
-A type alias uses `type Name = Type;` and may have annotations applicable to its target. Aliases are transparent and do not introduce a runtime representation. Both alias constraints and constraints at the use site apply. Aliases cannot be cyclic. `@env` applies only to fields, not aliases.
+A type alias uses `type Name = Type;`. An annotation after its target type belongs to that root type node and is compiled as an alias constraint. Aliases are transparent and do not introduce a runtime representation. Both alias constraints and constraints at the use site apply. Aliases cannot be cyclic. `@env` applies only to a field's root type node, not aliases.
 
 ## 3. Types, structs, and enums
 
 ### 3.1 Types
 
 ```text
-type          ::= builtin_type
+type          ::= type_primary annotation*
+type_primary  ::= builtin_type
                 | "option" "<" type ">"
                 | "[" type "]"
                 | "[" type ";" decimal_integer "]"
@@ -100,7 +101,14 @@ path          ::= identifier ("::" identifier)*
 
 Integer types are signed or unsigned integers of the stated width. `f32` and `f64` are IEEE 754 binary32 and binary64. `option<T>` is an optional `T`; `[T]` is an array of any length; `[T; N]` has exactly `N` elements; and `map<string, T>` maps unique string keys to `T`. `N` is a non-negative decimal integer in the range 0 through `u32::MAX`.
 
-Container elements may themselves use containers or user-declared types. After aliases are fully expanded, nested `option<option<T>>` is unsupported. User-declared types may refer to themselves or each other through fields, enum payloads, containers, and non-cyclic aliases when the type graph has a finite value. Options, dynamic arrays, maps, and zero-length fixed arrays can stop recursive construction; a recursive enum needs at least one constructible variant. Positive-length fixed arrays require a constructible element type. A required cycle with no finite branch, such as `struct Loop { next: Loop }`, is a static error. Type aliases must still be acyclic.
+An annotation belongs to the `type` node immediately before it. It constrains that node's value only; constraints do not flow to its parent or children. For example, an annotation inside an array constrains each element, while one after `]` constrains the array. The same rule applies recursively inside `option`, fixed and dynamic arrays, and map values. Map keys remain the built-in `string` type and cannot have annotations. After aliases are fully expanded, nested `option<option<T>>` is unsupported. User-declared types may refer to themselves or each other through fields, enum payloads, containers, and non-cyclic aliases when the type graph has a finite value. Options, dynamic arrays, maps, and zero-length fixed arrays can stop recursive construction; a recursive enum needs at least one constructible variant. Positive-length fixed arrays require a constructible element type. A required cycle with no finite branch, such as `struct Loop { next: Loop }`, is a static error. Type aliases must still be acyclic.
+
+```tschem
+entry struct NetworkPolicy {
+    dns_servers: [string @length(1, 64)] @size(max = 16) = [],
+    private_https_origins: [string @length(1, 512)] @size(max = 256) = [],
+}
+```
 
 ```tschem
 struct Node {
@@ -124,11 +132,11 @@ entry struct Config {
 ```text
 struct_decl   ::= "struct" identifier "{" field_list? "}" struct_assert*
 field_list    ::= field ("," field)* ","?
-field         ::= identifier ":" type annotation* ("=" default_value)?
+field         ::= identifier ":" type ("=" default_value)?
 struct_assert ::= "@assert" "(" expression "," string_literal ")"
 ```
 
-A struct may be empty. Field names must be unique within that struct. A field may have zero or more annotations after its type; a default, when present, follows the annotations. Fields are comma-separated, and the final comma is optional.
+A struct may be empty. Field names must be unique within that struct. A field's type node may have zero or more annotations; a default, when present, follows the complete type including its annotations. Fields are comma-separated, and the final comma is optional.
 
 ### 3.3 Enums
 
@@ -136,12 +144,12 @@ A struct may be empty. Field names must be unique within that struct. A field ma
 enum_decl       ::= "enum" identifier "{" variant_list ","? "}"
 variant_list    ::= variant ("," variant)*
 variant         ::= identifier variant_assert*
-                  | identifier "(" type annotation* ")" variant_assert*
+                  | identifier "(" type ")" variant_assert*
                   | identifier "{" field_list? "}" variant_assert*
 variant_assert  ::= "@assert" "(" expression "," string_literal ")"
 ```
 
-An enum must contain at least one variant, and variant names must be unique. A variant can have no payload, one typed payload, or an anonymous struct payload. Anonymous struct fields follow ordinary field rules for types, annotations, and defaults.
+An enum must contain at least one variant, and variant names must be unique. A variant can have no payload, one typed payload, or an anonymous struct payload. An annotation on the single payload's root type remains a payload constraint; annotations inside it belong to their nested type nodes. Anonymous struct fields follow ordinary field rules for types, annotations, and defaults.
 
 An assertion following a variant belongs to that variant and runs only when that variant is selected. Assertions following a struct belong to that struct. In an assertion, `self` is the current struct instance or variant payload, and `root` is the entry struct instance. In an entry struct assertion, both refer to the same instance. A unit variant has no payload and cannot use `self`. Assertions run after a configuration value is fully constructed.
 
@@ -181,7 +189,13 @@ The Rust facade can generate a complete `.tconf` from these declarations through
 
 ## 5. Annotations
 
-Annotations may be used on type aliases, fields, anonymous struct variant fields, and the payload type of a single-value variant, subject to the target types in the table below. An annotation may appear at most once on a declaration. Alias and use-site constraints apply together.
+Annotations belong to the adjacent type-expression node at any depth. Root annotations on an alias target, field type, or single-value variant payload retain their existing owner semantics. Annotations below those roots are local to their `TypeUse`. For one value, inherited alias constraints combine with either its owner-root constraints or its nested `TypeUse` constraints; parent and child constraints are never merged. The same annotation may occur on different nodes, but may appear only once on any one node.
+
+```tschem
+map<string, [[string @length(1, 32)] @size(max = 8)] @size(max = 16)>
+```
+
+`@all` on a nested array or map uses that node's direct element or value type. `@env` is the field-root exception: it is allowed only on a struct field or anonymous struct variant field's root type, and its scalar shape and name-matching rules remain in force. Alias roots, payload roots, and nested type nodes cannot use `@env`. `@secret` can mark any exact type node; it protects that value and its descendants under the existing diagnostic and display redaction rules.
 
 ```text
 annotation ::= "@min" "(" number ")"
@@ -213,13 +227,13 @@ number ::= numeric_literal | "-" numeric_literal
 | `@host` | `string` or optional string | Validates an IP literal or DNS hostname; schemes, ports, and whitespace are not accepted. |
 | `@email` | `string` or optional string | Validates a practical ASCII email form: a non-empty local part, one `@`, and a valid DNS domain. It does not promise full RFC 5322 coverage. |
 | `@cidr(v4_only = bool)` | `string` or optional string | Validates an IP address and prefix length. `true` permits only IPv4; `false` permits IPv4 or IPv6. |
-| `@env("NAME")` | String, boolean, or numeric field, including optional forms | Authorizes reading the named environment variable for a field. It is not valid on aliases. |
+| `@env("NAME")` | String, boolean, or numeric struct-field root, including optional forms | Authorizes reading the named environment variable for a field. It is not valid on alias roots, payload roots, or nested type nodes. |
 | `@size(...)` | Array or map | Limits element or entry count. Positional arguments are min and max; named arguments may specify either or both. |
 | `@unique` | Array | Requires array elements to be unique. |
 | `@unique(by = "field.path")` | Array of structs | Requires the selected field path to be unique. |
 | `@all(expression, "message")` | Array or map | Requires every array element or map value to satisfy the expression. |
 | `@sum(...)` | Numeric array | Sums elements in array order and checks inclusive bounds; either or both of `min` and `max` may be given. |
-| `@secret` | Alias, field, or single-payload type | Marks a value sensitive for diagnostics and safe display. A marker on an alias propagates to uses of that alias. |
+| `@secret` | Any type-expression node | Marks that exact value as sensitive for diagnostics and safe display. A marker on an alias root propagates to uses of that alias. |
 
 The bounds of `@min`, `@max`, `@range`, `@size`, and `@sum` are inclusive. Numeric bounds are contextual: an integer bound may be used for a float target and is rounded directly to that target precision using IEEE 754 round-to-nearest, ties-to-even. A float bound cannot be used for an integer target. Bounds and combinations must be compatible with the target type; an inapplicable annotation, duplicate annotation, invalid argument, or incompatible combination invalidates the Schema.
 

@@ -324,7 +324,7 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
                 self.compiler.diagnostics,
                 out.reborrow(),
             )?;
-            if !self.unaliased(current_target) {
+            if !self.unaliased(current_target) || self.has_type_use_metadata(current_target) {
                 return Ok(SingleArrayBuild::unsupported());
             }
             let Some(ResolvedTypeKind::Array { element, length }) =
@@ -358,6 +358,7 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
                 }
                 DefaultValueKind::Scalar(scalar)
                     if self.unaliased(element)
+                        && !self.has_type_use_metadata(element)
                         && matches!(
                             self.compiler.type_kind(element),
                             Some(ResolvedTypeKind::Builtin(_))
@@ -454,6 +455,18 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
             .types
             .type_use(target)
             .is_some_and(|type_use| type_use.alias_chain().is_none())
+    }
+
+    fn has_type_use_metadata(&self, target: TypeUseId) -> bool {
+        self.compiler
+            .annotations
+            .type_use_constraints(target)
+            .is_some_and(|constraints| !constraints.is_empty())
+            || self
+                .compiler
+                .annotations
+                .type_use_secret(target)
+                .unwrap_or(false)
     }
 
     fn push_task<'slot>(

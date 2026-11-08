@@ -270,6 +270,7 @@ impl RecordSupport {
             aliases,
             fields,
             variants,
+            type_uses,
             regexes,
         } = annotations.into_parts();
         let ExpressionParts {
@@ -299,6 +300,25 @@ impl RecordSupport {
                 out.reborrow(),
             )?;
             alias_rules.try_push(rules, out.reborrow())?;
+        }
+        let mut type_use_rules = diagnostics.new_vec(execution, out.reborrow())?;
+        type_use_rules.try_reserve_exact(type_uses.len(), out.reborrow())?;
+        for items in type_uses {
+            execution.consume(1, out.reborrow())?;
+            let rules = RecordSupport::compile_rules(
+                CompileRulesInput {
+                    slot: items,
+                    model: &mut model,
+                    context,
+                    diagnostics,
+                },
+                out.reborrow(),
+            )?;
+            type_use_rules.try_push(rules, out.reborrow())?;
+        }
+        if type_use_rules.len() != types.uses.len() {
+            diagnostics.push(schema_internal!(fallback));
+            return Err(out.fail(BuildFailure::empty()));
         }
         let mut links: ChargedVec<(Option<RefinementId>, bool)> =
             diagnostics.new_vec(execution, out.reborrow())?;
@@ -356,17 +376,57 @@ impl RecordSupport {
                 _ => None,
             };
             if let Some(target) = target {
-                let (head, secret) =
+                let (head, inherited_secret) =
                     RecordSupport::use_rules(target, types, &links, diagnostics, fallback)
                         .store_err_into(out.reborrow())?;
+                let target_type = TypeId::new(index);
+                let (local_rules, local_secret) = match ty {
+                    ExpressionType::Resolved(id) => {
+                        let Some(local) = type_use_rules.get_mut(id.index()) else {
+                            diagnostics.push(schema_internal!(fallback));
+                            return Err(out.fail(BuildFailure::empty()));
+                        };
+                        (
+                            mem::replace(
+                                &mut local.ids,
+                                diagnostics.new_vec(execution, out.reborrow())?,
+                            ),
+                            local.secret,
+                        )
+                    }
+                    ExpressionType::User(_) => {
+                        (diagnostics.new_vec(execution, out.reborrow())?, false)
+                    }
+                    _ => {
+                        diagnostics.push(schema_internal!(fallback));
+                        return Err(out.fail(BuildFailure::empty()));
+                    }
+                };
+                let empty_rules = diagnostics.new_vec(execution, out.reborrow())?;
+                let refinement = context.builder_access(
+                    out.reborrow(),
+                    fallback,
+                    diagnostics,
+                    |builder_out| {
+                        model.add_refinement(
+                            RefinementInput {
+                                target: target_type,
+                                rules: empty_rules,
+                                next: head,
+                                tail: local_rules,
+                            },
+                            builder_out,
+                        )
+                    },
+                )?;
                 let record = context.builder_access(
                     out.reborrow(),
                     fallback,
                     diagnostics,
                     |builder_out| model.type_mut(TypeId::new(index), builder_out),
                 )?;
-                record.set_refinement(head);
-                record.set_secret(secret);
+                record.set_refinement(refinement);
+                record.set_secret(inherited_secret || local_secret);
             }
         }
         for (symbol, assertions) in symbols.types().iter().zip(type_assertions) {

@@ -13,9 +13,11 @@ use crate::{
 };
 
 use opeo::{ErrSlot, OResult, Out};
-use typol_core::SourceSpan;
+use typol_core::{ChargedVec, SourceSpan};
 use typol_i18n::diagnostic_message;
-use typol_syntax::{Annotation, Assertion, AstAccessError, VariantPayloadKind};
+use typol_syntax::{
+    Annotation, Assertion, AstAccessError, TypeExpr, TypeExprKind, VariantPayloadKind,
+};
 
 pub(crate) struct ExpressionCompiler;
 
@@ -30,6 +32,16 @@ pub(crate) struct ExpressionCompileInput<'tree, 'src, 'annotations, 'diagnostics
 struct AllTask<'a> {
     annotation: Annotation<'a>,
     target: TypeUseId,
+}
+
+struct TypeAllCollection<'a, 'tree> {
+    expression: TypeExpr<'tree>,
+    target: TypeUseId,
+    annotations: &'a AnnotationCompilation,
+    types: &'a ResolvedTypeGraph,
+    context: &'a CompileContext,
+    diagnostics: &'a mut DiagnosticCollector,
+    tasks: &'a mut ChargedVec<AllTask<'tree>>,
 }
 
 struct AssertionCompileInput<'a, 'src, 'diag> {
@@ -282,6 +294,22 @@ impl ExpressionCompiler {
             let TypeDeclarationKind::Alias(alias) = symbol.declaration() else {
                 continue;
             };
+            let Some(target) = types.alias_target(symbol.id()) else {
+                continue;
+            };
+            let expression = ast_access(context, out.reborrow(), |ast_out| alias.target(ast_out))?;
+            collect_nested_type_alls(
+                TypeAllCollection {
+                    expression,
+                    target,
+                    annotations,
+                    types,
+                    context,
+                    diagnostics,
+                    tasks: &mut all_tasks,
+                },
+                out.reborrow(),
+            )?;
             let Some(constraint) = ExpressionCompileSupport::all_rule(
                 annotations.alias_constraints(symbol.id()),
                 context,
@@ -293,8 +321,8 @@ impl ExpressionCompiler {
                 continue;
             };
             let Some(annotation) = ExpressionCompileSupport::annotation(
-                ast_access(context, out.reborrow(), |ast_out| {
-                    alias.annotations(ast_out)
+                ast_access(context, out.reborrow(), |mut ast_out| {
+                    alias.target(ast_out.reborrow())?.annotations(ast_out)
                 })?,
                 constraint.span(),
                 context,
@@ -304,9 +332,6 @@ impl ExpressionCompiler {
             else {
                 diagnostics.push(schema_internal!(alias.span()));
                 return Err(out.fail(BuildFailure::empty()));
-            };
-            let Some(target) = types.alias_target(symbol.id()) else {
-                continue;
             };
             all_tasks.try_push(AllTask { annotation, target }, out.reborrow())?;
         }
@@ -319,6 +344,24 @@ impl ExpressionCompiler {
             if field.state() != SymbolState::Valid {
                 continue;
             }
+            let Some(ty) = types.field_type(field.id()) else {
+                continue;
+            };
+            let expression = ast_access(context, out.reborrow(), |ast_out| {
+                field.declaration().ty(ast_out)
+            })?;
+            collect_nested_type_alls(
+                TypeAllCollection {
+                    expression,
+                    target: ty,
+                    annotations,
+                    types,
+                    context,
+                    diagnostics,
+                    tasks: &mut all_tasks,
+                },
+                out.reborrow(),
+            )?;
             let Some(constraint) = ExpressionCompileSupport::all_rule(
                 annotations.field_constraints(field.id()),
                 context,
@@ -330,8 +373,11 @@ impl ExpressionCompiler {
                 continue;
             };
             let Some(annotation) = ExpressionCompileSupport::annotation(
-                ast_access(context, out.reborrow(), |ast_out| {
-                    field.declaration().annotations(ast_out)
+                ast_access(context, out.reborrow(), |mut ast_out| {
+                    field
+                        .declaration()
+                        .ty(ast_out.reborrow())?
+                        .annotations(ast_out)
                 })?,
                 constraint.span(),
                 context,
@@ -341,9 +387,6 @@ impl ExpressionCompiler {
             else {
                 diagnostics.push(schema_internal!(field.declaration().span()));
                 return Err(out.fail(BuildFailure::empty()));
-            };
-            let Some(ty) = types.field_type(field.id()) else {
-                continue;
             };
             all_tasks.try_push(
                 AllTask {
@@ -370,6 +413,22 @@ impl ExpressionCompiler {
             let VariantPayloadKind::Single(payload) = payload_kind else {
                 continue;
             };
+            let Some(target) = types.variant_payload_type(variant.id()) else {
+                continue;
+            };
+            let expression = ast_access(context, out.reborrow(), |ast_out| payload.ty(ast_out))?;
+            collect_nested_type_alls(
+                TypeAllCollection {
+                    expression,
+                    target,
+                    annotations,
+                    types,
+                    context,
+                    diagnostics,
+                    tasks: &mut all_tasks,
+                },
+                out.reborrow(),
+            )?;
             let Some(constraint) = ExpressionCompileSupport::all_rule(
                 annotations.variant_payload_constraints(variant.id()),
                 context,
@@ -381,8 +440,8 @@ impl ExpressionCompiler {
                 continue;
             };
             let Some(annotation) = ExpressionCompileSupport::annotation(
-                ast_access(context, out.reborrow(), |ast_out| {
-                    payload.annotations(ast_out)
+                ast_access(context, out.reborrow(), |mut ast_out| {
+                    payload.ty(ast_out.reborrow())?.annotations(ast_out)
                 })?,
                 constraint.span(),
                 context,
@@ -392,9 +451,6 @@ impl ExpressionCompiler {
             else {
                 diagnostics.push(schema_internal!(variant.declaration().span()));
                 return Err(out.fail(BuildFailure::empty()));
-            };
-            let Some(target) = types.variant_payload_type(variant.id()) else {
-                continue;
             };
             all_tasks.try_push(AllTask { annotation, target }, out.reborrow())?;
         }
@@ -489,6 +545,104 @@ impl ExpressionCompiler {
 
         Ok(output)
     }
+}
+
+struct TypeAllFrame<'a> {
+    expression: TypeExpr<'a>,
+    target: TypeUseId,
+    root: bool,
+}
+
+fn collect_nested_type_alls<'slot, 'tree>(
+    collection: TypeAllCollection<'_, 'tree>,
+    mut out: Out<'slot, '_, BuildFailure>,
+) -> OResult<'slot, ()> {
+    let TypeAllCollection {
+        expression,
+        target,
+        annotations,
+        types,
+        context,
+        diagnostics,
+        tasks,
+    } = collection;
+    let mut frames = diagnostics.new_vec(context.execution(), out.reborrow())?;
+    frames.try_push(
+        TypeAllFrame {
+            expression,
+            target,
+            root: true,
+        },
+        out.reborrow(),
+    )?;
+    while let Some(frame) = frames.pop() {
+        context.consume(1, frame.expression.span(), diagnostics, out.reborrow())?;
+        if !frame.root {
+            if let Some(constraint) = ExpressionCompileSupport::all_rule(
+                annotations.type_use_constraints(frame.target),
+                context,
+                frame.expression.span(),
+                diagnostics,
+                out.reborrow(),
+            )? {
+                let node_annotations = ast_access(context, out.reborrow(), |ast_out| {
+                    frame.expression.annotations(ast_out)
+                })?;
+                let Some(annotation) = ExpressionCompileSupport::annotation(
+                    node_annotations,
+                    constraint.span(),
+                    context,
+                    diagnostics,
+                    out.reborrow(),
+                )?
+                else {
+                    diagnostics.push(schema_internal!(frame.expression.span()));
+                    return Err(out.fail(BuildFailure::empty()));
+                };
+                tasks.try_push(
+                    AllTask {
+                        annotation,
+                        target: frame.target,
+                    },
+                    out.reborrow(),
+                )?;
+            }
+        }
+        let ast_kind = ast_access(context, out.reborrow(), |ast_out| {
+            frame.expression.kind(ast_out)
+        })?;
+        let use_kind = types.type_use(frame.target).map(|use_| use_.kind());
+        let child = match (ast_kind, use_kind) {
+            (TypeExprKind::Option(expression), Some(ResolvedTypeKind::Option(target)))
+            | (TypeExprKind::Map { value: expression }, Some(ResolvedTypeKind::Map(target)))
+            | (
+                TypeExprKind::Array {
+                    element: expression,
+                    ..
+                },
+                Some(ResolvedTypeKind::Array {
+                    element: target, ..
+                }),
+            ) => Some((expression, target)),
+            (TypeExprKind::Builtin(_), Some(ResolvedTypeKind::Builtin(_)))
+            | (TypeExprKind::Path(_), Some(_)) => None,
+            _ => {
+                diagnostics.push(schema_internal!(frame.expression.span()));
+                return Err(out.fail(BuildFailure::empty()));
+            }
+        };
+        if let Some((expression, target)) = child {
+            frames.try_push(
+                TypeAllFrame {
+                    expression,
+                    target,
+                    root: false,
+                },
+                out.reborrow(),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn record_invalid_all<'slot>(

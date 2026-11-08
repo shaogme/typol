@@ -44,6 +44,7 @@ pub(crate) enum AnnotationOwner {
     Alias(TypeSymbolId),
     Field(FieldSymbolId),
     VariantPayload(VariantSymbolId),
+    TypeUse(TypeUseId),
 }
 
 pub(crate) struct AnnotationTask<'a> {
@@ -106,6 +107,13 @@ impl AnnotationCompiler {
                 diagnostics,
                 out.reborrow(),
             )?,
+            empty_constraints(
+                types.uses.len(),
+                fallback_span,
+                context,
+                diagnostics,
+                out.reborrow(),
+            )?,
             CompiledRegexConstraints::empty(),
         );
         let mut tasks = AnnotationTaskCollector::collect(
@@ -144,6 +152,7 @@ impl AnnotationCompiler {
                 AnnotationOwner::Alias(_) => ConstraintLayer::Alias,
                 AnnotationOwner::Field(_) => ConstraintLayer::Field,
                 AnnotationOwner::VariantPayload(_) => ConstraintLayer::VariantPayload,
+                AnnotationOwner::TypeUse(_) => ConstraintLayer::TypeUse,
             };
             let constraints = compile_annotation_list(
                 AnnotationListInput {

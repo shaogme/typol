@@ -49,16 +49,13 @@ impl<'storage> StorageConstructor<'storage> {
         let FieldParams {
             name,
             ty,
-            annotations,
             default,
             span,
         } = params;
-        let annotations = self.storage.store_list(annotations, span, out.reborrow())?;
         self.storage.insert(
             FieldDecl {
                 name,
                 ty,
-                annotations,
                 default,
                 span,
             },
@@ -111,19 +108,8 @@ impl<'storage> StorageConstructor<'storage> {
         params: TypeAliasDeclParams,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<TypeAliasDecl>> {
-        let TypeAliasDeclParams {
-            name,
-            target,
-            annotations,
-            span,
-        } = params;
-        let annotations = self.storage.store_list(annotations, span, out.reborrow())?;
-        let value = TypeAliasDecl {
-            name,
-            target,
-            annotations,
-            span,
-        };
+        let TypeAliasDeclParams { name, target, span } = params;
+        let value = TypeAliasDecl { name, target, span };
         self.storage.insert(value, out.reborrow())
     }
 

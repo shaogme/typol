@@ -251,9 +251,8 @@ fn tree_outlives_source_and_keeps_all_text_and_tables_charged() -> TestResult {
         .access(|out| fields.first(out))
         .test_value()?
         .test_value()?;
-    let annotations = ast_errors
-        .access(|out| field.annotations(out))
-        .test_value()?;
+    let ty = ast_errors.access(|out| field.ty(out)).test_value()?;
+    let annotations = ast_errors.access(|out| ty.annotations(out)).test_value()?;
     let annotation = ast_errors
         .access(|out| annotations.first(out))
         .test_value()?

@@ -145,7 +145,7 @@ fn every_arena_node_counts_and_whole_tree_heights_match_parent_edges() -> TestRe
         },
         ResourceCase {
             input: "struct A { x: u8 @all(true, \"rule\") }",
-            height: 5,
+            height: 6,
             nodes: 11,
         },
     ] {
@@ -298,72 +298,72 @@ fn typed_annotation_payloads_have_independent_count_and_height_boundaries() -> T
     for case in [
         ResourceCase {
             input: "@min(0)",
-            height: 2,
+            height: 3,
             nodes: 6,
         },
         ResourceCase {
             input: "@range(0, 1)",
-            height: 2,
+            height: 3,
             nodes: 7,
         },
         ResourceCase {
             input: "@length(0, 1)",
-            height: 2,
+            height: 3,
             nodes: 7,
         },
         ResourceCase {
             input: "@regex(\"x\")",
-            height: 2,
+            height: 3,
             nodes: 6,
         },
         ResourceCase {
             input: "@host",
-            height: 1,
+            height: 2,
             nodes: 5,
         },
         ResourceCase {
             input: "@email",
-            height: 1,
+            height: 2,
             nodes: 5,
         },
         ResourceCase {
             input: "@cidr(v4_only = false)",
-            height: 2,
+            height: 3,
             nodes: 7,
         },
         ResourceCase {
             input: "@env(\"X\")",
-            height: 2,
+            height: 3,
             nodes: 6,
         },
         ResourceCase {
             input: "@size(0, 1)",
-            height: 2,
+            height: 3,
             nodes: 7,
         },
         ResourceCase {
             input: "@size(min = 0, max = 1)",
-            height: 2,
+            height: 3,
             nodes: 9,
         },
         ResourceCase {
             input: "@unique",
-            height: 1,
+            height: 2,
             nodes: 5,
         },
         ResourceCase {
             input: "@unique(by = \"x\")",
-            height: 2,
+            height: 3,
             nodes: 7,
         },
         ResourceCase {
             input: "@sum(min = 0)",
-            height: 2,
+            height: 3,
             nodes: 7,
         },
         ResourceCase {
             input: "@secret",
-            height: 1,
+            height: 2,
             nodes: 5,
         },
     ] {

@@ -98,6 +98,7 @@ pub(crate) struct TypePath {
 #[derive(Debug)]
 pub(crate) struct TypeExpr {
     pub(crate) kind: TypeExprKind,
+    pub(crate) annotations: ListId<Id<Annotation>>,
     pub(crate) span: SourceSpan,
 }
 
@@ -118,7 +119,6 @@ pub(crate) struct ModuleDecl {
 pub(crate) struct TypeAliasDecl {
     pub(crate) name: Id<Name>,
     pub(crate) target: Id<TypeExpr>,
-    pub(crate) annotations: ListId<Id<Annotation>>,
     pub(crate) span: SourceSpan,
 }
 
@@ -126,7 +126,6 @@ pub(crate) struct TypeAliasDecl {
 pub(crate) struct FieldDecl {
     pub(crate) name: Id<Name>,
     pub(crate) ty: Id<TypeExpr>,
-    pub(crate) annotations: ListId<Id<Annotation>>,
     pub(crate) default: Option<Id<DefaultValue>>,
     pub(crate) span: SourceSpan,
 }
@@ -142,7 +141,6 @@ pub(crate) struct StructDecl {
 #[derive(Debug)]
 pub(crate) struct SingleVariantPayload {
     pub(crate) ty: Id<TypeExpr>,
-    pub(crate) annotations: ListId<Id<Annotation>>,
 }
 
 #[derive(Debug)]
@@ -174,7 +172,6 @@ pub(crate) struct EnumDecl {
 pub(crate) struct FieldParams {
     pub(crate) name: Id<Name>,
     pub(crate) ty: Id<TypeExpr>,
-    pub(crate) annotations: ChargedVec<Id<Annotation>>,
     pub(crate) default: Option<Id<DefaultValue>>,
     pub(crate) span: SourceSpan,
 }
@@ -196,7 +193,6 @@ pub(crate) struct StructDeclParams {
 pub(crate) struct TypeAliasDeclParams {
     pub(crate) name: Id<Name>,
     pub(crate) target: Id<TypeExpr>,
-    pub(crate) annotations: ChargedVec<Id<Annotation>>,
     pub(crate) span: SourceSpan,
 }
 

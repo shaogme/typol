@@ -125,6 +125,12 @@ impl<'a, 'src> CompileModel<'a, 'src> {
         let Some(use_) = self.types.type_use(id) else {
             return Ok(None);
         };
+        if self.rules_host(
+            self.annotations.type_use_constraints(id).unwrap_or(&[]),
+            out.reborrow(),
+        )? {
+            return Ok(Some(true));
+        }
         let mut link = use_.alias_chain();
         while let Some(id) = link {
             self.consume(1, out.reborrow())?;

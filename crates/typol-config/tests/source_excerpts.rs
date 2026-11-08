@@ -191,6 +191,10 @@ fn aliases_containers_and_secret_map_keys_are_masked() -> TestResult {
             "entry struct Root { value: [u8] @secret }",
             "{value: [999]}",
         ),
+        (
+            "entry struct Root { value: [u8 @secret] }",
+            "{value: [999]}",
+        ),
     ];
     for (declaration, input) in cases {
         let schema = compile(declaration)?;

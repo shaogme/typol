@@ -130,11 +130,11 @@ macro_rules! children {
 children! {
     Name {}, NumberLiteral {}, StringLiteral {}, BooleanLiteral {}, ArrayLength {},
     Annotation { data }, Assertion { expression, message }, ExternModDecl { name },
-    ModuleDecl { name, declarations }, TypeAliasDecl { name, target, annotations },
-    StructDecl { name, fields, assertions }, FieldDecl { name, ty, annotations, default },
+    ModuleDecl { name, declarations }, TypeAliasDecl { name, target },
+    StructDecl { name, fields, assertions }, FieldDecl { name, ty, default },
     EnumDecl { name, variants }, VariantDecl { name, payload, assertions },
     VariantPayload { kind }, MethodArgument { kind }, Expr { kind }, TypePath { segments },
-    TypeExpr { kind }, BraceEntry { key, value }, ArrayDefault { elements },
+    TypeExpr { kind, annotations }, BraceEntry { key, value }, ArrayDefault { elements },
     BracedDefault { entries }, EnumDefaultPayload { kind }, EnumDefault { variant, payload },
     DefaultValue { kind }, NamedBounds { first, second },
 }
@@ -218,11 +218,7 @@ impl ChildHeight<VariantPayloadKind> for Height {
         let height = match value {
             VariantPayloadKind::Unit => None,
             VariantPayloadKind::Single(payload) => {
-                Height::children(&payload.ty, storage, out.reborrow())?.max(Height::children(
-                    &payload.annotations,
-                    storage,
-                    out.reborrow(),
-                )?)
+                Height::children(&payload.ty, storage, out.reborrow())?
             }
             VariantPayloadKind::Structure(payload) => {
                 Height::children(&payload.fields, storage, out.reborrow())?

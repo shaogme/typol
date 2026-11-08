@@ -139,14 +139,14 @@ let loaded = SchemaLoader::new(TypolOptions::default())
 
 ```tschem
 struct RetryPolicy {
-    delays_ms: [u32] @size(min = 1, max = 5)
+    delays_ms: [u32 @min(1)] @size(min = 1, max = 5)
         @all(item > 0, "延迟必须为正数")
         @sum(max = 60000),
     targets: [network::Endpoint] @unique(by = "host"),
 }
 ```
 
-`@all` 检查数组中的每个元素或 map 中的每个值。`@unique(by = "...")` 检查结构体数组中指定字段路径的唯一性；`@sum` 适用于数值数组。Schema 编译时会对表达式进行类型检查。完整配置值构造后才执行结构体和当前枚举变体的断言；若解析或局部校验失败，则不会执行这些断言。
+`@min(1)` 附着于每个 `u32` 元素；`@size` 和 `@all` 则作用于数组本身。注解只作用于其紧邻的类型表达式，因此嵌套数组和 map 值也可以各自设置规则。`@all` 检查数组中的每个元素或 map 中的每个值。`@unique(by = "...")` 检查结构体数组中指定字段路径的唯一性；`@sum` 适用于数值数组。Schema 编译时会对表达式进行类型检查。完整配置值构造后才执行结构体和当前枚举变体的断言；若解析或局部校验失败，则不会执行这些断言。
 
 正则表达式采用搜索语义：子串匹配即成功。需要匹配整个字符串时，请加上 `^` 和 `$`，例如 `@regex("^[a-z][a-z0-9-]*$")`。Typol 只实现文档定义的正则子集，并不支持通用正则引擎的全部功能。详见 [Schema DSL 参考](../../specification/schema-dsl/)。
 

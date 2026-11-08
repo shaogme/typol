@@ -5,6 +5,7 @@ use crate::{
     expressions::ExpressionCompilation,
     regex::CompiledRegexConstraints,
     symbols::{FieldSymbolId, TypeSymbolId, VariantSymbolId},
+    types::TypeUseId,
 };
 use opeo::{OResult, Out};
 use typol_core::{ChargedVec, ExecutionBudget};
@@ -26,6 +27,7 @@ pub(crate) struct AnnotationParts {
     pub(crate) aliases: ChargedVec<AnnotationSlot>,
     pub(crate) fields: ChargedVec<AnnotationSlot>,
     pub(crate) variants: ChargedVec<AnnotationSlot>,
+    pub(crate) type_uses: ChargedVec<AnnotationSlot>,
     pub(crate) regexes: CompiledRegexConstraints,
 }
 
@@ -33,6 +35,7 @@ pub(crate) struct AnnotationCompilation {
     aliases: ChargedVec<AnnotationSlot>,
     fields: ChargedVec<AnnotationSlot>,
     variant_payloads: ChargedVec<AnnotationSlot>,
+    type_uses: ChargedVec<AnnotationSlot>,
     regexes: CompiledRegexConstraints,
 }
 
@@ -41,12 +44,14 @@ impl AnnotationCompilation {
         aliases: ChargedVec<AnnotationSlot>,
         fields: ChargedVec<AnnotationSlot>,
         variant_payloads: ChargedVec<AnnotationSlot>,
+        type_uses: ChargedVec<AnnotationSlot>,
         regexes: CompiledRegexConstraints,
     ) -> Self {
         Self {
             aliases,
             fields,
             variant_payloads,
+            type_uses,
             regexes,
         }
     }
@@ -56,6 +61,7 @@ impl AnnotationCompilation {
             aliases: self.aliases,
             fields: self.fields,
             variants: self.variant_payloads,
+            type_uses: self.type_uses,
             regexes: self.regexes,
         }
     }
@@ -81,6 +87,16 @@ impl AnnotationCompilation {
             .map(|slot| slot.rules.as_slice())
     }
 
+    pub(crate) fn type_use_constraints(&self, id: TypeUseId) -> Option<&[CompiledConstraint]> {
+        self.type_uses
+            .get(id.index())
+            .map(|slot| slot.rules.as_slice())
+    }
+
+    pub(crate) fn type_use_secret(&self, id: TypeUseId) -> Option<bool> {
+        self.type_uses.get(id.index()).map(|slot| slot.secret)
+    }
+
     pub(crate) fn regexes(&self) -> &CompiledRegexConstraints {
         &self.regexes
     }
@@ -94,6 +110,7 @@ impl AnnotationCompilation {
             AnnotationOwner::Alias(id) => self.aliases.get_mut(id.index()),
             AnnotationOwner::Field(id) => self.fields.get_mut(id.index()),
             AnnotationOwner::VariantPayload(id) => self.variant_payloads.get_mut(id.index()),
+            AnnotationOwner::TypeUse(id) => self.type_uses.get_mut(id.index()),
         }
     }
 
@@ -109,6 +126,7 @@ impl AnnotationCompilation {
             .iter_mut()
             .chain(self.fields.iter_mut())
             .chain(self.variant_payloads.iter_mut())
+            .chain(self.type_uses.iter_mut())
         {
             if let Some(rule) = slot.rules.first() {
                 context.consume(1, rule.span(), diagnostics, out.reborrow())?;

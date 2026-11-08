@@ -5,12 +5,12 @@ use crate::{
     module_tree::TypeDeclarationKind,
     session::ObjectState,
     symbols::{SymbolState, SymbolTable},
-    types::ResolvedTypeGraph,
+    types::{ResolvedTypeGraph, ResolvedTypeKind, TypeUseId},
 };
 
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{ChargedVec, SourceSpan};
-use typol_syntax::{AnnotationList, VariantPayloadKind};
+use typol_syntax::{AnnotationList, TypeExpr, TypeExprKind, VariantPayloadKind};
 
 pub(super) struct MakeTasksInput<'symbols, 'source, 'diagnostics> {
     pub(super) symbols: &'symbols SymbolTable<'source>,
@@ -18,6 +18,22 @@ pub(super) struct MakeTasksInput<'symbols, 'source, 'diagnostics> {
     pub(super) span: SourceSpan,
     pub(super) context: &'symbols CompileContext,
     pub(super) diagnostics: &'diagnostics mut DiagnosticCollector,
+}
+
+struct TypeTaskFrame<'a> {
+    expression: TypeExpr<'a>,
+    target: TypeUseId,
+    owner: AnnotationOwner,
+}
+
+struct TypeTaskCollection<'a, 'source> {
+    expression: TypeExpr<'source>,
+    target: TypeUseId,
+    root_owner: AnnotationOwner,
+    types: &'a ResolvedTypeGraph,
+    context: &'a CompileContext,
+    diagnostics: &'a mut DiagnosticCollector,
+    tasks: &'a mut ChargedVec<AnnotationTask<'source>>,
 }
 
 pub(super) struct AnnotationTaskCollector;
@@ -34,6 +50,7 @@ impl AnnotationTaskCollector {
             context,
             diagnostics,
         } = input;
+        let mut tasks = diagnostics.new_vec(context.execution(), out.reborrow())?;
         let capacity = symbols
             .types()
             .len()
@@ -44,7 +61,6 @@ impl AnnotationTaskCollector {
                 BuildFailure::empty()
             })
             .store_err_into(out.reborrow())?;
-        let mut tasks = diagnostics.new_vec(context.execution(), out.reborrow())?;
         tasks.try_reserve_exact(capacity, out.reborrow())?;
 
         for symbol in symbols.types() {
@@ -52,54 +68,44 @@ impl AnnotationTaskCollector {
             if symbol.state() != SymbolState::Valid {
                 continue;
             }
-            if let TypeDeclarationKind::Alias(alias) = symbol.declaration() {
-                let annotations = context.ast_access(
-                    out.reborrow(),
-                    |ast_out| alias.annotations(ast_out),
-                    BuildFailure::from,
-                )?;
-                if !annotations.is_empty() {
-                    let state = diagnostics.require(
-                        types.alias_state(symbol.id()),
-                        alias.span(),
-                        out.reborrow(),
-                    )?;
-                    let target = match (state, types.alias_target(symbol.id())) {
-                        (ObjectState::Valid, Some(target)) => target,
-                        (ObjectState::Invalid | ObjectState::Ambiguous, None) => continue,
-                        _ => {
-                            diagnostics.abort(schema_internal!(alias.span()));
-                            return Err(out.fail(BuildFailure::empty()));
-                        }
-                    };
-                    let task_span = primary_annotation_span(
-                        annotations,
-                        alias.span(),
-                        context,
-                        diagnostics,
-                        out.reborrow(),
-                    )?;
-                    tasks.try_push(
-                        AnnotationTask {
-                            annotations,
-                            target,
-                            owner: AnnotationOwner::Alias(symbol.id()),
-                            span: task_span,
-                        },
-                        out.reborrow(),
-                    )?;
+            let TypeDeclarationKind::Alias(alias) = symbol.declaration() else {
+                continue;
+            };
+            let state = diagnostics.require(
+                types.alias_state(symbol.id()),
+                alias.span(),
+                out.reborrow(),
+            )?;
+            let target = match (state, types.alias_target(symbol.id())) {
+                (ObjectState::Valid, Some(target)) => target,
+                (ObjectState::Invalid | ObjectState::Ambiguous, None) => continue,
+                _ => {
+                    diagnostics.abort(schema_internal!(alias.span()));
+                    return Err(out.fail(BuildFailure::empty()));
                 }
-            }
+            };
+            let expression = context.ast_access(
+                out.reborrow(),
+                |ast_out| alias.target(ast_out),
+                BuildFailure::from,
+            )?;
+            Self::collect_type_tree(
+                TypeTaskCollection {
+                    expression,
+                    target,
+                    root_owner: AnnotationOwner::Alias(symbol.id()),
+                    types,
+                    context,
+                    diagnostics,
+                    tasks: &mut tasks,
+                },
+                out.reborrow(),
+            )?;
         }
 
         for field in symbols.fields() {
             context.consume(1, span, diagnostics, out.reborrow())?;
-            let annotations = context.ast_access(
-                out.reborrow(),
-                |ast_out| field.declaration().annotations(ast_out),
-                BuildFailure::from,
-            )?;
-            if field.state() != SymbolState::Valid || annotations.is_empty() {
+            if field.state() != SymbolState::Valid {
                 continue;
             }
             let field_span = field.declaration().span();
@@ -113,19 +119,20 @@ impl AnnotationTaskCollector {
                     return Err(out.fail(BuildFailure::empty()));
                 }
             };
-            let task_span = primary_annotation_span(
-                annotations,
-                field_span,
-                context,
-                diagnostics,
+            let expression = context.ast_access(
                 out.reborrow(),
+                |ast_out| field.declaration().ty(ast_out),
+                BuildFailure::from,
             )?;
-            tasks.try_push(
-                AnnotationTask {
-                    annotations,
+            Self::collect_type_tree(
+                TypeTaskCollection {
+                    expression,
                     target,
-                    owner: AnnotationOwner::Field(field.id()),
-                    span: task_span,
+                    root_owner: AnnotationOwner::Field(field.id()),
+                    types,
+                    context,
+                    diagnostics,
+                    tasks: &mut tasks,
                 },
                 out.reborrow(),
             )?;
@@ -149,29 +156,74 @@ impl AnnotationTaskCollector {
             let VariantPayloadKind::Single(payload) = payload_kind else {
                 continue;
             };
+            let variant_span = variant.declaration().span();
+            let state = diagnostics.require(
+                types.variant_payload_state(variant.id()),
+                variant_span,
+                out.reborrow(),
+            )?;
+            let target = match (state, types.variant_payload_type(variant.id())) {
+                (ObjectState::Valid, Some(target)) => target,
+                (ObjectState::Invalid | ObjectState::Ambiguous, None) => continue,
+                _ => {
+                    diagnostics.abort(schema_internal!(variant_span));
+                    return Err(out.fail(BuildFailure::empty()));
+                }
+            };
+            let expression = context.ast_access(
+                out.reborrow(),
+                |ast_out| payload.ty(ast_out),
+                BuildFailure::from,
+            )?;
+            Self::collect_type_tree(
+                TypeTaskCollection {
+                    expression,
+                    target,
+                    root_owner: AnnotationOwner::VariantPayload(variant.id()),
+                    types,
+                    context,
+                    diagnostics,
+                    tasks: &mut tasks,
+                },
+                out.reborrow(),
+            )?;
+        }
+        Ok(tasks)
+    }
+
+    fn collect_type_tree<'slot, 'source>(
+        collection: TypeTaskCollection<'_, 'source>,
+        mut out: Out<'slot, '_, BuildFailure>,
+    ) -> OResult<'slot, ()> {
+        let TypeTaskCollection {
+            expression,
+            target,
+            root_owner,
+            types,
+            context,
+            diagnostics,
+            tasks,
+        } = collection;
+        let mut frames = diagnostics.new_vec(context.execution(), out.reborrow())?;
+        frames.try_push(
+            TypeTaskFrame {
+                expression,
+                target,
+                owner: root_owner,
+            },
+            out.reborrow(),
+        )?;
+        while let Some(frame) = frames.pop() {
+            context.consume(1, frame.expression.span(), diagnostics, out.reborrow())?;
             let annotations = context.ast_access(
                 out.reborrow(),
-                |ast_out| payload.annotations(ast_out),
+                |ast_out| frame.expression.annotations(ast_out),
                 BuildFailure::from,
             )?;
             if !annotations.is_empty() {
-                let variant_span = variant.declaration().span();
-                let state = diagnostics.require(
-                    types.variant_payload_state(variant.id()),
-                    variant_span,
-                    out.reborrow(),
-                )?;
-                let target = match (state, types.variant_payload_type(variant.id())) {
-                    (ObjectState::Valid, Some(target)) => target,
-                    (ObjectState::Invalid | ObjectState::Ambiguous, None) => continue,
-                    _ => {
-                        diagnostics.abort(schema_internal!(variant_span));
-                        return Err(out.fail(BuildFailure::empty()));
-                    }
-                };
                 let task_span = primary_annotation_span(
                     annotations,
-                    variant_span,
+                    frame.expression.span(),
                     context,
                     diagnostics,
                     out.reborrow(),
@@ -179,15 +231,50 @@ impl AnnotationTaskCollector {
                 tasks.try_push(
                     AnnotationTask {
                         annotations,
-                        target,
-                        owner: AnnotationOwner::VariantPayload(variant.id()),
+                        target: frame.target,
+                        owner: frame.owner,
                         span: task_span,
                     },
                     out.reborrow(),
                 )?;
             }
+            let ast_kind = context.ast_access(
+                out.reborrow(),
+                |ast_out| frame.expression.kind(ast_out),
+                BuildFailure::from,
+            )?;
+            let use_kind = types.type_use(frame.target).map(|use_| use_.kind());
+            let child = match (ast_kind, use_kind) {
+                (TypeExprKind::Option(expression), Some(ResolvedTypeKind::Option(target)))
+                | (TypeExprKind::Map { value: expression }, Some(ResolvedTypeKind::Map(target)))
+                | (
+                    TypeExprKind::Array {
+                        element: expression,
+                        ..
+                    },
+                    Some(ResolvedTypeKind::Array {
+                        element: target, ..
+                    }),
+                ) => Some((expression, target)),
+                (TypeExprKind::Builtin(_), Some(ResolvedTypeKind::Builtin(_)))
+                | (TypeExprKind::Path(_), Some(_)) => None,
+                _ => {
+                    diagnostics.push(schema_internal!(frame.expression.span()));
+                    return Err(out.fail(BuildFailure::empty()));
+                }
+            };
+            if let Some((expression, target)) = child {
+                frames.try_push(
+                    TypeTaskFrame {
+                        expression,
+                        target,
+                        owner: AnnotationOwner::TypeUse(target),
+                    },
+                    out.reborrow(),
+                )?;
+            }
         }
-        Ok(tasks)
+        Ok(())
     }
 }
 

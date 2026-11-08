@@ -57,7 +57,7 @@ extern_mod_decl   ::= "extern" "mod" identifier ";"
 entry_decl        ::= "entry" struct_decl
 declaration       ::= module_decl | type_decl | struct_decl | enum_decl
 module_decl       ::= "mod" identifier "{" declaration* "}"
-type_decl         ::= "type" identifier "=" type annotation* ";"
+type_decl         ::= "type" identifier "=" type ";"
 ```
 
 `extern mod name;` 引入名为 `name` 的模块；模块内容来自对应的外部 Schema 文件。模块可以嵌套。模块和类型声明共享所在作用域的名称空间，同一作用域不得出现重名声明。声明顺序不影响类型引用的解析。
@@ -79,14 +79,15 @@ entry struct ServiceConfig {
 }
 ```
 
-类型别名使用 `type Name = Type;` 声明，可附加适用于目标类型的注解。别名透明，不引入新的运行时表示；引用别名时同时应用别名及使用位置的约束。别名不得形成循环。`@env` 仅适用于字段，不可附加于类型别名。
+类型别名使用 `type Name = Type;` 声明。目标类型后的注解属于该根类型节点，并按别名约束编译。别名透明，不引入新的运行时表示；引用别名时同时应用别名及使用位置的约束。别名不得形成循环。`@env` 仅适用于字段类型根节点，不可用于类型别名。
 
 ## 3. 类型、结构体与枚举
 
 ### 3.1 类型
 
 ```text
-type          ::= builtin_type
+type          ::= type_primary annotation*
+type_primary  ::= builtin_type
                 | "option" "<" type ">"
                 | "[" type "]"
                 | "[" type ";" decimal_integer "]"
@@ -100,7 +101,14 @@ path          ::= identifier ("::" identifier)*
 
 整数类型为对应位宽的有符号或无符号整数。`f32` 和 `f64` 分别为 IEEE 754 binary32 与 binary64。`option<T>` 表示可选的 `T`；`[T]` 表示任意长度数组；`[T; N]` 表示长度恰为 `N` 的数组；`map<string, T>` 表示字符串键到 `T` 的映射。`N` 使用非负十进制整数，范围为 `0` 至 `u32::MAX`。映射键唯一。
 
-容器元素类型可继续使用容器或用户声明类型。完全展开别名后不支持嵌套 `option<option<T>>`。用户声明类型可以通过字段、枚举载荷、容器及非循环别名直接或间接递归引用自身或其他用户声明类型，但类型图必须存在有限值。`option`、动态数组、map 和零长定长数组可以终止递归构造；递归枚举至少需要一个可构造变体。正长度定长数组要求元素类型可构造。没有有限分支的必需环（例如 `struct Loop { next: Loop }`）属于静态错误。类型别名仍不得形成循环。
+注解属于其前方紧邻的 `type` 节点，只约束该节点表示的值；约束不会传递到父节点或子节点。例如，数组括号内的注解约束每个元素，`]` 后的注解约束整个数组。`option`、定长/变长数组和 map value 中的规则递归适用。map key 仍是固定的内建 `string` 类型，不可附加注解。完全展开别名后不支持嵌套 `option<option<T>>`。用户声明类型可以通过字段、枚举载荷、容器及非循环别名直接或间接递归引用自身或其他用户声明类型，但类型图必须存在有限值。`option`、动态数组、map 和零长定长数组可以终止递归构造；递归枚举至少需要一个可构造变体。正长度定长数组要求元素类型可构造。没有有限分支的必需环（例如 `struct Loop { next: Loop }`）属于静态错误。类型别名仍不得形成循环。
+
+```tschem
+entry struct NetworkPolicy {
+    dns_servers: [string @length(1, 64)] @size(max = 16) = [],
+    private_https_origins: [string @length(1, 512)] @size(max = 256) = [],
+}
+```
 
 ```tschem
 struct Node {
@@ -124,11 +132,11 @@ entry struct Config {
 ```text
 struct_decl   ::= "struct" identifier "{" field_list? "}" struct_assert*
 field_list    ::= field ("," field)* ","?
-field         ::= identifier ":" type annotation* ("=" default_value)?
+field         ::= identifier ":" type ("=" default_value)?
 struct_assert ::= "@assert" "(" expression "," string_literal ")"
 ```
 
-结构体可以为空。字段名在同一结构体中必须唯一。字段类型之后可有零个或多个注解，默认值（若有）必须位于注解之后。逗号分隔字段，末尾逗号可省略或保留。
+结构体可以为空。字段名在同一结构体中必须唯一。字段类型节点可带零个或多个注解；如有默认值，必须放在完整类型（含其注解）之后。逗号分隔字段，末尾逗号可省略或保留。
 
 ### 3.3 枚举
 
@@ -136,12 +144,12 @@ struct_assert ::= "@assert" "(" expression "," string_literal ")"
 enum_decl       ::= "enum" identifier "{" variant_list ","? "}"
 variant_list    ::= variant ("," variant)*
 variant         ::= identifier variant_assert*
-                  | identifier "(" type annotation* ")" variant_assert*
+                  | identifier "(" type ")" variant_assert*
                   | identifier "{" field_list? "}" variant_assert*
 variant_assert  ::= "@assert" "(" expression "," string_literal ")"
 ```
 
-枚举至少包含一个变体；同一枚举中的变体名必须唯一。变体可以不带载荷、携带一个有类型的载荷，或携带一组匿名结构体字段。匿名结构体字段遵循普通字段的类型、注解和默认值规则。
+枚举至少包含一个变体；同一枚举中的变体名必须唯一。变体可以不带载荷、携带一个有类型的载荷，或携带一组匿名结构体字段。单值载荷根节点上的注解仍是载荷约束；其内部注解属于对应的嵌套类型节点。匿名结构体字段遵循普通字段的类型、注解和默认值规则。
 
 变体后的断言附着于紧邻的变体，仅在该变体被选中时检查。结构体后的断言附着于该结构体。断言中的 `self` 表示当前结构体实例或变体载荷，`root` 表示入口结构体实例；入口结构体断言中的二者指向同一实例。单元变体没有载荷，不能在其断言中使用 `self`。断言在配置值构造完成后检查。
 
@@ -181,7 +189,13 @@ Rust facade 可通过 `LoadedSchema::default_config_to_string` 或 `write_defaul
 
 ## 5. 注解
 
-注解可用于类型别名、字段、匿名结构体变体字段及单载荷变体的载荷类型，具体适用范围如下表。同一声明上不得重复同一种注解。别名上的约束与使用位置的约束共同生效。
+注解属于任意深度上与其相邻的类型表达式节点。别名目标、字段类型和单值枚举载荷的根注解保留既有 owner 语义；根以下的注解属于各自 `TypeUse` 局部规则。对同一个值，别名继承约束与其 owner 根约束或嵌套 `TypeUse` 约束之一合并；父子节点的约束不会合并。同一种注解可出现在不同节点，但同一节点最多出现一次。
+
+```tschem
+map<string, [[string @length(1, 32)] @size(max = 8)] @size(max = 16)>
+```
+
+嵌套数组或 map 上的 `@all` 使用该节点直接子级的元素类型或 value 类型。`@env` 是字段根节点例外：只允许出现在结构体字段或匿名结构体变体字段的类型根节点，并继续遵循标量形状及名称匹配规则。别名根、载荷根和嵌套类型节点均不可使用 `@env`。`@secret` 可标记任意精确类型节点，并按既有诊断和展示遮蔽规则保护该值及其后代。
 
 ```text
 annotation ::= "@min" "(" number ")"
@@ -213,13 +227,13 @@ number ::= numeric_literal | "-" numeric_literal
 | `@host` | `string`，可选字符串 | 校验 IP 字面地址或 DNS 主机名；不接受 scheme、端口或空白。 |
 | `@email` | `string`，可选字符串 | 校验实用的 ASCII 邮箱形式：非空本地部分、一个 `@` 和合法 DNS 域名；不保证完整 RFC 5322 覆盖。 |
 | `@cidr(v4_only = bool)` | `string`，可选字符串 | 校验 IP 地址和前缀长度；`true` 仅允许 IPv4，`false` 允许 IPv4 或 IPv6。 |
-| `@env("NAME")` | 字符串、布尔或数值字段及其可选形式 | 声明字段可读取对应环境变量；只允许用于字段，不允许用于类型别名。 |
+| `@env("NAME")` | 字符串、布尔或数值结构体字段根节点及其可选形式 | 声明字段可读取对应环境变量；不允许用于别名根、载荷根或嵌套类型节点。 |
 | `@size(...)` | 数组、映射 | 限制元素数量或键值对数量。位置参数为最小值和最大值；命名参数可指定 `min`、`max` 或两者。 |
 | `@unique` | 数组 | 要求数组元素唯一。 |
 | `@unique(by = "field.path")` | 结构体元素数组 | 要求指定字段路径的值唯一。 |
 | `@all(expression, "message")` | 数组、映射 | 要求每个数组元素或每个映射值满足表达式。 |
 | `@sum(...)` | 数值数组 | 按数组顺序求和，并检查总和是否满足指定的包含边界；可指定 `min`、`max` 或两者。 |
-| `@secret` | 类型别名、字段或单载荷类型 | 将值标记为敏感值，在诊断和安全展示中隐藏其实际内容；别名上的标记传播到其使用位置。 |
+| `@secret` | 任意类型表达式节点 | 将该精确值标记为敏感值，在诊断和安全展示中隐藏其实际内容；别名根上的标记传播到其使用位置。 |
 
 `@min`、`@max`、`@range`、`@size` 和 `@sum` 的边界均包含端点。数值注解边界是上下文数值：整数边界可用于浮点目标，并直接按 IEEE 754 最近值、平分取偶数规则舍入到目标浮点精度；浮点边界不能用于整数目标。所有边界值及组合必须与目标类型相容；不适用的注解、重复注解、无效参数或不兼容组合均使 Schema 无效。
 

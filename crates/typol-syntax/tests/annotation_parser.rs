@@ -65,7 +65,8 @@ const SOURCE_ID: SourceId = SourceId::new(7);
 
 macro_rules! annotation_data {
     ($slot:ident, $alias:expr, $index:expr) => {{
-        let annotations = $slot.access(|out| $alias.annotations(out)).test_value()?;
+        let target = $slot.access(|out| $alias.target(out)).test_value()?;
+        let annotations = $slot.access(|out| target.annotations(out)).test_value()?;
         let annotation = $slot
             .access(|out| annotations.get($index, out))
             .test_value()?
@@ -117,8 +118,9 @@ fn typed_payloads_own_text_and_preserve_bound_order_and_positions() -> TestResul
         let Some(Declaration::TypeAlias(alias)) = item.declaration() else {
             return Err(TestFailure);
         };
+        let target = ast_errors.access(|out| alias.target(out)).test_value()?;
         let annotations = ast_errors
-            .access(|out| alias.annotations(out))
+            .access(|out| target.annotations(out))
             .test_value()?;
         let annotation = ast_errors
             .access(|out| annotations.first(out))
@@ -422,7 +424,8 @@ fn payload_debug_hides_boolean_text_numbers_expressions_and_names() -> TestResul
                 let Some(Declaration::TypeAlias(alias)) = item.declaration() else {
                     continue;
                 };
-                let annotations = alias.annotations(out.reborrow())?;
+                let target = alias.target(out.reborrow())?;
+                let annotations = target.annotations(out.reborrow())?;
                 let annotations = annotations.iter(out.reborrow()).collect::<Vec<_>>();
                 for annotation in annotations {
                     let annotation = annotation?;

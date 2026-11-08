@@ -481,6 +481,9 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
                 return Err(out.fail(BuildFailure::empty()));
             }
         }
+        if let Some(constraints) = self.annotations.type_use_constraints(target) {
+            valid &= self.validate_constraint_list(value, target, constraints, out.reborrow())?;
+        }
         valid &= self.validate_constraint_list(value, target, extra, out.reborrow())?;
         Ok(valid)
     }

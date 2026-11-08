@@ -2,7 +2,6 @@ use crate::{
     Keyword, Symbol, TokenKind,
     error::SyntaxDiagnostic,
     parser::{
-        annotation::AnnotationParser,
         context::{ParserControl, ParserState},
         expression::ExpressionParser,
         recovery::{RecoveryBoundary, RecoveryParser},
@@ -257,16 +256,10 @@ impl DeclarationParser {
         let name = ParserControl::take_name(parser, out.reborrow())?;
         ParserControl::expect_symbol(parser, Symbol::Equal, out.reborrow())?;
         let target = TypeParser::parse_type_expr(parser, out.reborrow())?;
-        let annotations = AnnotationParser::parse_annotations(parser, out.reborrow())?;
         ParserControl::expect_symbol(parser, Symbol::Semicolon, out.reborrow())?;
         let span = ParserControl::span_from_start(parser, start, out.reborrow())?;
         Ok(Declaration::TypeAlias(parser.ast.type_alias_decl_new(
-            TypeAliasDeclParams {
-                name,
-                target,
-                annotations,
-                span,
-            },
+            TypeAliasDeclParams { name, target, span },
             out.reborrow(),
         )?))
     }
@@ -376,7 +369,6 @@ impl DeclarationParser {
         let name = ParserControl::take_name(parser, out.reborrow())?;
         ParserControl::expect_symbol(parser, Symbol::Colon, out.reborrow())?;
         let ty = TypeParser::parse_type_expr(parser, out.reborrow())?;
-        let annotations = AnnotationParser::parse_annotations(parser, out.reborrow())?;
         let default = if ParserControl::eat_symbol(parser, Symbol::Equal, out.reborrow())?.is_some()
         {
             Some(DefaultParser::parse_default_value(parser, out.reborrow())?)
@@ -388,7 +380,6 @@ impl DeclarationParser {
             FieldParams {
                 name,
                 ty,
-                annotations,
                 default,
                 span,
             },
@@ -506,13 +497,12 @@ impl DeclarationParser {
             TokenKind::Symbol(Symbol::LeftParen) => {
                 let open = ParserControl::bump(parser, out.reborrow())?.span;
                 let ty = TypeParser::parse_type_expr(parser, out.reborrow())?;
-                let annotations = AnnotationParser::parse_annotations(parser, out.reborrow())?;
                 let close =
                     ParserControl::expect_symbol(parser, Symbol::RightParen, out.reborrow())?;
                 let span = ParserControl::span_between(parser, open, close.span, out.reborrow())?;
                 parser
                     .ast
-                    .variant_payload_single(ty, annotations, span, out.reborrow())?
+                    .variant_payload_single(ty, span, out.reborrow())?
             }
             TokenKind::Symbol(Symbol::LeftBrace) => {
                 let open = ParserControl::bump(parser, out.reborrow())?.span;

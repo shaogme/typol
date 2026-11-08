@@ -139,14 +139,14 @@ A field annotation checks one field or collection. A struct or enum `@assert` ch
 
 ```tschem
 struct RetryPolicy {
-    delays_ms: [u32] @size(min = 1, max = 5)
+    delays_ms: [u32 @min(1)] @size(min = 1, max = 5)
         @all(item > 0, "delays must be positive")
         @sum(max = 60000),
     targets: [network::Endpoint] @unique(by = "host"),
 }
 ```
 
-`@all` checks every array item or map value. `@unique(by = "...")` checks a field path on an array of structs, and `@sum` applies to numeric arrays. Expressions are type-checked when the Schema is compiled. Struct and active enum-variant assertions run after the full configuration value is constructed; a parse or local validation failure prevents those assertions from running.
+The `@min(1)` annotation is attached to each `u32` item, while `@size` and `@all` apply to the array itself. An annotation applies only to the type expression it immediately follows, so nested arrays and map values can each have their own rules. `@all` checks every array item or map value. `@unique(by = "...")` checks a field path on an array of structs, and `@sum` applies to numeric arrays. Expressions are type-checked when the Schema is compiled. Struct and active enum-variant assertions run after the full configuration value is constructed; a parse or local validation failure prevents those assertions from running.
 
 Regular expressions use search semantics, so any matching substring is sufficient. Add `^` and `$` when the whole string must match, for example `@regex("^[a-z][a-z0-9-]*$")`. Typol implements the documented regex subset, not every feature of a general-purpose regex engine. See the [Schema DSL reference](../../specification/schema-dsl/).
 

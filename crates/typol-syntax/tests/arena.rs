@@ -189,9 +189,8 @@ fn pooled_text_and_nested_lists_survive_source_release_and_table_growth() -> Tes
         .access(|out| fields.first(out))
         .test_value()?
         .test_value()?;
-    let annotations = ast_errors
-        .access(|out| text.annotations(out))
-        .test_value()?;
+    let ty = ast_errors.access(|out| text.ty(out)).test_value()?;
+    let annotations = ast_errors.access(|out| ty.annotations(out)).test_value()?;
     let annotation = ast_errors
         .access(|out| annotations.first(out))
         .test_value()?

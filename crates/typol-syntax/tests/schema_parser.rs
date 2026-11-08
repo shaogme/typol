@@ -523,8 +523,9 @@ fn annotations_and_assertions_preserve_order_and_expression_nodes() -> TestResul
         .access(|out| fields.first(out))
         .test_value()?
         .test_value()?;
+    let first_type = errors.access(|out| first_field.ty(out)).test_value()?;
     let annotations = errors
-        .access(|out| first_field.annotations(out))
+        .access(|out| first_type.annotations(out))
         .test_value()?;
 
     test_assert_eq!(annotations.len(), 3);
@@ -637,7 +638,8 @@ fn all_annotation_forms_are_parsed_with_their_argument_categories() -> TestResul
                 let Some(field) = fields.get(field_index, out.reborrow())? else {
                     return Ok(Err(TestFailure));
                 };
-                let annotations = field.annotations(out.reborrow())?;
+                let ty = field.ty(out.reborrow())?;
+                let annotations = ty.annotations(out.reborrow())?;
                 for annotation_index in 0..annotations.len() {
                     let Some(annotation) = annotations.get(annotation_index, out.reborrow())?
                     else {
@@ -676,7 +678,8 @@ fn all_annotation_forms_are_parsed_with_their_argument_categories() -> TestResul
                 .access(|out| fields.get($field_index, out))
                 .test_value()?
                 .test_value()?;
-            let annotations = errors.access(|out| field.annotations(out)).test_value()?;
+            let ty = errors.access(|out| field.ty(out)).test_value()?;
+            let annotations = errors.access(|out| ty.annotations(out)).test_value()?;
             let annotation = errors
                 .access(|out| annotations.get($annotation_index, out))
                 .test_value()?
@@ -800,6 +803,73 @@ fn empty_brace_defaults_and_trailing_commas_keep_their_syntax_shape() -> TestRes
     let entries = errors.access(|out| braced.entries(out)).test_value()?;
     test_assert!(entries.is_empty());
 
+    Ok(())
+}
+
+#[test]
+fn annotations_belong_to_the_adjacent_recursive_type_expression_node() -> TestResult {
+    let mut errors = TestSlot::<AstAccessError>::default();
+    let mut budget_errors = TestSlot::<BudgetError>::default();
+    let mut syntax_errors = TestSlot::<SyntaxErrors>::default();
+    let execution = budget_errors
+        .access(|out| ExecutionBudget::new(ExecutionLimits::new(67_108_864, 67_108_864), out))
+        .test_value()?;
+    let source = r#"entry struct Root {
+        data: map<string, [[string @length(1, 4)] @size(max = 8)] @size(max = 16)> @size(max = 32),
+    }"#;
+    let schema = syntax_errors
+        .access(|out| {
+            SchemaParser::parse_str(
+                SOURCE_ID,
+                source,
+                &SchemaParseOptions::default(),
+                &execution,
+                out,
+            )
+        })
+        .test_value()?;
+    let item = errors
+        .access(|out| schema.items().first(out))
+        .test_value()?
+        .test_value()?;
+    let entry = item.entry_struct().test_value()?;
+    let fields = errors.access(|out| entry.fields(out)).test_value()?;
+    let field = errors
+        .access(|out| fields.first(out))
+        .test_value()?
+        .test_value()?;
+    let map_type = errors.access(|out| field.ty(out)).test_value()?;
+
+    macro_rules! first_annotation_kind {
+        ($type_expr:expr) => {{
+            let annotations = errors
+                .access(|out| $type_expr.annotations(out))
+                .test_value()?;
+            test_assert_eq!(annotations.len(), 1);
+            let annotation = errors
+                .access(|out| annotations.first(out))
+                .test_value()?
+                .test_value()?;
+            errors.access(|out| annotation.kind(out)).test_value()?
+        }};
+    }
+
+    test_assert_eq!(first_annotation_kind!(map_type), AnnotationKind::Size);
+    let map_value = match errors.access(|out| map_type.kind(out)).test_value()? {
+        TypeExprKind::Map { value } => value,
+        _ => return Err(TestFailure),
+    };
+    test_assert_eq!(first_annotation_kind!(map_value), AnnotationKind::Size);
+    let inner_array = match errors.access(|out| map_value.kind(out)).test_value()? {
+        TypeExprKind::Array { element, .. } => element,
+        _ => return Err(TestFailure),
+    };
+    test_assert_eq!(first_annotation_kind!(inner_array), AnnotationKind::Size);
+    let string_type = match errors.access(|out| inner_array.kind(out)).test_value()? {
+        TypeExprKind::Array { element, .. } => element,
+        _ => return Err(TestFailure),
+    };
+    test_assert_eq!(first_annotation_kind!(string_type), AnnotationKind::Length);
     Ok(())
 }
 

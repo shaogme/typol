@@ -1,7 +1,7 @@
 use crate::{
     ast::{
-        AnnotationList, AssertionList, DeclarationList, DefaultValue, FieldDeclList, Name,
-        TypeExpr, VariantDeclList,
+        AssertionList, DeclarationList, DefaultValue, FieldDeclList, Name, TypeExpr,
+        VariantDeclList,
     },
     storage::{
         AstAccessError, Declaration as StoredDeclaration, EnumDecl as StoredEnumDecl,
@@ -302,14 +302,6 @@ impl<'a> TypeAliasDecl<'a> {
         Ok(TypeExpr::project(self.storage, record))
     }
 
-    pub fn annotations<'slot>(
-        self,
-        mut out: Out<'slot, '_, AstAccessError>,
-    ) -> OResult<'slot, AnnotationList<'a>> {
-        let records = self.storage.list(self.record.annotations, out.reborrow())?;
-        Ok(AnnotationList::project(self.storage, records))
-    }
-
     pub fn span(self) -> SourceSpan {
         self.record.span
     }
@@ -386,14 +378,6 @@ impl<'a> FieldDecl<'a> {
     ) -> OResult<'slot, TypeExpr<'a>> {
         let record = self.storage.get(self.record.ty, out.reborrow())?;
         Ok(TypeExpr::project(self.storage, record))
-    }
-
-    pub fn annotations<'slot>(
-        self,
-        mut out: Out<'slot, '_, AstAccessError>,
-    ) -> OResult<'slot, AnnotationList<'a>> {
-        let records = self.storage.list(self.record.annotations, out.reborrow())?;
-        Ok(AnnotationList::project(self.storage, records))
     }
 
     pub fn default<'slot>(
@@ -531,14 +515,6 @@ impl<'a> SingleVariantPayload<'a> {
     ) -> OResult<'slot, TypeExpr<'a>> {
         let record = self.storage.get(self.record.ty, out.reborrow())?;
         Ok(TypeExpr::project(self.storage, record))
-    }
-
-    pub fn annotations<'slot>(
-        self,
-        mut out: Out<'slot, '_, AstAccessError>,
-    ) -> OResult<'slot, AnnotationList<'a>> {
-        let records = self.storage.list(self.record.annotations, out.reborrow())?;
-        Ok(AnnotationList::project(self.storage, records))
     }
 }
 

@@ -1,6 +1,6 @@
 pub use crate::storage::BuiltinType;
 use crate::{
-    ast::NameList,
+    ast::{AnnotationList, NameList},
     storage::{
         ArrayLength as StoredArrayLength, AstAccessError, Storage, TypeExpr as StoredTypeExpr,
         TypeExprKind as StoredTypeExprKind, TypePath as StoredTypePath,
@@ -134,6 +134,14 @@ impl<'a> TypeExpr<'a> {
         mut out: Out<'slot, '_, AstAccessError>,
     ) -> OResult<'slot, TypeExprKind<'a>> {
         TypeExprKind::project(self.storage, &self.record.kind, out.reborrow())
+    }
+
+    pub fn annotations<'slot>(
+        self,
+        mut out: Out<'slot, '_, AstAccessError>,
+    ) -> OResult<'slot, AnnotationList<'a>> {
+        let records = self.storage.list(self.record.annotations, out.reborrow())?;
+        Ok(AnnotationList::project(self.storage, records))
     }
 
     pub fn span(self) -> SourceSpan {

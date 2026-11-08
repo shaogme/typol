@@ -89,6 +89,38 @@ fn text_parse_returns_an_explicit_validation_marker() -> TestResult<()> {
 }
 
 #[test]
+fn text_parse_enforces_nested_type_use_constraints() -> TestResult<()> {
+    let schema = compile(
+        "entry struct Root { values: [string @length(2, 4)], mapping: map<string, u8 @min(2)> }",
+    )?;
+    let mut provider = Provider {
+        bytes: Vec::new(),
+        calls: 0,
+        error: None,
+    };
+    let errors = Support::parse(
+        &schema,
+        config_request(
+            (
+                &mut SliceSource::new(br#"{ values: ["x"], mapping: {"one": 1} }"#),
+                "nested",
+            ),
+            &ConfigLimits::default(),
+        ),
+        &mut provider,
+    )
+    .test_error()?;
+    test_assert!(
+        errors
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| { diagnostic.code() == DiagnosticCode::CONFIG_VALIDATION_ERROR })
+    )?;
+    test_eq!(provider.calls, 0)?;
+    Ok(())
+}
+
+#[test]
 fn config_limit_builders_update_all_fields_from_defaults() -> TestResult<()> {
     let defaults = ConfigLimits::default();
     test_eq!(defaults.max_source_bytes(), 1_048_576)?;

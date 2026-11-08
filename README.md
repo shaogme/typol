@@ -36,12 +36,14 @@ struct Endpoint {
 entry struct ServiceConfig {
     name: string,
     endpoint: Endpoint,
-    tags: [string],
+    tags: [string @length(1, 32)],
     note: option<string>,
 }
 ```
 
 `Endpoint` and `ServiceConfig` are Schema structs. `entry` selects the root configuration type. The application may define Rust structs with the same names and matching fields; `#[derive(Typol)]` generates their conversion mapping. Rust methods and field visibility remain under the application's control.
+
+Annotations attach to the type expression immediately before them. Here, `@length` checks each string in `tags`; a collection annotation such as `@size` after the closing `]` checks the array itself. See the [Schema DSL reference](docs/src/content/docs/specification/schema-dsl.md) for nested type rules and annotation applicability.
 
 Schema defaults normally fill omitted fields while reading. To generate a complete `.tconf` from those defaults without declaring or binding a Rust type, call `LoadedSchema::default_config_to_string` or `write_default_config`. Every required field must have an explicit Schema default; fields are not guessed from Rust `Default` or empty-container conventions. See the [Quick start](docs/src/content/docs/guides/quickstart.md) and [Advanced tutorial](docs/src/content/docs/guides/advanced.md).
 
