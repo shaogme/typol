@@ -53,7 +53,7 @@ Schema 实现分为四层：
 
 Schema 输入必须是有效 UTF-8。词法约定以[Schema DSL §1](../schema-dsl/#1-词法规则)为准。`Read` 按顺序提供字节，短读不代表结束，零字节表示 EOF；parser 不要求输入可重放，也不保存完整源文本。Lexer 按需扫描，不生成完整 token 数组；`TokenCursor` 最多缓存当前事件和一个前瞻事件。token 保存 `SourceSpan`（源 ID 与 UTF-8 字节范围），标识符/数字可读取原文，字符串提供解码内容。EOF 的跨度是源末尾的空范围。
 
-标识符和数字 token 使用受预算约束的拥有缓冲；Schema parser 借用 token 文本并复制到 AST 文本池。字符串始终使用受预算约束的拥有型解码缓冲，无论原文是否含转义；Schema parser 将解码缓冲直接移交 AST。共享 lexer 通过可复用窗口读取 `Read`，不会向 token 暴露稳定的源文本切片。token、AST 的调试输出避免打印字面值，只暴露种类、跨度和长度等信息。
+标识符和数字 token 使用受预算约束的拥有缓冲；Schema parser 借用 token 文本并复制到 AST 文本池。字符串始终使用受预算约束的拥有型解码缓冲，无论原文是否含转义；Schema parser 将解码缓冲直接移交 AST。由于输入不可保证可回放，块字符串只将当前 token 正文暂存到受计费工作区，再计算缩进并解码到第二个受计费缓冲区。源扫描消耗共享执行额度；token 字节上限包括分隔符、正文、CRLF 源字节和闭合缩进，字符串上限只统计去缩进、换行归一化及转义解码后的字节。只有完整找到闭合分隔符并完成解码后才会返回块字符串。共享 lexer 通过可复用窗口读取 `Read`，不会向 token 暴露稳定的源文本切片。token、AST 的调试输出避免打印字面值，只暴露种类、跨度和长度等信息。
 
 ### 2.2 Schema AST
 
@@ -80,7 +80,7 @@ Schema parser 从 `SchemaLimits::syntax()` 读取 `SyntaxLimits`：解析深度�
 
 需要保留原文的工具可调用 `SchemaParser::parse_document`。它返回 `SchemaDocument<'source>`，借用传入的确切 `&str`，并拥有成功解析的语法 AST。该入口不解析导入，也不执行静态语义检查；编译路径仍使用原有流式 `parse`，不会保存完整源文本。
 
-`SchemaFormatter::format` 消费绑定后的文档和 `SchemaFormatOptions`，通过 OPEO 错误槽返回完整的 `FormattedSchema`。它会在分配 formatter token 表之前释放仅用于语法验证的 AST，避免 AST 与 formatter 工作区同时驻留。选项限制输出字节数、formatter 工作区和嵌套深度。Formatter 保留所有 token 与注释的原字节和顺序，统一布局与尾逗号；输入中含 CRLF 时使用 CRLF，否则使用 LF。调用方可用 `FormattedSchema::as_str()` 检查结果，或消费式调用 `write_to()` 写入 `fmt::Write` sink。
+`SchemaFormatter::format` 消费绑定后的文档和 `SchemaFormatOptions`，通过 OPEO 错误槽返回完整的 `FormattedSchema`。它会在分配 formatter token 表之前释放仅用于语法验证的 AST，避免 AST 与 formatter 工作区同时驻留。选项限制输出字节数、formatter 工作区和嵌套深度。Formatter 将完整块字符串视为单一 token，保留原始字节、内部换行、缩进和转义拼写，只统一该 token 外部布局。它保留所有 token 与注释的顺序，统一布局与尾逗号；输入中含 CRLF 时使用 CRLF，否则使用 LF。调用方可用 `FormattedSchema::as_str()` 检查结果，或消费式调用 `write_to()` 写入 `fmt::Write` sink。
 
 ```rust
 use std::{error::Error, io::Error as IoError};

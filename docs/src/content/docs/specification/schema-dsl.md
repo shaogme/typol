@@ -23,7 +23,24 @@ This document defines the lexical, grammatical, and static semantic rules for `.
 
 Schema source is UTF-8. Whitespace between tokens is limited to space (`U+0020`), horizontal tab (`U+0009`), LF (`U+000A`), and CRLF (`U+000D U+000A`). A standalone CR is invalid. Other Unicode whitespace, vertical tab, and form feed are also invalid. LF and CRLF both represent line breaks.
 
-The language supports `//` line comments and non-nesting `/* ... */` block comments. Block comments must be closed. Strings use double quotes and support `\"`, `\\`, `\n`, `\r`, and `\t`. Other escapes and unescaped control characters are invalid. Non-ASCII string characters retain their Unicode content.
+The language supports `//` line comments and non-nesting `/* ... */` block comments. Block comments must be closed. Single-line strings use double quotes and support `\"`, `\\`, `\n`, `\r`, and `\t`. Other escapes and unescaped control characters are invalid. Non-ASCII string characters retain their Unicode content.
+
+Triple double quotes introduce a block string. The opening `"""` must be followed immediately by LF or CRLF, with no same-line whitespace or comment. The closing `"""` is the first triple quote after optional spaces or tabs at the start of a physical line. Its indentation and the structural line ending immediately before it are excluded from the value; the closing delimiter may be followed by ordinary DSL tokens on that line. A triple quote at the beginning of a body line closes the string; escape its first quote to include it as content.
+
+The body is dedented before escapes are decoded. Blank lines containing only spaces and tabs become empty lines. For nonblank lines, the lexer removes the smallest count of leading ASCII spaces and tabs shared by all nonblank lines; a tab counts as one character, and additional indentation remains. Physical CRLF is normalized to LF. Supported escapes remain `\"`, `\\`, `\n`, `\r`, and `\t`; only physical source line endings and tabs in the remaining line-leading indentation may appear unescaped as control characters. A physical line ending creates a value newline, while `\\n` creates a newline only after dedenting.
+
+For example, this default decodes to `First line.\nSecond line.`:
+
+```text
+entry struct Release {
+    description: string = """
+        First line.
+        Second line.
+        """,
+}
+```
+
+The same block-string rules apply in `.tconf` values and in every Schema position that accepts a string literal.
 
 Identifiers begin with an ASCII letter or underscore, followed by ASCII letters, digits, or underscores. They are case-sensitive. The following keywords cannot be declaration names, field names, or path segments: `extern`, `mod`, `type`, `struct`, `entry`, `enum`, `option`, `map`, every built-in type name, `true`, `false`, and `none`.
 

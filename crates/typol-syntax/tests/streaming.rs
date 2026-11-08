@@ -269,6 +269,32 @@ fn all_symbols_and_utf8_scalars_survive_every_split_and_match_line_index() -> Te
 }
 
 #[test]
+fn block_string_delimiters_escapes_and_crlf_survive_stream_splits() -> TestResult {
+    let text =
+        "{value: \"\"\"\r\n    alpha\\nβ\r\n    [}, /* //, \\\"\"\"\r\n    tail\r\n    \"\"\",}";
+    let expected = tokens(&mut SliceSource::new(text.as_bytes()), 8192)?;
+    for chunk in [1, 2, 3, 7, 8192] {
+        for cut in 1..text.len() {
+            let calls = Cell::new(0);
+            let mut source = ShortSource {
+                bytes: text.as_bytes(),
+                offset: 0,
+                cut,
+                calls: &calls,
+                invalid_count: false,
+            };
+            test_assert_eq!(
+                tokens(&mut source, chunk)?,
+                expected,
+                "chunk {chunk}, cut {cut}"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn cached_events_never_read_or_charge_again_and_eof_is_emitted_once() -> TestResult {
     let calls = Cell::new(0);
     let mut source = ShortSource {

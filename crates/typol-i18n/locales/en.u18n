@@ -288,6 +288,7 @@ message diagnostic.schema.default_sum_constraint_failed = "schema default does n
 message diagnostic.schema.default_unique_constraint_failed = "schema default does not satisfy the @unique constraint";
 message diagnostic.syntax.float_literal_requires_integer_part = "floating-point literals must include an integer part";
 message diagnostic.syntax.incomplete_escape_sequence = "string escape sequence is incomplete";
+message diagnostic.syntax.block_string_requires_newline = "a block string opening delimiter must be followed by a line ending";
 message diagnostic.syntax.invalid_character = "source contains an invalid character";
 message diagnostic.syntax.invalid_line_ending = "a bare CR is not a valid line ending";
 message diagnostic.syntax.malformed_float = "floating-point literal is malformed";

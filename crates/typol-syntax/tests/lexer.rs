@@ -57,6 +57,15 @@ macro_rules! test_assert_eq {
 
 type TestResult<T = ()> = Result<T, TestFailure>;
 
+struct BlockStringErrorCase<'source> {
+    source: &'source str,
+    needle: &'source str,
+    source_length: usize,
+    line: usize,
+    start_column: usize,
+    end_column: usize,
+}
+
 trait TestValue<T> {
     fn test_value(self) -> TestResult<T>;
 }
@@ -410,6 +419,200 @@ fn strings_decode_supported_escapes_and_reject_invalid_forms() -> TestResult {
 }
 
 #[test]
+fn block_strings_dedent_normalize_lines_decode_escapes_and_preserve_spans() -> TestResult {
+    let mut errors = TestErrors::new();
+    let execution = errors
+        .execution(ExecutionLimits::new(67_108_864, 67_108_864))
+        .test_value()?;
+    let cases = [
+        ("\"\"\"\n\"\"\"", ""),
+        ("\"\"\"\n   \t\n \n  \"\"\"", "\n"),
+        ("\"\"\"\n    first\n    second\n    \"\"\"", "first\nsecond"),
+        ("\"\"\"\n  first\n    second\n  \"\"\"", "first\n  second"),
+        (
+            "\"\"\"\r\n\t  alpha\\ntwo\r\n\t  beta\r\n\t  \"\"\"",
+            "alpha\ntwo\nbeta",
+        ),
+        (
+            "\"\"\"\n  first\n  second\n   \n  \"\"\"",
+            "first\nsecond\n",
+        ),
+        (
+            "\"\"\"\n    one\\ntwo\n    \\\"\"\"\n    \"\"\"",
+            "one\ntwo\n\"\"\"",
+        ),
+    ];
+
+    for (source, expected) in cases {
+        let mut input = SliceSource::new(source.as_bytes());
+        let mut cursor = errors
+            .diagnostic(|out| {
+                TokenCursor::new(
+                    InputConfig {
+                        source_id: SOURCE_ID,
+                        source: &mut input,
+                        resources: &InputLimits::default(),
+                        stream: StreamLimits::default(),
+                        budget: &execution,
+                    },
+                    out,
+                )
+            })
+            .test_value()?;
+        let token = errors
+            .diagnostic(|out| cursor.peek(out))
+            .test_value()?
+            .token()
+            .test_value()?;
+        test_assert_eq!(token.kind(), TokenKind::String);
+        test_assert_eq!(token.decoded_string(), Some(expected));
+        test_assert_eq!(token.located_span().span().start(), 0);
+        test_assert_eq!(token.located_span().span().end(), source.len());
+        let location = token.located_span().location().test_value()?;
+        test_assert_eq!(location.end.line(), source.lines().count());
+    }
+
+    let source = "\"\"\"\n  value\n  \"\"\",";
+    let mut input = SliceSource::new(source.as_bytes());
+    let mut cursor = errors
+        .diagnostic(|out| {
+            TokenCursor::new(
+                InputConfig {
+                    source_id: SOURCE_ID,
+                    source: &mut input,
+                    resources: &InputLimits::default(),
+                    stream: StreamLimits::default(),
+                    budget: &execution,
+                },
+                out,
+            )
+        })
+        .test_value()?;
+    let event = errors.diagnostic(|out| cursor.bump(out)).test_value()?;
+    let token = event.token().test_value()?;
+    test_assert_eq!(token.decoded_string(), Some("value"));
+    test_assert_eq!(token.located_span().span().end(), source.len() - 1);
+    test_assert_eq!(
+        errors
+            .diagnostic(|out| cursor.peek(out))
+            .test_value()?
+            .token()
+            .test_value()?
+            .kind(),
+        TokenKind::Symbol(Symbol::Comma)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn malformed_block_strings_report_lexical_errors() -> TestResult {
+    let mut errors = TestErrors::new();
+    let execution = errors
+        .execution(ExecutionLimits::new(67_108_864, 67_108_864))
+        .test_value()?;
+    for source in [
+        "\"\"\" text\n\"\"\"",
+        "\"\"\"\n  unfinished",
+        "\"\"\"\rtext\n\"\"\"",
+        "\"\"\"\n  bad\\q\n\"\"\"",
+        "\"\"\"\n  bad\ttext\n\"\"\"",
+    ] {
+        let mut input = SliceSource::new(source.as_bytes());
+        let mut cursor = errors
+            .diagnostic(|out| {
+                TokenCursor::new(
+                    InputConfig {
+                        source_id: SOURCE_ID,
+                        source: &mut input,
+                        resources: &InputLimits::default(),
+                        stream: StreamLimits::default(),
+                        budget: &execution,
+                    },
+                    out,
+                )
+            })
+            .test_value()?;
+        let diagnostic = errors
+            .diagnostic(|out| cursor.peek(out))
+            .test_value()?
+            .diagnostic()
+            .test_value()?;
+        test_assert_eq!(diagnostic.code(), DiagnosticCode::LEXICAL_ERROR);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn block_string_decode_errors_point_at_offending_source_text() -> TestResult {
+    let mut errors = TestErrors::new();
+    let execution = errors
+        .execution(ExecutionLimits::new(67_108_864, 67_108_864))
+        .test_value()?;
+    let cases = [
+        BlockStringErrorCase {
+            source: "\n\"\"\"\r\n  ẞ\\q\n  trailing\n  \"\"\"",
+            needle: "\\q",
+            source_length: 2,
+            line: 3,
+            start_column: 4,
+            end_column: 6,
+        },
+        BlockStringErrorCase {
+            source: "\n\"\"\"\r\n  alpha\u{0085}tail\n  trailing\n  \"\"\"",
+            needle: "\u{0085}",
+            source_length: 2,
+            line: 3,
+            start_column: 8,
+            end_column: 9,
+        },
+    ];
+
+    for case in cases {
+        let start = case.source.find(case.needle).test_value()?;
+        let mut input = SliceSource::new(case.source.as_bytes());
+        let mut cursor = errors
+            .diagnostic(|out| {
+                TokenCursor::new(
+                    InputConfig {
+                        source_id: SOURCE_ID,
+                        source: &mut input,
+                        resources: &InputLimits::default(),
+                        stream: StreamLimits::default(),
+                        budget: &execution,
+                    },
+                    out,
+                )
+            })
+            .test_value()?;
+        let diagnostic = errors
+            .diagnostic(|out| cursor.peek(out))
+            .test_value()?
+            .diagnostic()
+            .test_value()?;
+        let primary = diagnostic.located_primary().test_value()?;
+        let span = primary.span();
+        test_assert_eq!(
+            (span.start(), span.end()),
+            (start, start + case.source_length)
+        );
+        let location = primary.location().test_value()?;
+        test_assert_eq!(
+            (
+                location.start.line(),
+                location.start.column(),
+                location.end.line(),
+                location.end.column()
+            ),
+            (case.line, case.start_column, case.line, case.end_column)
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn comments_and_config_tokens_use_the_shared_lexical_rules() -> TestResult {
     let mut errors = TestErrors::new();
     let execution = errors
@@ -713,6 +916,50 @@ fn decoded_string_limit_counts_decoded_utf8_bytes() -> TestResult {
         .diagnostic()
         .test_value()?;
     test_assert_eq!(diagnostic.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED);
+
+    Ok(())
+}
+
+#[test]
+fn block_string_limits_count_source_token_and_decoded_output_separately() -> TestResult {
+    let mut errors = TestErrors::new();
+    let execution = errors
+        .execution(ExecutionLimits::new(67_108_864, 67_108_864))
+        .test_value()?;
+    let source = format!(
+        "\"\"\"\n{}value\n{}\"\"\"",
+        " ".repeat(512),
+        " ".repeat(512)
+    );
+    for token_limit in [source.len() - 1, source.len()] {
+        for string_limit in [4, 5] {
+            let stream = StreamLimits::try_new(1, token_limit).test_value()?;
+            let mut input = SliceSource::new(source.as_bytes());
+            let mut cursor = errors
+                .diagnostic(|out| {
+                    TokenCursor::new(
+                        InputConfig {
+                            source_id: SOURCE_ID,
+                            source: &mut input,
+                            resources: &InputLimits::new(source.len(), string_limit),
+                            stream,
+                            budget: &execution,
+                        },
+                        out,
+                    )
+                })
+                .test_value()?;
+            let event = errors.diagnostic(|out| cursor.peek(out)).test_value()?;
+            if token_limit == source.len() && string_limit == 5 {
+                test_assert_eq!(event.token().test_value()?.decoded_string(), Some("value"));
+            } else {
+                test_assert_eq!(
+                    event.diagnostic().test_value()?.code(),
+                    DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+                );
+            }
+        }
+    }
 
     Ok(())
 }

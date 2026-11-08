@@ -156,17 +156,7 @@ fn scan_tokens_impl(
             }
             LexemeKind::BlockComment
         } else if byte == b'"' {
-            offset += 1;
-            loop {
-                let current = bytes.get(offset).copied().ok_or_else(inconsistent_source)?;
-                offset += 1;
-                if current == b'\\' {
-                    bytes.get(offset).ok_or_else(inconsistent_source)?;
-                    offset += 1;
-                } else if current == b'"' {
-                    break;
-                }
-            }
+            offset = scan_string(bytes, offset)?;
             LexemeKind::String
         } else if byte.is_ascii_alphabetic() || byte == b'_' {
             offset += 1;
@@ -526,6 +516,62 @@ fn scan_symbol(bytes: &[u8], offset: usize) -> Result<(Symbol, usize), SchemaFor
     let byte = bytes.get(offset).copied().ok_or_else(inconsistent_source)?;
     let next = bytes.get(offset + 1).copied();
     Symbol::from_ascii(byte, next).ok_or_else(inconsistent_source)
+}
+
+fn scan_string(bytes: &[u8], start: usize) -> Result<usize, SchemaFormatError> {
+    if bytes.get(start..start.saturating_add(3)) == Some(b"\"\"\"") {
+        let mut cursor = start
+            .checked_add(3)
+            .ok_or_else(|| SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded))?;
+        match bytes.get(cursor) {
+            Some(b'\n') => cursor += 1,
+            Some(b'\r') if bytes.get(cursor.saturating_add(1)) == Some(&b'\n') => cursor += 2,
+            _ => return Err(inconsistent_source()),
+        }
+        while cursor < bytes.len() {
+            let mut content = cursor;
+            while matches!(bytes.get(content), Some(b' ' | b'\t')) {
+                content = content.checked_add(1).ok_or_else(|| {
+                    SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
+                })?;
+            }
+            if bytes.get(content..content.saturating_add(3)) == Some(b"\"\"\"") {
+                return content.checked_add(3).ok_or_else(|| {
+                    SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
+                });
+            }
+            while bytes.get(cursor).is_some_and(|byte| *byte != b'\n') {
+                cursor = cursor.checked_add(1).ok_or_else(|| {
+                    SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
+                })?;
+            }
+            if cursor < bytes.len() {
+                cursor = cursor.checked_add(1).ok_or_else(|| {
+                    SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
+                })?;
+            }
+        }
+        return Err(inconsistent_source());
+    }
+    let mut cursor = start
+        .checked_add(1)
+        .ok_or_else(|| SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded))?;
+    while let Some(byte) = bytes.get(cursor).copied() {
+        if byte == b'\\' {
+            cursor = cursor.checked_add(2).ok_or_else(|| {
+                SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
+            })?;
+        } else if byte == b'"' {
+            return cursor.checked_add(1).ok_or_else(|| {
+                SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
+            });
+        } else {
+            cursor = cursor.checked_add(1).ok_or_else(|| {
+                SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
+            })?;
+        }
+    }
+    Err(inconsistent_source())
 }
 
 fn inconsistent_source() -> SchemaFormatError {

@@ -177,6 +177,56 @@ fn declarations_keep_their_source_order_and_structured_payload_shapes() -> TestR
 }
 
 #[test]
+fn schema_string_defaults_store_the_dedented_block_value_and_full_span() -> TestResult {
+    let mut errors = TestSlot::<AstAccessError>::default();
+    let mut budget_errors = TestSlot::<BudgetError>::default();
+    let mut syntax_errors = TestSlot::<SyntaxErrors>::default();
+    let execution = budget_errors
+        .access(|out| ExecutionBudget::new(ExecutionLimits::new(67_108_864, 67_108_864), out))
+        .test_value()?;
+    let source = "entry struct Root { text: string = \"\"\"\n    first\n    second\n    \"\"\", }";
+    let schema = syntax_errors
+        .access(|out| {
+            SchemaParser::parse_str(
+                SOURCE_ID,
+                source,
+                &SchemaParseOptions::default(),
+                &execution,
+                out,
+            )
+        })
+        .test_value()?;
+    let item = errors
+        .access(|out| schema.items().first(out))
+        .test_value()?
+        .test_value()?;
+    let entry = item.entry_struct().test_value()?;
+    let fields = errors.access(|out| entry.fields(out)).test_value()?;
+    let field = errors
+        .access(|out| fields.first(out))
+        .test_value()?
+        .test_value()?;
+    let default = errors
+        .access(|out| field.default(out))
+        .test_value()?
+        .test_value()?;
+    let DefaultValueKind::Scalar(ScalarLiteral::String(value)) =
+        errors.access(|out| default.kind(out)).test_value()?
+    else {
+        return Err(TestFailure);
+    };
+    test_assert_eq!(
+        errors.access(|out| value.value(out)).test_value()?,
+        "first\nsecond"
+    );
+    let span = value.span().span();
+    let token_start = source.find("\"\"\"").test_value()?;
+    let token_end = source.rfind("\"\"\"").test_value()? + 3;
+    test_assert_eq!((span.start(), span.end()), (token_start, token_end));
+    Ok(())
+}
+
+#[test]
 fn type_expressions_retain_builtin_container_array_and_path_forms() -> TestResult {
     let mut errors = TestSlot::<AstAccessError>::default();
     let mut budget_errors = TestSlot::<BudgetError>::default();

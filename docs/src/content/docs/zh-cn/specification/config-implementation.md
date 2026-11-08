@@ -66,13 +66,13 @@ ConfigParser::new(schema).parse(request, environment)
 
 解析成功返回 `ValidatedConfigValue`，明确表示值约束和完整树断言均已通过。调用方可只读借用其中的 `ConfigValue`；只有需要不带验证标记的拥有值时才调用 `into_config_value()`。
 
-`ConfigParseRequest` 包含可读 `Read`、显示名称和 `ConfigParseOptions`。选项分别持有 `ExcerptLimits` 和 `RegexOptions`，并配置 `ConfigLimits`、通用执行/工作区 `ExecutionLimits` 和词法流 `StreamLimits`。显示名称仅用于诊断元数据，不是配置文本的一部分。
+`ConfigParseRequest` 包含可读 `Read`、显示名称和 `ConfigParseOptions`。选项分别持有 `ExcerptLimits` 和 `RegexOptions`，并配置 `ConfigLimits`、通用执行/工作区 `ExecutionLimits` 和词法流 `StreamLimits`。Schema 与 Config 共享相同的块字符串 lexer 规则。由于 `Read` 不保证支持回放，lexer 会将当前块 token 正文暂存到计费工作区，再去缩进并解码到第二个计费缓冲区。扫描消耗共享执行额度；源 token 上限包括分隔符、闭合缩进及原始 CRLF 字节，字符串上限只计算最终解码后的 UTF-8 字节。显示名称仅用于诊断元数据，不是配置文本的一部分。
 
 `ConfigParser::parse_document` 和 `LoadedSchema::read_document` 会保留 parser 的 UTF-8 源缓冲区及语义定位索引。文档直接接管该缓冲区作为源文本，不再复制第二份完整内容。首次编辑前，源文本本身也用于 `DocumentSnapshot` 写入期望值；首次编辑成功时，旧源缓冲区会直接转为计费快照，不再分配第二份文本。写入成功后，期望值更新为当前源文本，并释放独立快照。
 
-`ConfigDocument::write_to` 原样输出保留的文本。`apply_edits` 通过 parser 索引解析带类型的替换、字段/map 项/数组元素插入和删除操作。事务按父容器分组子节点索引，并为每个受影响容器只准备一次边界、条目位置、逗号和布局。它拒绝重叠源范围，组装一个候选文档，再重解析并校验后提交内存文档。重解析只记录位置，不会再保留一份候选源码；校验成功后，候选缓冲区会直接成为新文档保留的源码。替换会编码目标子树；插入会推断容器换行、缩进和键分隔空格。插入值直接编码到最终补丁缓冲区；map 项存在性检查使用已解析的父节点，不克隆完整路径。删除和复合值替换会提取受影响范围内的注释，并把注释字节保留在替换区域。未触及的源范围逐字节不变。编辑数量、排序、索引遍历和有界源扫描均计入共享执行额度。相关修改应通过一次 `apply_edits` 或 `replace_values` 批量提交，这样候选文档只会解析和校验一次；分开的 `set_value` 调用会各自付出一次成本。编辑器扫描受限的源切片定位分隔符和注释范围，不另建 token/trivia CST。
+`ConfigDocument::write_to` 原样输出保留的文本。`apply_edits` 通过 parser 索引解析带类型的替换、字段/map 项/数组元素插入和删除操作。事务按父容器分组子节点索引，并为每个受影响容器只准备一次边界、条目位置、逗号和布局。它拒绝重叠源范围，组装一个候选文档，再重解析并校验后提交内存文档。重解析只记录位置，不会再保留一份候选源码；校验成功后，候选缓冲区会直接成为新文档保留的源码。替换会编码目标子树；插入会推断容器换行、缩进和键分隔空格。插入值直接编码到最终补丁缓冲区；map 项存在性检查使用已解析的父节点，不克隆完整路径。删除和复合值替换会提取受影响范围内的注释，并把注释字节保留在替换区域。未触及的源范围逐字节不变。编辑数量、排序、索引遍历和有界源扫描均计入共享执行额度。相关修改应通过一次 `apply_edits` 或 `replace_values` 批量提交，这样候选文档只会解析和校验一次；分开的 `set_value` 调用会各自付出一次成本。编辑器扫描受限的源切片定位分隔符和注释，并把两种字符串形式都当作不透明范围，因此块字符串中的括号、逗号和注释标记不会干扰容器配对；它不另建 token/trivia CST。
 
-`ConfigFormatter::format(&document, options, out)` 只格式化成功解析得到的 `ConfigDocument`。它使用显式分隔符栈直接扫描保留的源文，不构造配置 AST，也不重新编码 `ConfigValue`。`FormattedConfig` 独立拥有完整结果，提供只读字符串视图，并可通过 `typol_core::Write` sink 消费写出。`ConfigFormatter::is_formatted` 使用相同格式化流程，将每段输出直接与原文比较，不分配完整输出缓冲区；CLI 的 `config fmt --check` 使用此路径。原文档及其源位置保持不变。格式化按顺序保留所有非空白源 token 和注释，包括字符串/数值写法和 `env(...)` 表达式。非空容器按每行一个条目展开，使用 4 空格缩进并添加尾逗号；空容器保持紧凑。枚举单值载荷和 `env(...)` 括号保持紧凑，其中的容器除外。输入采用 LF 或 CRLF 时保留对应风格，输出以相应换行符结束，并满足幂等性。
+`ConfigFormatter::format(&document, options, out)` 只格式化成功解析得到的 `ConfigDocument`。它使用显式分隔符栈直接扫描保留的源文，不构造配置 AST，也不重新编码 `ConfigValue`。`FormattedConfig` 独立拥有完整结果，提供只读字符串视图，并可通过 `typol_core::Write` sink 消费写出。`ConfigFormatter::is_formatted` 使用相同格式化流程，将每段输出直接与原文比较，不分配完整输出缓冲区；CLI 的 `config fmt --check` 使用此路径。原文档及其源位置保持不变。格式化按顺序保留所有非空白源 token 和注释，包括字符串/数值写法和 `env(...)` 表达式。每个块字符串都是不透明 token，内部字节、缩进和 LF/CRLF 写法均保持原样；`format` 与 `is_formatted` 使用相同的边界扫描器。非空容器按每行一个条目展开，使用 4 空格缩进并添加尾逗号；空容器保持紧凑。枚举单值载荷和 `env(...)` 括号保持紧凑，其中的容器除外。输入采用 LF 或 CRLF 时保留对应风格，输出以相应换行符结束，并满足幂等性。
 
 `ConfigFormatOptions` 只提供输出字节、格式化工作区和嵌套深度额度，不提供会产生多种规范格式的样式选项。格式化还受文档的源码和构造文本额度约束；栈存储和扫描工作计入文档共享执行预算。`format` 会构造拥有型计费输出缓冲区，并计量构造文本；`is_formatted` 使用相同的输出额度逐段比较，不构造或保留该缓冲区。尾部注释的逗号前瞻每串连续注释只执行一次，因此含 `k` 条注释的串只增加线性扫描工作。拥有型结果只有在扫描、范围检查和输出计量全部成功后才返回。结构错误、资源超限、分配失败和后续输出 sink 错误保持不同类别；格式化中断时不会把部分缓冲区作为成功结果返回。
 

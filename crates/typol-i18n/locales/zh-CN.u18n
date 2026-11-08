@@ -288,6 +288,7 @@ message diagnostic.schema.default_sum_constraint_failed = "Schema 默认值不�
 message diagnostic.schema.default_unique_constraint_failed = "Schema 默认值不符合 @unique 约束";
 message diagnostic.syntax.float_literal_requires_integer_part = "浮点字面量必须包含整数部分";
 message diagnostic.syntax.incomplete_escape_sequence = "字符串转义序列不完整";
+message diagnostic.syntax.block_string_requires_newline = "块字符串的起始分隔符后必须紧跟换行符";
 message diagnostic.syntax.invalid_character = "来源包含无效字符";
 message diagnostic.syntax.invalid_line_ending = "单独的 CR 不是有效的换行符";
 message diagnostic.syntax.malformed_float = "浮点字面量格式错误";

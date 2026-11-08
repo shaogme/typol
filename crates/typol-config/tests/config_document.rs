@@ -10,14 +10,14 @@ use typol_config::{
     EnvironmentReadContext, SourceCommitError, SourceExpectation, SourceRevision, SourceWriter,
 };
 use typol_core::{
-    ConfigValue, ConfigValueBuilder, ExecutionBudget, ExecutionLimits, SliceSource, ValueScalar,
-    ValueSource,
+    ConfigValue, ConfigValueBuilder, ExecutionBudget, ExecutionLimits, SliceSource, ValueKind,
+    ValueScalar, ValueSource,
 };
 use typol_schema::{SchemaCompileOptions, SchemaSource};
 use typol_semantic::CompiledSchema;
 use typol_test_support::{
-    ConfigTestSupport as Support, TestExtract, TestOpeo, TestResult, test_verify as test_assert,
-    test_verify_eq as test_eq,
+    ConfigTestSupport as Support, TestExtract, TestFailure, TestOpeo, TestResult,
+    test_verify as test_assert, test_verify_eq as test_eq,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -175,6 +175,41 @@ fn formatter_expands_containers_and_preserves_source_expressions_and_order() -> 
         format_document(&formatted_document, ConfigFormatOptions::default())?,
         formatted
     );
+    Ok(())
+}
+
+#[test]
+fn multiline_strings_are_opaque_to_formatting_and_document_edits() -> TestResult<()> {
+    let schema = compile("entry struct Root { text: string, values: [u8], extra: u8 = 0 }")?;
+    let block = "\"\"\"\n    [}, /* //, \\\"quoted\\\"\n    tail\n    \"\"\"";
+    let source = format!("{{text: {block}, values: [1]}}");
+    let mut document = parse_document(&schema, &source)?;
+    let ValueKind::Structure(mut entries) = document.as_config_value().root().as_ref() else {
+        return Err(TestFailure::new("expected a structure value"));
+    };
+    let text_entry = entries
+        .find(|entry| entry.name() == Some("text"))
+        .test_value()?;
+    let ValueKind::String(decoded) = text_entry.value().as_ref() else {
+        return Err(TestFailure::new("expected a string value"));
+    };
+    test_eq!(decoded, "[}, /* //, \"quoted\"\ntail");
+    let formatted = format_document(&document, ConfigFormatOptions::default())?;
+    test_assert!(formatted.contains(block));
+    let formatted_document = parse_document(&schema, &formatted)?;
+    test_assert!(TestOpeo::value(|out| {
+        ConfigFormatter::is_formatted(&formatted_document, ConfigFormatOptions::default(), out)
+    })?);
+
+    let extra = ConfigPath::new().field("extra");
+    let value = unsigned(7)?;
+    let edit = ConfigEdit::InsertField {
+        path: &extra,
+        value: &value,
+    };
+    TestOpeo::value(|out| document.apply_edits(&[edit], &mut EmptyEnvironment, out))?;
+    test_assert!(document.source().contains("extra: 7"));
+    parse_document(&schema, document.source())?;
     Ok(())
 }
 

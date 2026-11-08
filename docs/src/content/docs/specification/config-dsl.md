@@ -29,7 +29,22 @@ Line endings are LF (`U+000A`) or CRLF (`U+000D U+000A`). A standalone CR is inv
 
 Identifiers begin with an ASCII letter or underscore and continue with ASCII letters, digits, or underscores. They are case-sensitive. Reserved names cannot be identifiers: `extern`, `mod`, `type`, `struct`, `entry`, `enum`, `option`, `map`, built-in type names (`i8` through `i128`, `u8` through `u128`, `f32`, `f64`, `string`, `bool`), `true`, `false`, and `none`. `env` is not reserved; it is recognized as an environment expression only in a field value position where the Schema permits it.
 
-Strings use double quotes. Supported escapes are `\\`, `\"`, `\n`, `\r`, and `\t`. Other backslash escapes and unescaped control characters are invalid. Non-ASCII characters are represented directly as UTF-8.
+Single-line strings use double quotes. Supported escapes are `\\`, `\"`, `\n`, `\r`, and `\t`. Other backslash escapes and unescaped control characters are invalid. Non-ASCII characters are represented directly as UTF-8.
+
+Triple double quotes introduce a block string. The opening `"""` must be followed immediately by LF or CRLF, with no same-line whitespace or comment. The closing `"""` is the first triple quote after optional spaces or tabs at the start of a physical line. Its indentation and the structural line ending immediately before it are excluded from the value; the closing delimiter may be followed by ordinary DSL tokens on that line. A triple quote at the beginning of a body line closes the string; escape its first quote to include it as content.
+
+The body is dedented before escapes are decoded. Blank lines containing only spaces and tabs become empty lines. For nonblank lines, the lexer removes the smallest count of leading ASCII spaces and tabs shared by all nonblank lines; a tab counts as one character, and additional indentation remains. Physical CRLF is normalized to LF. Supported escapes remain `\\`, `\"`, `\n`, `\r`, and `\t`; only physical source line endings and tabs in the remaining line-leading indentation may appear unescaped as control characters. A physical line ending creates a value newline, while `\\n` creates a newline only after dedenting. The shared rules are also used for Schema string literals.
+
+For example, this field value decodes to `First line.\nSecond line.`:
+
+```text
+{
+    description: """
+        First line.
+        Second line.
+        """,
+}
+```
 
 Integers are decimal or hexadecimal with a lowercase `0x` prefix. A leading zero without that prefix remains decimal. A float requires at least one decimal digit on both sides of the decimal point. Numbers may have a leading minus sign; a leading plus sign, exponent notation, and digit separators are unsupported. Boolean literals are `true` and `false`.
 

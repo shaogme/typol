@@ -127,6 +127,40 @@ fn scan_atom(bytes: &[u8], start: usize) -> Result<usize, ScanError> {
 
 fn scan_string(source: &str, start: usize) -> Result<usize, ScanError> {
     let bytes = source.as_bytes();
+    if bytes.get(start..start.saturating_add(3)) == Some(b"\"\"\"") {
+        let mut cursor = start
+            .checked_add(3)
+            .ok_or(ScanError::ResourceLimitExceeded)?;
+        match bytes.get(cursor) {
+            Some(b'\n') => cursor += 1,
+            Some(b'\r') if bytes.get(cursor.saturating_add(1)) == Some(&b'\n') => cursor += 2,
+            _ => return Err(ScanError::InvalidStructure),
+        }
+        while cursor < bytes.len() {
+            let mut content = cursor;
+            while matches!(bytes.get(content), Some(b' ' | b'\t')) {
+                content = content
+                    .checked_add(1)
+                    .ok_or(ScanError::ResourceLimitExceeded)?;
+            }
+            if bytes.get(content..content.saturating_add(3)) == Some(b"\"\"\"") {
+                return content
+                    .checked_add(3)
+                    .ok_or(ScanError::ResourceLimitExceeded);
+            }
+            while bytes.get(cursor).is_some_and(|byte| *byte != b'\n') {
+                cursor = cursor
+                    .checked_add(1)
+                    .ok_or(ScanError::ResourceLimitExceeded)?;
+            }
+            if cursor < bytes.len() {
+                cursor = cursor
+                    .checked_add(1)
+                    .ok_or(ScanError::ResourceLimitExceeded)?;
+            }
+        }
+        return Err(ScanError::InvalidStructure);
+    }
     let mut cursor = start
         .checked_add(1)
         .ok_or(ScanError::ResourceLimitExceeded)?;

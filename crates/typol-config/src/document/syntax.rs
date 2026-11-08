@@ -377,6 +377,40 @@ fn lexical_span(source: &str, start: usize) -> Result<Option<LexicalSpan>, Confi
 
 fn skip_string(source: &str, start: usize) -> Result<usize, ConfigEditErrorKind> {
     let bytes = source.as_bytes();
+    if bytes.get(start..start.saturating_add(3)) == Some(b"\"\"\"") {
+        let mut cursor = start
+            .checked_add(3)
+            .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+        match bytes.get(cursor) {
+            Some(b'\n') => cursor += 1,
+            Some(b'\r') if bytes.get(cursor.saturating_add(1)) == Some(&b'\n') => cursor += 2,
+            _ => return Err(ConfigEditErrorKind::EditConflict),
+        }
+        while cursor < bytes.len() {
+            let mut content = cursor;
+            while matches!(bytes.get(content), Some(b' ' | b'\t')) {
+                content = content
+                    .checked_add(1)
+                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+            }
+            if bytes.get(content..content.saturating_add(3)) == Some(b"\"\"\"") {
+                return content
+                    .checked_add(3)
+                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded);
+            }
+            while bytes.get(cursor).is_some_and(|byte| *byte != b'\n') {
+                cursor = cursor
+                    .checked_add(1)
+                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+            }
+            if cursor < bytes.len() {
+                cursor = cursor
+                    .checked_add(1)
+                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+            }
+        }
+        return Err(ConfigEditErrorKind::EditConflict);
+    }
     let mut cursor = start
         .checked_add(1)
         .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;

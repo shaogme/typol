@@ -147,9 +147,20 @@ fn run(
 fn every_single_split_and_short_read_preserves_values_and_origins() -> TestResult<()> {
     let schema = compile(
         r#"enum E { Unit, Single(u8), Fields { n: u8 } }
-        entry struct Root { text: string, n: i128, f: f64, hex: u8, values: [u8], pair: [u8; 2], labels: map<string, string>, optional: option<u8>, variant: E, from_env: u8 @env("X"), again: u8 @env("X"), default: u8 = 9 }"#,
+        entry struct Root { text: string, block: string, n: i128, f: f64, hex: u8, values: [u8], pair: [u8; 2], labels: map<string, string>, optional: option<u8>, variant: E, from_env: u8 @env("X"), again: u8 @env("X"), default: u8 = 9 }"#,
     )?;
-    let text = "/* before😀 */\r\n{text: \"éø😀é\\n\\\"\\\\\", n: -00012, f: 0012.50, hex: 0x2a, values: [1,2], pair: [3,4], labels: {\"ø\": \"v\"}, optional: none, variant: .Fields{n: 5}, from_env: env(\"X\"), again: env(\"X\", 8)}//tail\n";
+    let text = concat!(
+        "/* before😀 */\r\n{",
+        "text: \"éø😀é\\n\\\"\\\\\", ",
+        "block: \"\"\"\r\n",
+        "    alpha\\nβ\r\n",
+        "    [}, /* //\r\n",
+        "    tail\r\n",
+        "    \"\"\", ",
+        "n: -00012, f: 0012.50, hex: 0x2a, values: [1,2], pair: [3,4], ",
+        "labels: {\"ø\": \"v\"}, optional: none, variant: .Fields{n: 5}, ",
+        "from_env: env(\"X\"), again: env(\"X\", 8)}//tail\n"
+    );
     let expected = snapshot(
         &run(&schema, &mut SliceSource::new(text.as_bytes()), 8192)
             .test_value()?

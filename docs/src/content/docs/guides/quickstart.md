@@ -82,10 +82,14 @@ Save this in `service.tconf`:
         host: "edge.internal",
         port: 8443,
     },
+    note: """
+        Drains active requests
+        before restart.
+        """,
 }
 ```
 
-Configuration keys and values follow the Schema. Missing fields use their defaults; an omitted optional field becomes `none`. A supplied value must still match its declared type and constraints. For example, `port: 0` fails the `@range(1, 65535)` rule.
+Configuration keys and values follow the Schema. Missing fields use their defaults; an omitted optional field becomes `none`. A supplied value must still match its declared type and constraints. The `note` block string decodes to two lines of text with its common indentation removed. For example, `port: 0` fails the `@range(1, 65535)` rule.
 
 ## 3. Map Schema types to Rust
 

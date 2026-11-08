@@ -82,10 +82,14 @@ Schema 中的 `struct` 将命名字段组合为一个类型。每个字段都声
         host: "edge.internal",
         port: 8443,
     },
+    note: """
+        Drains active requests
+        before restart.
+        """,
 }
 ```
 
-配置的键和值遵循 Schema。缺失字段采用默认值；省略的可选字段变为 `none`。显式提供的值仍须符合声明类型和约束。例如，`port: 0` 不满足 `@range(1, 65535)`。
+配置的键和值遵循 Schema。缺失字段采用默认值；省略的可选字段变为 `none`。显式提供的值仍须符合声明类型和约束。`note` 块字符串会移除公共前置缩进，并解码为两行文本。例如，`port: 0` 不满足 `@range(1, 65535)`。
 
 ## 3. 将 Schema 类型映射到 Rust
 

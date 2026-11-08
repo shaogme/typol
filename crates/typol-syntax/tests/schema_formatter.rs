@@ -164,6 +164,24 @@ fn preserves_comments_raw_strings_and_expression_spacing() -> Result<(), Box<dyn
 }
 
 #[test]
+fn preserves_multiline_string_source_bytes_and_formats_around_the_token()
+-> Result<(), Box<dyn Error>> {
+    let block = "\"\"\"\r\n        first, ] } // /*\r\n        second\\ntext\r\n        \"\"\"";
+    let source = format!("entry struct Root {{ text: string = {block}, }}");
+    let actual = format(&source)?;
+    ensure(
+        actual.contains(block),
+        "block string bytes and internal line endings should be preserved",
+    )?;
+    ensure_equal(
+        format(&actual)?,
+        actual,
+        "block string formatter idempotence",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn preserves_numeric_spelling_and_compacts_unary_negative_values() -> Result<(), Box<dyn Error>> {
     let source = "entry struct Root { decimal: u16 = 0009, hexadecimal: u16 = 0x0f, ratio: f32 = 1.00, } @assert(self.decimal >= -1, \"valid\")";
     let actual = format(source)?;

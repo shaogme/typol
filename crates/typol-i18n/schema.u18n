@@ -264,6 +264,7 @@ message diagnostic.schema.default_sum_constraint_failed();
 message diagnostic.schema.default_unique_constraint_failed();
 message diagnostic.syntax.float_literal_requires_integer_part();
 message diagnostic.syntax.incomplete_escape_sequence();
+message diagnostic.syntax.block_string_requires_newline();
 message diagnostic.syntax.invalid_character();
 message diagnostic.syntax.invalid_line_ending();
 message diagnostic.syntax.malformed_float();

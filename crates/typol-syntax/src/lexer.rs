@@ -1,3 +1,5 @@
+mod block_string;
+
 use crate::{
     InputLimits, StreamLimits,
     error::SyntaxDiagnostic,
@@ -5,6 +7,7 @@ use crate::{
     parser::SourcePositionIndex,
     token::{CommentKind, Keyword, Symbol, Token, TokenKind},
 };
+use block_string::{BlockStringContext, BlockStringDecoder};
 use opeo::{OResult, Out};
 use typol_core::{
     ChargedString, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage,
@@ -191,6 +194,17 @@ impl<'input> Lexer<'input> {
             return Err(out.reborrow().fail(diagnostic));
         }
         if character == '"' {
+            if self.input.byte(1, out.reborrow())? == Some(b'"')
+                && self.input.byte(2, out.reborrow())? == Some(b'"')
+            {
+                let context = BlockStringContext {
+                    input: &mut self.input,
+                    limits: self.limits,
+                    stream: self.stream,
+                    budget: &self.budget,
+                };
+                return BlockStringDecoder::scan(context, start, out.reborrow());
+            }
             return self.string(start, out.reborrow());
         }
         if Symbol::can_start(character) {
