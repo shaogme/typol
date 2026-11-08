@@ -27,13 +27,14 @@ use crate::{
 use core::{any::TypeId, fmt, mem};
 use opeo::{OResult, Out};
 use typol_core::{
-    BudgetError, NamedValue, ValueError, ValueId, ValueKind, ValuePayload, ValueView,
+    BudgetError, NamedValue, ValueError, ValueId, ValueKind, ValuePayload, ValueScalar, ValueView,
 };
 use typol_semantic::{TypeKind, TypeView, VariantPayloadInfo};
 
 pub(crate) use pipeline::ConvertedValue;
 pub use pipeline::{
-    Conversion, ConversionFields, ConversionPayload, ConversionValue, EnumInput, Sourced,
+    Conversion, ConversionFields, ConversionPayload, ConversionValue, EnumInput,
+    EnvironmentFallback, EnvironmentScalar, EnvironmentSourcedValue, Sourced,
 };
 
 pub(super) use self::pipeline::{BindingCursor, BindingState, ConversionState, ResolvedBinding};
@@ -278,6 +279,21 @@ impl<'call> ConversionContext<'call> {
         out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, String> {
         ConversionState::target_text(self.state.as_deref_mut(), self.session, text, out)
+    }
+
+    pub(crate) fn add_environment_reference<'slot>(
+        &mut self,
+        values: &[ValueId],
+        name: &str,
+        fallback: Option<ValueScalar<'_>>,
+        mut out: Out<'slot, '_, CodecErrors>,
+    ) -> OResult<'slot, ()> {
+        let session = self.session;
+        self.value_builder(out.reborrow())?.environment_reference(
+            session,
+            value_builder::EnvironmentReferenceInput::new(values, name, fallback),
+            out,
+        )
     }
 
     pub fn text<'slot>(

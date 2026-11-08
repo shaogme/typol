@@ -243,7 +243,9 @@ Schema 错误由 `SchemaCompileErrors` 以非空集合或不需分配的内联�
 
 `#[derive(Typol)]` 只从 Rust 类型本身生成类型描述和转换实现。它不在宏展开时读取 Schema。`LoadedSchema::bind` 和 `TypedSchema::bind(compiled_schema, options)` 要求类型具备隐藏的 `BudgetedTypol` 标记；derive 为所有嵌套字段和枚举载荷添加标记约束。内建标量与容器按其子类型条件实现该标记。derive 支持 `Vec<Self>` 等递归形态；绑定器按 Rust `TypeId` 与 Schema `TypeView` 配对追踪活动分支，遇到相同配对时结束该分支，并继续独立检查同一 Rust 类型在其他 Schema 使用点的映射。绑定、转换、节点、执行和工作区额度仍约束有限递归值。若派生类型包含手写 `Typol` 子类型，应添加 `#[typol(trusted)]` 以省略该类型的常规额度标记，并通过 `bind_trusted` 使用。
 
-当应用逻辑需要字段来源时，使用 `Sourced<T>`。它与 `T` 具有相同的 Schema 形态，`source()` 返回解码值节点的来源。对于可选字段，`Option<Sourced<T>>` 在值存在时记录内层值的来源。`Sourced<T>` 不实现 `Debug`，避免意外打印包装的秘密。`BoundSchema::read_with_value` 返回 `BoundRead<T>`，其中包含类型化结果和同一次解析、校验会话产生的 `ValidatedConfigValue`；`read` 仍是只返回类型化结果的便捷方法。
+当应用逻辑需要字段来源时，使用 `Sourced<T>`。它与 `T` 具有相同的 Schema 形态，`source()` 返回来源类别。成功解析 `env(...)` 后，`environment_name()` 和 `environment_fallback()` 可读取保留的引用元数据；它们不含 provider 返回的实际值。`Option<Sourced<T>>` 在内层标量存在时记录引用，`Sourced<Option<T>>` 则在 option 值上记录引用。环境引用只允许位于标量或 `option<标量>` 字段，且 `@env` 名称必须完全匹配。数组、map、枚举单载荷、未授权字段和 `none` 值不能携带引用。
+
+`Sourced::from_environment` 与 `Sourced::from_environment_with_fallback` 可显式创建引用，不会查询环境 provider。typed writer 会在写入首字节前校验名称、标量形状、fallback 可表示性、字段位置和 `@env` 授权。调用 `into_value()` 可主动丢弃引用，只写 Rust 值。变量未设置且采用表达式回退值时，解析结果来源是 `ExplicitFallback`，不是环境引用。`Sourced<T>` 不实现 `Debug`，避免意外打印包装的秘密或引用 fallback。`BoundSchema::read_with_value` 返回 `BoundRead<T>`，其中包含类型化结果和同一次解析、校验会话产生的 `ValidatedConfigValue`；`read` 仍是只返回类型化结果的便捷方法。
 
 手写实现通过 `LoadedSchema::bind_trusted` 或 `TypedSchema::bind_trusted` 接入，返回的 `TrustedBoundSchema` 或 `TrustedTypedSchema` 会保留这一路径标识。受信任回调使用 `DescribeContext`、`ConversionContext` 和子类型分发时，对应的库管理工作仍受现有额度约束；库无法限制回调直接分配、阻塞或执行任意计算，也不重新校验手写解码器返回的 Rust 值。`BudgetedTypol` 只是常规 API 的能力标记，不是沙箱或防止恶意伪造的安全边界。需要约束不可信实现时，必须另行使用进程或 Wasm 隔离。
 

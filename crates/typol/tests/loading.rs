@@ -10,7 +10,7 @@ use std::{
 use typol::{
     BoundSchema, ConfigParseOptions, ConfigPath, EmptyEnvironment, Environment, EnvironmentError,
     EnvironmentReadContext, LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits,
-    SchemaLoader, SourceCommitError, SourceExpectation, Typol, TypolError, TypolOptions,
+    SchemaLoader, SourceCommitError, SourceExpectation, Sourced, Typol, TypolError, TypolOptions,
     TypolStage, ValidatedConfigValue, WriteOptions,
     binding::{
         BindOptions, CodecStage, ConversionLimits, MAX_CONVERSION_DEPTH, Typol as TypolTrait,
@@ -36,8 +36,8 @@ use typol::{
     },
 };
 use typol_test_support::{
-    TestExpect, TestExtract, TestOpeo, TestResult, test_verify as assert,
-    test_verify_eq as assert_eq,
+    TestExpect, TestExtract, TestFailure, TestOpeo, TestOpeoOutcome, TestResult,
+    test_verify as assert, test_verify_eq as assert_eq,
 };
 
 trait BoundProcessEnvironmentTestExt<T: TypolTrait> {
@@ -213,6 +213,61 @@ struct Root {
 #[derive(Debug, Typol)]
 struct Different {
     value: bool,
+}
+
+#[derive(Typol)]
+struct OriginRoot {
+    token: Sourced<String>,
+    optional: Option<Sourced<u16>>,
+    flag: Sourced<Option<bool>>,
+}
+
+#[derive(Typol)]
+struct ManualOrigin {
+    value: Sourced<String>,
+}
+
+#[derive(Typol)]
+struct ManualFloatOrigin {
+    value: Sourced<f64>,
+}
+
+#[derive(Typol)]
+struct ManualRangedOrigin {
+    value: Sourced<u8>,
+}
+
+#[derive(Typol)]
+struct ManualOptionalOrigin {
+    value: Sourced<Option<u16>>,
+}
+
+#[derive(Typol)]
+struct ManualOptionalLeafOrigin {
+    value: Option<Sourced<u16>>,
+}
+
+struct OriginProvider {
+    token: Option<String>,
+    optional: Option<String>,
+    flag: Option<String>,
+}
+
+impl Environment for OriginProvider {
+    fn read<'slot, 'borrow, 'env>(
+        &'env mut self,
+        name: &str,
+        _: EnvironmentReadContext<'_>,
+        _: Out<'slot, 'borrow, EnvironmentError>,
+    ) -> OResult<'slot, Option<&'env [u8]>> {
+        let value = match name {
+            "SERVICE_TOKEN" => self.token.as_deref(),
+            "OPTIONAL_PORT" => self.optional.as_deref(),
+            "FLAG" => self.flag.as_deref(),
+            _ => None,
+        };
+        Ok(value.map(str::as_bytes))
+    }
 }
 
 struct NoImports;
@@ -597,6 +652,199 @@ fn explicit_schema_binding_supports_typed_and_environment_reads() -> TestResult 
     assert_eq!(provider.calls, 1);
 
     directory.cleanup()?;
+    Ok(())
+}
+
+#[test]
+fn sourced_environment_values_roundtrip_the_reference_and_typed_fallback() -> TestResult {
+    let loaded = load(
+        "entry struct OriginRoot { token: string @env(\"SERVICE_TOKEN\"), optional: option<u16> @env(\"OPTIONAL_PORT\"), flag: option<bool> @env(\"FLAG\") }",
+        default_options(),
+    )?;
+    let binding = load_value(|out| loaded.bind::<OriginRoot>(out))?;
+    let source = "{token: env(\"SERVICE_TOKEN\", \"fallback-secret\"), optional: env(\"OPTIONAL_PORT\", 9), flag: env(\"FLAG\", true)}";
+    let mut first_provider = OriginProvider {
+        token: Some("provider-token-one".to_string()),
+        optional: Some("8123".to_string()),
+        flag: Some("false".to_string()),
+    };
+    let read = TestOpeo::outcome(|out| {
+        binding.read(ReadRequest::from_text(source), &mut first_provider, out)
+    });
+    let value = match read {
+        TestOpeoOutcome::Value(value) => value,
+        TestOpeoOutcome::Error(error) => {
+            let rendered = TestOpeo::value(|out| {
+                error.render(
+                    Translator::new(Language::English),
+                    RenderOptions::default(),
+                    out,
+                )
+            })?;
+            return Err(TestFailure::new(format!("{error:?}{rendered}")));
+        }
+    };
+    assert_eq!(value.token.value(), "provider-token-one");
+    assert_eq!(value.token.source(), ValueSource::EnvironmentVariable);
+    assert_eq!(value.token.environment_name(), Some("SERVICE_TOKEN"));
+    assert!(matches!(
+        value.token.environment_fallback(),
+        Some(typol::EnvironmentFallback::String(text)) if text == "fallback-secret"
+    ));
+    let optional = value
+        .optional
+        .as_ref()
+        .test_expect("environment-backed optional should be Some")?;
+    assert_eq!(*optional.value(), 8123);
+    assert_eq!(optional.environment_name(), Some("OPTIONAL_PORT"));
+    assert_eq!(value.flag.value(), &Some(false));
+    assert_eq!(value.flag.environment_name(), Some("FLAG"));
+
+    let encoded = load_value(|out| binding.write_to_string(&value, WriteOptions::default(), out))?;
+    assert!(encoded.contains("env(\"SERVICE_TOKEN\", \"fallback-secret\")"));
+    assert!(encoded.contains("env(\"OPTIONAL_PORT\", 9)"));
+    assert!(encoded.contains("env(\"FLAG\", true)"));
+    assert!(!encoded.contains("provider-token-one"));
+
+    let mut second_provider = OriginProvider {
+        token: Some("provider-token-two".to_string()),
+        optional: Some("9000".to_string()),
+        flag: Some("true".to_string()),
+    };
+    let reparsed = load_value(|out| {
+        binding.read(ReadRequest::from_text(&encoded), &mut second_provider, out)
+    })?;
+    assert_eq!(reparsed.token.value(), "provider-token-two");
+    assert_eq!(reparsed.token.environment_name(), Some("SERVICE_TOKEN"));
+    assert_eq!(
+        *reparsed
+            .optional
+            .as_ref()
+            .test_expect("environment-backed optional should remain Some")?
+            .value(),
+        9000
+    );
+    assert_eq!(reparsed.flag.value(), &Some(true));
+
+    let mut unset_provider = OriginProvider {
+        token: None,
+        optional: None,
+        flag: None,
+    };
+    let fallback_value =
+        load_value(|out| binding.read(ReadRequest::from_text(source), &mut unset_provider, out))?;
+    assert_eq!(fallback_value.token.value(), "fallback-secret");
+    assert_eq!(fallback_value.token.source(), ValueSource::ExplicitFallback);
+    assert_eq!(fallback_value.token.environment_name(), None);
+    let fallback_encoded =
+        load_value(|out| binding.write_to_string(&fallback_value, WriteOptions::default(), out))?;
+    assert!(!fallback_encoded.contains("env("));
+    assert!(fallback_encoded.contains("fallback-secret"));
+
+    let manual_schema = load(
+        "entry struct ManualOrigin { value: string }",
+        default_options(),
+    )?;
+    let manual_binding = load_value(|out| manual_schema.bind::<ManualOrigin>(out))?;
+    let manual_value = ManualOrigin {
+        value: Sourced::from_environment("UNAUTHORIZED".to_string(), "secret".to_string()),
+    };
+    let mut output = Vec::new();
+    let error = load_error(|out| {
+        manual_binding.write(&manual_value, &mut output, WriteOptions::default(), out)
+    })?;
+    assert_eq!(error.stage(), TypolStage::Encoding);
+    assert!(output.is_empty());
+
+    let float_schema = load(
+        "entry struct ManualFloatOrigin { value: f64 @env(\"VALUE\") }",
+        default_options(),
+    )?;
+    let float_binding = load_value(|out| float_schema.bind::<ManualFloatOrigin>(out))?;
+    let invalid_float = ManualFloatOrigin {
+        value: Sourced::from_environment_with_fallback("VALUE".to_string(), 1.0, f64::NAN),
+    };
+    let mut output = Vec::new();
+    let error = load_error(|out| {
+        float_binding.write(&invalid_float, &mut output, WriteOptions::default(), out)
+    })?;
+    assert_eq!(error.stage(), TypolStage::Encoding);
+    assert!(output.is_empty());
+
+    let ranged_schema = load(
+        "entry struct ManualRangedOrigin { value: u8 @range(10, 20) @env(\"VALUE\") }",
+        default_options(),
+    )?;
+    let ranged_binding = load_value(|out| ranged_schema.bind::<ManualRangedOrigin>(out))?;
+    let invalid_ranged = ManualRangedOrigin {
+        value: Sourced::from_environment_with_fallback("VALUE".to_string(), 12, 0),
+    };
+    let mut output = Vec::new();
+    let error = load_error(|out| {
+        ranged_binding.write(&invalid_ranged, &mut output, WriteOptions::default(), out)
+    })?;
+    assert_eq!(error.stage(), TypolStage::Encoding);
+    assert!(output.is_empty());
+
+    let string_limits = ConfigLimits::default().with_max_string_bytes(3);
+    let string_schema = load(
+        "entry struct ManualOrigin { value: string @env(\"X\") }",
+        default_options().with_config_limits(string_limits),
+    )?;
+    let string_binding = load_value(|out| string_schema.bind::<ManualOrigin>(out))?;
+    let invalid_string = ManualOrigin {
+        value: Sourced::from_environment_with_fallback(
+            "X".to_string(),
+            "ok".to_string(),
+            "long".to_string(),
+        ),
+    };
+    let mut output = Vec::new();
+    let error = load_error(|out| {
+        string_binding.write(&invalid_string, &mut output, WriteOptions::default(), out)
+    })?;
+    assert_eq!(error.stage(), TypolStage::Encoding);
+    assert!(output.is_empty());
+
+    let optional_leaf_schema = load(
+        "entry struct ManualOptionalLeafOrigin { value: option<u16> @range(10, 20) @env(\"VALUE\") }",
+        default_options(),
+    )?;
+    let optional_leaf_binding =
+        load_value(|out| optional_leaf_schema.bind::<ManualOptionalLeafOrigin>(out))?;
+    let invalid_optional_leaf = ManualOptionalLeafOrigin {
+        value: Some(Sourced::from_environment_with_fallback(
+            "VALUE".to_string(),
+            12,
+            0,
+        )),
+    };
+    let mut output = Vec::new();
+    let error = load_error(|out| {
+        optional_leaf_binding.write(
+            &invalid_optional_leaf,
+            &mut output,
+            WriteOptions::default(),
+            out,
+        )
+    })?;
+    assert_eq!(error.stage(), TypolStage::Encoding);
+    assert!(output.is_empty());
+
+    let optional_schema = load(
+        "entry struct ManualOptionalOrigin { value: option<u16> @env(\"VALUE\") }",
+        default_options(),
+    )?;
+    let optional_binding = load_value(|out| optional_schema.bind::<ManualOptionalOrigin>(out))?;
+    let invalid_optional = ManualOptionalOrigin {
+        value: Sourced::from_environment("VALUE".to_string(), None),
+    };
+    let mut output = Vec::new();
+    let error = load_error(|out| {
+        optional_binding.write(&invalid_optional, &mut output, WriteOptions::default(), out)
+    })?;
+    assert_eq!(error.stage(), TypolStage::Encoding);
+    assert!(output.is_empty());
     Ok(())
 }
 

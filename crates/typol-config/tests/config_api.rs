@@ -7,8 +7,8 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{
-    DiagnosticCode, ExecutionLimits, Read, SliceSource, SourceId, SourceSpan, Span, ValueKind,
-    ValueSource, ValueView,
+    ConfigValueBuilder, DiagnosticCode, ExecutionLimits, NamedValue, Read, SliceSource, SourceId,
+    SourceSpan, Span, ValueKind, ValueScalar, ValueSource, ValueView,
 };
 use typol_i18n::{Language, Translator};
 use typol_policy::{ExcerptLimits, RegexOptions};
@@ -250,6 +250,45 @@ fn external_value_operations_return_distinct_normalized_and_validated_types() ->
 }
 
 #[test]
+fn optional_environment_reference_stays_shared_after_external_validation() -> TestResult<()> {
+    let schema = compile("entry struct Root { value: option<u8> @env(\"TOKEN\") }")?;
+    let mut builder = TestOpeo::call(|out| ConfigValueBuilder::new(None, out))
+        .map_err(TestFailure::from_debug)?;
+    let inner = TestOpeo::call(|out| builder.add_unsigned(7, ValueSource::RustValue, out))
+        .map_err(TestFailure::from_debug)?;
+    let optional =
+        TestOpeo::call(|out| builder.add_optional(Some(inner), ValueSource::RustValue, out))
+            .map_err(TestFailure::from_debug)?;
+    TestOpeo::call(|out| {
+        builder.add_environment_reference(&[optional], "TOKEN", Some(ValueScalar::Unsigned(9)), out)
+    })
+    .map_err(TestFailure::from_debug)?;
+    TestOpeo::call(|out| {
+        builder.add_environment_reference(&[inner], "TOKEN", Some(ValueScalar::Unsigned(9)), out)
+    })
+    .map_err(TestFailure::from_debug)?;
+    let root = TestOpeo::call(|out| {
+        builder.add_structure(
+            &[NamedValue::new("value", optional)],
+            ValueSource::RustValue,
+            out,
+        )
+    })
+    .map_err(TestFailure::from_debug)?;
+    let value = TestOpeo::call(|out| builder.finish(root, out)).map_err(TestFailure::from_debug)?;
+    let options = ConfigValidationRequest::new(ConfigValidationOptions::default());
+    let validated =
+        TestOpeo::value(|out| ConfigValueProcessor::new(&schema).validate(value, options, out))?;
+    let optional = field(validated.as_config_value(), "value")?;
+    let ValueKind::Optional(Some(inner)) = optional.as_ref() else {
+        return Err(TestFailure::new("validated option should contain a value"));
+    };
+    test_assert!(optional.shares_environment_reference(inner))?;
+
+    Ok(())
+}
+
+#[test]
 fn normalization_shape_errors_keep_their_localized_or_redacted_message() -> TestResult<()> {
     let schema = compile("entry struct Root { password: u8 @secret }")?;
     let value = ValueFactory::structure(vec![ValueFactory::named(
@@ -274,6 +313,42 @@ fn normalization_shape_errors_keep_their_localized_or_redacted_message() -> Test
         .map_err(|_| TestFailure::new("hidden normalization message should translate"))?;
     test_eq!(message, "值已隐藏")?;
     test_assert!(!diagnostic.message().contains("private-value"))?;
+    Ok(())
+}
+
+#[test]
+fn ordinary_normalization_rejects_environment_origins_without_full_validation() -> TestResult<()> {
+    let schema = compile("entry struct Root { value: string }")?;
+    let mut builder = TestOpeo::call(|out| ConfigValueBuilder::new(None, out))
+        .map_err(TestFailure::from_debug)?;
+    let scalar =
+        TestOpeo::call(|out| builder.add_string("provider-value", ValueSource::RustValue, out))
+            .map_err(TestFailure::from_debug)?;
+    TestOpeo::call(|out| builder.add_environment_reference(&[scalar], "UNAUTHORIZED", None, out))
+        .map_err(TestFailure::from_debug)?;
+    let root = TestOpeo::call(|out| {
+        builder.add_structure(
+            &[NamedValue::new("value", scalar)],
+            ValueSource::RustValue,
+            out,
+        )
+    })
+    .map_err(TestFailure::from_debug)?;
+    let value = TestOpeo::call(|out| builder.finish(root, out)).map_err(TestFailure::from_debug)?;
+    let options = ConfigValidationRequest::new(ConfigValidationOptions::default());
+    let mut errors = TestSlot::<ConfigValueErrors>::default();
+    let errors = errors
+        .access(|out| ConfigValueProcessor::new(&schema).normalize(value, options, out))
+        .test_error()?;
+    test_assert!(
+        errors
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| { diagnostic.code() == DiagnosticCode::CONFIG_VALUE_ERROR })
+    )?;
+    test_assert!(!format!("{errors:?}").contains("UNAUTHORIZED"))?;
+    test_assert!(!format!("{errors:?}").contains("provider-value"))?;
+
     Ok(())
 }
 

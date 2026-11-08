@@ -125,8 +125,8 @@ fn arena_views_preserve_order_source_and_named_entries() -> Result<(), Box<dyn E
     let budget = make_budget(1_000)?;
     let initial = budget.workspace_bytes();
     let mut builder = TestOpeo::call(|out| ConfigValueBuilder::new(Some(&budget), out))?;
-    let label =
-        TestOpeo::call(|out| builder.add_string("€€🙂", ValueSource::EnvironmentVariable, out))?;
+    let label = TestOpeo::call(|out| builder.add_string("€€🙂", ValueSource::RustValue, out))?;
+    TestOpeo::call(|out| builder.add_environment_reference(&[label], "LABEL", None, out))?;
     let number = TestOpeo::call(|out| builder.add_unsigned(42, ValueSource::SchemaDefault, out))?;
     let fields = [
         NamedValue::new("name", label),

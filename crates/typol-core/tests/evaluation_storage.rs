@@ -187,7 +187,10 @@ fn value_builder_copies_nested_views_and_preserves_source_tags() -> Result<(), B
     let mut original_builder =
         TestOpeo::call::<ValueError, _>(|out| ConfigValueBuilder::new(None, out))?;
     let token = TestOpeo::call::<ValueError, _>(|out| {
-        original_builder.add_string("UPINS_TOKEN", ValueSource::EnvironmentVariable, out)
+        original_builder.add_string("UPINS_TOKEN", ValueSource::RustValue, out)
+    })?;
+    TestOpeo::call::<ValueError, _>(|out| {
+        original_builder.add_environment_reference(&[token], "UPINS_TOKEN", None, out)
     })?;
     let fields = [NamedValue::new("token", token)];
     let payload = TestOpeo::call::<ValueError, _>(|out| {

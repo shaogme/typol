@@ -41,6 +41,21 @@ pub(super) enum NodeKind {
 pub(super) struct ValueNode {
     pub(super) kind: NodeKind,
     pub(super) source: ValueSource,
+    pub(super) environment: Option<usize>,
+}
+
+pub(super) enum EnvironmentFallbackRecord {
+    Signed(i128),
+    Unsigned(u128),
+    Float32(f32),
+    Float64(f64),
+    String(TextRange),
+    Bool(bool),
+}
+
+pub(super) struct EnvironmentReferenceRecord {
+    pub(super) name: TextRange,
+    pub(super) fallback: Option<EnvironmentFallbackRecord>,
 }
 
 pub(super) struct ValueEdge {
@@ -99,6 +114,36 @@ impl ArenaRebase {
                         PayloadKind::Structure(Self::edge_range(range, edge_offset)?)
                     }
                 },
+            },
+        })
+    }
+
+    pub(super) fn environment_reference(
+        reference: EnvironmentReferenceRecord,
+        text_offset: usize,
+    ) -> Option<EnvironmentReferenceRecord> {
+        Some(EnvironmentReferenceRecord {
+            name: Self::text_range(reference.name, text_offset)?,
+            fallback: match reference.fallback {
+                Some(EnvironmentFallbackRecord::Signed(value)) => {
+                    Some(EnvironmentFallbackRecord::Signed(value))
+                }
+                Some(EnvironmentFallbackRecord::Unsigned(value)) => {
+                    Some(EnvironmentFallbackRecord::Unsigned(value))
+                }
+                Some(EnvironmentFallbackRecord::Float32(value)) => {
+                    Some(EnvironmentFallbackRecord::Float32(value))
+                }
+                Some(EnvironmentFallbackRecord::Float64(value)) => {
+                    Some(EnvironmentFallbackRecord::Float64(value))
+                }
+                Some(EnvironmentFallbackRecord::String(range)) => Some(
+                    EnvironmentFallbackRecord::String(Self::text_range(range, text_offset)?),
+                ),
+                Some(EnvironmentFallbackRecord::Bool(value)) => {
+                    Some(EnvironmentFallbackRecord::Bool(value))
+                }
+                None => None,
             },
         })
     }

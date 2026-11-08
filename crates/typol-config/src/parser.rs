@@ -11,7 +11,7 @@ mod semantics;
 mod tests;
 
 use self::{
-    context::{ParserContext, ParserControlRequest},
+    context::{ParserContextStorage, ParserControlRequest},
     frames::ValueParser,
     literals::{ContextDiagnosticRequest, LiteralParser},
     recovery::{ParseFailure, Recovery},
@@ -50,7 +50,7 @@ static PARSER_SETUP_RESULT_MISSING: DiagnosticContext = diagnostic_context!(
 );
 
 pub(super) struct Parser<'schema, 'source, 'limits> {
-    context: ParserContext<'schema, 'source, 'limits>,
+    context: ParserContextStorage<'schema, 'source, 'limits>,
     frame_errors: ErrSlot<ParseFailure>,
     item_errors: ErrSlot<ParseFailure>,
     root_type: TypeView<'schema>,
@@ -149,19 +149,30 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
                 Some(self.context.source_id),
             )));
         }
-        let budget = &self.context.budget;
+        let source_id = self.context.source_id;
+        let mut budget_errors = ErrSlot::<BudgetError>::new();
+        let budget =
+            match budget_errors.try_call(|budget_out| self.context.budget.try_clone(budget_out)) {
+                Ok(budget) => budget,
+                Err(caught) => {
+                    return Err(out.fail(ConfigParseErrors::emergency(
+                        BudgetDiagnostic::from_error(caught.take()),
+                        Some(source_id),
+                    )));
+                }
+            };
         let copy = match self
             .context
             .session
             .validation()
             .budget_errors
-            .try_call(|budget_out| ChargedString::copy(name, Some(budget), budget_out))
+            .try_call(|budget_out| ChargedString::copy(name, Some(&budget), budget_out))
         {
             Ok(copy) => copy,
             Err(caught) => {
                 return Err(out.fail(ConfigParseErrors::emergency(
                     BudgetDiagnostic::from_error(caught.take()),
-                    Some(self.context.source_id),
+                    Some(source_id),
                 )));
             }
         };
@@ -183,23 +194,22 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
     ) -> OResult<'slot, (ConfigValue, LocationIndex<'schema>)> {
         let mut parse_errors = ErrSlot::new();
         let result = parse_errors.try_call(|parse_out| self.parse_value(parse_out));
-        self.context
-            .session
-            .begin_secret(self.context.cursor.consumed_end());
+        let mut context = self.context.into_inner();
+        context.session.begin_secret(context.cursor.consumed_end());
         match result {
-            Ok(value) if self.context.diagnostics.is_empty() => Ok((value, self.context.locations)),
+            Ok(value) if context.diagnostics.is_empty() => Ok((value, context.locations)),
             Ok(_) => Err(out.fail(ConfigParseErrors::from_buffer(
-                self.context.diagnostics,
-                self.context.schema,
-                self.context.source_id,
+                context.diagnostics,
+                context.schema,
+                context.source_id,
                 self.source_name,
             ))),
             Err(caught) => {
-                Recovery::record_failure(&mut self.context, caught.take());
+                Recovery::record_failure(&mut context, caught.take());
                 Err(out.fail(ConfigParseErrors::from_buffer(
-                    self.context.diagnostics,
-                    self.context.schema,
-                    self.context.source_id,
+                    context.diagnostics,
+                    context.schema,
+                    context.source_id,
                     self.source_name,
                 )))
             }

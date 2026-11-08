@@ -10,7 +10,8 @@ use typol_config::{
     EnvironmentReadContext, SourceCommitError, SourceExpectation, SourceRevision, SourceWriter,
 };
 use typol_core::{
-    ConfigValue, ConfigValueBuilder, ExecutionBudget, ExecutionLimits, SliceSource, ValueSource,
+    ConfigValue, ConfigValueBuilder, ExecutionBudget, ExecutionLimits, SliceSource, ValueScalar,
+    ValueSource,
 };
 use typol_schema::{SchemaCompileOptions, SchemaSource};
 use typol_semantic::CompiledSchema;
@@ -324,6 +325,23 @@ fn text(value: &str) -> TestResult<ConfigValue> {
     })
 }
 
+fn environment_text(name: &str, fallback: &str, value: &str) -> TestResult<ConfigValue> {
+    let budget = TestOpeo::value(|out| {
+        ExecutionBudget::new(ExecutionLimits::new(1_000_000, 1_000_000), out)
+    })?;
+    TestOpeo::value(|mut out| {
+        let mut builder = ConfigValueBuilder::new(Some(&budget), out.reborrow())?;
+        let root = builder.add_string(value, ValueSource::RustValue, out.reborrow())?;
+        builder.add_environment_reference(
+            &[root],
+            name,
+            Some(ValueScalar::String(fallback)),
+            out.reborrow(),
+        )?;
+        builder.finish(root, out)
+    })
+}
+
 fn float32(value: f32) -> TestResult<ConfigValue> {
     let budget = TestOpeo::value(|out| {
         ExecutionBudget::new(ExecutionLimits::new(1_000_000, 1_000_000), out)
@@ -396,6 +414,33 @@ fn failed_batch_validation_preserves_document_source() -> TestResult {
         TestOpeo::error(|out| document.set_value(&path, &invalid, &mut EmptyEnvironment, out))?;
     test_eq!(error.kind(), ConfigEditErrorKind::ValidationFailed);
     test_eq!(document.source(), original);
+    Ok(())
+}
+
+#[test]
+fn environment_replacement_preserves_reference_and_rejects_unauthorized_name() -> TestResult {
+    let schema = compile("entry struct Root { token: string @env(\"SERVICE_TOKEN\") }")?;
+    let original = "{ token: \"initial\" }";
+    let path = ConfigPath::new().field("token");
+    let replacement = environment_text("SERVICE_TOKEN", "local-token", "provider-secret")?;
+    let mut document = parse_document(&schema, original)?;
+
+    TestOpeo::value(|out| document.set_value(&path, &replacement, &mut EmptyEnvironment, out))?;
+    test_eq!(
+        document.source(),
+        "{ token: env(\"SERVICE_TOKEN\", \"local-token\") }"
+    );
+    test_assert!(!document.source().contains("provider-secret"));
+
+    let invalid = environment_text("OTHER_TOKEN", "local-token", "provider-secret")?;
+    let error =
+        TestOpeo::error(|out| document.set_value(&path, &invalid, &mut EmptyEnvironment, out))?;
+    test_eq!(error.kind(), ConfigEditErrorKind::ValidationFailed);
+    test_eq!(
+        document.source(),
+        "{ token: env(\"SERVICE_TOKEN\", \"local-token\") }"
+    );
+
     Ok(())
 }
 

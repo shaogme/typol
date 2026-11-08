@@ -5,7 +5,7 @@ use core::{
 use opeo::ErrSlot;
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, ExecutionBudget, ValueEntries, ValueKind,
-    ValuePayloadView, ValueView,
+    ValuePayloadView, ValueScalar, ValueSource, ValueView,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,60 +87,80 @@ impl ScalarEncoder {
                     push_frame(&mut frames, EncodeFrame::Text("}"))?;
                     push_entries(&mut frames, entries, map_keys)?;
                 }
-                EncodeFrame::Value(value) => match value.as_ref() {
-                    ValueKind::Signed(number) => {
-                        append_format(output, format_args!("{number}"), limit)?;
-                    }
-                    ValueKind::Unsigned(number) => {
-                        append_format(output, format_args!("{number}"), limit)?;
-                    }
-                    ValueKind::Float32(number) => append_float(output, number, limit)?,
-                    ValueKind::Float64(number) => append_float(output, number, limit)?,
-                    ValueKind::String(text) => append_escaped(output, text, limit)?,
-                    ValueKind::Bool(value) => {
-                        append_text(output, if value { "true" } else { "false" }, limit)?;
-                    }
-                    ValueKind::Optional(Some(value)) => {
-                        push_frame(&mut frames, EncodeFrame::Value(value))?;
-                    }
-                    ValueKind::Optional(None) => append_text(output, "none", limit)?,
-                    ValueKind::Array(entries) => {
-                        encode_entries(
-                            output,
-                            &mut frames,
-                            EntriesEncoding {
-                                entries,
-                                open: "[",
-                                close: "]",
-                                limit,
-                            },
-                        )?;
-                    }
-                    ValueKind::Map(entries) => {
-                        append_text(output, "{", limit)?;
-                        push_frame(&mut frames, EncodeFrame::Text("}"))?;
-                        push_entries(&mut frames, entries, true)?;
-                    }
-                    ValueKind::Structure(entries) => {
-                        push_frame(&mut frames, EncodeFrame::Entries(entries, false))?;
-                    }
-                    ValueKind::Enumeration { variant, payload } => {
-                        append_text(output, ".", limit)?;
-                        append_text(output, variant, limit)?;
-                        match payload {
-                            ValuePayloadView::Unit => {}
-                            ValuePayloadView::Single(value) => {
-                                append_text(output, "(", limit)?;
-                                push_frame(&mut frames, EncodeFrame::Text(")"))?;
-                                push_frame(&mut frames, EncodeFrame::Value(value))?;
+                EncodeFrame::Value(value) => {
+                    if let Some(reference) = value.environment_reference() {
+                        append_environment(output, reference.name(), reference.fallback(), limit)?;
+                    } else if value.source() == ValueSource::EnvironmentVariable {
+                        return Err(ConfigEditErrorKind::EncodingFailed);
+                    } else {
+                        match value.as_ref() {
+                            ValueKind::Signed(number) => {
+                                append_format(output, format_args!("{number}"), limit)?;
                             }
-                            ValuePayloadView::Structure(entries) => {
-                                append_text(output, " ", limit)?;
+                            ValueKind::Unsigned(number) => {
+                                append_format(output, format_args!("{number}"), limit)?;
+                            }
+                            ValueKind::Float32(number) => append_float(output, number, limit)?,
+                            ValueKind::Float64(number) => append_float(output, number, limit)?,
+                            ValueKind::String(text) => append_escaped(output, text, limit)?,
+                            ValueKind::Bool(value) => {
+                                append_text(output, if value { "true" } else { "false" }, limit)?;
+                            }
+                            ValueKind::Optional(Some(value)) => {
+                                if let Some(reference) = value.environment_reference() {
+                                    append_environment(
+                                        output,
+                                        reference.name(),
+                                        reference.fallback(),
+                                        limit,
+                                    )?;
+                                } else {
+                                    push_frame(&mut frames, EncodeFrame::Value(value))?;
+                                }
+                            }
+                            ValueKind::Optional(None) => append_text(output, "none", limit)?,
+                            ValueKind::Array(entries) => {
+                                encode_entries(
+                                    output,
+                                    &mut frames,
+                                    EntriesEncoding {
+                                        entries,
+                                        open: "[",
+                                        close: "]",
+                                        limit,
+                                    },
+                                )?;
+                            }
+                            ValueKind::Map(entries) => {
+                                append_text(output, "{", limit)?;
+                                push_frame(&mut frames, EncodeFrame::Text("}"))?;
+                                push_entries(&mut frames, entries, true)?;
+                            }
+                            ValueKind::Structure(entries) => {
                                 push_frame(&mut frames, EncodeFrame::Entries(entries, false))?;
+                            }
+                            ValueKind::Enumeration { variant, payload } => {
+                                append_text(output, ".", limit)?;
+                                append_text(output, variant, limit)?;
+                                match payload {
+                                    ValuePayloadView::Unit => {}
+                                    ValuePayloadView::Single(value) => {
+                                        append_text(output, "(", limit)?;
+                                        push_frame(&mut frames, EncodeFrame::Text(")"))?;
+                                        push_frame(&mut frames, EncodeFrame::Value(value))?;
+                                    }
+                                    ValuePayloadView::Structure(entries) => {
+                                        append_text(output, " ", limit)?;
+                                        push_frame(
+                                            &mut frames,
+                                            EncodeFrame::Entries(entries, false),
+                                        )?;
+                                    }
+                                }
                             }
                         }
                     }
-                },
+                }
             }
         }
         Ok(())
@@ -159,6 +179,32 @@ impl ScalarEncoder {
         append_text(output, request.colon_spacing, request.limit)?;
         Self::encode_value_into(output, request.value, request.budget, request.limit)
     }
+}
+
+fn append_environment(
+    output: &mut ChargedString,
+    name: &str,
+    fallback: Option<&ValueScalar<'_>>,
+    limit: usize,
+) -> Result<(), ConfigEditErrorKind> {
+    append_text(output, "env(", limit)?;
+    append_escaped(output, name, limit)?;
+    if let Some(fallback) = fallback {
+        append_text(output, ", ", limit)?;
+        match fallback {
+            ValueScalar::Signed(value) => append_format(output, format_args!("{value}"), limit)?,
+            ValueScalar::Unsigned(value) => {
+                append_format(output, format_args!("{value}"), limit)?;
+            }
+            ValueScalar::Float32(value) => append_float(output, *value, limit)?,
+            ValueScalar::Float64(value) => append_float(output, *value, limit)?,
+            ValueScalar::String(value) => append_escaped(output, value, limit)?,
+            ValueScalar::Bool(value) => {
+                append_text(output, if *value { "true" } else { "false" }, limit)?;
+            }
+        }
+    }
+    append_text(output, ")", limit)
 }
 
 fn push_frame<'value>(

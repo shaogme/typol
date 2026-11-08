@@ -16,8 +16,8 @@ use crate::{
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedVec, ConfigValue, Diagnostic, ExecutionBudget, InstancePath, LocatedSpan,
-    RegexExecutionBudget,
+    BudgetError, ChargedVec, ConfigValue, Diagnostic, DiagnosticCode, ExecutionBudget,
+    InstancePath, LocatedSpan, RegexExecutionBudget,
 };
 use typol_semantic::{
     CompiledSchema, ConstraintList, FieldView, RegexExecutor, TypeView, VariantView,
@@ -27,6 +27,7 @@ use typol_semantic::{
 pub(crate) struct TreeTarget<'schema> {
     pub(crate) expected: TypeView<'schema>,
     pub(crate) field: Option<FieldView<'schema>>,
+    pub(crate) environment_field: Option<FieldView<'schema>>,
     pub(crate) variant: Option<VariantView<'schema>>,
     pub(crate) span: Option<LocatedSpan>,
 }
@@ -52,14 +53,10 @@ pub(crate) struct TreeContext<'schema, 'work, 'limits> {
 
 pub(crate) struct ValueValidation;
 
-pub(crate) enum ValueValidationInput<'value> {
-    External(&'value ConfigValue),
-    SchemaComplete(ConfigValue),
-}
-
 pub(crate) struct ValueValidationRequest<'schema, 'value, 'options, 'budget> {
     pub(crate) schema: &'schema CompiledSchema,
-    pub(crate) value: ValueValidationInput<'value>,
+    pub(crate) external_value: Option<&'value ConfigValue>,
+    pub(crate) schema_complete_value: Option<ConfigValue>,
     pub(crate) options: &'options ConfigValidationOptions,
     pub(crate) budget: &'budget ExecutionBudget,
 }
@@ -81,7 +78,8 @@ impl ValueValidation {
     ) -> OResult<'slot, ConfigValue> {
         let ValueValidationRequest {
             schema,
-            value,
+            external_value,
+            schema_complete_value,
             options,
             budget,
         } = request;
@@ -119,8 +117,8 @@ impl ValueValidation {
             }
         };
         let mut nodes = 0;
-        let (value, shape_validated) = match value {
-            ValueValidationInput::External(value) => {
+        let (value, shape_validated) = match (external_value, schema_complete_value) {
+            (Some(value), None) => {
                 let normalized = match operation_errors.try_call(|diagnostic_out| {
                     ValueNormalizer::copy(
                         NormalizeRequest {
@@ -130,6 +128,7 @@ impl ValueValidation {
                             primary: None,
                             text_limit: options.config().max_constructed_text_bytes(),
                             schema_default: false,
+                            allow_unvalidated_environment_sources: true,
                         },
                         &mut nodes,
                         options.config().values(),
@@ -150,7 +149,13 @@ impl ValueValidation {
                 };
                 (normalized.into_config_value(), true)
             }
-            ValueValidationInput::SchemaComplete(value) => (value, false),
+            (None, Some(value)) => (value, false),
+            _ => {
+                return Err(out.fail(ConfigParseErrors::emergency(
+                    Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR),
+                    None,
+                )));
+            }
         };
         let value_nodes = if shape_validated {
             nodes
@@ -233,6 +238,7 @@ impl ValueValidation {
                     TreeTarget {
                         expected: schema.entry(),
                         field: None,
+                        environment_field: None,
                         variant: None,
                         span: None,
                     },

@@ -1,8 +1,14 @@
-use crate::{BudgetError, DiagnosticContext};
+use crate::{BudgetError, DiagnosticContext, diagnostic_context};
 use core::{
     error::Error,
     fmt::{self, Display},
 };
+
+static ENVIRONMENT_REFERENCE_REQUIRED: DiagnosticContext = diagnostic_context!(
+    "typol-core",
+    "value-arena",
+    "environment-source-requires-reference",
+);
 
 /// Dynamic allocation failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,21 +28,12 @@ impl From<BudgetError> for AllocationError {
     }
 }
 
-/// The category of a configuration value source, excluding source text and environment values.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ValueSource {
-    ConfigLiteral,
-    SchemaDefault,
-    EnvironmentVariable,
-    ExplicitFallback,
-    RustValue,
-}
-
 /// A structural error found while constructing a value container.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValueErrorKind {
     DuplicateMapKey,
     DuplicateFieldName,
+    EnvironmentReferenceRequired,
     AllocationFailed,
     ResourceLimitExceeded,
     CapacityExceeded,
@@ -84,6 +81,15 @@ impl ValueError {
             context: Some(context),
         }
     }
+
+    pub(super) const fn environment_reference_required() -> Self {
+        Self {
+            kind: ValueErrorKind::EnvironmentReferenceRequired,
+            first_index: None,
+            second_index: None,
+            context: Some(ENVIRONMENT_REFERENCE_REQUIRED),
+        }
+    }
 }
 
 impl Display for ValueError {
@@ -91,6 +97,9 @@ impl Display for ValueError {
         let message = match self.kind {
             ValueErrorKind::DuplicateMapKey => "duplicate map key",
             ValueErrorKind::DuplicateFieldName => "duplicate field name",
+            ValueErrorKind::EnvironmentReferenceRequired => {
+                "environment source requires structured reference metadata"
+            }
             ValueErrorKind::AllocationFailed => "memory allocation failed",
             ValueErrorKind::ResourceLimitExceeded => "execution resource limit exceeded",
             ValueErrorKind::CapacityExceeded => "workspace capacity exceeded",

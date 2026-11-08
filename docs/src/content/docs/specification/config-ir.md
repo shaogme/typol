@@ -32,7 +32,7 @@ Config IR is UTF-8 JSON text. The top-level object contains exactly these member
 
 Every successful output ends with exactly one LF (`U+000A`), in both compact and pretty modes. Output has no BOM. Pretty mode changes only JSON whitespace, not the data model.
 
-V1 exports the complete configuration value. It does not include source locations, value origins, default origins, constraint definitions, or validation results. Type aliases are transparent: the format describes the expanded type shape, while structs and enums retain their qualified Schema names. The key type of `map<string, T>` is always string and is not encoded separately in the map type description.
+V1 exports the complete configuration value. It does not include source locations, value origins, environment reference names or fallbacks, default origins, constraint definitions, or validation results. Omitting the reference metadata does not redact the resolved value: an environment value and values under `@secret` are still exported as data and must be protected accordingly. Type aliases are transparent: the format describes the expanded type shape, while structs and enums retain their qualified Schema names. The key type of `map<string, T>` is always string and is not encoded separately in the map type description.
 
 `ConfigIr::serialize` does not read environment variables. `ConfigIrOptions` selects the value handling mode before serialization:
 

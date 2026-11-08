@@ -129,7 +129,7 @@ impl Scalar {
         if builtin == BuiltinType::String {
             let mut value_errors = ErrSlot::new();
             let value = value_errors.try_call(|value_out| {
-                ValueFactory::string(text, ValueSource::EnvironmentVariable, budget, value_out)
+                ValueFactory::string(text, ValueSource::RustValue, budget, value_out)
             });
             return match value {
                 Ok(value) => Ok(value),
@@ -150,12 +150,7 @@ impl Scalar {
                 if equal {
                     let mut value_errors = ErrSlot::new();
                     return match value_errors.try_call(|value_out| {
-                        ValueFactory::boolean(
-                            value,
-                            ValueSource::EnvironmentVariable,
-                            budget,
-                            value_out,
-                        )
+                        ValueFactory::boolean(value, ValueSource::RustValue, budget, value_out)
                     }) {
                         Ok(value) => Ok(value),
                         Err(caught) => Err(out.fail(ValueFactory::failure(
@@ -229,30 +224,18 @@ impl Scalar {
             Some(value) => {
                 let mut value_errors = ErrSlot::new();
                 match value_errors.try_call(|value_out| match value {
-                    ScalarValue::Signed(value) => ValueFactory::signed(
-                        value,
-                        ValueSource::EnvironmentVariable,
-                        budget,
-                        value_out,
-                    ),
-                    ScalarValue::Unsigned(value) => ValueFactory::unsigned(
-                        value,
-                        ValueSource::EnvironmentVariable,
-                        budget,
-                        value_out,
-                    ),
-                    ScalarValue::Float32(value) => ValueFactory::float32(
-                        value,
-                        ValueSource::EnvironmentVariable,
-                        budget,
-                        value_out,
-                    ),
-                    ScalarValue::Float64(value) => ValueFactory::float64(
-                        value,
-                        ValueSource::EnvironmentVariable,
-                        budget,
-                        value_out,
-                    ),
+                    ScalarValue::Signed(value) => {
+                        ValueFactory::signed(value, ValueSource::RustValue, budget, value_out)
+                    }
+                    ScalarValue::Unsigned(value) => {
+                        ValueFactory::unsigned(value, ValueSource::RustValue, budget, value_out)
+                    }
+                    ScalarValue::Float32(value) => {
+                        ValueFactory::float32(value, ValueSource::RustValue, budget, value_out)
+                    }
+                    ScalarValue::Float64(value) => {
+                        ValueFactory::float64(value, ValueSource::RustValue, budget, value_out)
+                    }
                 }) {
                     Ok(value) => Ok(value),
                     Err(caught) => Err(out.fail(ValueFactory::failure(

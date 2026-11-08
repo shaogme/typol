@@ -1,6 +1,8 @@
 use super::support::{Choice, CustomError, SerdeTestSupport as Support};
 use crate::{diagnostics::CodecErrors, test_support::TestValues, value::EnumPayload};
-use typol_test_support::{TestResult, test_verify as assert, test_verify_eq as assert_eq};
+use typol_test_support::{
+    TestOpeo, TestResult, test_verify as assert, test_verify_eq as assert_eq,
+};
 
 fn secret_is_hidden(errors: &CodecErrors) -> bool {
     !format!("{errors:?}{errors}").contains("secret")
@@ -22,7 +24,7 @@ fn enum_payloads_round_trip_and_wrong_variants_reject() -> TestResult {
             value
         );
     }
-    let payload = EnumPayload::single(TestValues::signed(1));
+    let payload = TestOpeo::value(|out| EnumPayload::single(TestValues::signed(1), None, out))?;
     let tree = TestValues::enumeration_unmetered("Unit".to_owned(), payload);
     assert_eq!(
         Support::code(
@@ -40,7 +42,13 @@ fn enum_payloads_round_trip_and_wrong_variants_reject() -> TestResult {
     assert_eq!(Support::code(error)?, 15);
     let tree = TestValues::enumeration_unmetered(
         "Unit".to_owned(),
-        EnumPayload::single(TestValues::string_unmetered("secret payload".to_owned())),
+        TestOpeo::value(|out| {
+            EnumPayload::single(
+                TestValues::string_unmetered("secret payload".to_owned()),
+                None,
+                out,
+            )
+        })?,
     );
     let error = Support::decode::<Choice>(&schema, &tree)?
         .err()

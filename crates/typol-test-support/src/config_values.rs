@@ -1,7 +1,7 @@
 extern crate alloc;
 
 use crate::{TestFailure, TestOpeo, TestResult};
-use alloc::{borrow::ToOwned, string::String, vec, vec::Vec};
+use alloc::{borrow::ToOwned, boxed::Box, string::String, vec, vec::Vec};
 use opeo::{OResult, Out};
 use typol_core::{
     AllocationError, BudgetError, ConfigValue, ConfigValueBuilder, NamedValue, ValueEntryView,
@@ -43,7 +43,7 @@ pub type MapEntry = Named;
 
 pub enum Payload {
     Unit,
-    Single(ConfigValue),
+    Single(Box<ConfigValue>),
     Structure(Vec<Named>),
 }
 
@@ -562,7 +562,7 @@ mod helper_tests {
 
     use super::{FieldValue, MapEntry, Named, Payload, ValueFactory, ValueViewInput};
     use crate::{TestFailure, TestOpeo, TestResult, test_assert, test_eq};
-    use alloc::vec;
+    use alloc::{boxed::Box, vec};
     use typol_core::{ValueKind, ValueSource, ValueView};
 
     fn view<'a>(value: impl Into<ValueViewInput<'a>>) -> ValueView<'a> {
@@ -598,7 +598,10 @@ mod helper_tests {
         let _ = ValueFactory::try_map(vec![ValueFactory::named("key", ValueFactory::unsigned(1)?)])
             .map_err(TestFailure::from_debug)?;
         let _ = ValueFactory::enumeration("Unit", Payload::Unit)?;
-        let _ = ValueFactory::enumeration("Single", Payload::Single(ValueFactory::unsigned(1)?))?;
+        let _ = ValueFactory::enumeration(
+            "Single",
+            Payload::Single(Box::new(ValueFactory::unsigned(1)?)),
+        )?;
         let _ = ValueFactory::enumeration(
             "Structure",
             Payload::Structure(vec![ValueFactory::named(
@@ -661,7 +664,7 @@ mod helper_tests {
 
         let _alias: FieldValue = ValueFactory::named("alias", ValueFactory::unsigned(4)?);
         let _map_entry: MapEntry = ValueFactory::named("alias", ValueFactory::unsigned(5)?);
-        let _ = Payload::Single(ValueFactory::unsigned(6)?);
+        let _ = Payload::Single(Box::new(ValueFactory::unsigned(6)?));
         Ok(())
     }
 }

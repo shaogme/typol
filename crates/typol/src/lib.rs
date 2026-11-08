@@ -152,7 +152,9 @@ pub(crate) use self::{
 #[cfg(all(test, feature = "std", feature = "serde"))]
 pub(crate) use self::tests::AllocationScope;
 
-pub use conversion::{OrderedMap, Sourced};
+pub use conversion::{
+    EnvironmentFallback, EnvironmentScalar, EnvironmentSourcedValue, OrderedMap, Sourced,
+};
 pub use error::{TypolError, TypolStage};
 pub use loading::{
     BoundRead, BoundSchema, LoadedSchema, SchemaLoader, SourceNames, TrustedBoundSchema,

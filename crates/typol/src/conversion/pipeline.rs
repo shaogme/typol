@@ -14,7 +14,7 @@ use core::any::TypeId;
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
     BudgetError, ConfigValue, DiagnosticContext, ValueEntries, ValueId, ValuePayloadView,
-    ValueSource, ValueView, diagnostic_context,
+    ValueScalar, ValueSource, ValueView, diagnostic_context,
 };
 use typol_semantic::TypeView;
 
@@ -43,12 +43,172 @@ impl<'value> ConversionValue<'value> {
     }
 }
 
+pub enum EnvironmentFallback {
+    Signed(i128),
+    Unsigned(u128),
+    Float32(f32),
+    Float64(f64),
+    String(String),
+    Bool(bool),
+}
+
+struct OwnedEnvironmentReference {
+    name: String,
+    fallback: Option<EnvironmentFallback>,
+}
+
 /// A decoded value paired with the origin of its configuration node.
 ///
 /// The wrapper does not expose `Debug`, so it cannot accidentally reveal a wrapped secret.
 pub struct Sourced<T> {
     value: T,
     source: ValueSource,
+    environment: Option<OwnedEnvironmentReference>,
+}
+
+mod environment_scalar_sealed {
+    pub trait Sealed {}
+}
+
+pub trait EnvironmentScalar: Typol + environment_scalar_sealed::Sealed {
+    #[doc(hidden)]
+    fn as_value_scalar(&self) -> ValueScalar<'_>;
+
+    #[doc(hidden)]
+    fn into_environment_fallback(self) -> EnvironmentFallback;
+}
+
+mod environment_value_sealed {
+    pub trait Sealed {}
+}
+
+pub trait EnvironmentSourcedValue: Typol + environment_value_sealed::Sealed {
+    type Scalar: EnvironmentScalar;
+}
+
+impl<T: EnvironmentSourcedValue> Sourced<T> {
+    pub fn from_environment(name: String, value: T) -> Self {
+        Self {
+            value,
+            source: ValueSource::EnvironmentVariable,
+            environment: Some(OwnedEnvironmentReference {
+                name,
+                fallback: None,
+            }),
+        }
+    }
+
+    pub fn from_environment_with_fallback(name: String, value: T, fallback: T::Scalar) -> Self {
+        Self {
+            value,
+            source: ValueSource::EnvironmentVariable,
+            environment: Some(OwnedEnvironmentReference {
+                name,
+                fallback: Some(fallback.into_environment_fallback()),
+            }),
+        }
+    }
+}
+
+impl<T: EnvironmentScalar> environment_value_sealed::Sealed for T {}
+
+impl<T: EnvironmentScalar> EnvironmentSourcedValue for T {
+    type Scalar = T;
+}
+
+impl<T: EnvironmentScalar> environment_value_sealed::Sealed for Option<T> {}
+
+impl<T: EnvironmentScalar> EnvironmentSourcedValue for Option<T> {
+    type Scalar = T;
+}
+
+impl EnvironmentScalar for String {
+    fn as_value_scalar(&self) -> ValueScalar<'_> {
+        ValueScalar::String(self)
+    }
+
+    fn into_environment_fallback(self) -> EnvironmentFallback {
+        EnvironmentFallback::String(self)
+    }
+}
+
+impl environment_scalar_sealed::Sealed for String {}
+
+impl EnvironmentScalar for bool {
+    fn as_value_scalar(&self) -> ValueScalar<'_> {
+        ValueScalar::Bool(*self)
+    }
+
+    fn into_environment_fallback(self) -> EnvironmentFallback {
+        EnvironmentFallback::Bool(self)
+    }
+}
+
+impl environment_scalar_sealed::Sealed for bool {}
+
+macro_rules! signed_environment_scalar {
+    ($($type:ty),+ $(,)?) => {
+        $(
+            impl environment_scalar_sealed::Sealed for $type {}
+
+            impl EnvironmentScalar for $type {
+                fn as_value_scalar(&self) -> ValueScalar<'_> {
+                    ValueScalar::Signed(i128::from(*self))
+                }
+
+                fn into_environment_fallback(self) -> EnvironmentFallback {
+                    EnvironmentFallback::Signed(i128::from(self))
+                }
+
+            }
+        )+
+    };
+}
+
+macro_rules! unsigned_environment_scalar {
+    ($($type:ty),+ $(,)?) => {
+        $(
+            impl environment_scalar_sealed::Sealed for $type {}
+
+            impl EnvironmentScalar for $type {
+                fn as_value_scalar(&self) -> ValueScalar<'_> {
+                    ValueScalar::Unsigned(u128::from(*self))
+                }
+
+                fn into_environment_fallback(self) -> EnvironmentFallback {
+                    EnvironmentFallback::Unsigned(u128::from(self))
+                }
+
+            }
+        )+
+    };
+}
+
+signed_environment_scalar!(i8, i16, i32, i64, i128);
+unsigned_environment_scalar!(u8, u16, u32, u64, u128);
+
+impl environment_scalar_sealed::Sealed for f32 {}
+
+impl EnvironmentScalar for f32 {
+    fn as_value_scalar(&self) -> ValueScalar<'_> {
+        ValueScalar::Float32(*self)
+    }
+
+    fn into_environment_fallback(self) -> EnvironmentFallback {
+        EnvironmentFallback::Float32(self)
+    }
+}
+
+impl environment_scalar_sealed::Sealed for f64 {}
+
+impl EnvironmentScalar for f64 {
+    fn as_value_scalar(&self) -> ValueScalar<'_> {
+        ValueScalar::Float64(*self)
+    }
+
+    fn into_environment_fallback(self) -> EnvironmentFallback {
+        EnvironmentFallback::Float64(self)
+    }
 }
 
 impl<T> Sourced<T> {
@@ -58,6 +218,18 @@ impl<T> Sourced<T> {
 
     pub const fn source(&self) -> ValueSource {
         self.source
+    }
+
+    pub fn environment_name(&self) -> Option<&str> {
+        self.environment
+            .as_ref()
+            .map(|reference| reference.name.as_str())
+    }
+
+    pub fn environment_fallback(&self) -> Option<&EnvironmentFallback> {
+        self.environment
+            .as_ref()
+            .and_then(|reference| reference.fallback.as_ref())
     }
 
     pub fn into_value(self) -> T {
@@ -88,7 +260,20 @@ impl<T: Typol> Typol for Sourced<T> {
     ) -> OResult<'slot, ValueId> {
         context.start::<Self>(out.reborrow())?;
         let ty = context.current_type(out.reborrow())?;
-        context.encode_child::<T>(ty, &self.value, out.reborrow())
+        let value = context.encode_child::<T>(ty, &self.value, out.reborrow())?;
+        if let Some(reference) = &self.environment {
+            let fallback = reference
+                .fallback
+                .as_ref()
+                .map(EnvironmentFallback::as_value_scalar);
+            context.add_environment_reference(
+                &[value],
+                &reference.name,
+                fallback,
+                out.reborrow(),
+            )?;
+        }
+        Ok(value)
     }
 
     fn from_config_value<'slot>(
@@ -98,9 +283,48 @@ impl<T: Typol> Typol for Sourced<T> {
     ) -> OResult<'slot, Self> {
         context.start::<Self>(out.reborrow())?;
         let source = value.source();
+        let environment = value
+            .view()
+            .environment_reference()
+            .map(|reference| {
+                let name = context.target_text(reference.name(), out.reborrow())?;
+                let fallback = reference
+                    .fallback()
+                    .copied()
+                    .map(|fallback| match fallback {
+                        ValueScalar::Signed(value) => Ok(EnvironmentFallback::Signed(value)),
+                        ValueScalar::Unsigned(value) => Ok(EnvironmentFallback::Unsigned(value)),
+                        ValueScalar::Float32(value) => Ok(EnvironmentFallback::Float32(value)),
+                        ValueScalar::Float64(value) => Ok(EnvironmentFallback::Float64(value)),
+                        ValueScalar::String(value) => context
+                            .target_text(value, out.reborrow())
+                            .map(EnvironmentFallback::String),
+                        ValueScalar::Bool(value) => Ok(EnvironmentFallback::Bool(value)),
+                    })
+                    .transpose()?;
+                Ok(OwnedEnvironmentReference { name, fallback })
+            })
+            .transpose()?;
         let ty = context.current_type(out.reborrow())?;
         let value = context.decode_child::<T>(ty, value, out.reborrow())?;
-        Ok(Self { value, source })
+        Ok(Self {
+            value,
+            source,
+            environment,
+        })
+    }
+}
+
+impl EnvironmentFallback {
+    fn as_value_scalar(&self) -> ValueScalar<'_> {
+        match self {
+            Self::Signed(value) => ValueScalar::Signed(*value),
+            Self::Unsigned(value) => ValueScalar::Unsigned(*value),
+            Self::Float32(value) => ValueScalar::Float32(*value),
+            Self::Float64(value) => ValueScalar::Float64(*value),
+            Self::String(value) => ValueScalar::String(value),
+            Self::Bool(value) => ValueScalar::Bool(*value),
+        }
     }
 }
 

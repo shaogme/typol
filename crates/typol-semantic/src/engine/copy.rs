@@ -126,6 +126,7 @@ fn value_error(error: ValueError) -> CopyError {
         ValueErrorKind::AllocationFailed => CopyError::Allocation,
         ValueErrorKind::CapacityExceeded => CopyError::Capacity,
         ValueErrorKind::InternalInvariantFailure
+        | ValueErrorKind::EnvironmentReferenceRequired
         | ValueErrorKind::DuplicateMapKey
         | ValueErrorKind::DuplicateFieldName => CopyError::InvalidValue(error),
     }

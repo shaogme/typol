@@ -1,13 +1,14 @@
 use crate::{
     ConfigLimits, ConfigParseErrors, ConfigParseOptions, ConfigParseRequest, ConfigParser,
     ConfigValidationOptions, Environment, EnvironmentError, EnvironmentReadContext,
-    value_validation::{ValueValidation, ValueValidationInput, ValueValidationRequest},
+    value_validation::{ValueValidation, ValueValidationRequest},
 };
-use alloc::{format, vec, vec::Vec};
+use alloc::{boxed::Box, format, vec, vec::Vec};
 use opeo::{OResult, Out};
 use typol_core::{
-    AllocationError, BudgetError, ConfigValue, DiagnosticCode, ExecutionBudget, ExecutionLimits,
-    SliceSource, ValueError, ValueKind, ValuePayloadView, ValueSource,
+    AllocationError, BudgetError, ConfigValue, ConfigValueBuilder, DiagnosticCode, ExecutionBudget,
+    ExecutionLimits, NamedValue, SliceSource, ValueError, ValueKind, ValuePayloadView, ValueScalar,
+    ValueSource,
 };
 use typol_policy::{ExcerptLimits, RegexOptions};
 use typol_schema::{
@@ -137,7 +138,7 @@ impl ValidationTest {
 
     fn enum_single(&mut self, value: ConfigValue) -> TestResult<Payload> {
         self.allocation_errors
-            .run(|_| Ok(Payload::Single(value)))
+            .run(|_| Ok(Payload::Single(Box::new(value))))
             .test_value()
     }
 
@@ -170,7 +171,8 @@ impl ValidationTest {
             ValueValidation::value(
                 ValueValidationRequest {
                     schema,
-                    value: ValueValidationInput::External(value),
+                    external_value: Some(value),
+                    schema_complete_value: None,
                     options,
                     budget,
                 },
@@ -189,7 +191,28 @@ impl ValidationTest {
             ValueValidation::value(
                 ValueValidationRequest {
                     schema,
-                    value: ValueValidationInput::External(value),
+                    external_value: Some(value),
+                    schema_complete_value: None,
+                    options: &options,
+                    budget: &self.default_budget,
+                },
+                out,
+            )
+        })
+    }
+
+    fn run_complete(
+        &mut self,
+        schema: &CompiledSchema,
+        value: ConfigValue,
+    ) -> TestOpeoOutcome<ConfigValue, ConfigParseErrors> {
+        let options = ConfigValidationOptions::default();
+        self.parse_errors.run(|out| {
+            ValueValidation::value(
+                ValueValidationRequest {
+                    schema,
+                    external_value: None,
+                    schema_complete_value: Some(value),
                     options: &options,
                     budget: &self.default_budget,
                 },
@@ -224,6 +247,46 @@ impl ValidationTest {
             .map(|error| error.code().get())
             .collect())
     }
+}
+
+#[test]
+fn optional_environment_references_reject_different_fallbacks() -> TestResult<()> {
+    let mut test = ValidationTest::new()?;
+    let schema = test.compile("entry struct Root { value: option<u8> @env(\"TOKEN\") }")?;
+    let mut builder = TestOpeo::call(|out| ConfigValueBuilder::new(None, out))
+        .map_err(TestFailure::from_debug)?;
+    let inner = TestOpeo::call(|out| builder.add_unsigned(7, ValueSource::RustValue, out))
+        .map_err(TestFailure::from_debug)?;
+    let optional =
+        TestOpeo::call(|out| builder.add_optional(Some(inner), ValueSource::RustValue, out))
+            .map_err(TestFailure::from_debug)?;
+    TestOpeo::call(|out| {
+        builder.add_environment_reference(&[optional], "TOKEN", Some(ValueScalar::Unsigned(1)), out)
+    })
+    .map_err(TestFailure::from_debug)?;
+    TestOpeo::call(|out| {
+        builder.add_environment_reference(&[inner], "TOKEN", Some(ValueScalar::Unsigned(2)), out)
+    })
+    .map_err(TestFailure::from_debug)?;
+    let root = TestOpeo::call(|out| {
+        builder.add_structure(
+            &[NamedValue::new("value", optional)],
+            ValueSource::RustValue,
+            out,
+        )
+    })
+    .map_err(TestFailure::from_debug)?;
+    let value = TestOpeo::call(|out| builder.finish(root, out)).map_err(TestFailure::from_debug)?;
+
+    let errors = test.run_complete(&schema, value).test_error()?;
+    test_assert!(
+        errors
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| { diagnostic.code() == DiagnosticCode::CONFIG_VALUE_ERROR })
+    )?;
+
+    Ok(())
 }
 
 #[test]

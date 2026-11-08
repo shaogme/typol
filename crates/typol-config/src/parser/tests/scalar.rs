@@ -1,4 +1,7 @@
-use super::{ConfigLimits, ParserTestSupport, environment::EnvironmentTest, foundation::Provider};
+use super::{
+    ConfigLimits, ParserLimits, ParserTestSupport, environment::EnvironmentTest,
+    foundation::Provider,
+};
 use crate::diagnostics::ConfigParseErrors;
 use alloc::{format, vec::Vec};
 use typol_core::{ConfigValue, ValueKind, ValueSource};
@@ -18,7 +21,7 @@ struct TextRuleCase {
     invalid: &'static [&'static str],
 }
 
-fn validate<L: Into<super::ParserLimits>>(
+fn validate<L: Into<ParserLimits>>(
     schema: &CompiledSchema,
     source: &str,
     provider: &mut Provider,

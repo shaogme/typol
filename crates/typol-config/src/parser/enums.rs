@@ -281,7 +281,7 @@ impl<'schema> EnumFrame<'schema> {
             "expected a closing parenthesis after the single-payload enum value",
             out.reborrow(),
         )?;
-        let payload = EnumPayload::single(parsed.value);
+        let payload = EnumPayload::single(parsed.value, Some(&context.budget), out.reborrow())?;
         self.finish(context, payload, close, out.reborrow())
     }
 
@@ -431,6 +431,13 @@ fn value_error(error: ValueError, span: LocatedSpan, source: ValueSource) -> Dia
         }
         ValueErrorKind::InternalInvariantFailure => DiagnosticFactory::internal(
             error.context().unwrap_or(PARSER_ENUM_PAYLOAD_INVARIANT),
+            Some(span),
+            None,
+            Some(source),
+        ),
+        ValueErrorKind::EnvironmentReferenceRequired => DiagnosticFactory::make_diagnostic(
+            DiagnosticCode::CONFIG_VALUE_ERROR,
+            "environment source requires structured reference metadata",
             Some(span),
             None,
             Some(source),

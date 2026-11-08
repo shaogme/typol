@@ -87,6 +87,7 @@ impl ScalarFailureKind {
                 }
                 ValueErrorKind::DuplicateMapKey
                 | ValueErrorKind::DuplicateFieldName
+                | ValueErrorKind::EnvironmentReferenceRequired
                 | ValueErrorKind::InternalInvariantFailure => {
                     "configuration value has an invalid internal state"
                 }

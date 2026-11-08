@@ -313,6 +313,10 @@ impl<T> WorkspaceVec<T> {
         self.values.truncate(length);
     }
 
+    pub(crate) fn rollback(&mut self, length: usize) {
+        self.values.truncate(length);
+    }
+
     pub fn drain(&mut self, range: RangeFrom<usize>) -> Drain<'_, T> {
         self.values.drain(range)
     }

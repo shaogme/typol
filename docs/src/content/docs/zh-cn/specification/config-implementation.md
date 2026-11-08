@@ -92,6 +92,8 @@ no_std 与 std 构建共用 `TypolOptions` 和 `SchemaLoader::new(TypolOptions)`
 
 值规范化会检查每层值形态、字段名、枚举载荷和目标标量；按 Schema 字段顺序重建结构体，补齐 Schema 默认值和无默认值的可选字段，并为输出创建新的拥有树。缺少必填字段、未知或重复字段、无效 map 键/值及错误载荷形态均失败。map 不具有 DSL 层面的顺序语义；外来值路径为了稳定重建会按键排序。
 
+仅规范化的操作会拒绝携带环境来源的值，因为它不会运行这些引用所需的完整授权和 fallback 校验。外来值需要保留环境来源时，请使用 `ConfigValueProcessor::validate`。
+
 ### 2.3 根据 Schema 默认值生成配置
 
 `LoadedSchema::default_config_to_string` 和 `LoadedSchema::write_default_config` 会根据编译后的入口 Schema 生成 `.tconf`，无需绑定 Rust 类型或接收 `Environment`。Facade 创建空结构体根值，并只调用一次 `ConfigValueProcessor::validate_with_budget`，因此默认补齐、字段和集合约束、完整树断言都沿用其他外来值的验证流水线。生成错误通过 `TypolError` 返回，阶段为 `Encoding`；值诊断仍可通过 `codec_errors().config_value_errors()` 检查。
@@ -127,7 +129,7 @@ no_std 与 std 构建共用 `TypolOptions` 和 `SchemaLoader::new(TypolOptions)`
 
 ### 3.3 值来源
 
-每个 `ConfigValue` 记录来源类别，供诊断和后续转换区分：`ConfigLiteral`、`SchemaDefault`、`EnvironmentVariable`、`ExplicitFallback` 和 `RustValue`。文本字面值、默认值、环境值及回退值在构造时分别标记；外来值规范化标记为 Rust 值，并将从 Schema 补入的子树标记为 Schema 默认值。来源类别不包含原始环境文本或源名称。
+每个 `ConfigValue` 记录来源类别，供诊断和后续转换区分：`ConfigLiteral`、`SchemaDefault`、`EnvironmentVariable`、`ExplicitFallback` 和 `RustValue`。成功的环境解析还会保存结构化引用名称，以及已按目标类型校验的可选标量 fallback；provider 返回的实际值不会进入这份元数据。option 节点与其存在的标量子节点共享同一引用记录；跨值复制和 rebase 会保留这种共享，并将引用文本计入值额度。外来值规范化遇到无法验证的环境引用时会报错，不会静默降级为 `RustValue`。
 
 ## 4. 环境变量解析
 
@@ -139,7 +141,9 @@ Schema 编译期为授权名称建立规范化槽位；同名授权共享一个�
 
 提供器 返回 `None` 表示未设置，`Some(&[])` 表示已设置为空值。返回字节需先通过 UTF-8 验证；字符串保留原文，布尔值只接受 `true`/`false`，数值遵循配置数值格式及目标范围。提供器 错误、无效 UTF-8 或已设置值转换/校验失败均产生错误，不会转而使用回退值。
 
-若表达式包含回退字面值，解析器先按字段标量类型解析并校验回退，即使环境最终已设置也必须有效。环境缺失时优先采用显式回退；无显式回退时，解析器将字段标记为延后处理，再沿用对象闭合时的默认值、可选值或必填字段规则。成功的环境值和回退值都会作为该字段的显式赋值。
+若表达式包含回退字面值，解析器先按字段标量类型解析并校验回退，即使环境最终已设置也必须有效。环境缺失时优先采用显式回退；结果来源是 `ExplicitFallback`，不会携带环境引用。无显式回退时，解析器将字段标记为延后处理，再沿用对象闭合时的默认值、可选值或必填字段规则。只有 provider 值成功转换且通过校验后，才会保留表达式名称和 fallback 供 typed 往返。
+
+Schema-aware writer 会将保留的引用写成 `env("NAME"[, fallback])`，而已选用的 fallback 写成标量字面值。完整值和 Schema 校验会在 writer 写入首字节前检查引用名、标量/option 形状、字段精确授权和 typed fallback。`ConfigDocument` 对替换和插入使用相同的标量编码，再重新解析并校验候选文本后才提交；候选无效时保留原文档。formatter 仍保留未编辑范围中的原始 token 和注释。
 
 `typol_config::Environment` 不依赖进程环境。`typol_std::ProcessEnvironment` 是可选宿主适配器：按名称查询进程环境，不枚举或修改环境；Unix 字节在配置层校验 UTF-8，Windows 转为 UTF-8 并拒绝孤立代理项。
 

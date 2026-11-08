@@ -352,6 +352,10 @@ impl WorkspaceString {
     pub fn clear(&mut self) {
         self.bytes.clear();
     }
+
+    pub(crate) fn rollback(&mut self, length: usize) {
+        self.bytes.rollback(length);
+    }
 }
 
 impl Deref for WorkspaceString {
@@ -362,14 +366,15 @@ impl Deref for WorkspaceString {
     }
 }
 
-/// Fixed-size wrapper storage is charged before allocation and released with its actual owner.
-pub(crate) struct WorkspaceBox<T> {
+/// Owns a heap-allocated value charged to an execution budget.
+pub struct WorkspaceBox<T> {
     value: Box<T>,
     _charge: WorkspaceCharge,
 }
 
 impl<T> WorkspaceBox<T> {
-    pub(crate) fn new<'slot, E>(
+    /// Allocates the value and charges its storage before writing it to the allocation.
+    pub fn new<'slot, E>(
         value: T,
         budget: Option<&ExecutionBudget>,
         mut out: Out<'slot, '_, E>,
@@ -400,6 +405,11 @@ impl<T> WorkspaceBox<T> {
             value,
             _charge: charge,
         })
+    }
+
+    /// Moves the value out and releases its storage charge.
+    pub fn into_inner(self) -> T {
+        *self.value
     }
 }
 

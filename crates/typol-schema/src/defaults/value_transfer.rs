@@ -21,7 +21,7 @@ enum CopyTask<'a> {
 
 pub(super) enum EnumPayload<'a> {
     Unit,
-    Single(ConfigValue),
+    Single(ChargedVec<ConfigValue>),
     Structure(ChargedVec<NamedDefault<'a>>),
 }
 
@@ -95,7 +95,13 @@ impl ValueTransfer {
                 ValueSource::SchemaDefault,
                 out,
             ),
-            EnumPayload::Single(value) => {
+            EnumPayload::Single(mut values) => {
+                let Some(value) = values.pop() else {
+                    return Err(out.fail(invalid_value_entry()));
+                };
+                if !values.is_empty() {
+                    return Err(out.fail(invalid_value_entry()));
+                }
                 let child = Self::copy_into(builder, value.root(), budget, out.reborrow())?;
                 builder.add_enumeration(
                     variant,

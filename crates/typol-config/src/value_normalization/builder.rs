@@ -15,7 +15,7 @@ impl NormalizeBuilder {
         state: &mut NormalizeState<'_, '_>,
         plan: Plan<'_>,
         children: ChargedVec<ConfigValue>,
-        out: Out<'slot, '_, Diagnostic>,
+        mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ConfigValue> {
         if children.len() != plan.children.len() {
             return Err(out.fail(NormalizeOps::invariant_error()));
@@ -25,20 +25,42 @@ impl NormalizeBuilder {
         } else {
             ValueSource::RustValue
         };
-        match plan.kind {
+        let environment = plan
+            .input
+            .value
+            .and_then(|value| value.environment_reference())
+            .map(|reference| (reference.name(), reference.fallback().copied()));
+        let value = match plan.kind {
             PlanKind::MissingOptional | PlanKind::OptionalNone => {
-                Self::finish_none(state, plan, source, out)
+                Self::finish_none(state, plan, source, out.reborrow())?
             }
-            PlanKind::Scalar => Self::finish_scalar(state, plan, out),
-            PlanKind::OptionalSome => Self::finish_optional(state, plan, children, source, out),
-            PlanKind::Array => Self::finish_array(state, plan, children, source, out),
-            PlanKind::Map => Self::finish_map(state, plan, children, source, out),
-            PlanKind::Structure => Self::finish_structure(state, plan, children, source, out),
-            PlanKind::EnumUnit(_) => Self::finish_enum_unit(state, plan, source, out),
-            PlanKind::EnumSingle(_) => Self::finish_enum_single(state, plan, children, source, out),
+            PlanKind::Scalar => Self::finish_scalar(state, plan, out.reborrow())?,
+            PlanKind::OptionalSome => {
+                Self::finish_optional(state, plan, children, source, out.reborrow())?
+            }
+            PlanKind::Array => Self::finish_array(state, plan, children, source, out.reborrow())?,
+            PlanKind::Map => Self::finish_map(state, plan, children, source, out.reborrow())?,
+            PlanKind::Structure => {
+                Self::finish_structure(state, plan, children, source, out.reborrow())?
+            }
+            PlanKind::EnumUnit(_) => Self::finish_enum_unit(state, plan, source, out.reborrow())?,
+            PlanKind::EnumSingle(_) => {
+                Self::finish_enum_single(state, plan, children, source, out.reborrow())?
+            }
             PlanKind::EnumStructure(_) => {
-                Self::finish_enum_structure(state, plan, children, source, out)
+                Self::finish_enum_structure(state, plan, children, source, out.reborrow())?
             }
+        };
+        if let Some((name, fallback)) = environment {
+            NormalizeOps::value_call(
+                &mut state.errors.value,
+                |value_out| {
+                    ValueFactory::environment(value, name, fallback, Some(state.budget), value_out)
+                },
+                out,
+            )
+        } else {
+            Ok(value)
         }
     }
 
@@ -238,7 +260,7 @@ impl NormalizeBuilder {
         }
         let mut children = children.into_iter();
         let single = NormalizeOps::take_single(&mut children, out.reborrow())?;
-        let payload = EnumPayload::single(single);
+        let payload = EnumPayload::single(single, Some(state.budget), out.reborrow())?;
         NormalizeOps::value_call(
             &mut state.errors.value,
             |value_out| {

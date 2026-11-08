@@ -42,11 +42,12 @@ pub use source::{
     LineIndex, LocatedSpan, LocationError, LocationErrorKind, SourceId, SourceLocation, SourceSpan,
     Span, SpanError, SpanLocation,
 };
+pub use storage::WorkspaceBox as ChargedBox;
 pub use storage::WorkspaceString as ChargedString;
 pub use value::{
-    AllocationError, ConfigValue, ConfigValueBuilder, NamedValue, NamedValueEntryView,
-    ValueCopyLimits, ValueEntries, ValueEntryView, ValueError, ValueErrorKind, ValueId, ValueKind,
-    ValuePayload, ValuePayloadView, ValueSource, ValueView,
+    AllocationError, ConfigValue, ConfigValueBuilder, EnvironmentReference, NamedValue,
+    NamedValueEntryView, ValueCopyLimits, ValueEntries, ValueEntryView, ValueError, ValueErrorKind,
+    ValueId, ValueKind, ValuePayload, ValuePayloadView, ValueScalar, ValueSource, ValueView,
 };
 pub use workspace::WorkspaceVec as ChargedVec;
 

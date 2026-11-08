@@ -177,6 +177,22 @@ impl NormalizePlanner {
             )?;
             return Err(out.fail(diagnostic));
         };
+        if value.source() == ValueSource::EnvironmentVariable
+            && (value.environment_reference().is_none()
+                || !state.request.allow_unvalidated_environment_sources)
+        {
+            let diagnostic = Self::error(
+                state,
+                input,
+                path,
+                diagnostic_message!(
+                    "diagnostic.environment.expression_invalid",
+                    "environment source metadata requires Schema-complete validation"
+                ),
+                out.reborrow(),
+            )?;
+            return Err(out.fail(diagnostic));
+        }
         let shape_valid = NormalizeOps::schema_call(
             &mut state.errors.schema,
             |schema_out| Validator::shape(input.ty, value, schema_out),

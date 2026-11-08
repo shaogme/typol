@@ -42,6 +42,7 @@ pub(crate) struct NormalizeRequest<'a> {
     pub(crate) primary: Option<LocatedSpan>,
     pub(crate) text_limit: usize,
     pub(crate) schema_default: bool,
+    pub(crate) allow_unvalidated_environment_sources: bool,
 }
 
 pub(super) struct NormalizeErrors {
@@ -218,6 +219,13 @@ impl NormalizeOps {
             }
             ValueErrorKind::InternalInvariantFailure => DiagnosticFactory::internal(
                 error.context().unwrap_or(NORMALIZE_VALUE_CONSTRUCTION),
+                None,
+                None,
+                None,
+            ),
+            ValueErrorKind::EnvironmentReferenceRequired => DiagnosticFactory::make_diagnostic(
+                DiagnosticCode::CONFIG_VALUE_ERROR,
+                "environment source requires structured reference metadata",
                 None,
                 None,
                 None,

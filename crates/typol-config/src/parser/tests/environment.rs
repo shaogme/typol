@@ -1,4 +1,4 @@
-use super::{ParserTestSupport, foundation::Provider};
+use super::{ParserLimits, ParserTestSupport, foundation::Provider};
 use crate::{
     ConfigLimits, ConfigParser,
     diagnostics::ConfigParseErrors,
@@ -13,7 +13,7 @@ use typol_test_support::*;
 pub(super) struct EnvironmentTest;
 
 impl EnvironmentTest {
-    pub(super) fn run<L: Into<super::ParserLimits>>(
+    pub(super) fn run<L: Into<ParserLimits>>(
         schema: &CompiledSchema,
         source: &str,
         provider: &mut dyn Environment,

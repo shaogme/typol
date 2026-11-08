@@ -204,14 +204,14 @@ fn ordering_defaults_none_escapes_and_variants_round_trip() -> TestResult {
     let output = encoded(&mut validated)?;
     assert_eq!(
         output,
-        r#"{first: "secret\"\\\n\r\t", mapping: {"a": "ascii", "é": "accent", "ö": "han", "😀": "astral"}, array: [.Unit, .Single("inner"), .Structure {first: 7, last: none}], optional: none, defaulted: 9, empty: []}"#
+        r#"{first: env("X"), mapping: {"a": "ascii", "é": "accent", "ö": "han", "😀": "astral"}, array: [.Unit, .Single("inner"), .Structure {first: 7, last: none}], optional: none, defaulted: 9, empty: []}"#
     );
     assert_eq!(before, format!("{:?}", validated.value()));
     assert_eq!(output, encoded(&mut validated)?);
     let reparsed = parsed_config(
         &schema,
         request(&mut SliceSource::new(output.as_bytes())),
-        &mut Provider(Vec::new()),
+        &mut Provider("secret\"\\\n\r\t".as_bytes().to_vec()),
     )?;
     let mut second = session(4096)?;
     let mut verified = parsed(
@@ -411,23 +411,19 @@ fn floats_preserve_bits_at_extremes_and_rounding_boundaries() -> TestResult {
                 text.push_str(".0");
             }
             let mut call = session(4096)?;
+            let environment_text = text.clone();
             let mut verified = parsed(
                 &schema,
                 request(&mut SliceSource::new((r#"{value: env("X")}"#).as_bytes())),
-                &mut Provider(text.into_bytes()),
+                &mut Provider(environment_text.as_bytes().to_vec()),
                 &mut call,
             )?;
             let output = encoded(&mut verified)?;
-            let end = output.len().checked_sub(1).test_value()?;
-            let literal = output
-                .get(8..end)
-                .test_expect("encoding should contain the numeric literal for the root field")?;
-            assert!(!literal.contains(['e', 'E']));
-            assert!(literal.contains('.'));
+            assert_eq!(output, r#"{value: env("X")}"#);
             let parsed = parsed_config(
                 &schema,
                 request(&mut SliceSource::new(output.as_bytes())),
-                &mut Provider(Vec::new()),
+                &mut Provider(text.into_bytes()),
             )?;
             match field(&parsed)? {
                 ValueKind::Float32(value) => assert_eq!(value.to_bits(), bits as u32),
@@ -455,9 +451,9 @@ fn unrepresentable_controls_fail_safely_after_validation() -> TestResult {
             &mut Provider(secret.into_bytes()),
             &mut call,
         )?;
-        let error = encode_error(&mut verified)?;
-        assert!(!format!("{error:?} {error}").contains("secret"));
-        assert_eq!(BindingTestSupport::code(error)?, 16);
+        let output = encoded(&mut verified)?;
+        assert_eq!(output, r#"{value: env("X")}"#);
+        assert!(!output.contains("secret"));
     }
     Ok(())
 }

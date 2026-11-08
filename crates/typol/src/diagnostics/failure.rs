@@ -169,6 +169,9 @@ impl Failure {
             ValueErrorKind::InternalInvariantFailure => {
                 Self::internal(error.context().unwrap_or(VALUE_INTERNAL_CONTEXT))
             }
+            ValueErrorKind::EnvironmentReferenceRequired => {
+                Self::ConversionAt(error.context().unwrap_or(VALUE_INTERNAL_CONTEXT))
+            }
             ValueErrorKind::DuplicateMapKey => Self::ConversionAt(
                 error
                     .duplicate_indices()

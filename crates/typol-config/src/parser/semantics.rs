@@ -576,6 +576,7 @@ impl SubtreeValidator {
             primary: Some(primary.into()),
             text_limit: context.config_limits.max_constructed_text_bytes(),
             schema_default: true,
+            allow_unvalidated_environment_sources: false,
         };
         let value_nodes = &mut context.value_nodes;
         let limits = context.config_limits.values();
@@ -651,6 +652,7 @@ impl SubtreeValidator {
         TreeTarget {
             expected: target.expected,
             field: target.field,
+            environment_field: target.field,
             variant: target.variant,
             span: Some(target.span),
         }

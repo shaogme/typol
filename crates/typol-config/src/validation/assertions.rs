@@ -179,6 +179,7 @@ fn map_value_error(error: ValueError) -> EvalError {
         ValueErrorKind::CapacityExceeded => EvalError::Capacity,
         ValueErrorKind::DuplicateMapKey
         | ValueErrorKind::DuplicateFieldName
+        | ValueErrorKind::EnvironmentReferenceRequired
         | ValueErrorKind::InternalInvariantFailure => EvalError::Internal,
     }
 }

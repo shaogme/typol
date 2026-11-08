@@ -453,6 +453,13 @@ fn container_error(error: ValueError, span: LocatedSpan, source: ValueSource) ->
             None,
             Some(source),
         ),
+        ValueErrorKind::EnvironmentReferenceRequired => DiagnosticFactory::make_diagnostic(
+            DiagnosticCode::CONFIG_VALUE_ERROR,
+            "environment source requires structured reference metadata",
+            Some(span),
+            None,
+            Some(source),
+        ),
         ValueErrorKind::DuplicateFieldName | ValueErrorKind::DuplicateMapKey => {
             DiagnosticFactory::internal(
                 error

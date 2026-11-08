@@ -1,9 +1,9 @@
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, ConfigValue, ConfigValueBuilder, Diagnostic,
-    DiagnosticCode, DiagnosticContext, ExecutionBudget, LocatedSpan, NamedValue, ValueEntries,
-    ValueError, ValueErrorKind, ValueId, ValueKind, ValuePayload, ValuePayloadView, ValueSource,
-    ValueView, diagnostic_context,
+    DiagnosticCode, DiagnosticContext, ExecutionBudget, LocatedSpan, NamedValue, ValueCopyLimits,
+    ValueEntries, ValueError, ValueErrorKind, ValueId, ValueKind, ValuePayload, ValueScalar,
+    ValueSource, ValueView, diagnostic_context,
 };
 
 /// A schema-shaped value with defaults applied, before constraints and assertions run.
@@ -57,11 +57,6 @@ static VALUE_SCALAR_KIND_REQUIRED: DiagnosticContext = diagnostic_context!(
     "scalar-constructor-received-container",
 );
 
-enum CopyTask<'value> {
-    Enter(ValueView<'value>),
-    Finish(ValueView<'value>, usize),
-}
-
 pub(crate) struct OwnedNamedValue {
     name: ChargedString,
     value: ConfigValue,
@@ -105,7 +100,7 @@ impl OwnedNamedValue {
 
 pub(crate) enum EnumPayload {
     Unit,
-    Single(ConfigValue),
+    Single(ChargedVec<ConfigValue>),
     Structure(ChargedVec<FieldValue>),
 }
 
@@ -114,8 +109,17 @@ impl EnumPayload {
         Self::Unit
     }
 
-    pub(crate) fn single(value: ConfigValue) -> Self {
-        Self::Single(value)
+    pub(crate) fn single<'slot, E>(
+        value: ConfigValue,
+        budget: Option<&ExecutionBudget>,
+        mut out: Out<'slot, '_, E>,
+    ) -> OResult<'slot, Self>
+    where
+        E: From<BudgetError>,
+    {
+        let mut values = ChargedVec::new(budget, out.reborrow())?;
+        values.try_push(value, out.reborrow())?;
+        Ok(Self::Single(values))
     }
 
     pub(crate) fn structure(values: ChargedVec<FieldValue>) -> Self {
@@ -126,6 +130,32 @@ impl EnumPayload {
 pub(crate) struct ValueFactory;
 
 impl ValueFactory {
+    pub(crate) fn environment<'slot>(
+        value: ConfigValue,
+        name: &str,
+        fallback: Option<ValueScalar<'_>>,
+        budget: Option<&ExecutionBudget>,
+        mut out: Out<'slot, '_, ValueError>,
+    ) -> OResult<'slot, ConfigValue> {
+        let source = value.root();
+        let mut references = [source.id(); 2];
+        let count = match source.as_ref() {
+            ValueKind::Optional(Some(inner)) => {
+                references[1] = inner.id();
+                2
+            }
+            _ => 1,
+        };
+        let (mut builder, root) = Self::continue_from(value, budget, out.reborrow())?;
+        let Some(references) = references.get(..count) else {
+            return Err(out.fail(ValueError::from(BudgetError::invariant(
+                &VALUE_INTERNAL_FAILURE,
+            ))));
+        };
+        builder.add_environment_reference(references, name, fallback, out.reborrow())?;
+        builder.finish(root, out.reborrow())
+    }
+
     pub(crate) fn scalar<'slot>(
         value: ValueView<'_>,
         source: ValueSource,
@@ -151,6 +181,7 @@ impl ValueFactory {
 
     pub(crate) const fn failure_code_for_kind(kind: ValueErrorKind) -> DiagnosticCode {
         match kind {
+            ValueErrorKind::EnvironmentReferenceRequired => DiagnosticCode::CONFIG_VALUE_ERROR,
             ValueErrorKind::ResourceLimitExceeded => DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
             ValueErrorKind::AllocationFailed => DiagnosticCode::ALLOCATION_FAILED,
             ValueErrorKind::CapacityExceeded => DiagnosticCode::CAPACITY_EXCEEDED,
@@ -174,7 +205,8 @@ impl ValueFactory {
             }
             ValueErrorKind::AllocationFailed
             | ValueErrorKind::ResourceLimitExceeded
-            | ValueErrorKind::CapacityExceeded => error.context(),
+            | ValueErrorKind::CapacityExceeded
+            | ValueErrorKind::EnvironmentReferenceRequired => error.context(),
         }
     }
 
@@ -284,7 +316,7 @@ impl ValueFactory {
     ) -> OResult<'slot, ConfigValue> {
         let mut builder = ConfigValueBuilder::new(budget, out.reborrow())?;
         let child = value
-            .map(|value| Self::copy_into(&mut builder, value.root(), budget, out.reborrow()))
+            .map(|value| Self::copy_into(&mut builder, value.root(), out.reborrow()))
             .transpose()?;
         let root = builder.add_optional(child, source, out.reborrow())?;
         builder.finish(root, out.reborrow())
@@ -313,7 +345,7 @@ impl ValueFactory {
         children.try_reserve_exact(values.len(), out.reborrow())?;
         for value in values {
             children.try_push(
-                Self::copy_into(&mut builder, value.root(), budget, out.reborrow())?,
+                Self::copy_into(&mut builder, value.root(), out.reborrow())?,
                 out.reborrow(),
             )?;
         }
@@ -378,7 +410,7 @@ impl ValueFactory {
             let Some(name) = entry.name() else {
                 return Err(out.fail(ValueError::from(BudgetError::CapacityExceeded)));
             };
-            let value = Self::copy_into(&mut builder, entry.value(), budget, out.reborrow())?;
+            let value = Self::copy_into(&mut builder, entry.value(), out.reborrow())?;
             named.try_push(NamedValue::new(name, value), out.reborrow())?;
         }
         let root = builder.add_structure(&named, source, out.reborrow())?;
@@ -393,7 +425,8 @@ impl ValueFactory {
         mut out: Out<'slot, '_, ValueError>,
     ) -> OResult<'slot, ConfigValue> {
         match payload {
-            EnumPayload::Single(value) => {
+            EnumPayload::Single(mut values) => {
+                let value = Self::take_single_payload(&mut values, out.reborrow())?;
                 let (mut builder, child) = Self::continue_from(value, budget, out.reborrow())?;
                 let root = builder.add_enumeration(
                     variant,
@@ -435,8 +468,9 @@ impl ValueFactory {
             EnumPayload::Unit => {
                 builder.add_enumeration(variant, ValuePayload::Unit, source, out.reborrow())?
             }
-            EnumPayload::Single(value) => {
-                let child = Self::copy_into(&mut builder, value.root(), budget, out.reborrow())?;
+            EnumPayload::Single(mut values) => {
+                let value = Self::take_single_payload(&mut values, out.reborrow())?;
+                let child = Self::copy_into(&mut builder, value.root(), out.reborrow())?;
                 builder.add_enumeration(
                     variant,
                     ValuePayload::Single(child),
@@ -469,6 +503,23 @@ impl ValueFactory {
             }
         };
         builder.finish(root, out.reborrow())
+    }
+
+    fn take_single_payload<'slot>(
+        values: &mut ChargedVec<ConfigValue>,
+        out: Out<'slot, '_, ValueError>,
+    ) -> OResult<'slot, ConfigValue> {
+        let Some(value) = values.pop() else {
+            return Err(out.fail(ValueError::from(BudgetError::invariant(
+                &VALUE_INTERNAL_FAILURE,
+            ))));
+        };
+        if !values.is_empty() {
+            return Err(out.fail(ValueError::from(BudgetError::invariant(
+                &VALUE_INTERNAL_FAILURE,
+            ))));
+        }
+        Ok(value)
     }
 
     fn named_owned<'slot>(
@@ -543,150 +594,9 @@ impl ValueFactory {
     fn copy_into<'slot, 'value>(
         builder: &mut ConfigValueBuilder,
         root: ValueView<'value>,
-        budget: Option<&ExecutionBudget>,
-        mut out: Out<'slot, '_, ValueError>,
+        out: Out<'slot, '_, ValueError>,
     ) -> OResult<'slot, ValueId> {
-        let mut tasks = ChargedVec::new(budget, out.reborrow())?;
-        let mut values = ChargedVec::new(budget, out.reborrow())?;
-        tasks.try_push(CopyTask::Enter(root), out.reborrow())?;
-        while let Some(task) = tasks.pop() {
-            match task {
-                CopyTask::Enter(value) => {
-                    let start = values.len();
-                    let mut children = ChargedVec::new(budget, out.reborrow())?;
-                    match value.as_ref() {
-                        ValueKind::Optional(Some(child)) => {
-                            children.try_push(child, out.reborrow())?;
-                        }
-                        ValueKind::Array(entries)
-                        | ValueKind::Map(entries)
-                        | ValueKind::Structure(entries) => {
-                            children.try_reserve_exact(entries.len(), out.reborrow())?;
-                            for entry in entries {
-                                children.try_push(entry.value(), out.reborrow())?;
-                            }
-                        }
-                        ValueKind::Enumeration { payload, .. } => match payload {
-                            ValuePayloadView::Unit => {}
-                            ValuePayloadView::Single(child) => {
-                                children.try_push(child, out.reborrow())?;
-                            }
-                            ValuePayloadView::Structure(entries) => {
-                                children.try_reserve_exact(entries.len(), out.reborrow())?;
-                                for entry in entries {
-                                    children.try_push(entry.value(), out.reborrow())?;
-                                }
-                            }
-                        },
-                        _ => {}
-                    }
-                    tasks.try_push(CopyTask::Finish(value, start), out.reborrow())?;
-                    for child in children.into_iter().rev() {
-                        tasks.try_push(CopyTask::Enter(child), out.reborrow())?;
-                    }
-                }
-                CopyTask::Finish(value, start) => {
-                    let child_count = values.len().saturating_sub(start);
-                    let mut children = ChargedVec::new(budget, out.reborrow())?;
-                    children.try_reserve_exact(child_count, out.reborrow())?;
-                    children.extend(values.drain(start..), out.reborrow())?;
-                    let source = value.source();
-                    let is_map = matches!(value.as_ref(), ValueKind::Map(_));
-                    let kind = value.as_ref();
-                    let id = match kind {
-                        ValueKind::Signed(number) => {
-                            builder.add_signed(number, source, out.reborrow())?
-                        }
-                        ValueKind::Unsigned(number) => {
-                            builder.add_unsigned(number, source, out.reborrow())?
-                        }
-                        ValueKind::Float32(number) => {
-                            builder.add_float32(number, source, out.reborrow())?
-                        }
-                        ValueKind::Float64(number) => {
-                            builder.add_float64(number, source, out.reborrow())?
-                        }
-                        ValueKind::Bool(boolean) => {
-                            builder.add_bool(boolean, source, out.reborrow())?
-                        }
-                        ValueKind::String(text) => {
-                            builder.add_string(text, source, out.reborrow())?
-                        }
-                        ValueKind::Optional(child) => {
-                            let child = match child {
-                                Some(_) => Some(children.first().copied().ok_or_else(|| {
-                                    out.reborrow()
-                                        .fail(ValueError::from(BudgetError::CapacityExceeded))
-                                })?),
-                                None => None,
-                            };
-                            builder.add_optional(child, source, out.reborrow())?
-                        }
-                        ValueKind::Array(_) => {
-                            builder.add_array(&children, source, out.reborrow())?
-                        }
-                        ValueKind::Map(entries) | ValueKind::Structure(entries) => {
-                            let mut named = ChargedVec::new(budget, out.reborrow())?;
-                            named.try_reserve_exact(entries.len(), out.reborrow())?;
-                            for (entry, child) in entries.zip(children.iter().copied()) {
-                                let Some(name) = entry.name() else {
-                                    return Err(
-                                        out.fail(ValueError::from(BudgetError::CapacityExceeded))
-                                    );
-                                };
-                                named.try_push(NamedValue::new(name, child), out.reborrow())?;
-                            }
-                            if is_map {
-                                builder.add_map(&named, source, out.reborrow())?
-                            } else {
-                                builder.add_structure(&named, source, out.reborrow())?
-                            }
-                        }
-                        ValueKind::Enumeration { variant, payload } => match payload {
-                            ValuePayloadView::Unit => builder.add_enumeration(
-                                variant,
-                                ValuePayload::Unit,
-                                source,
-                                out.reborrow(),
-                            )?,
-                            ValuePayloadView::Single(_) => builder.add_enumeration(
-                                variant,
-                                ValuePayload::Single(children.first().copied().ok_or_else(
-                                    || {
-                                        out.reborrow()
-                                            .fail(ValueError::from(BudgetError::CapacityExceeded))
-                                    },
-                                )?),
-                                source,
-                                out.reborrow(),
-                            )?,
-                            ValuePayloadView::Structure(entries) => {
-                                let mut named = ChargedVec::new(budget, out.reborrow())?;
-                                named.try_reserve_exact(entries.len(), out.reborrow())?;
-                                for (entry, child) in entries.zip(children.iter().copied()) {
-                                    let Some(name) = entry.name() else {
-                                        return Err(out.fail(ValueError::from(
-                                            BudgetError::CapacityExceeded,
-                                        )));
-                                    };
-                                    named.try_push(NamedValue::new(name, child), out.reborrow())?;
-                                }
-                                builder.add_enumeration(
-                                    variant,
-                                    ValuePayload::Structure(&named),
-                                    source,
-                                    out.reborrow(),
-                                )?
-                            }
-                        },
-                    };
-                    values.try_push(id, out.reborrow())?;
-                }
-            }
-        }
-        values
-            .pop()
-            .ok_or_else(|| out.fail(ValueError::from(BudgetError::CapacityExceeded)))
+        builder.append_view(root, ValueCopyLimits::new(usize::MAX), out)
     }
 }
 

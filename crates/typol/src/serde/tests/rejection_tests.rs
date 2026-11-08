@@ -7,7 +7,7 @@ use serde::{
     de::{EnumAccess, MapAccess, VariantAccess, Visitor},
     ser::{SerializeMap, SerializeTupleStruct, SerializeTupleVariant},
 };
-use typol_test_support::{TestExpect, TestResult, test_verify_eq as assert_eq};
+use typol_test_support::{TestExpect, TestOpeo, TestResult, test_verify_eq as assert_eq};
 
 struct Request<const MODE: u8>;
 
@@ -105,7 +105,7 @@ fn tuple_enum_variant_rejection_is_classified_as_unsupported() -> TestResult {
         Support::compile("enum Choice { Tuple(u8) } entry struct Root { value: Choice, }")?;
     let payload = TestValues::enumeration_unmetered(
         "Tuple".to_owned(),
-        EnumPayload::single(TestValues::unsigned(7)),
+        TestOpeo::value(|out| EnumPayload::single(TestValues::unsigned(7), None, out))?,
     );
     let errors = Support::decode::<TupleVariantRequest>(&schema, &payload)?
         .err()

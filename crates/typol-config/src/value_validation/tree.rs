@@ -1,3 +1,6 @@
+mod environment;
+
+use self::environment::{EnvironmentReferenceValidator, EnvironmentValidation};
 use crate::{
     context::{AssignmentContext, CompletionState, RuleContext, SemanticStatus},
     diagnostics::{DiagnosticFactory, NAMED_ENTRY_NAME_MISSING},
@@ -27,6 +30,7 @@ struct Visit<'value, 'schema> {
     target: TreeTarget<'schema>,
     value: ValueView<'value>,
     member: Member<'schema>,
+    fallback_validated: bool,
 }
 
 enum Children<'value, 'schema> {
@@ -98,6 +102,7 @@ impl TreeTraversal {
                 target,
                 value: value.root(),
                 member: context.next_member,
+                fallback_validated: false,
             }),
             out.reborrow(),
         )?;
@@ -193,11 +198,13 @@ impl<'value, 'schema> Children<'value, 'schema> {
                     target: TreeTarget {
                         expected: *ty,
                         field: None,
+                        environment_field: None,
                         variant: None,
                         span: *span,
                     },
                     value: value.value(),
                     member,
+                    fallback_validated: false,
                 }
             }
             Self::Map {
@@ -218,11 +225,13 @@ impl<'value, 'schema> Children<'value, 'schema> {
                     target: TreeTarget {
                         expected: *ty,
                         field: None,
+                        environment_field: None,
                         variant: None,
                         span: *span,
                     },
                     value: entry.value(),
                     member,
+                    fallback_validated: false,
                 }
             }
             Self::Fields {
@@ -290,11 +299,13 @@ impl<'value, 'schema> Children<'value, 'schema> {
                     target: TreeTarget {
                         expected,
                         field: Some(field),
+                        environment_field: Some(field),
                         variant: None,
                         span: *span,
                     },
                     value,
                     member,
+                    fallback_validated: false,
                 }
             }
         };
@@ -321,6 +332,17 @@ fn run<'schema, 'slot>(
         }
         match task {
             Task::Enter(mut visit) => {
+                match EnvironmentReferenceValidator::validate(
+                    context,
+                    visit.target,
+                    visit.value,
+                    visit.fallback_validated,
+                    out.reborrow(),
+                )? {
+                    EnvironmentValidation::Valid => {}
+                    EnvironmentValidation::Reported => *reported = true,
+                    EnvironmentValidation::Stopped => return Ok(()),
+                }
                 if visit.value.source() == ValueSource::SchemaDefault
                     && visit.target.span.is_none()
                     && let Some(field) = visit.target.field
@@ -554,11 +576,14 @@ fn schedule_children<'value, 'schema, 'slot>(
                     target: TreeTarget {
                         expected: inner,
                         field: None,
+                        environment_field: target.environment_field,
                         variant: None,
                         span,
                     },
                     value,
                     member: Member::Optional,
+                    fallback_validated: visit.fallback_validated
+                        || visit.value.shares_environment_reference(value),
                 }),
                 out.reborrow(),
             )?;
@@ -653,11 +678,13 @@ fn schedule_children<'value, 'schema, 'slot>(
                             target: TreeTarget {
                                 expected: ty,
                                 field: None,
+                                environment_field: None,
                                 variant: Some(variant),
                                 span,
                             },
                             value,
                             member: Member::Payload(variant),
+                            fallback_validated: false,
                         }),
                         out.reborrow(),
                     )?;

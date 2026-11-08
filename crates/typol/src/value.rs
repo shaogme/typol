@@ -1,7 +1,7 @@
 use opeo::{OResult, Out};
 use typol_core::{
-    BudgetError, ChargedString, ChargedVec, ConfigValue, ConfigValueBuilder, DiagnosticContext,
-    ExecutionBudget, NamedValue, ValueError, ValueId, ValuePayload, ValueSource,
+    BudgetError, ChargedBox, ChargedString, ChargedVec, ConfigValue, ConfigValueBuilder,
+    DiagnosticContext, ExecutionBudget, NamedValue, ValueError, ValueId, ValuePayload, ValueSource,
     diagnostic_context,
 };
 
@@ -18,7 +18,7 @@ pub(crate) struct OwnedNamedValue {
 
 enum EnumPayloadKind {
     Unit,
-    Single(ConfigValue),
+    Single(ChargedBox<ConfigValue>),
     Structure(ChargedVec<OwnedNamedValue>),
 }
 
@@ -73,10 +73,15 @@ impl EnumPayload {
         }
     }
 
-    pub(crate) fn single(value: ConfigValue) -> Self {
-        Self {
+    pub(crate) fn single<'slot>(
+        value: ConfigValue,
+        budget: Option<&ExecutionBudget>,
+        out: Out<'slot, '_, ValueError>,
+    ) -> OResult<'slot, Self> {
+        let value = ChargedBox::new(value, budget, out)?;
+        Ok(Self {
             kind: EnumPayloadKind::Single(value),
-        }
+        })
     }
 
     pub(crate) fn structure(values: ChargedVec<OwnedNamedValue>) -> Self {
@@ -229,7 +234,7 @@ impl ValueFactory {
                 out.reborrow(),
             )?,
             EnumPayloadKind::Single(value) => {
-                let child = builder.append_value(value, out.reborrow())?;
+                let child = builder.append_value(value.into_inner(), out.reborrow())?;
                 builder.add_enumeration(
                     variant,
                     ValuePayload::Single(child),

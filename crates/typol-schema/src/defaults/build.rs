@@ -198,7 +198,9 @@ impl<'b, 'a, 'd> DefaultBuilder<'b, 'a, 'd> {
                                 .unwrap_or(&[]),
                             out.reborrow(),
                         )? {
-                            let payload = EnumPayload::Single(value.value);
+                            let mut payload_values = self.compiler.new_vec(out.reborrow())?;
+                            payload_values.try_push(value.value, out.reborrow())?;
+                            let payload = EnumPayload::Single(payload_values);
                             let mut value_builder = ValueDefaultBuilder::new(self.compiler);
                             state.set_result(Some(value_builder.enum_value(
                                 id,
@@ -409,6 +411,7 @@ impl<'b, 'a, 'd> DefaultBuilder<'b, 'a, 'd> {
                 Some(context) => EmergencyDiagnostics::internal(span, context),
                 None => schema_internal!(span),
             },
+            ValueErrorKind::EnvironmentReferenceRequired => schema_internal!(span),
             ValueErrorKind::DuplicateMapKey => {
                 let context = error.duplicate_indices().map_or_else(
                     || schema_context!("value-construction", "duplicate-map-index-missing"),

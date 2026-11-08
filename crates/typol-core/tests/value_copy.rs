@@ -1,7 +1,8 @@
 use std::{error::Error, io::Error as IoError, thread};
 use typol_core::{
-    ConfigValue, ConfigValueBuilder, ExecutionBudget, ExecutionLimits, NamedValue, ValueCopyLimits,
-    ValueError, ValueErrorKind, ValueKind, ValuePayload, ValuePayloadView, ValueSource, ValueView,
+    BudgetError, ConfigValue, ConfigValueBuilder, ExecutionBudget, ExecutionLimits, NamedValue,
+    ValueCopyLimits, ValueError, ValueErrorKind, ValueKind, ValuePayload, ValuePayloadView,
+    ValueScalar, ValueSource, ValueView,
 };
 use typol_opeo_test_support::TestOpeo;
 
@@ -45,6 +46,20 @@ enum BoundaryValue {
     EnumStructureField,
 }
 
+#[test]
+fn builder_requires_structured_environment_reference_metadata() -> Result<(), Box<dyn Error>> {
+    let mut builder = TestOpeo::call(|out| ConfigValueBuilder::new(None, out))?;
+    let error = TestOpeo::call(|out| {
+        builder.add_string("provider-result", ValueSource::EnvironmentVariable, out)
+    })
+    .err()
+    .ok_or_else(|| IoError::other("builder accepted an unstructured environment source"))?;
+    if error.kind() != ValueErrorKind::EnvironmentReferenceRequired {
+        return Err(IoError::other("builder returned the wrong source error").into());
+    }
+    Ok(())
+}
+
 fn boundary_value(kind: BoundaryValue) -> Result<ConfigValue, ValueError> {
     let mut builder = TestOpeo::call(|out| ConfigValueBuilder::new(None, out))?;
     let scalar = TestOpeo::call(|out| builder.add_signed(-7, ValueSource::RustValue, out))?;
@@ -79,7 +94,7 @@ fn boundary_value(kind: BoundaryValue) -> Result<ConfigValue, ValueError> {
             builder.add_enumeration(
                 "Fields",
                 ValuePayload::Structure(&[NamedValue::new("value", scalar)]),
-                ValueSource::EnvironmentVariable,
+                ValueSource::RustValue,
                 out,
             )
         })?,
@@ -136,6 +151,107 @@ fn exact_depth_is_allowed_and_excess_depth_is_a_resource_error() -> Result<(), B
 }
 
 #[test]
+fn failed_view_append_restores_builder_nodes() -> Result<(), Box<dyn Error>> {
+    let budget = TestOpeo::call(|out| {
+        ExecutionBudget::new(ExecutionLimits::new(1_000_000, 1_048_576), out)
+    })?;
+    let mut source_builder = TestOpeo::call(|out| ConfigValueBuilder::new(None, out))?;
+    let text = TestOpeo::call(|out| {
+        source_builder.add_string("copied text", ValueSource::RustValue, out)
+    })?;
+    let mut deep =
+        TestOpeo::call(|out| source_builder.add_bool(true, ValueSource::RustValue, out))?;
+    for _ in 0..4 {
+        deep = TestOpeo::call(|out| {
+            source_builder.add_optional(Some(deep), ValueSource::RustValue, out)
+        })?;
+    }
+    let source_root = TestOpeo::call(|out| {
+        source_builder.add_structure(
+            &[NamedValue::new("text", text), NamedValue::new("deep", deep)],
+            ValueSource::RustValue,
+            out,
+        )
+    })?;
+    let source = TestOpeo::call(|out| source_builder.finish(source_root, out))?;
+
+    let mut builder = TestOpeo::call(|out| ConfigValueBuilder::new(Some(&budget), out))?;
+    let existing = TestOpeo::call(|out| builder.add_bool(false, ValueSource::RustValue, out))?;
+    let error =
+        TestOpeo::call(|out| builder.append_view(source.root(), ValueCopyLimits::new(2), out))
+            .err()
+            .ok_or_else(|| IoError::other("copy above its depth limit succeeded"))?;
+    if error.kind() != ValueErrorKind::ResourceLimitExceeded {
+        return Err(IoError::other("depth error used the wrong category").into());
+    }
+    let appended = TestOpeo::call(|out| builder.add_bool(true, ValueSource::RustValue, out))?;
+    let root = TestOpeo::call(|out| {
+        builder.add_structure(
+            &[
+                NamedValue::new("existing", existing),
+                NamedValue::new("appended", appended),
+            ],
+            ValueSource::RustValue,
+            out,
+        )
+    })?;
+    let completed = TestOpeo::call(|out| builder.finish(root, out))?;
+    if completed.node_count() != 3 || !matches!(completed.as_ref(), ValueKind::Structure(_)) {
+        return Err(IoError::other("failed copy left nodes in the builder").into());
+    }
+    let ValueKind::Structure(entries) = completed.root().as_ref() else {
+        return Err(IoError::other("failed copy changed the root shape").into());
+    };
+    if !entries
+        .get(0)
+        .is_some_and(|entry| matches!(entry.value().as_ref(), ValueKind::Bool(false)))
+        || !entries
+            .get(1)
+            .is_some_and(|entry| matches!(entry.value().as_ref(), ValueKind::Bool(true)))
+    {
+        return Err(IoError::other("failed copy changed prior builder roots").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn failed_value_append_restores_builder_nodes() -> Result<(), Box<dyn Error>> {
+    let budget = TestOpeo::call(|out| {
+        ExecutionBudget::new(ExecutionLimits::new(1_000_000, 1_048_576), out)
+    })?;
+    let mut target = TestOpeo::call(|out| ConfigValueBuilder::new(Some(&budget), out))?;
+    let existing = TestOpeo::call(|out| target.add_bool(false, ValueSource::RustValue, out))?;
+    let mut source_builder = TestOpeo::call(|out| ConfigValueBuilder::new(Some(&budget), out))?;
+    let text =
+        TestOpeo::call(|out| source_builder.add_string("payload", ValueSource::RustValue, out))?;
+    let source_root = TestOpeo::call(|out| {
+        source_builder.add_structure(
+            &[NamedValue::new("field", text)],
+            ValueSource::RustValue,
+            out,
+        )
+    })?;
+    let source = TestOpeo::call(|out| source_builder.finish(source_root, out))?;
+    let remaining = budget.limits().max_steps() - budget.steps();
+    if remaining <= 3 {
+        return Err(IoError::other("test exhausted its setup budget").into());
+    }
+    TestOpeo::call::<BudgetError, _>(|out| budget.consume(remaining - 3, out))?;
+
+    let error = TestOpeo::call(|out| target.append_value(source, out))
+        .err()
+        .ok_or_else(|| IoError::other("append unexpectedly fit the remaining step budget"))?;
+    if error.kind() != ValueErrorKind::ResourceLimitExceeded {
+        return Err(IoError::other("step error used the wrong category").into());
+    }
+    let completed = TestOpeo::call(|out| target.finish(existing, out))?;
+    if completed.node_count() != 1 || !matches!(completed.as_ref(), ValueKind::Bool(false)) {
+        return Err(IoError::other("failed append left nodes in the builder").into());
+    }
+    Ok(())
+}
+
+#[test]
 fn depth_rules_cover_roots_empty_containers_and_enum_payloads() -> Result<(), Box<dyn Error>> {
     assert_copy_limit(&boundary_value(BoundaryValue::Scalar)?, 0, true)?;
     assert_copy_limit(&boundary_value(BoundaryValue::EmptyArray)?, 0, true)?;
@@ -163,14 +279,13 @@ fn copies_every_kind_name_payload_order_and_source() -> Result<(), Box<dyn Error
     let mut builder = TestOpeo::call(|out| ConfigValueBuilder::new(None, out))?;
     let signed = TestOpeo::call(|out| builder.add_signed(-17, ValueSource::ConfigLiteral, out))?;
     let unsigned = TestOpeo::call(|out| builder.add_unsigned(23, ValueSource::SchemaDefault, out))?;
-    let float32 =
-        TestOpeo::call(|out| builder.add_float32(1.25, ValueSource::EnvironmentVariable, out))?;
+    let float32 = TestOpeo::call(|out| builder.add_float32(1.25, ValueSource::RustValue, out))?;
     let float64 =
         TestOpeo::call(|out| builder.add_float64(2.5, ValueSource::ExplicitFallback, out))?;
     let text = TestOpeo::call(|out| builder.add_string("text", ValueSource::RustValue, out))?;
     let boolean = TestOpeo::call(|out| builder.add_bool(true, ValueSource::ConfigLiteral, out))?;
     let optional_none =
-        TestOpeo::call(|out| builder.add_optional(None, ValueSource::EnvironmentVariable, out))?;
+        TestOpeo::call(|out| builder.add_optional(None, ValueSource::RustValue, out))?;
     let optional_some =
         TestOpeo::call(|out| builder.add_optional(Some(boolean), ValueSource::SchemaDefault, out))?;
     let array = TestOpeo::call(|out| {
@@ -193,7 +308,7 @@ fn copies_every_kind_name_payload_order_and_source() -> Result<(), Box<dyn Error
     let structure = TestOpeo::call(|out| {
         builder.add_structure(
             &[NamedValue::new("inside", boolean)],
-            ValueSource::EnvironmentVariable,
+            ValueSource::RustValue,
             out,
         )
     })?;
@@ -235,6 +350,13 @@ fn copies_every_kind_name_payload_order_and_source() -> Result<(), Box<dyn Error
             out,
         )
     })?;
+    for (value, name) in [
+        (float32, "FLOAT"),
+        (optional_none, "OPTIONAL"),
+        (structure, "STRUCTURE"),
+    ] {
+        TestOpeo::call(|out| builder.add_environment_reference(&[value], name, None, out))?;
+    }
     let source = TestOpeo::call(|out| builder.finish(root, out))?;
     let copied = copy_value(&source, 3)?;
     if copied.root().source() != ValueSource::RustValue {
@@ -396,6 +518,58 @@ fn workspace_and_step_budgets_fail_as_values_errors() -> Result<(), Box<dyn Erro
             .ok_or_else(|| IoError::other("copy exceeded no step limit"))?;
     if error.kind() != ValueErrorKind::ResourceLimitExceeded {
         return Err(IoError::other("step error used the wrong category").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn environment_reference_is_preserved_and_shared_when_a_subtree_is_copied()
+-> Result<(), Box<dyn Error>> {
+    let mut source_builder = TestOpeo::call(|out| ConfigValueBuilder::new(None, out))?;
+    let scalar = TestOpeo::call(|out| {
+        source_builder.add_string("provider-result", ValueSource::RustValue, out)
+    })?;
+    let root = TestOpeo::call(|out| {
+        source_builder.add_optional(Some(scalar), ValueSource::RustValue, out)
+    })?;
+    TestOpeo::call(|out| {
+        source_builder.add_environment_reference(
+            &[root, scalar],
+            "SERVICE_TOKEN",
+            Some(ValueScalar::String("fallback")),
+            out,
+        )
+    })?;
+    let source = TestOpeo::call(|out| source_builder.finish(root, out))?;
+
+    let copied = copy_value(&source, 1)?;
+    let ValueKind::Optional(Some(child)) = copied.root().as_ref() else {
+        return Err(IoError::other("copied environment option has the wrong shape").into());
+    };
+    if !copied.root().shares_environment_reference(child) {
+        return Err(IoError::other("option nodes did not share the environment reference").into());
+    }
+    for value in [copied.root(), child] {
+        let reference = value
+            .environment_reference()
+            .ok_or_else(|| IoError::other("copied environment reference was missing"))?;
+        if reference.name() != "SERVICE_TOKEN"
+            || !matches!(reference.fallback(), Some(ValueScalar::String("fallback")))
+        {
+            return Err(IoError::other("copied environment metadata changed").into());
+        }
+    }
+
+    let mut append_builder = TestOpeo::call(|out| ConfigValueBuilder::new(None, out))?;
+    let appended = TestOpeo::call(|out| append_builder.append_value(source, out))?;
+    let appended = TestOpeo::call(|out| append_builder.finish(appended, out))?;
+    let ValueKind::Optional(Some(child)) = appended.root().as_ref() else {
+        return Err(IoError::other("appended environment option has the wrong shape").into());
+    };
+    if !appended.root().shares_environment_reference(child) {
+        return Err(
+            IoError::other("appended nodes did not share the environment reference").into(),
+        );
     }
     Ok(())
 }

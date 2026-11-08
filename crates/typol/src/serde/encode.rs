@@ -371,7 +371,12 @@ impl<'a, 'schema, 'call> SerTrait for Encoder<'a, 'schema, 'call> {
                 Ok(value) => value,
                 Err(error) => return Err(out.fail(error)),
             };
-            let payload = EnumPayload::single(value);
+            let payload = self.cursor.session().value_as(
+                |value_out| {
+                    EnumPayload::single(value, Some(self.cursor.session().execution()), value_out)
+                },
+                out.reborrow(),
+            )?;
             let name = self
                 .cursor
                 .session()

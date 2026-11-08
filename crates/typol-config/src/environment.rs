@@ -14,13 +14,13 @@ use core::str::from_utf8_unchecked;
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage,
-    DiagnosticMessageKey, ExecutionBudget, LocatedSpan, ValueSource, diagnostic_context,
+    DiagnosticMessageKey, ExecutionBudget, LocatedSpan, ValueKind, ValueScalar, ValueSource,
+    diagnostic_context,
 };
 use typol_i18n::{diagnostic_key, diagnostic_message};
 use typol_model::BuiltinType;
 use typol_semantic::{EnvironmentAuthorization, TypeKind};
 
-#[cfg(test)]
 #[cfg(test)]
 use core::str::from_utf8;
 #[cfg(test)]
@@ -721,6 +721,7 @@ impl EnvironmentResolver {
                 )));
             }
         };
+        let name = authorization.name();
         let cached = resources.cache.read(
             EnvironmentReadRequest {
                 provider: resources.environment,
@@ -801,15 +802,44 @@ impl EnvironmentResolver {
             &mut resources.validation.budget_errors,
             out.reborrow(),
         )?;
+        let fallback_scalar = match fallback.as_ref() {
+            Some(fallback) => {
+                let value = match (optional, fallback.value.root().as_ref()) {
+                    (true, ValueKind::Optional(Some(value))) => value,
+                    (false, _) => fallback.value.root(),
+                    _ => {
+                        return Err(out.fail(DiagnosticFactory::internal(
+                            ENVIRONMENT_INTERNAL_FALLBACK,
+                            Some(fallback.span),
+                            None,
+                            Some(ValueSource::ExplicitFallback),
+                        )));
+                    }
+                };
+                Some(match value.as_ref() {
+                    ValueKind::Signed(value) => ValueScalar::Signed(value),
+                    ValueKind::Unsigned(value) => ValueScalar::Unsigned(value),
+                    ValueKind::Float32(value) => ValueScalar::Float32(value),
+                    ValueKind::Float64(value) => ValueScalar::Float64(value),
+                    ValueKind::String(value) => ValueScalar::String(value),
+                    ValueKind::Bool(value) => ValueScalar::Bool(value),
+                    _ => {
+                        return Err(out.fail(DiagnosticFactory::internal(
+                            ENVIRONMENT_INTERNAL_FALLBACK,
+                            Some(fallback.span),
+                            None,
+                            Some(ValueSource::ExplicitFallback),
+                        )));
+                    }
+                })
+            }
+            None => None,
+        };
+        let budget = &resources.budget;
         let value = if optional {
             let mut value_errors = ErrSlot::new();
             match value_errors.try_call(move |value_out| {
-                ValueFactory::optional_owned(
-                    value,
-                    ValueSource::EnvironmentVariable,
-                    Some(&resources.budget),
-                    value_out,
-                )
+                ValueFactory::optional_owned(value, ValueSource::RustValue, Some(budget), value_out)
             }) {
                 Ok(value) => value,
                 Err(caught) => {
@@ -822,6 +852,21 @@ impl EnvironmentResolver {
             }
         } else {
             value
+        };
+        let value = {
+            let mut value_errors = ErrSlot::new();
+            match value_errors.try_call(|value_out| {
+                ValueFactory::environment(value, name, fallback_scalar, Some(budget), value_out)
+            }) {
+                Ok(value) => value,
+                Err(caught) => {
+                    return Err(out.fail(ValueFactory::failure(
+                        caught.take(),
+                        Some(spans.call),
+                        Some(ValueSource::EnvironmentVariable),
+                    )));
+                }
+            }
         };
         Ok(Some(EnvironmentValue {
             value,

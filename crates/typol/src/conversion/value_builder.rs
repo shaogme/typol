@@ -4,8 +4,29 @@ use crate::{
 };
 use opeo::{OResult, Out};
 use typol_core::{
-    ConfigValue, ConfigValueBuilder, NamedValue, ValueError, ValueId, ValuePayload, ValueSource,
+    ConfigValue, ConfigValueBuilder, NamedValue, ValueError, ValueId, ValuePayload, ValueScalar,
+    ValueSource,
 };
+
+pub(super) struct EnvironmentReferenceInput<'value> {
+    values: &'value [ValueId],
+    name: &'value str,
+    fallback: Option<ValueScalar<'value>>,
+}
+
+impl<'value> EnvironmentReferenceInput<'value> {
+    pub(super) fn new(
+        values: &'value [ValueId],
+        name: &'value str,
+        fallback: Option<ValueScalar<'value>>,
+    ) -> Self {
+        Self {
+            values,
+            name,
+            fallback,
+        }
+    }
+}
 
 /// The value arena shared by one binding encode operation.
 pub(crate) struct ValueBuilder {
@@ -189,6 +210,31 @@ impl ValueBuilder {
                 builder.add_enumeration(variant, payload, ValueSource::RustValue, value_out)
             },
             out,
+        )
+    }
+
+    pub(super) fn environment_reference<'slot>(
+        &mut self,
+        session: &SessionBudget,
+        reference: EnvironmentReferenceInput<'_>,
+        mut out: Out<'slot, '_, CodecErrors>,
+    ) -> OResult<'slot, ()> {
+        session.charge_environment_reference_text(
+            reference.name,
+            reference.fallback,
+            out.reborrow(),
+        )?;
+        session.value_codec(
+            CodecStage::Conversion,
+            |value_out| {
+                self.builder.add_environment_reference(
+                    reference.values,
+                    reference.name,
+                    reference.fallback,
+                    value_out,
+                )
+            },
+            out.reborrow(),
         )
     }
 

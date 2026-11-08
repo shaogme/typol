@@ -13,7 +13,7 @@ use crate::{
     session::{ConfigSession, TrackingInput},
     value::{NormalizedConfigValue, ValidatedConfigValue},
     value_normalization::{NormalizeRequest, ValueNormalizer},
-    value_validation::{ValueValidation, ValueValidationInput, ValueValidationRequest},
+    value_validation::{ValueValidation, ValueValidationRequest},
 };
 use ::opeo::{ErrSlot, OResult, Out};
 use core::cell::RefCell;
@@ -241,6 +241,8 @@ impl<'schema> ConfigValueProcessor<'schema> {
     }
 
     /// Normalize an owned external value with Schema defaults, without evaluating constraints.
+    /// Values carrying environment origins are rejected because normalization alone does not
+    /// perform the complete authorization and fallback checks required for those references.
     pub fn normalize<'slot>(
         &self,
         value: ConfigValue,
@@ -357,6 +359,7 @@ fn parse_source<'slot, R: Read + ?Sized>(
     let mut parse_errors = ErrSlot::new();
     let parse_result = parse_errors
         .try_call(|parse_out| Parser::parse_slot(parser_slot.take(), source_id, parse_out));
+    drop(parser_slot);
     match parse_result {
         Ok(value) => Ok(ValidatedConfigValue::from_config_value(value)),
         Err(caught) => finish_parse_failure(
@@ -423,6 +426,7 @@ fn parse_document_source<'slot, 'schema, R: Read + ?Sized>(
     let parse_result = parse_errors.try_call(|parse_out| {
         Parser::parse_slot_with_locations(parser_slot.take(), source_id, parse_out)
     });
+    drop(parser_slot);
     match parse_result {
         Ok((value, locations)) => Ok(DocumentParseOutput {
             value: ValidatedConfigValue::from_config_value(value),
@@ -636,6 +640,7 @@ fn normalize_for_schema_with_budget<'slot, 'borrow>(
                 primary: None,
                 text_limit: request.options().config().max_constructed_text_bytes(),
                 schema_default: false,
+                allow_unvalidated_environment_sources: false,
             },
             &mut nodes,
             request.options().config().values(),
@@ -679,7 +684,8 @@ fn validate_for_schema_with_budget<'slot, 'borrow>(
         ValueValidation::value(
             ValueValidationRequest {
                 schema,
-                value: ValueValidationInput::External(&value),
+                external_value: Some(&value),
+                schema_complete_value: None,
                 options: request.options(),
                 budget,
             },
@@ -722,7 +728,8 @@ fn validate_complete_for_schema_with_budget<'slot, 'borrow>(
         ValueValidation::value(
             ValueValidationRequest {
                 schema,
-                value: ValueValidationInput::SchemaComplete(value),
+                external_value: None,
+                schema_complete_value: Some(value),
                 options: request.options(),
                 budget,
             },

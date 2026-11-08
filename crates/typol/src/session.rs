@@ -10,6 +10,7 @@ use typol_config::{
 };
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, ExecutionBudget, ExecutionLimits, ValueError,
+    ValueScalar,
 };
 use typol_semantic::SchemaAccessError;
 
@@ -23,6 +24,7 @@ pub(crate) struct TargetCharge {
 pub(crate) struct SessionBudget {
     execution: ExecutionBudget,
     max_text_bytes: usize,
+    max_string_bytes: usize,
     max_output_bytes: usize,
     output_bytes: usize,
     budget_errors: RefCell<Option<ErrSlot<BudgetError>>>,
@@ -57,6 +59,7 @@ impl SessionBudget {
         Ok(Self {
             execution,
             max_text_bytes,
+            max_string_bytes: usize::MAX,
             max_output_bytes,
             output_bytes: 0,
             budget_errors: RefCell::new(None),
@@ -86,38 +89,42 @@ impl SessionBudget {
         options: WriteOptions,
         mut out: Out<'slot, '_, BudgetError>,
     ) -> OResult<'slot, Self> {
-        let session = Self::new(
+        let mut session = Self::new(
             *options.validation().execution(),
             options.validation().config().max_constructed_text_bytes(),
             options.max_output_bytes(),
             out.reborrow(),
         )?;
+        session.max_string_bytes = options.validation().config().max_string_bytes();
         Ok(session)
     }
 
     pub(crate) fn default_config<'slot>(
         validation: ConfigValidationOptions,
         max_output_bytes: usize,
-        out: Out<'slot, '_, BudgetError>,
+        mut out: Out<'slot, '_, BudgetError>,
     ) -> OResult<'slot, Self> {
-        Self::new(
+        let mut session = Self::new(
             *validation.execution(),
             validation.config().max_constructed_text_bytes(),
             max_output_bytes,
-            out,
-        )
+            out.reborrow(),
+        )?;
+        session.max_string_bytes = validation.config().max_string_bytes();
+        Ok(session)
     }
 
     pub(crate) fn parsing<'slot>(
         options: ConfigParseOptions,
         mut out: Out<'slot, '_, BudgetError>,
     ) -> OResult<'slot, Self> {
-        let session = Self::new(
+        let mut session = Self::new(
             *options.execution(),
             options.config().max_constructed_text_bytes(),
             0,
             out.reborrow(),
         )?;
+        session.max_string_bytes = options.config().max_string_bytes();
         Ok(session)
     }
 
@@ -130,6 +137,7 @@ impl SessionBudget {
         Ok(Self {
             execution,
             max_text_bytes: options.config().max_constructed_text_bytes(),
+            max_string_bytes: options.config().max_string_bytes(),
             max_output_bytes: 0,
             output_bytes: 0,
             budget_errors: RefCell::new(None),
@@ -357,6 +365,38 @@ impl SessionBudget {
 
     pub(crate) const fn max_text_bytes(&self) -> usize {
         self.max_text_bytes
+    }
+
+    pub(crate) fn charge_environment_reference_text<'slot>(
+        &self,
+        name: &str,
+        fallback: Option<ValueScalar<'_>>,
+        out: Out<'slot, '_, CodecErrors>,
+    ) -> OResult<'slot, ()> {
+        let fallback_bytes = match fallback {
+            Some(ValueScalar::String(value)) => value.len(),
+            _ => 0,
+        };
+        if name.len() > self.max_string_bytes || fallback_bytes > self.max_string_bytes {
+            return Err(out.fail(CodecErrors::emergency(
+                CodecStage::Conversion,
+                Failure::Resource,
+            )));
+        }
+        let Some(bytes) = name.len().checked_add(fallback_bytes) else {
+            return Err(out.fail(CodecErrors::emergency(
+                CodecStage::Conversion,
+                Failure::Resource,
+            )));
+        };
+        self.budget_codec(
+            CodecStage::Conversion,
+            |budget_out| {
+                self.execution
+                    .construct_text(bytes, self.max_text_bytes, budget_out)
+            },
+            out,
+        )
     }
 
     pub(crate) fn visit<'slot>(&self, mut out: Out<'slot, '_, BudgetError>) -> OResult<'slot, ()> {

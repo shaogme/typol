@@ -768,7 +768,7 @@ fn parse_local_value<'schema>(
     let mut parse_errors = TestSlot::<ParseFailure>::default();
     let mut frame_errors = TestSlot::default();
     let mut item_errors = TestSlot::default();
-    match parse_errors.run(|out| {
+    let result = parse_errors.run(|out| {
         ValueParser::parse(
             &mut context,
             schema.entry(),
@@ -776,7 +776,9 @@ fn parse_local_value<'schema>(
             item_errors.slot(),
             out,
         )
-    }) {
+    });
+    let mut context = context.into_inner();
+    match result {
         TestOpeoOutcome::Value(parsed) => Ok((parsed.value, context.locations)),
         TestOpeoOutcome::Error(failure) => {
             Recovery::record_failure(&mut context, failure);

@@ -1,12 +1,12 @@
-use super::arena::{EdgeRange, NodeKind, PayloadKind, TextRange, ValueEdge, ValueNode};
+use super::{
+    EnvironmentReference, ValueId, ValueKind, ValuePayloadView, ValueScalar,
+    arena::{
+        EdgeRange, EnvironmentFallbackRecord, EnvironmentReferenceRecord, NodeKind, PayloadKind,
+        TextRange, ValueEdge, ValueNode,
+    },
+};
 use crate::{ChargedString, ChargedVec, ExecutionBudget, ValueSource};
 use core::fmt;
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ValueId {
-    pub(super) arena_id: usize,
-    pub(super) index: usize,
-}
 
 /// A root value owned by a flat arena; dropping nodes does not recursively traverse child values.
 pub struct ConfigValue {
@@ -16,6 +16,7 @@ pub struct ConfigValue {
     nodes: ChargedVec<ValueNode>,
     edges: ChargedVec<ValueEdge>,
     text: ChargedVec<ChargedString>,
+    environment_references: ChargedVec<EnvironmentReferenceRecord>,
 }
 
 pub(super) struct ConfigValueParts {
@@ -25,6 +26,7 @@ pub(super) struct ConfigValueParts {
     pub(super) nodes: ChargedVec<ValueNode>,
     pub(super) edges: ChargedVec<ValueEdge>,
     pub(super) text: ChargedVec<ChargedString>,
+    pub(super) environment_references: ChargedVec<EnvironmentReferenceRecord>,
 }
 
 #[derive(Clone, Copy)]
@@ -49,30 +51,6 @@ pub struct ValueEntryView<'a> {
 #[derive(Clone, Copy)]
 pub struct NamedValueEntryView<'a>(&'a str, ValueView<'a>);
 
-#[derive(Clone, Copy)]
-pub enum ValuePayloadView<'a> {
-    Unit,
-    Single(ValueView<'a>),
-    Structure(ValueEntries<'a>),
-}
-
-pub enum ValueKind<'a> {
-    Signed(i128),
-    Unsigned(u128),
-    Float32(f32),
-    Float64(f64),
-    String(&'a str),
-    Bool(bool),
-    Optional(Option<ValueView<'a>>),
-    Array(ValueEntries<'a>),
-    Map(ValueEntries<'a>),
-    Structure(ValueEntries<'a>),
-    Enumeration {
-        variant: &'a str,
-        payload: ValuePayloadView<'a>,
-    },
-}
-
 impl ConfigValue {
     pub(super) fn from_parts(parts: ConfigValueParts) -> Self {
         Self {
@@ -82,6 +60,7 @@ impl ConfigValue {
             nodes: parts.nodes,
             edges: parts.edges,
             text: parts.text,
+            environment_references: parts.environment_references,
         }
     }
 
@@ -93,6 +72,7 @@ impl ConfigValue {
             nodes: self.nodes,
             edges: self.edges,
             text: self.text,
+            environment_references: self.environment_references,
         }
     }
 
@@ -134,11 +114,41 @@ impl ConfigValue {
             .get(range.segment)
             .and_then(|text| text.get(range.start..range.end))
     }
+
+    fn environment_reference(&self, index: usize) -> Option<EnvironmentReference<'_>> {
+        let reference = self.environment_references.get(index)?;
+        let name = self.text_range(reference.name)?;
+        let fallback = match reference.fallback.as_ref() {
+            Some(EnvironmentFallbackRecord::Signed(value)) => Some(ValueScalar::Signed(*value)),
+            Some(EnvironmentFallbackRecord::Unsigned(value)) => Some(ValueScalar::Unsigned(*value)),
+            Some(EnvironmentFallbackRecord::Float32(value)) => Some(ValueScalar::Float32(*value)),
+            Some(EnvironmentFallbackRecord::Float64(value)) => Some(ValueScalar::Float64(*value)),
+            Some(EnvironmentFallbackRecord::String(range)) => {
+                Some(ValueScalar::String(self.text_range(*range)?))
+            }
+            Some(EnvironmentFallbackRecord::Bool(value)) => Some(ValueScalar::Bool(*value)),
+            None => None,
+        };
+        Some(EnvironmentReference::new(name, fallback))
+    }
 }
 
 impl<'a> ValueView<'a> {
     pub const fn source(self) -> ValueSource {
         self.node.source
+    }
+
+    pub fn environment_reference(self) -> Option<EnvironmentReference<'a>> {
+        self.owner.environment_reference(self.node.environment?)
+    }
+
+    pub const fn shares_environment_reference(self, other: Self) -> bool {
+        self.owner.arena_id == other.owner.arena_id
+            && matches!((self.node.environment, other.node.environment), (Some(left), Some(right)) if left == right)
+    }
+
+    pub(crate) const fn environment_reference_id(self) -> Option<usize> {
+        self.node.environment
     }
 
     pub fn as_ref(self) -> ValueKind<'a> {

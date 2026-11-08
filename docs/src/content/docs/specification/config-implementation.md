@@ -83,6 +83,8 @@ With `std`, the same `TypolOptions` also carries host limits. Configure file inp
 
 Normalization checks each value shape, field name, enum payload, and scalar target, rebuilds structs in Schema field order, and fills Schema defaults and optional fields without defaults. It creates a new owned tree. Missing required fields, unknown or duplicate fields, invalid map keys/values, and incorrect payload shapes fail. Maps have no DSL ordering; the foreign-value path sorts keys for stable reconstruction.
 
+Normalize-only operations reject values with environment origins because they do not run the complete authorization and fallback validation for those references. Use `ConfigValueProcessor::validate` when an external value must retain an environment origin.
+
 ### 2.3 Generating configuration from Schema defaults
 
 `LoadedSchema::default_config_to_string` and `LoadedSchema::write_default_config` generate `.tconf` from the compiled entry Schema without binding a Rust type or receiving an `Environment`. The facade creates an empty structure root and calls `ConfigValueProcessor::validate_with_budget` once, so default filling, field and collection constraints, and full-tree assertions use the same validation pipeline as other external values. Generation errors are returned through `TypolError` with stage `Encoding`; value diagnostics remain available through `codec_errors().config_value_errors()`.
@@ -118,7 +120,7 @@ A struct frame tracks each Schema field as unseen, parsing, complete, failed, or
 
 ### 3.3 Value origins
 
-Each `ConfigValue` records a source category so diagnostics and later conversions can distinguish `ConfigLiteral`, `SchemaDefault`, `EnvironmentVariable`, `ExplicitFallback`, and `RustValue`. Text literals, defaults, environment values, and fallbacks are tagged during construction. Foreign-value normalization tags input as a Rust value and marks subtrees filled from the Schema as Schema defaults. Origins do not store raw environment text or source names.
+Each `ConfigValue` records a source category so diagnostics and later conversions can distinguish `ConfigLiteral`, `SchemaDefault`, `EnvironmentVariable`, `ExplicitFallback`, and `RustValue`. Successful environment resolution also stores a structured reference name and the already validated, typed scalar fallback when present. The provider's actual value is not part of this metadata. A reference record is shared by the option node and its present scalar child; copies and rebases preserve that sharing and charge reference text to the value budget. Foreign-value normalization rejects environment references that it cannot validate instead of silently reducing them to `RustValue`.
 
 ## 4. Environment variables
 
@@ -130,7 +132,9 @@ Before a first read, the parser checks name length, authorization slot, cache hi
 
 Provider `None` means unset; `Some(&[])` means set to an empty value. Returned bytes must be UTF-8. Strings retain their text, booleans accept only `true`/`false`, and numbers follow Config number syntax and target ranges. Provider errors, invalid UTF-8, and conversion or validation failures on a set value are errors and do not select a fallback.
 
-When an expression has a fallback, the parser parses and validates it against the field's scalar type even if the environment is set. If the variable is unset, the explicit fallback wins. Without a fallback, the field is deferred until object close, where normal Schema-default, optional, or required-field rules apply. A successful environment value or fallback is an explicit field value.
+When an expression has a fallback, the parser parses and validates it against the field's scalar type even if the environment is set. If the variable is unset, the explicit fallback wins and the resulting value has `ExplicitFallback` origin without an environment reference. Without a fallback, the field is deferred until object close, where normal Schema-default, optional, or required-field rules apply. Only a successfully converted and validated provider value retains the expression name and fallback for typed round trips.
+
+The Schema-aware writer emits a retained reference as `env("NAME"[, fallback])`; a fallback-selected value is written as a scalar literal. Full value and Schema validation checks the reference name, scalar/option shape, exact field authorization, and typed fallback before the writer sends its first byte. `ConfigDocument` uses the same scalar encoding for replacements and insertions, then reparses and validates the candidate before committing it, so an invalid candidate leaves the retained source unchanged. Its formatter continues to preserve untouched source tokens and comments.
 
 `typol_config::Environment` is independent of the process environment. The optional host adapter `typol_std::ProcessEnvironment` queries named variables without enumerating or modifying the environment. Unix bytes are checked as UTF-8 in the configuration layer; Windows values are converted to UTF-8 and isolated surrogate values are rejected.
 

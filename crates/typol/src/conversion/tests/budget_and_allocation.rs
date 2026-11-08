@@ -3,12 +3,13 @@ use crate::{
     binding_impl::TypedSchema,
     conversion::{Conversion, ConvertedValue, OrderedMap, Sourced},
     descriptor::Typol,
-    diagnostics::CodecErrors,
+    diagnostics::{CodecErrors, CodecStage},
     options::{BindOptions, ConversionLimits, MAX_CONVERSION_DEPTH, WriteOptions},
     session::SessionBudget,
     test_support::{TestOpeo, TestOpeoOutcome, TestValues},
 };
 use std::{collections::HashMap, string::String};
+use typol_config::{ConfigLimits, ConfigValidationOptions};
 use typol_core::{BudgetError, ConfigValue, DiagnosticCode, ExecutionLimits, ValueSource};
 use typol_test_support::{
     TestExtract, TestFailure, TestResult, test_verify as assert, test_verify_eq as assert_eq,
@@ -413,6 +414,58 @@ fn sourced_values_obey_conversion_node_limits() -> TestResult {
             .map(|diagnostic| diagnostic.code()),
         Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
     );
+    Ok(())
+}
+
+#[test]
+fn sourced_environment_text_is_checked_before_copying() -> TestResult {
+    let schema =
+        BindingTestSupport::compile("entry struct SourcedRoot { value: string @env(\"TOKEN\") }")?;
+    let binding = TestOpeo::value(|out| {
+        TypedSchema::<SourcedRoot>::bind(&schema, BindOptions::default(), out)
+    })?;
+    let value = SourcedRoot {
+        value: Sourced::from_environment_with_fallback(
+            String::from("TOKEN"),
+            String::new(),
+            String::from("x"),
+        ),
+    };
+    let session = session_with_text_limit(5)?;
+    let errors = encode_error(&binding, &value, &session, ConversionLimits::default())?;
+    assert_eq!(errors.stage(), CodecStage::Conversion);
+    assert_eq!(
+        errors
+            .diagnostics()
+            .last()
+            .map(|diagnostic| diagnostic.code()),
+        Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+    );
+    assert_eq!(session.execution().constructed_text_bytes(), 0);
+
+    let schema =
+        BindingTestSupport::compile("entry struct SourcedRoot { value: string @env(\"X\") }")?;
+    let binding = TestOpeo::value(|out| {
+        TypedSchema::<SourcedRoot>::bind(&schema, BindOptions::default(), out)
+    })?;
+    let value = SourcedRoot {
+        value: Sourced::from_environment_with_fallback(
+            String::from("X"),
+            String::new(),
+            String::from("long"),
+        ),
+    };
+    let validation = ConfigValidationOptions::default().with_config(
+        ConfigLimits::default()
+            .with_max_string_bytes(3)
+            .with_max_constructed_text_bytes(100),
+    );
+    let session = TestOpeo::value(|out| {
+        SessionBudget::codec(WriteOptions::default().with_validation(validation), out)
+    })?;
+    let errors = encode_error(&binding, &value, &session, ConversionLimits::default())?;
+    assert_eq!(errors.stage(), CodecStage::Conversion);
+    assert_eq!(session.execution().constructed_text_bytes(), 0);
     Ok(())
 }
 

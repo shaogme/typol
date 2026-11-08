@@ -181,6 +181,37 @@ let config = binding.read_file(
 
 Applications can implement `Environment` to read from a secret manager or another controlled source. The process adapter limits accepted variable name and value sizes; configuration limits separately bound the number of distinct names queried and the bytes cached for one read. See the [Config implementation](../../specification/config-implementation/) for lookup and caching behavior.
 
+Keep a parsed reference with `Sourced<T>` when the application may write the value back. Its scalar shape still matches the Schema, and `Option<Sourced<T>>` retains the reference when the optional value is present:
+
+```tschem
+entry struct ServiceConfig {
+    token: string @env("SERVICE_TOKEN"),
+    optional_port: option<u16> @env("OPTIONAL_PORT"),
+}
+```
+
+```text
+{
+    token: env("SERVICE_TOKEN", "local-token"),
+    optional_port: env("OPTIONAL_PORT", 8080),
+}
+```
+
+```rust
+#[derive(Typol)]
+struct ServiceConfig {
+    token: Sourced<String>,
+    optional_port: Option<Sourced<u16>>,
+}
+
+let binding = loaded.bind::<ServiceConfig>(out)?;
+let config = binding.read(request, &mut environment, out)?;
+assert_eq!(config.token.environment_name(), Some("SERVICE_TOKEN"));
+let source = binding.write_to_string(&config, WriteOptions::default(), out)?;
+```
+
+The written source keeps `env("SERVICE_TOKEN", "local-token")`; it does not contain the provider's current token. Reading that source with another provider resolves the reference again, so the actual value may change while the name and typed fallback stay the same. `Sourced::from_environment` and `Sourced::from_environment_with_fallback` create explicit references without reading a provider; the writer checks their names and Schema authorization. Calling `into_value()` deliberately discards the reference, after which the ordinary scalar value is written. When a provider is unset and the expression fallback is selected, the resulting value has `ExplicitFallback` origin and is written as a scalar literal.
+
 ## Map Rust structs, enums, and recursive types
 
 A Rust record mirrors a Schema struct. Field names and types must match; fields may remain private, and application methods can expose the intended API. Enum type and variant names and payload shapes must also match. Derive supports unit, single-payload, and named-field variants. For example, this Schema:

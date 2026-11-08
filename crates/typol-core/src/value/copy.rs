@@ -1,5 +1,6 @@
 use crate::{
-    BudgetError, ChargedVec, DiagnosticContext, ExecutionBudget, ValueError, diagnostic_context,
+    BudgetError, ChargedVec, DiagnosticContext, ExecutionBudget, ValueError, ValueSource,
+    diagnostic_context,
     value::{
         ConfigValueBuilder, NamedValue, ValueEntries, ValueId, ValueKind, ValuePayload,
         ValuePayloadView, ValueView,
@@ -11,6 +12,13 @@ static VALUE_VIEW_ENTRY_NAME_MISSING: DiagnosticContext =
     diagnostic_context!("typol-core", "value-arena", "value-view-entry-name-missing",);
 static VALUE_VIEW_CHILD_MISSING: DiagnosticContext =
     diagnostic_context!("typol-core", "value-arena", "value-view-child-missing",);
+
+fn construction_source(value: ValueView<'_>) -> ValueSource {
+    match value.source() {
+        ValueSource::EnvironmentVariable => ValueSource::RustValue,
+        source => source,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ValueCopyLimits {
@@ -70,6 +78,12 @@ struct CopiedValue<'a> {
     id: ValueId,
 }
 
+struct CopyInsertion<'a> {
+    name: Option<&'a str>,
+    source: ValueView<'a>,
+    id: ValueId,
+}
+
 enum ValueCopyFrame<'a> {
     Enter {
         value: ValueView<'a>,
@@ -88,6 +102,7 @@ enum ValueCopyFrame<'a> {
 struct ValueCopyState<'a> {
     frames: ChargedVec<ValueCopyFrame<'a>>,
     values: ChargedVec<CopiedValue<'a>>,
+    references: ChargedVec<(usize, usize)>,
 }
 
 pub(super) struct ValueViewCopier {
@@ -109,6 +124,7 @@ impl ValueViewCopier {
         let mut state = ValueCopyState {
             frames: ChargedVec::new(self.budget.as_ref(), out.reborrow())?,
             values: ChargedVec::new(self.budget.as_ref(), out.reborrow())?,
+            references: ChargedVec::new(self.budget.as_ref(), out.reborrow())?,
         };
         state.frames.try_push(
             ValueCopyFrame::Enter {
@@ -124,47 +140,123 @@ impl ValueViewCopier {
                     Self::check_copy_depth(depth, limits, out.reborrow())?;
                     match value.as_ref() {
                         ValueKind::Signed(number) => {
-                            let id = builder.add_signed(number, value.source(), out.reborrow())?;
-                            state
-                                .values
-                                .try_push(CopiedValue { name, id }, out.reborrow())?;
+                            let id = builder.add_signed(
+                                number,
+                                construction_source(value),
+                                out.reborrow(),
+                            )?;
+                            self.push_copied(
+                                builder,
+                                &mut state,
+                                CopyInsertion {
+                                    name,
+                                    source: value,
+                                    id,
+                                },
+                                out.reborrow(),
+                            )?;
                         }
                         ValueKind::Unsigned(number) => {
-                            let id =
-                                builder.add_unsigned(number, value.source(), out.reborrow())?;
-                            state
-                                .values
-                                .try_push(CopiedValue { name, id }, out.reborrow())?;
+                            let id = builder.add_unsigned(
+                                number,
+                                construction_source(value),
+                                out.reborrow(),
+                            )?;
+                            self.push_copied(
+                                builder,
+                                &mut state,
+                                CopyInsertion {
+                                    name,
+                                    source: value,
+                                    id,
+                                },
+                                out.reborrow(),
+                            )?;
                         }
                         ValueKind::Float32(number) => {
-                            let id = builder.add_float32(number, value.source(), out.reborrow())?;
-                            state
-                                .values
-                                .try_push(CopiedValue { name, id }, out.reborrow())?;
+                            let id = builder.add_float32(
+                                number,
+                                construction_source(value),
+                                out.reborrow(),
+                            )?;
+                            self.push_copied(
+                                builder,
+                                &mut state,
+                                CopyInsertion {
+                                    name,
+                                    source: value,
+                                    id,
+                                },
+                                out.reborrow(),
+                            )?;
                         }
                         ValueKind::Float64(number) => {
-                            let id = builder.add_float64(number, value.source(), out.reborrow())?;
-                            state
-                                .values
-                                .try_push(CopiedValue { name, id }, out.reborrow())?;
+                            let id = builder.add_float64(
+                                number,
+                                construction_source(value),
+                                out.reborrow(),
+                            )?;
+                            self.push_copied(
+                                builder,
+                                &mut state,
+                                CopyInsertion {
+                                    name,
+                                    source: value,
+                                    id,
+                                },
+                                out.reborrow(),
+                            )?;
                         }
                         ValueKind::String(text) => {
-                            let id = builder.add_string(text, value.source(), out.reborrow())?;
-                            state
-                                .values
-                                .try_push(CopiedValue { name, id }, out.reborrow())?;
+                            let id = builder.add_string(
+                                text,
+                                construction_source(value),
+                                out.reborrow(),
+                            )?;
+                            self.push_copied(
+                                builder,
+                                &mut state,
+                                CopyInsertion {
+                                    name,
+                                    source: value,
+                                    id,
+                                },
+                                out.reborrow(),
+                            )?;
                         }
                         ValueKind::Bool(boolean) => {
-                            let id = builder.add_bool(boolean, value.source(), out.reborrow())?;
-                            state
-                                .values
-                                .try_push(CopiedValue { name, id }, out.reborrow())?;
+                            let id = builder.add_bool(
+                                boolean,
+                                construction_source(value),
+                                out.reborrow(),
+                            )?;
+                            self.push_copied(
+                                builder,
+                                &mut state,
+                                CopyInsertion {
+                                    name,
+                                    source: value,
+                                    id,
+                                },
+                                out.reborrow(),
+                            )?;
                         }
                         ValueKind::Optional(None) => {
-                            let id = builder.add_optional(None, value.source(), out.reborrow())?;
-                            state
-                                .values
-                                .try_push(CopiedValue { name, id }, out.reborrow())?;
+                            let id = builder.add_optional(
+                                None,
+                                construction_source(value),
+                                out.reborrow(),
+                            )?;
+                            self.push_copied(
+                                builder,
+                                &mut state,
+                                CopyInsertion {
+                                    name,
+                                    source: value,
+                                    id,
+                                },
+                                out.reborrow(),
+                            )?;
                         }
                         ValueKind::Optional(Some(child)) => {
                             let child_depth = Self::next_copy_depth(depth, out.reborrow())?;
@@ -246,12 +338,19 @@ impl ValueViewCopier {
                                 let id = builder.add_enumeration(
                                     variant,
                                     ValuePayload::Unit,
-                                    value.source(),
+                                    construction_source(value),
                                     out.reborrow(),
                                 )?;
-                                state
-                                    .values
-                                    .try_push(CopiedValue { name, id }, out.reborrow())?;
+                                self.push_copied(
+                                    builder,
+                                    &mut state,
+                                    CopyInsertion {
+                                        name,
+                                        source: value,
+                                        id,
+                                    },
+                                    out.reborrow(),
+                                )?;
                             }
                             ValuePayloadView::Single(child) => {
                                 let child_depth = Self::next_copy_depth(depth, out.reborrow())?;
@@ -322,19 +421,27 @@ impl ValueViewCopier {
                                 out.reborrow()
                                     .fail(copy_invariant(&VALUE_VIEW_CHILD_MISSING))
                             })?;
-                            builder.add_optional(Some(child.id), value.source(), out.reborrow())?
+                            builder.add_optional(
+                                Some(child.id),
+                                construction_source(value),
+                                out.reborrow(),
+                            )?
                         }
                         ValueCopyContainer::Array => {
                             let ids = self.copied_ids(children, out.reborrow())?;
-                            builder.add_array(&ids, value.source(), out.reborrow())?
+                            builder.add_array(&ids, construction_source(value), out.reborrow())?
                         }
                         ValueCopyContainer::Map => {
                             let values = self.copied_named_values(children, out.reborrow())?;
-                            builder.add_map(&values, value.source(), out.reborrow())?
+                            builder.add_map(&values, construction_source(value), out.reborrow())?
                         }
                         ValueCopyContainer::Structure => {
                             let values = self.copied_named_values(children, out.reborrow())?;
-                            builder.add_structure(&values, value.source(), out.reborrow())?
+                            builder.add_structure(
+                                &values,
+                                construction_source(value),
+                                out.reborrow(),
+                            )?
                         }
                         ValueCopyContainer::EnumerationSingle(variant) => {
                             let child = children.first().ok_or_else(|| {
@@ -344,7 +451,7 @@ impl ValueViewCopier {
                             builder.add_enumeration(
                                 variant,
                                 ValuePayload::Single(child.id),
-                                value.source(),
+                                construction_source(value),
                                 out.reborrow(),
                             )?
                         }
@@ -353,15 +460,22 @@ impl ValueViewCopier {
                             builder.add_enumeration(
                                 variant,
                                 ValuePayload::Structure(&fields),
-                                value.source(),
+                                construction_source(value),
                                 out.reborrow(),
                             )?
                         }
                     };
                     state.values.truncate(start);
-                    state
-                        .values
-                        .try_push(CopiedValue { name, id }, out.reborrow())?;
+                    self.push_copied(
+                        builder,
+                        &mut state,
+                        CopyInsertion {
+                            name,
+                            source: value,
+                            id,
+                        },
+                        out.reborrow(),
+                    )?;
                 }
             }
         }
@@ -373,6 +487,44 @@ impl ValueViewCopier {
             .pop()
             .ok_or_else(|| out.fail(copy_invariant(&VALUE_VIEW_CHILD_MISSING)))?;
         Ok(copied.id)
+    }
+
+    fn push_copied<'slot, 'value>(
+        &self,
+        builder: &mut ConfigValueBuilder,
+        state: &mut ValueCopyState<'value>,
+        insertion: CopyInsertion<'value>,
+        mut out: Out<'slot, '_, ValueError>,
+    ) -> OResult<'slot, ()> {
+        let CopyInsertion { name, source, id } = insertion;
+        if let Some(source_reference) = source.environment_reference_id() {
+            let destination_reference = if let Some((_, destination)) = state
+                .references
+                .iter()
+                .find(|(source, _)| *source == source_reference)
+            {
+                *destination
+            } else {
+                let reference = source.environment_reference().ok_or_else(|| {
+                    out.reborrow()
+                        .fail(copy_invariant(&VALUE_VIEW_CHILD_MISSING))
+                })?;
+                let fallback = reference.fallback().copied();
+                let destination = builder.create_environment_reference(
+                    reference.name(),
+                    fallback,
+                    out.reborrow(),
+                )?;
+                state
+                    .references
+                    .try_push((source_reference, destination), out.reborrow())?;
+                destination
+            };
+            builder.attach_environment_reference(id, destination_reference, out.reborrow())?;
+        }
+        state
+            .values
+            .try_push(CopiedValue { name, id }, out.reborrow())
     }
 
     fn schedule_single_copy<'slot, 'value>(

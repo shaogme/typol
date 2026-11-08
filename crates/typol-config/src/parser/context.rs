@@ -8,10 +8,14 @@ use crate::{
     instance::{LocationIndex, LocationNode, Member, NodeId},
     session::ConfigSession,
 };
-use core::{cell::RefCell, mem::replace};
+use core::{
+    cell::RefCell,
+    mem::replace,
+    ops::{Deref, DerefMut},
+};
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, InstancePath,
+    BudgetError, ChargedBox, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, InstancePath,
     LocatedSpan, Read, SourceId, ValueError, ValueSource,
 };
 use typol_semantic::{
@@ -51,6 +55,39 @@ pub(super) struct ParserContext<'schema, 'source, 'limits> {
     pub(super) value_errors: ErrSlot<ValueError>,
 }
 
+pub(super) struct ParserContextStorage<'schema, 'source, 'limits> {
+    context: ChargedBox<ParserContext<'schema, 'source, 'limits>>,
+}
+
+impl<'schema, 'source, 'limits> ParserContextStorage<'schema, 'source, 'limits> {
+    fn new<'slot>(
+        context: ParserContext<'schema, 'source, 'limits>,
+        budget: &ExecutionBudget,
+        mut out: Out<'slot, '_, Diagnostic>,
+    ) -> OResult<'slot, Self> {
+        let context = ChargedBox::new(context, Some(budget), out.reborrow())?;
+        Ok(Self { context })
+    }
+
+    pub(super) fn into_inner(self) -> ParserContext<'schema, 'source, 'limits> {
+        self.context.into_inner()
+    }
+}
+
+impl<'schema, 'source, 'limits> Deref for ParserContextStorage<'schema, 'source, 'limits> {
+    type Target = ParserContext<'schema, 'source, 'limits>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.context
+    }
+}
+
+impl<'schema, 'source, 'limits> DerefMut for ParserContextStorage<'schema, 'source, 'limits> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.context
+    }
+}
+
 pub(super) struct ParserControl;
 
 pub(super) struct ParserControlRequest<'schema, 'source, 'limits> {
@@ -65,7 +102,7 @@ impl ParserControl {
     pub(super) fn create<'schema, 'source, 'limits, 'slot>(
         request: ParserControlRequest<'schema, 'source, 'limits>,
         mut out: Out<'slot, '_, Diagnostic>,
-    ) -> OResult<'slot, ParserContext<'schema, 'source, 'limits>> {
+    ) -> OResult<'slot, ParserContextStorage<'schema, 'source, 'limits>> {
         let ParserControlRequest {
             schema,
             source,
@@ -105,35 +142,39 @@ impl ParserControl {
                 return Err(out.fail(BudgetDiagnostic::from_error(caught.take())));
             }
         };
-        Ok(ParserContext {
-            #[cfg(test)]
-            default_work_peak: 0,
-            #[cfg(test)]
-            subtree_shape_skips: 0,
-            budget: owned_budget,
-            config_limits,
-            session,
-            locations,
-            current_node: None,
-            next_member: Member::Root,
-            inherited_constraints,
-            target_variant: None,
-            assignment_variant: None,
-            target_field: None,
-            expected_type: schema.entry(),
-            schema,
-            source_id,
-            cursor,
-            limits,
-            path,
-            value_source: ValueSource::ConfigLiteral,
-            nesting_depth: 0,
-            value_nodes: 0,
-            diagnostics,
-            diagnostic_errors: RefCell::new(ErrSlot::new()),
-            tree_diagnostic_errors: ErrSlot::new(),
-            value_errors: ErrSlot::new(),
-        })
+        ParserContextStorage::new(
+            ParserContext {
+                #[cfg(test)]
+                default_work_peak: 0,
+                #[cfg(test)]
+                subtree_shape_skips: 0,
+                budget: owned_budget,
+                config_limits,
+                session,
+                locations,
+                current_node: None,
+                next_member: Member::Root,
+                inherited_constraints,
+                target_variant: None,
+                assignment_variant: None,
+                target_field: None,
+                expected_type: schema.entry(),
+                schema,
+                source_id,
+                cursor,
+                limits,
+                path,
+                value_source: ValueSource::ConfigLiteral,
+                nesting_depth: 0,
+                value_nodes: 0,
+                diagnostics,
+                diagnostic_errors: RefCell::new(ErrSlot::new()),
+                tree_diagnostic_errors: ErrSlot::new(),
+                value_errors: ErrSlot::new(),
+            },
+            &budget,
+            out,
+        )
     }
 
     pub(super) fn take_inherited<'schema, 'source, 'limits, 'slot>(

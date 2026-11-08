@@ -8,8 +8,8 @@ use crate::{
 };
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
-    ChargedVec, ConfigValue, DiagnosticContext, ValueEntries, ValueEntryView, ValueView, Write,
-    WriteError, diagnostic_context,
+    ChargedVec, ConfigValue, DiagnosticContext, EnvironmentReference, ValueEntries, ValueEntryView,
+    ValueScalar, ValueSource, ValueView, Write, WriteError, diagnostic_context,
 };
 use typol_semantic::{FieldList, TypeView};
 
@@ -173,6 +173,72 @@ impl<'call> Encoder<'call> {
             out.reborrow(),
         )?;
         self.write(text, out.reborrow())
+    }
+
+    fn environment_reference<'slot>(
+        &mut self,
+        reference: EnvironmentReference<'_>,
+        mut out: Out<'slot, '_, CodecErrors>,
+    ) -> OResult<'slot, ()> {
+        self.write("env(", out.reborrow())?;
+        self.string(reference.name(), out.reborrow())?;
+        if let Some(fallback) = reference.fallback() {
+            self.write(", ", out.reborrow())?;
+            match fallback {
+                ValueScalar::Signed(value) => {
+                    self.number(Literal::number(value, out.reborrow())?, out.reborrow())?;
+                }
+                ValueScalar::Unsigned(value) => {
+                    self.number(Literal::number(value, out.reborrow())?, out.reborrow())?;
+                }
+                ValueScalar::Float32(value) if value.is_finite() => {
+                    let literal = Literal::float(
+                        value,
+                        |length, mut check_out| {
+                            self.session.budget_codec(
+                                CodecStage::Encoding,
+                                |budget_out| self.session.check_output(length, budget_out),
+                                check_out.reborrow(),
+                            )?;
+                            self.session.budget_codec(
+                                CodecStage::Encoding,
+                                |budget_out| self.session.execution().consume(length, budget_out),
+                                check_out.reborrow(),
+                            )
+                        },
+                        out.reborrow(),
+                    )?;
+                    self.number(literal, out.reborrow())?;
+                }
+                ValueScalar::Float64(value) if value.is_finite() => {
+                    let literal = Literal::float(
+                        value,
+                        |length, mut check_out| {
+                            self.session.budget_codec(
+                                CodecStage::Encoding,
+                                |budget_out| self.session.check_output(length, budget_out),
+                                check_out.reborrow(),
+                            )?;
+                            self.session.budget_codec(
+                                CodecStage::Encoding,
+                                |budget_out| self.session.execution().consume(length, budget_out),
+                                check_out.reborrow(),
+                            )
+                        },
+                        out.reborrow(),
+                    )?;
+                    self.number(literal, out.reborrow())?;
+                }
+                ValueScalar::String(value) => self.string(value, out.reborrow())?,
+                ValueScalar::Bool(value) => {
+                    self.write(if *value { "true" } else { "false" }, out.reborrow())?;
+                }
+                ValueScalar::Float32(_) | ValueScalar::Float64(_) => {
+                    return Err(out.fail(encoding_error(Failure::Encoding)));
+                }
+            }
+        }
+        self.write(")", out.reborrow())
     }
 
     fn fields<'slot, 'schema, 'value>(
@@ -429,6 +495,15 @@ impl<'call> Encoder<'call> {
         let node = ValueNode::resolve(kind, value)
             .ok_or_else(|| encoding_error(Failure::internal(ENCODER_INVARIANT)))
             .store_err_into(out.reborrow())?;
+        if let Some(reference) = value.environment_reference() {
+            if !matches!(&node, ValueNodeKind::Optional { value: None, .. }) {
+                return self.environment_reference(reference, out.reborrow());
+            }
+            return Err(out.fail(encoding_error(Failure::Encoding)));
+        }
+        if value.source() == ValueSource::EnvironmentVariable {
+            return Err(out.fail(encoding_error(Failure::Encoding)));
+        }
         match node {
             ValueNodeKind::Signed { value, .. } => {
                 let literal = Literal::number(value, out.reborrow())?;
@@ -484,16 +559,21 @@ impl<'call> Encoder<'call> {
             ValueNodeKind::Optional {
                 inner,
                 value: Some(value),
-            } => push(
-                self.session,
-                frames,
-                Frame::Value(ValueInput {
-                    ty: inner,
-                    value,
-                    indent,
-                }),
-                out.reborrow(),
-            ),
+            } => {
+                if let Some(reference) = value.environment_reference() {
+                    return self.environment_reference(reference, out.reborrow());
+                }
+                push(
+                    self.session,
+                    frames,
+                    Frame::Value(ValueInput {
+                        ty: inner,
+                        value,
+                        indent,
+                    }),
+                    out.reborrow(),
+                )
+            }
             ValueNodeKind::Structure { fields, values } => self.fields(
                 FieldsInput {
                     fields,

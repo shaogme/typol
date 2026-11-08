@@ -181,6 +181,37 @@ let config = binding.read_file(
 
 应用可实现 `Environment`，从 Secret Manager 或其他受控来源读取值。进程环境适配器限制接受的变量名和值长度；配置额度会单独限制一次读取查询的不同变量数量和缓存总字节数。查找与缓存行为见 [Config 实现说明](../../specification/config-implementation/)。
 
+如果应用可能把值写回 `.tconf`，请用 `Sourced<T>` 保留解析到的引用。它的 Schema 形状仍与标量类型相同；可选值存在时，`Option<Sourced<T>>` 会保留引用：
+
+```tschem
+entry struct ServiceConfig {
+    token: string @env("SERVICE_TOKEN"),
+    optional_port: option<u16> @env("OPTIONAL_PORT"),
+}
+```
+
+```text
+{
+    token: env("SERVICE_TOKEN", "local-token"),
+    optional_port: env("OPTIONAL_PORT", 8080),
+}
+```
+
+```rust
+#[derive(Typol)]
+struct ServiceConfig {
+    token: Sourced<String>,
+    optional_port: Option<Sourced<u16>>,
+}
+
+let binding = loaded.bind::<ServiceConfig>(out)?;
+let config = binding.read(request, &mut environment, out)?;
+assert_eq!(config.token.environment_name(), Some("SERVICE_TOKEN"));
+let source = binding.write_to_string(&config, WriteOptions::default(), out)?;
+```
+
+写回的源文保留 `env("SERVICE_TOKEN", "local-token")`，不会写入 provider 当前返回的 token。用另一个 provider 读取时会重新解析该引用，因此实际值可以变化，而名称和类型化回退值保持不变。`Sourced::from_environment` 和 `Sourced::from_environment_with_fallback` 可显式创建引用，不会读取 provider；writer 会校验名称和 Schema 授权。调用 `into_value()` 会主动丢弃引用，之后写出普通标量值。变量未设置且选用了表达式回退值时，结果来源为 `ExplicitFallback`，写出为标量字面值。
+
 ## 映射 Rust 结构体、枚举和递归类型
 
 Rust 记录类型对应 Schema 结构体，字段名和类型必须匹配。字段可以保持私有，再通过应用方法暴露所需接口。枚举类型名、变体名和载荷形态也必须匹配。derive 支持无载荷、单载荷和命名字段载荷枚举。例如，以下 Schema：
