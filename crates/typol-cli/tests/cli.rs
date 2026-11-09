@@ -7,6 +7,9 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Output, id},
 };
+use typol::{
+    DefaultConfigOptions, SchemaLoader, TextLayout, TypolError, TypolOptions, opeo::ErrSlot,
+};
 
 const CLI_PATH: &str = env!("CARGO_BIN_EXE_typol");
 
@@ -247,6 +250,46 @@ fn config_format_writes_atomically_and_check_mode_never_changes_the_file()
         fs::read_to_string(&config_path)?,
         unformatted.to_owned(),
         "dirty fmt check must not change the file",
+    )?;
+    fs::remove_file(&schema_path)?;
+    fs::remove_file(&config_path)?;
+    Ok(())
+}
+
+fn pretty_default_config(schema: &str) -> Result<String, Box<dyn Error>> {
+    let mut errors = ErrSlot::<TypolError>::new();
+    let loaded = errors
+        .try_call(|out| {
+            SchemaLoader::new(TypolOptions::default()).compile_text(b"writer", schema, out)
+        })
+        .map_err(|caught| io::Error::other(format!("{:?}", caught.take())))?;
+    let mut errors = ErrSlot::<TypolError>::new();
+    errors
+        .try_call(|out| {
+            loaded.default_config_to_string(
+                DefaultConfigOptions::default().with_layout(TextLayout::Pretty),
+                out,
+            )
+        })
+        .map_err(|caught| io::Error::other(format!("{:?}", caught.take())).into())
+}
+
+#[test]
+fn pretty_writer_output_passes_config_fmt_check_without_rewriting() -> Result<(), Box<dyn Error>> {
+    let schema_path = temp_dir().join(format!("typol-pretty-writer-schema-{}.tschem", id()));
+    let config_path = temp_dir().join(format!("typol-pretty-writer-config-{}.tconf", id()));
+    let schema = "enum Choice { Scalar(u8), Sequence([u8]) } entry struct Root { choice: Choice = .Scalar(1), values: [u8] = [2, 3] }";
+    fs::write(&schema_path, schema)?;
+    let generated = pretty_default_config(schema)?;
+    ensure(generated.ends_with('\n'), "pretty writer must end with LF")?;
+    fs::write(&config_path, &generated)?;
+
+    let check = run_cli(format_arguments(&schema_path, &config_path, true))?;
+    ensure_equal(check.status.code(), Some(0), "pretty writer fmt check")?;
+    ensure_equal(
+        fs::read_to_string(&config_path)?,
+        generated,
+        "fmt check must not rewrite pretty writer output",
     )?;
     fs::remove_file(&schema_path)?;
     fs::remove_file(&config_path)?;

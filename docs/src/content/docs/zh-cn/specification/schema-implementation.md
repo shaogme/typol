@@ -80,7 +80,7 @@ Schema parser 从 `SchemaLimits::syntax()` 读取 `SyntaxLimits`：解析深度�
 
 需要保留原文的工具可调用 `SchemaParser::parse_document`。它返回 `SchemaDocument<'source>`，借用传入的确切 `&str`，并拥有成功解析的语法 AST。该入口不解析导入，也不执行静态语义检查；编译路径仍使用原有流式 `parse`，不会保存完整源文本。
 
-`SchemaFormatter::format` 消费绑定后的文档和 `SchemaFormatOptions`，通过 OPEO 错误槽返回完整的 `FormattedSchema`。它会在分配 formatter token 表之前释放仅用于语法验证的 AST，避免 AST 与 formatter 工作区同时驻留。选项限制输出字节数、formatter 工作区和嵌套深度。Formatter 将完整块字符串视为单一 token，保留原始字节、内部换行、缩进和转义拼写，只统一该 token 外部布局。它保留所有 token 与注释的顺序，统一布局与尾逗号；输入中含 CRLF 时使用 CRLF，否则使用 LF。调用方可用 `FormattedSchema::as_str()` 检查结果，或消费式调用 `write_to()` 写入 `fmt::Write` sink。
+`SchemaFormatter::format` 消费绑定后的文档和 `SchemaFormatOptions`，通过 OPEO 错误槽返回完整的 `FormattedSchema`。它使用 AST span 识别声明、类型、默认值和枚举载荷分隔符，同时保留源 token 与注释。AST 存储、token 容量和 formatter 帧均计入工作区额度；输出字节数和嵌套深度有各自限额。Formatter 将完整块字符串视为单一 token，保留原始字节、内部换行、缩进和转义拼写，只统一该 token 外部布局。它保留所有 token 与注释的顺序，统一布局与尾逗号；输入中含 CRLF 时使用 CRLF，否则使用 LF。调用方可用 `FormattedSchema::as_str()` 检查结果，或消费式调用 `write_to()` 写入 `fmt::Write` sink。
 
 ```rust
 use std::{error::Error, io::Error as IoError};
@@ -257,7 +257,7 @@ Schema 错误由 `SchemaCompileErrors` 以非空集合或不需分配的内联�
 
 文本解析、外来 `ConfigValue` 规范化和 Rust 序列化使用共享的完整树 Schema 校验入口。Rust 值不能跳过字段/集合约束或完整树断言；序列化输出按 Schema 字段顺序和 map 解码键序构造。上下文 serde 方法在绑定后使用同一验证路径；无 Schema 上下文的普通 serde trait 调用不承诺验证实际 `.tschem`。
 
-`BoundSchema::write(value, sink, options, out)` 和受 feature 控制的 `write_serde` 使用 `WriteOptions`；`WriteOptions::default()` 选择紧凑格式，并在调用方未显式覆盖时继承加载 Schema 的转换额度。`with_pretty(true)` 会将非空结构体、map 和数组展开为两空格缩进的多行文本，每行一个条目并带尾逗号；空容器仍保持内联。`TypedSchema::serialize` 和 `serialize_serde` 使用相同选项并写入调用方提供的 sink。格式空白会计入输出和执行额度；编码器仍使用迭代路径。写出前会完成转换和完整 Schema 校验；sink 或输出额度错误可能留下已写入的前缀。输出末尾没有换行，且仍包含 `@secret` 的实际值。
+`BoundSchema::write(value, sink, options, out)` 和受 feature 控制的 `write_serde` 使用 `WriteOptions`；`WriteOptions::default()` 选择 `TextLayout::Compact`，并在调用方未显式覆盖时继承加载 Schema 的转换额度。`with_layout(TextLayout::Pretty)` 会将非空结构体、map 和数组展开为四空格缩进的多行文本，每行一个条目并带尾逗号；单值枚举载荷使用多行分组且不带载荷逗号。空容器仍保持内联。Pretty 输出以 LF 结尾，与 `config fmt` 布局一致；紧凑输出保持单行且无末尾换行。`TypedSchema::serialize` 和 `serialize_serde` 使用相同选项并写入调用方提供的 sink。格式空白会计入输出和执行额度；编码器仍使用迭代路径。写出前会完成转换和完整 Schema 校验；sink 或输出额度错误可能留下已写入的前缀。输出仍包含 `@secret` 的实际值。
 
 ### Serde 桥接支持矩阵
 

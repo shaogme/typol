@@ -50,6 +50,15 @@ struct FormatFrame {
     has_declaration: bool,
 }
 
+struct RenderInput<'source, 'tokens> {
+    source: &'source str,
+    tokens: &'tokens [TokenSpan],
+    token_capacity: usize,
+    ast_bytes: usize,
+    options: SchemaFormatOptions,
+    newline: &'static str,
+}
+
 struct OutputBuffer {
     text: String,
     limit: usize,
@@ -180,8 +189,7 @@ impl SchemaFormatter {
             ast,
             source_limit,
         } = document;
-        drop(ast);
-        match Self::format_source(source, source_limit, options) {
+        match Self::format_source(source, &ast, source_limit, options) {
             Ok(formatted) => Ok(formatted),
             Err(error) => Err(out.fail(error)),
         }
@@ -189,6 +197,7 @@ impl SchemaFormatter {
 
     fn format_source(
         source: &str,
+        ast: &SchemaAst,
         source_limit: usize,
         options: SchemaFormatOptions,
     ) -> Result<FormattedSchema, SchemaFormatError> {
@@ -202,8 +211,18 @@ impl SchemaFormatter {
         } else {
             "\n"
         };
-        let tokens = TokenScanner::scan(source, options)?;
-        let text = render_tokens(source, &tokens, tokens.capacity(), options, newline)?;
+        let tokens = TokenScanner::scan(source, ast, options)?;
+        let ast_bytes = ast
+            .memory_bytes()
+            .ok_or_else(|| SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded))?;
+        let text = render_tokens(RenderInput {
+            source,
+            tokens: &tokens,
+            token_capacity: tokens.capacity(),
+            ast_bytes,
+            options,
+            newline,
+        })?;
         Ok(FormattedSchema { text })
     }
 }
@@ -211,6 +230,7 @@ impl SchemaFormatter {
 fn reserve_format_frame(
     frames: &mut Vec<FormatFrame>,
     token_capacity: usize,
+    ast_bytes: usize,
     options: SchemaFormatOptions,
 ) -> Result<(), SchemaFormatError> {
     let required = frames
@@ -219,6 +239,7 @@ fn reserve_format_frame(
         .ok_or_else(|| SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded))?;
     let token_bytes = token_capacity
         .checked_mul(size_of::<TokenSpan>())
+        .and_then(|bytes| bytes.checked_add(ast_bytes))
         .ok_or_else(|| SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded))?;
     let available_bytes = options
         .max_workspace_bytes()
@@ -344,13 +365,15 @@ impl OutputBuffer {
     }
 }
 
-fn render_tokens(
-    source: &str,
-    tokens: &[TokenSpan],
-    token_capacity: usize,
-    options: SchemaFormatOptions,
-    newline: &'static str,
-) -> Result<String, SchemaFormatError> {
+fn render_tokens(input: RenderInput<'_, '_>) -> Result<String, SchemaFormatError> {
+    let RenderInput {
+        source,
+        tokens,
+        token_capacity,
+        ast_bytes,
+        options,
+        newline,
+    } = input;
     let mut output = OutputBuffer::new(options.max_output_bytes(), newline);
     let mut frames = Vec::<FormatFrame>::new();
     let mut root_has_declaration = false;
@@ -430,7 +453,7 @@ fn render_tokens(
                         SchemaFormatErrorKind::ResourceLimitExceeded,
                     ));
                 }
-                reserve_format_frame(&mut frames, token_capacity, options)?;
+                reserve_format_frame(&mut frames, token_capacity, ast_bytes, options)?;
                 frames.push(FormatFrame {
                     container: token.container,
                     has_declaration: false,
@@ -722,7 +745,10 @@ fn indent_level(frames: &[FormatFrame]) -> usize {
 fn is_expanded(container: ContainerKind) -> bool {
     matches!(
         container,
-        ContainerKind::ModuleBody | ContainerKind::BraceList | ContainerKind::ArrayList
+        ContainerKind::ModuleBody
+            | ContainerKind::BraceList
+            | ContainerKind::ArrayList
+            | ContainerKind::EnumPayload
     )
 }
 

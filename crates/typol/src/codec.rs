@@ -17,8 +17,8 @@ use typol_config::{
     ConfigValueProcessor, Environment, ValidatedConfigValue,
 };
 use typol_core::{
-    ChargedVec, ConfigValue, ConfigValueBuilder, DiagnosticContext, Read, ValueEntries, ValueKind,
-    ValuePayloadView, ValueSource, ValueView, Write, diagnostic_context,
+    ChargedVec, ConfigValue, ConfigValueBuilder, DiagnosticContext, Read, TextLayout, ValueEntries,
+    ValueKind, ValuePayloadView, ValueSource, ValueView, Write, diagnostic_context,
 };
 use typol_semantic::{CompiledSchema, FieldList, TypeKind, TypeView, VariantPayloadInfo};
 
@@ -171,7 +171,7 @@ impl ValidatedValue<'_, '_> {
     pub(crate) fn encode<'slot>(
         &mut self,
         output: &mut dyn Write,
-        pretty: bool,
+        layout: TextLayout,
         mut out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, ()> {
         let entry = self.schema.entry();
@@ -189,7 +189,7 @@ impl ValidatedValue<'_, '_> {
             self.session,
             EncoderOutput {
                 sink: output,
-                pretty,
+                layout,
             },
             out.reborrow(),
         )

@@ -9,7 +9,8 @@ use std::{collections::HashMap, fmt::Debug, io::Cursor, marker::PhantomData, ptr
 use typol::{
     ConfigParseOptions, ConfigParser, ConfigValue, ConfigValueProcessor, DefaultConfigOptions,
     EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext, LoadedSchema,
-    SchemaLoader, Sourced, Typol, TypolOptions, TypolStage, ValidatedConfigValue, WriteOptions,
+    SchemaLoader, Sourced, TextLayout, Typol, TypolOptions, TypolStage, ValidatedConfigValue,
+    WriteOptions,
     binding::{
         BindOptions, BindingLimitError, BindingLimits, BindingMismatchKind, BindingShape,
         BudgetedTypol, CodecStage, ConversionLimits, MAX_CONVERSION_DEPTH, TypedSchema,
@@ -164,8 +165,7 @@ struct Root {
 
 #[test]
 fn pretty_codec_options_are_opt_in_for_typed_serialization() -> TestResult {
-    assert!(!WriteOptions::default().pretty());
-    assert!(!WriteOptions::default().pretty());
+    assert_eq!(WriteOptions::default().layout(), TextLayout::Compact);
     let schema = compile("entry struct Root { value: u8 }")?;
     let binding =
         TestOpeo::value(|out| TypedSchema::<Root>::bind(&schema, BindOptions::default(), out))?;
@@ -181,11 +181,11 @@ fn pretty_codec_options_are_opt_in_for_typed_serialization() -> TestResult {
         TestOpeo::value(|out| {
             binding.serialize_to_string(
                 &Root { value: 7 },
-                WriteOptions::default().with_pretty(true),
+                WriteOptions::default().with_layout(TextLayout::Pretty),
                 out,
             )
         })?,
-        "{\n  value: 7,\n}"
+        "{\n    value: 7,\n}\n"
     );
     Ok(())
 }
@@ -719,10 +719,13 @@ fn loaded_schema_generates_defaults_without_a_rust_binding() -> TestResult {
     );
 
     let pretty = TestOpeo::value(|out| {
-        loaded.default_config_to_string(DefaultConfigOptions::default().with_pretty(true), out)
+        loaded.default_config_to_string(
+            DefaultConfigOptions::default().with_layout(TextLayout::Pretty),
+            out,
+        )
     })?;
-    assert!(pretty.starts_with("{\n  port: 8080,"));
-    assert!(!pretty.ends_with('\n'));
+    assert!(pretty.starts_with("{\n    port: 8080,"));
+    assert!(pretty.ends_with('\n'));
 
     let mut environment = EmptyEnvironment;
     let reread = TestOpeo::value(|out| {

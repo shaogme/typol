@@ -159,7 +159,9 @@ fn formatter_expands_containers_and_preserves_source_expressions_and_order() -> 
             "        \"b\": 2,\n",
             "        \"a\": 1,\n",
             "    },\n",
-            "    mode: .Named(\"x, //\"),\n",
+            "    mode: .Named(\n",
+            "        \"x, //\"\n",
+            "    ),\n",
             "    details: .Details {\n",
             "        name: \"owner\",\n",
             "    },\n",
@@ -173,6 +175,164 @@ fn formatter_expands_containers_and_preserves_source_expressions_and_order() -> 
     })?);
     test_eq!(
         format_document(&formatted_document, ConfigFormatOptions::default())?,
+        formatted
+    );
+    Ok(())
+}
+
+#[test]
+fn formatter_groups_single_enum_payloads_and_keeps_env_calls_compact() -> TestResult<()> {
+    let schema = compile(
+        r#"
+        enum Child { Scalar(u8) }
+        enum Choice {
+            Scalar(u8),
+            Array([u8]),
+            Mapping(map<string, u8>),
+            Object { child: Child, },
+            Nested(Child),
+            Unit,
+        }
+        entry struct Root {
+            choices: [Choice],
+            configured: u8 @env("PORT"),
+        }
+        "#,
+    )?;
+    let source = r#"{choices:[.Scalar/* between variant and payload */(1),.Array([2,3]),.Mapping({"b":4,"a":5}),.Object{child:.Scalar(6)},.Nested(.Scalar(7)),.Unit],configured:env("PORT",8)}"#;
+    let document = parse_document(&schema, source)?;
+    let formatted = format_document(&document, ConfigFormatOptions::default())?;
+    test_eq!(
+        formatted,
+        concat!(
+            "{\n",
+            "    choices: [\n",
+            "        .Scalar /* between variant and payload */ (\n",
+            "            1\n",
+            "        ),\n",
+            "        .Array(\n",
+            "            [\n",
+            "                2,\n",
+            "                3,\n",
+            "            ]\n",
+            "        ),\n",
+            "        .Mapping(\n",
+            "            {\n",
+            "                \"b\": 4,\n",
+            "                \"a\": 5,\n",
+            "            }\n",
+            "        ),\n",
+            "        .Object {\n",
+            "            child: .Scalar(\n",
+            "                6\n",
+            "            ),\n",
+            "        },\n",
+            "        .Nested(\n",
+            "            .Scalar(\n",
+            "                7\n",
+            "            )\n",
+            "        ),\n",
+            "        .Unit,\n",
+            "    ],\n",
+            "    configured: env(\"PORT\", 8),\n",
+            "}\n"
+        )
+    );
+    let formatted_document = parse_document(&schema, &formatted)?;
+    test_assert!(TestOpeo::value(|out| {
+        ConfigFormatter::is_formatted(&formatted_document, ConfigFormatOptions::default(), out)
+    })?);
+    test_eq!(
+        format_document(&formatted_document, ConfigFormatOptions::default())?,
+        formatted
+    );
+    Ok(())
+}
+
+#[test]
+fn formatter_recognizes_enum_variants_separated_from_the_dot() -> TestResult<()> {
+    let schema = compile("enum Choice { Scalar(u8) } entry struct Root { choices: [Choice] }")?;
+    let source = "{choices:[. Scalar(1),. /* between dot and variant */ Scalar(2)]}";
+    let document = parse_document(&schema, source)?;
+    let formatted = format_document(&document, ConfigFormatOptions::default())?;
+    test_assert!(!TestOpeo::value(|out| {
+        ConfigFormatter::is_formatted(&document, ConfigFormatOptions::default(), out)
+    })?);
+    test_eq!(
+        formatted,
+        concat!(
+            "{\n",
+            "    choices: [\n",
+            "        . Scalar(\n",
+            "            1\n",
+            "        ),\n",
+            "        . /* between dot and variant */ Scalar(\n",
+            "            2\n",
+            "        ),\n",
+            "    ],\n",
+            "}\n"
+        )
+    );
+    let formatted_document = parse_document(&schema, &formatted)?;
+    test_assert!(TestOpeo::value(|out| {
+        ConfigFormatter::is_formatted(&formatted_document, ConfigFormatOptions::default(), out)
+    })?);
+    Ok(())
+}
+
+#[test]
+fn formatter_removes_space_before_enum_payload_close_after_block_comment() -> TestResult<()> {
+    let schema = compile("enum Choice { Scalar(u8) } entry struct Root { choice: Choice }")?;
+    let document = parse_document(&schema, "{choice:.Scalar(1 /*note*/)}")?;
+    let formatted = format_document(&document, ConfigFormatOptions::default())?;
+    test_eq!(
+        formatted,
+        concat!(
+            "{\n",
+            "    choice: .Scalar(\n",
+            "        1 /*note*/\n",
+            "    ),\n",
+            "}\n"
+        )
+    );
+    let trailing_space = parse_document(
+        &schema,
+        "{\n    choice: .Scalar(\n        1 /*note*/ \n    ),\n}\n",
+    )?;
+    test_assert!(!TestOpeo::value(|out| {
+        ConfigFormatter::is_formatted(&trailing_space, ConfigFormatOptions::default(), out)
+    })?);
+    let formatted_document = parse_document(&schema, &formatted)?;
+    test_assert!(TestOpeo::value(|out| {
+        ConfigFormatter::is_formatted(&formatted_document, ConfigFormatOptions::default(), out)
+    })?);
+    Ok(())
+}
+
+#[test]
+fn formatter_expands_comment_only_empty_containers_without_commas() -> TestResult<()> {
+    let schema = compile("entry struct Root { values: [u8], mapping: map<string, u8> }")?;
+    let document = parse_document(
+        &schema,
+        "{values:[/* empty array */],mapping:{/* empty map */}}",
+    )?;
+    let formatted = format_document(&document, ConfigFormatOptions::default())?;
+    test_eq!(
+        formatted,
+        concat!(
+            "{\n",
+            "    values: [\n",
+            "        /* empty array */\n",
+            "    ],\n",
+            "    mapping: {\n",
+            "        /* empty map */\n",
+            "    },\n",
+            "}\n"
+        )
+    );
+    let reparsed = parse_document(&schema, &formatted)?;
+    test_eq!(
+        format_document(&reparsed, ConfigFormatOptions::default())?,
         formatted
     );
     Ok(())

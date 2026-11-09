@@ -171,7 +171,7 @@ pub use typol_config::{
 };
 pub use typol_core::{
     ConfigValue, ExecutionBudget, ExecutionLimits, Read, SliceSource, SourceCommitError,
-    SourceExpectation, SourceRevision, SourceWriter,
+    SourceExpectation, SourceRevision, SourceWriter, TextLayout,
 };
 
 pub use api::{binding, config, core, model, policy, schema, semantic};

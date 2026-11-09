@@ -1,6 +1,6 @@
 use core::{error::Error, fmt};
 use typol_config::{ConfigLimits, ConfigParseOptions, ConfigValidationOptions};
-use typol_core::ExecutionLimits;
+use typol_core::{ExecutionLimits, TextLayout};
 use typol_schema::SchemaCompileOptions;
 
 #[cfg(feature = "std")]
@@ -144,7 +144,7 @@ impl Default for ConversionLimits {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DefaultConfigOptions {
     max_output_bytes: usize,
-    pretty: bool,
+    layout: TextLayout,
     reject_secret_values: bool,
 }
 
@@ -153,7 +153,7 @@ impl DefaultConfigOptions {
     pub const fn new(max_output_bytes: usize) -> Self {
         Self {
             max_output_bytes,
-            pretty: false,
+            layout: TextLayout::Compact,
             reject_secret_values: false,
         }
     }
@@ -162,8 +162,8 @@ impl DefaultConfigOptions {
         self.max_output_bytes
     }
 
-    pub const fn pretty(self) -> bool {
-        self.pretty
+    pub const fn layout(self) -> TextLayout {
+        self.layout
     }
 
     pub const fn reject_secret_values(self) -> bool {
@@ -175,9 +175,9 @@ impl DefaultConfigOptions {
         self
     }
 
-    /// Selects compact or multi-line output with two-space indentation.
-    pub const fn with_pretty(mut self, pretty: bool) -> Self {
-        self.pretty = pretty;
+    /// Selects compact or multi-line output.
+    pub const fn with_layout(mut self, layout: TextLayout) -> Self {
+        self.layout = layout;
         self
     }
 
@@ -349,7 +349,7 @@ pub struct WriteOptions {
     max_output_bytes: usize,
     conversion: ConversionLimits,
     conversion_overridden: bool,
-    pretty: bool,
+    layout: TextLayout,
 }
 
 impl WriteOptions {
@@ -364,7 +364,7 @@ impl WriteOptions {
                 depth: MAX_CONVERSION_DEPTH,
             },
             conversion_overridden: false,
-            pretty: false,
+            layout: TextLayout::Compact,
         }
     }
 
@@ -385,9 +385,9 @@ impl WriteOptions {
         self.conversion
     }
 
-    /// Returns whether the writer uses multi-line output with two-space indentation.
-    pub const fn pretty(self) -> bool {
-        self.pretty
+    /// Returns the selected text layout.
+    pub const fn layout(self) -> TextLayout {
+        self.layout
     }
 
     pub const fn with_conversion_limits(mut self, conversion: ConversionLimits) -> Self {
@@ -412,8 +412,8 @@ impl WriteOptions {
     }
 
     /// Selects compact or multi-line configuration text output.
-    pub const fn with_pretty(mut self, pretty: bool) -> Self {
-        self.pretty = pretty;
+    pub const fn with_layout(mut self, layout: TextLayout) -> Self {
+        self.layout = layout;
         self
     }
 

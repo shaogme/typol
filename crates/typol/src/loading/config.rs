@@ -278,7 +278,7 @@ impl LoadedSchema {
                     Failure::SecretOutput,
                 )));
             }
-            value.encode(output, options.pretty(), codec_out.reborrow())
+            value.encode(output, options.layout(), codec_out.reborrow())
         });
         match result {
             Ok(()) => Ok(()),

@@ -52,7 +52,7 @@ let second = binding.read_file(
 
 ```rust
 let text = loaded.default_config_to_string(
-    DefaultConfigOptions::default().with_pretty(true),
+    DefaultConfigOptions::default().with_layout(TextLayout::Pretty),
     out.reborrow(),
 )?;
 ```
@@ -306,12 +306,14 @@ let mut text = String::new();
 binding.write(
     &config,
     &mut text,
-    WriteOptions::default().with_pretty(true),
+    WriteOptions::default().with_layout(TextLayout::Pretty),
     out,
 )?;
 ```
 
-默认输出是紧凑格式；pretty 格式使用两空格缩进。写入器不会追加结尾换行，格式空白也计入输出额度。首字节写入前会完成校验和转换；sink 或输出额度失败时可能留下已写入的前缀。标记为 `@secret` 的值仍会写入输出。
+默认输出是紧凑格式；pretty 格式使用四空格缩进，将单值枚举载荷拆成多行，并以 LF 结尾。布局与 `config fmt` 一致，因此 pretty writer 输出可直接通过 `config fmt --check`。格式空白也计入输出额度。首字节写入前会完成校验和转换；sink 或输出额度失败时可能留下已写入的前缀。标记为 `@secret` 的值仍会写入输出。
+
+`TextLayout` 替代原来的 pretty 布尔选项。将 `WriteOptions::with_pretty(true)` 和 `DefaultConfigOptions::with_pretty(true)` 迁移为 `.with_layout(TextLayout::Pretty)`；使用 `.layout()` 可检查当前模式。此 API 变更还将 pretty 缩进从两空格改为四空格、添加末尾 LF，并展开单值枚举载荷括号。
 
 需要缓冲为 `String` 时使用 `write_to_string`。启用 `serde` 后，`write_serde` 使用同一组选项。
 

@@ -501,8 +501,8 @@ fn loaded_serde() {
     let loaded = invoke(|out| SchemaLoader::new(TypolOptions::default()).compile_file(Path::new("loading.tschem"), out));
     let bound = invoke(|out| loaded.bind::<Scalar>(out));
     let value = Scalar { value: 3 };
-    let write_options = WriteOptions::default().with_pretty(true);
-    let expected = "{\n  value: 3,\n}";
+    let write_options = WriteOptions::default().with_layout(TextLayout::Pretty);
+    let expected = "{\n    value: 3,\n}\n";
     assert_eq!(
         invoke(|out| bound.write_to_string(&value, write_options, out)),
         expected

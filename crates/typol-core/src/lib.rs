@@ -51,6 +51,16 @@ pub use value::{
 };
 pub use workspace::WorkspaceVec as ChargedVec;
 
+/// Selects compact or multi-line configuration text layout.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TextLayout {
+    /// Writes values on one line without a final newline.
+    #[default]
+    Compact,
+    /// Writes compound values with four-space indentation and a final LF.
+    Pretty,
+}
+
 /// The target state required before an atomic source replacement.
 pub enum SourceExpectation<'snapshot> {
     /// Require exact byte equality with the supplied prior version.

@@ -52,7 +52,7 @@ In particular, `BoundSchema::read_file` returns the typed Rust value. `LoadedSch
 
 ```rust
 let text = loaded.default_config_to_string(
-    DefaultConfigOptions::default().with_pretty(true),
+    DefaultConfigOptions::default().with_layout(TextLayout::Pretty),
     out.reborrow(),
 )?;
 ```
@@ -299,19 +299,21 @@ Writing a document back is a separate source operation. The standard filesystem 
 
 ## Write a typed Rust value
 
-A bound schema validates the complete value against the Schema before serializing it. Import `WriteOptions` with `use typol::WriteOptions;`. The method call order is `write(&value, sink, options, out)`; `WriteOptions` comes after the output sink:
+A bound schema validates the complete value against the Schema before serializing it. Import `WriteOptions` and `TextLayout` from `typol`. The method call order is `write(&value, sink, options, out)`; `WriteOptions` comes after the output sink:
 
 ```rust
 let mut text = String::new();
 binding.write(
     &config,
     &mut text,
-    WriteOptions::default().with_pretty(true),
+    WriteOptions::default().with_layout(TextLayout::Pretty),
     out,
 )?;
 ```
 
-Pretty output uses two-space indentation; default output is compact. The writer adds no final newline, and formatting whitespace counts toward the output limit. Validation and conversion finish before the first byte is written. A sink or output-limit error can leave an already-written prefix. Values marked `@secret` are still included in the output.
+Pretty output uses four-space indentation, groups single-value enum payloads across lines, and ends with LF; default output is compact. The layout matches `config fmt`, so pretty writer output can pass `config fmt --check` directly. Formatting whitespace counts toward the output limit. Validation and conversion finish before the first byte is written. A sink or output-limit error can leave an already-written prefix. Values marked `@secret` are still included in the output.
+
+`TextLayout` replaces the former pretty boolean option. Migrate `WriteOptions::with_pretty(true)` and `DefaultConfigOptions::with_pretty(true)` to `.with_layout(TextLayout::Pretty)`; use `.layout()` to inspect the selected mode. This API change also changes pretty indentation from two to four spaces, adds a final LF, and expands single-value enum payload parentheses.
 
 Use `write_to_string` when a buffered `String` is useful. The `write_serde` methods use the same options when the `serde` feature is enabled.
 

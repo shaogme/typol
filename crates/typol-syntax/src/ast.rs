@@ -16,6 +16,7 @@ pub use annotation::{
 use core::{
     error::Error,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
+    mem,
 };
 pub use declaration::{
     Declaration, EnumDecl, ExternModDecl, FieldDecl, ModuleDecl, SingleVariantPayload, StructDecl,
@@ -142,6 +143,14 @@ impl SchemaAst {
     /// The number of arena nodes actually inserted; text, edge tables, and file roots are not counted.
     pub fn node_count(&self) -> usize {
         self.storage.node_count()
+    }
+
+    pub(crate) fn memory_bytes(&self) -> Option<usize> {
+        self.storage.memory_bytes()?.checked_add(
+            self.items
+                .capacity()
+                .checked_mul(mem::size_of::<StoredTopLevelItem>())?,
+        )
     }
 
     /// File roots and lists are transparent containers; leaf nodes have height 0, and each parent-child edge adds 1.

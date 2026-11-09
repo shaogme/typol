@@ -287,7 +287,7 @@ impl<T: Typol> BoundSchema<'_, T> {
 
     /// Converts and validates `value`, then writes configuration text using `options`.
     ///
-    /// Pretty output uses two-space indentation and no final newline. The text retains actual
+    /// Pretty output uses four-space indentation and ends with a newline. The text retains actual
     /// values for fields marked `@secret`; treat it as sensitive.
     pub fn write_to_string<'slot>(
         &self,
@@ -313,7 +313,7 @@ impl<T: Typol> BoundSchema<'_, T> {
             .with_conversion_limits(
                 options.conversion_limits_or(self.loaded.options().conversion()),
             )
-            .with_pretty(options.pretty());
+            .with_layout(options.layout());
         let mut codec_errors = ErrSlot::new();
         let result = codec_errors
             .try_call(|codec_out| self.binding.serialize(value, output, options, codec_out));
@@ -404,7 +404,7 @@ impl<T: Typol> BoundSchema<'_, T> {
 
     /// Converts and validates Serde data, then writes configuration text using `options`.
     ///
-    /// Pretty output uses two-space indentation and no final newline. The text retains actual
+    /// Pretty output uses four-space indentation and ends with a newline. The text retains actual
     /// values for fields marked `@secret`; treat it as sensitive.
     #[cfg(feature = "serde")]
     pub fn write_serde_to_string<'slot>(
@@ -438,7 +438,7 @@ impl<T: Typol> BoundSchema<'_, T> {
             .with_conversion_limits(
                 options.conversion_limits_or(self.loaded.options().conversion()),
             )
-            .with_pretty(options.pretty());
+            .with_layout(options.layout());
         let mut codec_errors = ErrSlot::new();
         let result = codec_errors.try_call(|codec_out| {
             self.binding

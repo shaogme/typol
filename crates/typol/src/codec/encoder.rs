@@ -6,10 +6,11 @@ use crate::{
         EnumPayloadValue, FieldIndexError, NAMED_ENTRY_NAME_MISSING, ValueNode, ValueNodeKind,
     },
 };
+use core::fmt::LowerExp;
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
-    ChargedVec, ConfigValue, DiagnosticContext, EnvironmentReference, ValueEntries, ValueEntryView,
-    ValueScalar, ValueSource, ValueView, Write, WriteError, diagnostic_context,
+    ChargedVec, ConfigValue, DiagnosticContext, EnvironmentReference, TextLayout, ValueEntries,
+    ValueEntryView, ValueScalar, ValueSource, ValueView, Write, WriteError, diagnostic_context,
 };
 use typol_semantic::{FieldList, TypeView};
 
@@ -51,17 +52,20 @@ enum Frame<'schema, 'value> {
         next: usize,
         indent: usize,
     },
+    EnumPayloadEnd {
+        indent: usize,
+    },
 }
 
 pub(super) struct Encoder<'call> {
     session: &'call mut SessionBudget,
     output: &'call mut dyn Write,
-    pretty: bool,
+    layout: TextLayout,
 }
 
 pub(super) struct EncoderOutput<'output> {
     pub(super) sink: &'output mut dyn Write,
-    pub(super) pretty: bool,
+    pub(super) layout: TextLayout,
 }
 
 impl<'call> Encoder<'call> {
@@ -84,7 +88,7 @@ impl<'call> Encoder<'call> {
         let mut encoder = Self {
             session,
             output: output.sink,
-            pretty: output.pretty,
+            layout: output.layout,
         };
         push(
             encoder.session,
@@ -103,6 +107,9 @@ impl<'call> Encoder<'call> {
                 out.reborrow(),
             )?;
             encoder.frame(frame, &mut frames, out.reborrow())?;
+        }
+        if encoder.layout == TextLayout::Pretty {
+            encoder.write("\n", out.reborrow())?;
         }
         drop(frames);
         Ok(())
@@ -131,8 +138,16 @@ impl<'call> Encoder<'call> {
             self.write(",", out.reborrow())?;
         }
         self.write("\n", out.reborrow())?;
+        self.indent(indent, out.reborrow())
+    }
+
+    fn indent<'slot>(
+        &mut self,
+        indent: usize,
+        mut out: Out<'slot, '_, CodecErrors>,
+    ) -> OResult<'slot, ()> {
         for _ in 0..indent {
-            self.write("  ", out.reborrow())?;
+            self.write("    ", out.reborrow())?;
         }
         Ok(())
     }
@@ -173,6 +188,30 @@ impl<'call> Encoder<'call> {
             out.reborrow(),
         )?;
         self.write(text, out.reborrow())
+    }
+
+    fn float<'slot>(
+        &mut self,
+        value: impl LowerExp,
+        mut out: Out<'slot, '_, CodecErrors>,
+    ) -> OResult<'slot, ()> {
+        let literal = Literal::float(
+            value,
+            |length, mut check_out| {
+                self.session.budget_codec(
+                    CodecStage::Encoding,
+                    |budget_out| self.session.check_output(length, budget_out),
+                    check_out.reborrow(),
+                )?;
+                self.session.budget_codec(
+                    CodecStage::Encoding,
+                    |budget_out| self.session.execution().consume(length, budget_out),
+                    check_out.reborrow(),
+                )
+            },
+            out.reborrow(),
+        )?;
+        self.number(literal, out.reborrow())
     }
 
     fn environment_reference<'slot>(
@@ -320,6 +359,10 @@ impl<'call> Encoder<'call> {
     ) -> OResult<'slot, ()> {
         match frame {
             Frame::Text(text) => self.write(text, out.reborrow()),
+            Frame::EnumPayloadEnd { indent } => {
+                self.line_indent(indent, false, out.reborrow())?;
+                self.write(")", out.reborrow())
+            }
             Frame::Value(input) => self.value(input, frames, out.reborrow()),
             Frame::Fields {
                 fields,
@@ -329,12 +372,12 @@ impl<'call> Encoder<'call> {
                 indent,
             } => {
                 let Some(field) = fields.get(next) else {
-                    if self.pretty && next > 0 {
+                    if self.layout == TextLayout::Pretty && next > 0 {
                         self.line_indent(indent, true, out.reborrow())?;
                     }
                     return self.write("}", out.reborrow());
                 };
-                if self.pretty {
+                if self.layout == TextLayout::Pretty {
                     self.line_indent(indent.saturating_add(1), next > 0, out.reborrow())?;
                 } else if next > 0 {
                     self.write(", ", out.reborrow())?;
@@ -391,12 +434,12 @@ impl<'call> Encoder<'call> {
                 indent,
             } => {
                 let Some(value) = values.get(next).map(ValueEntryView::value) else {
-                    if self.pretty && next > 0 {
+                    if self.layout == TextLayout::Pretty && next > 0 {
                         self.line_indent(indent, true, out.reborrow())?;
                     }
                     return self.write("]", out.reborrow());
                 };
-                if self.pretty {
+                if self.layout == TextLayout::Pretty {
                     self.line_indent(indent.saturating_add(1), next > 0, out.reborrow())?;
                 } else if next > 0 {
                     self.write(", ", out.reborrow())?;
@@ -431,7 +474,7 @@ impl<'call> Encoder<'call> {
                 indent,
             } => {
                 let Some(slot) = slots.get(next) else {
-                    if self.pretty && next > 0 {
+                    if self.layout == TextLayout::Pretty && next > 0 {
                         self.line_indent(indent, true, out.reborrow())?;
                     }
                     return self.write("}", out.reborrow());
@@ -447,7 +490,7 @@ impl<'call> Encoder<'call> {
                 };
                 let name = entry.name();
                 let value = entry.value();
-                if self.pretty {
+                if self.layout == TextLayout::Pretty {
                     self.line_indent(indent.saturating_add(1), next > 0, out.reborrow())?;
                 } else if next > 0 {
                     self.write(", ", out.reborrow())?;
@@ -506,51 +549,13 @@ impl<'call> Encoder<'call> {
         }
         match node {
             ValueNodeKind::Signed { value, .. } => {
-                let literal = Literal::number(value, out.reborrow())?;
-                self.number(literal, out.reborrow())
+                self.number(Literal::number(value, out.reborrow())?, out.reborrow())
             }
             ValueNodeKind::Unsigned { value, .. } => {
-                let literal = Literal::number(value, out.reborrow())?;
-                self.number(literal, out.reborrow())
+                self.number(Literal::number(value, out.reborrow())?, out.reborrow())
             }
-            ValueNodeKind::Float32(value) if value.is_finite() => {
-                let literal = Literal::float(
-                    value,
-                    |length, mut check_out| {
-                        self.session.budget_codec(
-                            CodecStage::Encoding,
-                            |budget_out| self.session.check_output(length, budget_out),
-                            check_out.reborrow(),
-                        )?;
-                        self.session.budget_codec(
-                            CodecStage::Encoding,
-                            |budget_out| self.session.execution().consume(length, budget_out),
-                            check_out.reborrow(),
-                        )
-                    },
-                    out.reborrow(),
-                )?;
-                self.number(literal, out.reborrow())
-            }
-            ValueNodeKind::Float64(value) if value.is_finite() => {
-                let literal = Literal::float(
-                    value,
-                    |length, mut check_out| {
-                        self.session.budget_codec(
-                            CodecStage::Encoding,
-                            |budget_out| self.session.check_output(length, budget_out),
-                            check_out.reborrow(),
-                        )?;
-                        self.session.budget_codec(
-                            CodecStage::Encoding,
-                            |budget_out| self.session.execution().consume(length, budget_out),
-                            check_out.reborrow(),
-                        )
-                    },
-                    out.reborrow(),
-                )?;
-                self.number(literal, out.reborrow())
-            }
+            ValueNodeKind::Float32(value) if value.is_finite() => self.float(value, out.reborrow()),
+            ValueNodeKind::Float64(value) if value.is_finite() => self.float(value, out.reborrow()),
             ValueNodeKind::Bool(value) => {
                 self.write(if value { "true" } else { "false" }, out.reborrow())
             }
@@ -720,11 +725,29 @@ impl<'call> Encoder<'call> {
                     EnumPayloadValue::Unit => Ok(()),
                     EnumPayloadValue::Single { ty, value } => {
                         self.write("(", out.reborrow())?;
-                        push(self.session, frames, Frame::Text(")"), out.reborrow())?;
+                        if self.layout == TextLayout::Pretty {
+                            self.line_indent(indent.saturating_add(1), false, out.reborrow())?;
+                            push(
+                                self.session,
+                                frames,
+                                Frame::EnumPayloadEnd { indent },
+                                out.reborrow(),
+                            )?;
+                        } else {
+                            push(self.session, frames, Frame::Text(")"), out.reborrow())?;
+                        }
                         push(
                             self.session,
                             frames,
-                            Frame::Value(ValueInput { ty, value, indent }),
+                            Frame::Value(ValueInput {
+                                ty,
+                                value,
+                                indent: if self.layout == TextLayout::Pretty {
+                                    indent.saturating_add(1)
+                                } else {
+                                    indent
+                                },
+                            }),
                             out.reborrow(),
                         )
                     }

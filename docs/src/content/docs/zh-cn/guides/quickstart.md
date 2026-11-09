@@ -147,7 +147,8 @@ impl ServiceConfig {
 use std::{path::Path, process::ExitCode};
 
 use typol::{
-    DefaultConfigOptions, EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
+    DefaultConfigOptions, EmptyEnvironment, SchemaLoader, TextLayout, Typol, TypolError,
+    TypolOptions,
     opeo::ErrSlot,
 };
 
@@ -222,7 +223,7 @@ cargo run
 
 ```rust
 let defaults = loaded.default_config_to_string(
-    DefaultConfigOptions::default().with_pretty(true),
+    DefaultConfigOptions::default().with_layout(TextLayout::Pretty),
     out.reborrow(),
 )?;
 ```

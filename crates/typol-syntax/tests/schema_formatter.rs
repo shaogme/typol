@@ -111,6 +111,25 @@ fn expands_declarations_values_and_lists_with_trailing_commas() -> Result<(), Bo
 }
 
 #[test]
+fn formats_many_ast_container_spans() -> Result<(), Box<dyn Error>> {
+    let fields = (0..512)
+        .map(|index| format!("field{index}: [u8] = [1, 2],"))
+        .collect::<String>();
+    let source = format!("entry struct Root {{{fields}}}");
+    let actual = format(&source)?;
+    ensure_equal(
+        actual.matches(" = [\n").count(),
+        512,
+        "large schema array default count",
+    )?;
+    ensure_equal(
+        format(&actual)?,
+        actual,
+        "large schema formatter idempotence",
+    )
+}
+
+#[test]
 fn expands_arrays_nested_in_map_defaults() -> Result<(), Box<dyn Error>> {
     let source = "entry struct Root { settings: map<string, map<string, [u8]>> = {\"outer\": {\"inner\": [1, 2]}}, }";
     let actual = format(source)?;
@@ -132,6 +151,75 @@ fn expands_arrays_nested_in_map_defaults() -> Result<(), Box<dyn Error>> {
         "nested map default layout",
     )?;
     ensure_equal(format(&actual)?, actual, "nested map default idempotence")?;
+    Ok(())
+}
+
+#[test]
+fn formats_single_enum_defaults_as_recursive_groups_without_commas() -> Result<(), Box<dyn Error>> {
+    let source = "enum Choice { Unit, Scalar(u8), Numbers([u8]), Object { values: map<string, u8>, }, Nested(Choice), } entry struct Root { scalar: Choice = .Scalar(1), numbers: Choice = .Numbers([1, 2]), object: Choice = .Object { values: { key: 3 } }, nested: Choice = .Nested(.Scalar(4)), }";
+    let actual = format(source)?;
+    let expected = concat!(
+        "enum Choice {\n",
+        "    Unit,\n",
+        "    Scalar(u8),\n",
+        "    Numbers([u8]),\n",
+        "    Object {\n",
+        "        values: map<string, u8>,\n",
+        "    },\n",
+        "    Nested(Choice),\n",
+        "}\n\n",
+        "entry struct Root {\n",
+        "    scalar: Choice = .Scalar(\n",
+        "        1\n",
+        "    ),\n",
+        "    numbers: Choice = .Numbers(\n",
+        "        [\n",
+        "            1,\n",
+        "            2,\n",
+        "        ]\n",
+        "    ),\n",
+        "    object: Choice = .Object {\n",
+        "        values: {\n",
+        "            key: 3,\n",
+        "        },\n",
+        "    },\n",
+        "    nested: Choice = .Nested(\n",
+        "        .Scalar(\n",
+        "            4\n",
+        "        )\n",
+        "    ),\n",
+        "}\n"
+    );
+    ensure_equal(actual.clone(), expected.to_owned(), "enum payload layout")?;
+    ensure_equal(
+        format(&actual)?,
+        actual,
+        "enum payload formatter idempotence",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn comment_only_schema_containers_expand_without_inventing_commas() -> Result<(), Box<dyn Error>> {
+    let source = "struct Empty { /* fields */ } entry struct Root { values: [u8] = [/* array */], mapping: map<string, u8> = {/* object */}, }";
+    let actual = format(source)?;
+    ensure(
+        actual.contains("struct Empty {\n    /* fields */\n}"),
+        "comment-only declarations should expand without a comma",
+    )?;
+    ensure(
+        actual.contains("values: [u8] = [\n        /* array */\n    ],"),
+        "comment-only arrays should expand without a leading comma",
+    )?;
+    ensure(
+        actual.contains("mapping: map<string, u8> = {\n        /* object */\n    },"),
+        "comment-only objects should expand without a leading comma",
+    )?;
+    ensure_equal(
+        format(&actual)?,
+        actual,
+        "comment-only formatter idempotence",
+    )?;
     Ok(())
 }
 

@@ -88,7 +88,7 @@ cargo run -p typol-cli -- config fmt \
   examples/cli/cli_demo.tconf
 ```
 
-`config fmt` validates the file with its Schema, then atomically writes the canonical layout back to the same file. Nonempty arrays and objects are expanded with four spaces per nesting level. Source values, comments, and entry order are preserved; resolved environment values and omitted Schema defaults are not written into the file. Add `--check` to compare formatted output with the source without retaining a complete formatted copy or changing the file; that check exits with status `1` when the file needs formatting.
+`config fmt` validates the file with its Schema, then atomically writes the canonical layout back to the same file. Nonempty arrays and objects are expanded with four spaces per nesting level; single-value enum payloads use multiline parentheses without a payload comma. Source values, comments, and entry order are preserved; resolved environment values and omitted Schema defaults are not written into the file. This layout matches `TextLayout::Pretty` output from the Rust writer APIs. Add `--check` to compare formatted output with the source without retaining a complete formatted copy or changing the file; that check exits with status `1` when the file needs formatting.
 
 ## Environment selection
 

@@ -10,7 +10,7 @@ use typol_config::{
     ConfigParseOptions, ConfigParseRequest, ConfigParser, Environment, EnvironmentError,
     EnvironmentReadContext,
 };
-use typol_core::{ConfigValue, ExecutionLimits, SliceSource, ValueKind};
+use typol_core::{ConfigValue, ExecutionLimits, SliceSource, TextLayout, ValueKind};
 use typol_semantic::CompiledSchema;
 use typol_test_support::{TestResult, test_verify as assert, test_verify_eq as assert_eq};
 
@@ -60,7 +60,7 @@ fn parsed_config(
 
 fn encoded_with_pretty(validated: &mut ValidatedValue<'_, '_>) -> TestResult<String> {
     let mut output = String::new();
-    TestOpeo::value(|out| validated.encode(&mut output, true, out))?;
+    TestOpeo::value(|out| validated.encode(&mut output, TextLayout::Pretty, out))?;
     Ok(output)
 }
 
@@ -68,7 +68,7 @@ fn encode_outcome_with_pretty(
     validated: &mut ValidatedValue<'_, '_>,
 ) -> TestOpeoOutcome<String, CodecErrors> {
     let mut output = String::new();
-    match TestOpeo::outcome(|out| validated.encode(&mut output, true, out)) {
+    match TestOpeo::outcome(|out| validated.encode(&mut output, TextLayout::Pretty, out)) {
         TestOpeoOutcome::Value(()) => TestOpeoOutcome::Value(output),
         TestOpeoOutcome::Error(error) => TestOpeoOutcome::Error(error),
     }
@@ -77,36 +77,52 @@ fn encode_outcome_with_pretty(
 #[test]
 fn nested_containers_and_all_enum_payloads_have_pretty_config_text() -> TestResult {
     let schema = BindingTestSupport::compile(
-        "struct Empty {} struct Child { enabled: bool, } enum Choice { Unit, Single([u8]), Object { child: Child, } } entry struct Root { empty_struct: Empty, empty_map: map<string, u8>, empty_array: [u8], child: Child, mapping: map<string, [u8]>, choices: [Choice], }",
+        "struct Empty {} struct Child { enabled: bool, } enum Payload { Scalar(u8) } enum Choice { Unit, Single([u8]), Scalar(u8), Mapping(map<string, u8>), Object { child: Payload, }, Nested(Payload), } entry struct Root { empty_struct: Empty, empty_map: map<string, u8>, empty_array: [u8], child: Child, mapping: map<string, [u8]>, choices: [Choice], }",
     )?;
-    let input = r#"{choices: [.Object { child: {enabled: false} }, .Single([3, 4]), .Unit], mapping: {"z": [2], "a": []}, child: {enabled: true}, empty_array: [], empty_map: {}, empty_struct: {}}"#;
+    let input = r#"{choices: [.Object { child: .Scalar(8) }, .Single([3, 4]), .Scalar(5), .Mapping({"z": 6, "a": 7}), .Nested(.Scalar(9)), .Unit], mapping: {"z": [2], "a": []}, child: {enabled: true}, empty_array: [], empty_map: {}, empty_struct: {}}"#;
     let expected = concat!(
         "{\n",
-        "  empty_struct: {},\n",
-        "  empty_map: {},\n",
-        "  empty_array: [],\n",
-        "  child: {\n",
-        "    enabled: true,\n",
-        "  },\n",
-        "  mapping: {\n",
-        "    \"a\": [],\n",
-        "    \"z\": [\n",
-        "      2,\n",
-        "    ],\n",
-        "  },\n",
-        "  choices: [\n",
-        "    .Object {\n",
-        "      child: {\n",
-        "        enabled: false,\n",
-        "      },\n",
+        "    empty_struct: {},\n",
+        "    empty_map: {},\n",
+        "    empty_array: [],\n",
+        "    child: {\n",
+        "        enabled: true,\n",
         "    },\n",
-        "    .Single([\n",
-        "      3,\n",
-        "      4,\n",
-        "    ]),\n",
-        "    .Unit,\n",
-        "  ],\n",
-        "}"
+        "    mapping: {\n",
+        "        \"a\": [],\n",
+        "        \"z\": [\n",
+        "            2,\n",
+        "        ],\n",
+        "    },\n",
+        "    choices: [\n",
+        "        .Object {\n",
+        "            child: .Scalar(\n",
+        "                8\n",
+        "            ),\n",
+        "        },\n",
+        "        .Single(\n",
+        "            [\n",
+        "                3,\n",
+        "                4,\n",
+        "            ]\n",
+        "        ),\n",
+        "        .Scalar(\n",
+        "            5\n",
+        "        ),\n",
+        "        .Mapping(\n",
+        "            {\n",
+        "                \"a\": 7,\n",
+        "                \"z\": 6,\n",
+        "            }\n",
+        "        ),\n",
+        "        .Nested(\n",
+        "            .Scalar(\n",
+        "                9\n",
+        "            )\n",
+        "        ),\n",
+        "        .Unit,\n",
+        "    ],\n",
+        "}\n"
     );
     let mut call = session(4096)?;
     let mut validated = parsed(
@@ -131,7 +147,7 @@ fn nested_containers_and_all_enum_payloads_have_pretty_config_text() -> TestResu
 #[test]
 fn pretty_whitespace_counts_toward_output_and_failure_returns_no_fragment() -> TestResult {
     let schema = BindingTestSupport::compile("entry struct Root { value: [u8], }")?;
-    let expected = "{\n  value: [\n    1,\n    2,\n  ],\n}";
+    let expected = "{\n    value: [\n        1,\n        2,\n    ],\n}\n";
     for (limit, succeeds) in [(expected.len(), true), (expected.len() - 1, false)] {
         let mut call = session(limit)?;
         let mut validated = parsed(

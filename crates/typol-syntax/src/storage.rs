@@ -20,6 +20,7 @@ pub(crate) use crate::{
     },
 };
 pub(crate) use constructors::StorageConstructor;
+use core::mem;
 pub(crate) use expression::{BinaryExpressionParts, ExpressionBuilder, MethodCallParts};
 use height::{ChildHeight, Height};
 pub(crate) use ids::{Edge, Id, ListId, Node, Stored};
@@ -87,7 +88,26 @@ pub(crate) struct Storage {
     variant_payload: ChargedVec<Stored<VariantPayload>>,
 }
 
+fn capacity_bytes<T>(values: &ChargedVec<T>) -> Option<usize> {
+    values.capacity().checked_mul(mem::size_of::<T>())
+}
+
 impl Storage {
+    pub(crate) fn memory_bytes(&self) -> Option<usize> {
+        let mut bytes = 0usize;
+        macro_rules! add_capacities { ($total:ident, $storage:ident; $($field:ident),+ $(,)?) => { $($total = $total.checked_add(capacity_bytes(&$storage.$field)?)?;)+ }; }
+        add_capacities!(bytes, self;
+            annotation_edges, assertion_edges, brace_entry_edges, declaration_edges,
+            default_value_edges, field_decl_edges, name_edges, variant_decl_edges,
+            annotation, array_default, array_length, assertion, boolean_literal, brace_entry,
+            braced_default, default_value, enum_decl, enum_default, enum_default_payload,
+            expr, extern_mod_decl, field_decl, method_argument, module_decl, name,
+            number_literal, string_literal, struct_decl, type_alias_decl, type_expr, type_path,
+            variant_decl, variant_payload,
+        );
+        bytes.checked_add(self.text.memory_bytes()?)
+    }
+
     pub(crate) fn execution(&self) -> &ExecutionBudget {
         &self.execution
     }

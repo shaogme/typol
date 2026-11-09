@@ -1,5 +1,8 @@
 use crate::{ast::AstAccessError, error::SyntaxDiagnostic};
-use core::fmt::{Debug, Formatter, Result as FmtResult};
+use core::{
+    fmt::{Debug, Formatter, Result as FmtResult},
+    mem,
+};
 use opeo::{OResult, Out};
 use typol_core::{ChargedString, ChargedVec, Diagnostic, ExecutionBudget, SourceSpan};
 
@@ -29,6 +32,18 @@ impl TextStorage {
         let text = SyntaxDiagnostic::new_string(execution, span, out.reborrow())?;
         let decoded = SyntaxDiagnostic::new_vec(execution, span, out.reborrow())?;
         Ok(Self { text, decoded })
+    }
+
+    pub(crate) fn memory_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .decoded
+            .capacity()
+            .checked_mul(mem::size_of::<ChargedString>())?
+            .checked_add(self.text.capacity())?;
+        for value in self.decoded.as_slice() {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        Some(bytes)
     }
 
     pub(crate) fn read<'slot, 'storage>(

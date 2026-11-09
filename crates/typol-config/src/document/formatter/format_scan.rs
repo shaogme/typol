@@ -97,6 +97,23 @@ impl SourceScanner {
             newline_before,
         }))
     }
+
+    pub(crate) const fn closes(token: ScannedToken, delimiter: u8) -> bool {
+        matches!(token.kind, TokenKind::Close(found) if found == delimiter)
+    }
+
+    pub(super) const fn is_container(opener: u8) -> bool {
+        matches!(opener, b'{' | b'[')
+    }
+
+    pub(super) const fn matching_close(opener: u8) -> Option<u8> {
+        match opener {
+            b'{' => Some(b'}'),
+            b'[' => Some(b']'),
+            b'(' => Some(b')'),
+            _ => None,
+        }
+    }
 }
 
 fn is_whitespace(byte: u8) -> bool {

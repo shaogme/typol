@@ -72,7 +72,7 @@ ConfigParser::new(schema).parse(request, environment)
 
 `ConfigDocument::write_to` 原样输出保留的文本。`apply_edits` 通过 parser 索引解析带类型的替换、字段/map 项/数组元素插入和删除操作。事务按父容器分组子节点索引，并为每个受影响容器只准备一次边界、条目位置、逗号和布局。它拒绝重叠源范围，组装一个候选文档，再重解析并校验后提交内存文档。重解析只记录位置，不会再保留一份候选源码；校验成功后，候选缓冲区会直接成为新文档保留的源码。替换会编码目标子树；插入会推断容器换行、缩进和键分隔空格。插入值直接编码到最终补丁缓冲区；map 项存在性检查使用已解析的父节点，不克隆完整路径。删除和复合值替换会提取受影响范围内的注释，并把注释字节保留在替换区域。未触及的源范围逐字节不变。编辑数量、排序、索引遍历和有界源扫描均计入共享执行额度。相关修改应通过一次 `apply_edits` 或 `replace_values` 批量提交，这样候选文档只会解析和校验一次；分开的 `set_value` 调用会各自付出一次成本。编辑器扫描受限的源切片定位分隔符和注释，并把两种字符串形式都当作不透明范围，因此块字符串中的括号、逗号和注释标记不会干扰容器配对；它不另建 token/trivia CST。
 
-`ConfigFormatter::format(&document, options, out)` 只格式化成功解析得到的 `ConfigDocument`。它使用显式分隔符栈直接扫描保留的源文，不构造配置 AST，也不重新编码 `ConfigValue`。`FormattedConfig` 独立拥有完整结果，提供只读字符串视图，并可通过 `typol_core::Write` sink 消费写出。`ConfigFormatter::is_formatted` 使用相同格式化流程，将每段输出直接与原文比较，不分配完整输出缓冲区；CLI 的 `config fmt --check` 使用此路径。原文档及其源位置保持不变。格式化按顺序保留所有非空白源 token 和注释，包括字符串/数值写法和 `env(...)` 表达式。每个块字符串都是不透明 token，内部字节、缩进和 LF/CRLF 写法均保持原样；`format` 与 `is_formatted` 使用相同的边界扫描器。非空容器按每行一个条目展开，使用 4 空格缩进并添加尾逗号；空容器保持紧凑。枚举单值载荷和 `env(...)` 括号保持紧凑，其中的容器除外。输入采用 LF 或 CRLF 时保留对应风格，输出以相应换行符结束，并满足幂等性。
+`ConfigFormatter::format(&document, options, out)` 只格式化成功解析得到的 `ConfigDocument`。它使用显式分隔符栈直接扫描保留的源文，不构造配置 AST，也不重新编码 `ConfigValue`。`FormattedConfig` 独立拥有完整结果，提供只读字符串视图，并可通过 `typol_core::Write` sink 消费写出。`ConfigFormatter::is_formatted` 使用相同格式化流程，将每段输出直接与原文比较，不分配完整输出缓冲区；CLI 的 `config fmt --check` 使用此路径。原文档及其源位置保持不变。格式化按顺序保留所有非空白源 token 和注释，包括字符串/数值写法和 `env(...)` 表达式。每个块字符串都是不透明 token，内部字节、缩进和 LF/CRLF 写法均保持原样；`format` 与 `is_formatted` 使用相同的边界扫描器。非空容器按每行一个条目展开，使用 4 空格缩进并添加尾逗号；空容器保持紧凑，除非其中含有注释。枚举单值载荷使用多行圆括号分组且不加尾逗号，`env(...)` 调用仍保持紧凑。输入采用 LF 或 CRLF 时保留对应风格，输出以相应换行符结束，并满足幂等性。
 
 `ConfigFormatOptions` 只提供输出字节、格式化工作区和嵌套深度额度，不提供会产生多种规范格式的样式选项。格式化还受文档的源码和构造文本额度约束；栈存储和扫描工作计入文档共享执行预算。`format` 会构造拥有型计费输出缓冲区，并计量构造文本；`is_formatted` 使用相同的输出额度逐段比较，不构造或保留该缓冲区。尾部注释的逗号前瞻每串连续注释只执行一次，因此含 `k` 条注释的串只增加线性扫描工作。拥有型结果只有在扫描、范围检查和输出计量全部成功后才返回。结构错误、资源超限、分配失败和后续输出 sink 错误保持不同类别；格式化中断时不会把部分缓冲区作为成功结果返回。
 
@@ -100,7 +100,7 @@ no_std 与 std 构建共用 `TypolOptions` 和 `SchemaLoader::new(TypolOptions)`
 
 对每个缺失字段，共用的补齐规则依次选择显式 Schema 默认值、无默认值 `option<T>` 的 `none`，或带字段路径和 Schema 定义位置的必填缺失诊断。只有入口结构体会被合成为根值。不会仅因嵌套结构、数组、map 或枚举的内容看似可构造就自动生成它们；字段自身需要显式默认值。选定嵌套对象或枚举载荷后，再递归补齐其字段。`@env` 只授权输入文本中的环境表达式；生成过程不会执行 `env(...)` 或查询环境提供器。
 
-`DefaultConfigOptions` 默认选择紧凑格式、1 MiB UTF-8 字节输出上限，并允许输出真实 `@secret` 值。可选择 pretty 格式，或拒绝包含秘密标记值的结果；拒绝检查会在 sink 写入首字节前完成，并返回不含值文本的稳定编码诊断。允许输出时，秘密仍以明文形式存在，必须按敏感配置保护。字符串 API 只有在完整校验和编码成功后才返回；sink API 在编码、sink I/O、执行预算或输出限额失败时可能已写入前缀。
+`DefaultConfigOptions` 默认选择 `TextLayout::Compact`、1 MiB UTF-8 字节输出上限，并允许输出真实 `@secret` 值。`with_layout(TextLayout::Pretty)` 使用与 `config fmt` 相同的四空格规范布局：复合容器和枚举单值载荷分组为多行，输出以 LF 结尾。`with_pretty(bool)` 和 `pretty()` 已移除，这是公共 API 破坏性更改；调用方应迁移到 `with_layout(TextLayout)` 和 `layout()`。也可拒绝包含秘密标记值的结果；拒绝检查会在 sink 写入首字节前完成，并返回不含值文本的稳定编码诊断。允许输出时，秘密仍以明文形式存在，必须按敏感配置保护。字符串 API 只有在完整校验和编码成功后才返回；sink API 在编码、sink I/O、执行预算或输出限额失败时可能已写入前缀。
 
 若要原子创建或替换文件，应先生成完整字符串，再将字节交给 `FileSourceWriter::replace_atomically`，并显式选择 `SourceExpectation`。`LoadedSchema::write_file` 操作的是 `ConfigDocument` 的源快照，并非默认配置生成的文件 API。
 

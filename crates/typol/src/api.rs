@@ -43,8 +43,8 @@ pub mod core {
         ExecutionBudget, ExecutionLimits, LocatedSpan, NamedValue, NamedValueEntryView, Read,
         RegexExecutionBudget, SliceSource, SourceCapture, SourceCommitError, SourceExcerptSet,
         SourceExpectation, SourceId, SourceLocation, SourceReadError, SourceRevision, SourceSpan,
-        SourceWriter, ValueCopyLimits, ValueEntries, ValueEntryView, ValueError, ValueId,
-        ValueKind, ValuePayload, ValuePayloadView, ValueSource, ValueView,
+        SourceWriter, TextLayout, ValueCopyLimits, ValueEntries, ValueEntryView, ValueError,
+        ValueId, ValueKind, ValuePayload, ValuePayloadView, ValueSource, ValueView,
     };
 
     pub use crate::loading::SourceNames;

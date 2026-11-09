@@ -15,7 +15,7 @@ use typol_config::{
 };
 use typol_core::{
     BudgetError, ConfigValue, DiagnosticCode, ExecutionBudget, ExecutionLimits, SliceSource,
-    ValueKind,
+    TextLayout, ValueKind,
 };
 use typol_semantic::CompiledSchema;
 use typol_test_support::{
@@ -115,25 +115,25 @@ fn parsed_config(
 
 fn encoded(validated: &mut ValidatedValue<'_, '_>) -> TestResult<String> {
     let mut output = String::new();
-    TestOpeo::value(|out| validated.encode(&mut output, false, out))?;
+    TestOpeo::value(|out| validated.encode(&mut output, TextLayout::Compact, out))?;
     Ok(output)
 }
 
 fn encode_error(validated: &mut ValidatedValue<'_, '_>) -> TestResult<CodecErrors> {
     let mut output = String::new();
-    TestOpeo::error(|out| validated.encode(&mut output, false, out))
+    TestOpeo::error(|out| validated.encode(&mut output, TextLayout::Compact, out))
 }
 
 fn encode_outcome(validated: &mut ValidatedValue<'_, '_>) -> TestOpeoOutcome<String, CodecErrors> {
-    encode_outcome_with_pretty(validated, false)
+    encode_outcome_with_layout(validated, TextLayout::Compact)
 }
 
-fn encode_outcome_with_pretty(
+fn encode_outcome_with_layout(
     validated: &mut ValidatedValue<'_, '_>,
-    pretty: bool,
+    layout: TextLayout,
 ) -> TestOpeoOutcome<String, CodecErrors> {
     let mut output = String::new();
-    match TestOpeo::outcome(|out| validated.encode(&mut output, pretty, out)) {
+    match TestOpeo::outcome(|out| validated.encode(&mut output, layout, out)) {
         TestOpeoOutcome::Value(()) => TestOpeoOutcome::Value(output),
         TestOpeoOutcome::Error(error) => TestOpeoOutcome::Error(error),
     }
@@ -553,11 +553,11 @@ fn allocations_fail_atomically_during_sorting_and_output() -> TestResult {
         &mut Provider(Vec::new()),
         &mut call,
     )?);
-    for pretty in [false, true] {
+    for layout in [TextLayout::Compact, TextLayout::Pretty] {
         TestAssertions::assert_atomic_allocations(|| {
-            allocation_encode(encode_outcome_with_pretty(
+            allocation_encode(encode_outcome_with_layout(
                 &mut verified.borrow_mut(),
-                pretty,
+                layout,
             ))
         })?;
     }

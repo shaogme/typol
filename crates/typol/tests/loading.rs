@@ -10,8 +10,8 @@ use std::{
 use typol::{
     BoundSchema, ConfigParseOptions, ConfigPath, EmptyEnvironment, Environment, EnvironmentError,
     EnvironmentReadContext, LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits,
-    SchemaLoader, SourceCommitError, SourceExpectation, Sourced, Typol, TypolError, TypolOptions,
-    TypolStage, ValidatedConfigValue, WriteOptions,
+    SchemaLoader, SourceCommitError, SourceExpectation, Sourced, TextLayout, Typol, TypolError,
+    TypolOptions, TypolStage, ValidatedConfigValue, WriteOptions,
     binding::{
         BindOptions, CodecStage, ConversionLimits, MAX_CONVERSION_DEPTH, Typol as TypolTrait,
     },
@@ -412,10 +412,10 @@ fn bound_write_inherits_loaded_conversion_limits_unless_explicitly_overridden() 
     );
     let options = WriteOptions::default()
         .with_conversion_limits(ConversionLimits::default())
-        .with_pretty(true);
+        .with_layout(TextLayout::Pretty);
     assert_eq!(
         load_value(|out| binding.write_to_string(&value, options, out))?,
-        "{\n  value: 7,\n  optional: none,\n}"
+        "{\n    value: 7,\n    optional: none,\n}\n"
     );
 
     let validation_defaults = default_options();

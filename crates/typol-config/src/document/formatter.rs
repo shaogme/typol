@@ -50,9 +50,17 @@ struct FormatResult {
     matches_source: bool,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FramePurpose {
+    Container,
+    EnumPayload,
+    Parenthesized,
+}
+
 #[derive(Clone, Copy)]
 struct FormatFrame {
     opener: u8,
+    purpose: FramePurpose,
     content: bool,
     item: bool,
     after_comma: bool,
@@ -71,6 +79,8 @@ pub(crate) struct FormatterEngine<'source, 'budget> {
     options: ConfigFormatOptions,
     output_limit: usize,
     previous: Option<TokenKind>,
+    previous_significant: Option<ScannedToken>,
+    previous_significant_is_enum_variant: bool,
     previous_comment_standalone: bool,
     comment_run_checked: bool,
 }
@@ -238,6 +248,8 @@ impl FormatterEngine<'_, '_> {
             options: request.options,
             output_limit,
             previous: None,
+            previous_significant: None,
+            previous_significant_is_enum_variant: false,
             previous_comment_standalone: false,
             comment_run_checked: false,
         };
@@ -307,19 +319,19 @@ impl FormatterEngine<'_, '_> {
     ) -> OResult<'slot, ()> {
         match token.kind {
             TokenKind::LineComment | TokenKind::BlockComment => {
-                self.write_comment(token, out.reborrow())
+                self.write_comment(token, out.reborrow())?;
             }
             TokenKind::Open(opener) => {
                 self.comment_run_checked = false;
-                self.open(opener, token, out.reborrow())
+                self.open(opener, token, out.reborrow())?;
             }
             TokenKind::Close(closer) => {
                 self.comment_run_checked = false;
-                self.close(closer, token, out.reborrow())
+                self.close(closer, token, out.reborrow())?;
             }
             TokenKind::Comma => {
                 self.comment_run_checked = false;
-                self.comma(token, out.reborrow())
+                self.comma(token, out.reborrow())?;
             }
             TokenKind::Colon => {
                 self.comment_run_checked = false;
@@ -328,7 +340,6 @@ impl FormatterEngine<'_, '_> {
                 self.append_source(token.start, token.end, out.reborrow())?;
                 self.previous = Some(TokenKind::Colon);
                 self.previous_comment_standalone = false;
-                Ok(())
             }
             TokenKind::Atom | TokenKind::String => {
                 self.comment_run_checked = false;
@@ -337,9 +348,17 @@ impl FormatterEngine<'_, '_> {
                 self.append_source(token.start, token.end, out.reborrow())?;
                 self.previous = Some(token.kind);
                 self.previous_comment_standalone = false;
-                Ok(())
             }
         }
+        if !matches!(token.kind, TokenKind::LineComment | TokenKind::BlockComment) {
+            self.previous_significant_is_enum_variant = token.kind == TokenKind::Atom
+                && self.previous_significant.is_some_and(|previous| {
+                    previous.kind == TokenKind::Atom
+                        && self.source.get(previous.start..previous.end) == Some(".")
+                });
+            self.previous_significant = Some(token);
+        }
+        Ok(())
     }
 
     fn open<'slot>(
@@ -351,9 +370,15 @@ impl FormatterEngine<'_, '_> {
         self.mark_item();
         self.prepare_token(token, out.reborrow())?;
         self.append_source(token.start, token.end, out.reborrow())?;
-        let content = !self.container_is_empty(token.end, opener, out.reborrow())?;
-        self.push_frame(opener, content, out.reborrow())?;
-        if content && is_container(opener) {
+        let purpose = self.frame_purpose(opener);
+        let content = if purpose == FramePurpose::EnumPayload {
+            true
+        } else {
+            !self.container_is_empty(token.end, opener, out.reborrow())?
+        };
+        self.push_frame(opener, purpose, content, out.reborrow())?;
+        if content && (SourceScanner::is_container(opener) || purpose == FramePurpose::EnumPayload)
+        {
             self.append_newline(out.reborrow())?;
         }
         self.previous = Some(token.kind);
@@ -372,12 +397,20 @@ impl FormatterEngine<'_, '_> {
                 ConfigFormatErrorKind::InvalidStructure,
             )));
         };
-        if matching_close(frame.opener) != Some(closer) {
+        if SourceScanner::matching_close(frame.opener) != Some(closer) {
             return Err(out.fail(ConfigFormatError::new(
                 ConfigFormatErrorKind::InvalidStructure,
             )));
         }
-        if is_container(frame.opener) {
+        if frame.purpose == FramePurpose::EnumPayload {
+            self.append_newline(out.reborrow())?;
+            let depth = self.stack.len().checked_sub(1).ok_or_else(|| {
+                out.reborrow().fail(ConfigFormatError::new(
+                    ConfigFormatErrorKind::InvalidStructure,
+                ))
+            })?;
+            self.append_indent(depth, out.reborrow())?;
+        } else if SourceScanner::is_container(frame.opener) {
             if frame.item && !frame.after_comma {
                 self.prepare_comma(out.reborrow())?;
                 self.append_text(",", out.reborrow())?;
@@ -415,7 +448,7 @@ impl FormatterEngine<'_, '_> {
                 ConfigFormatErrorKind::InvalidStructure,
             )));
         };
-        if is_container(frame.opener) {
+        if SourceScanner::is_container(frame.opener) {
             if !frame.item || frame.after_comma {
                 return Err(out.fail(ConfigFormatError::new(
                     ConfigFormatErrorKind::InvalidStructure,
@@ -455,7 +488,12 @@ impl FormatterEngine<'_, '_> {
         let opening_boundary = matches!(
             self.previous,
             Some(TokenKind::Open(b'{') | TokenKind::Open(b'['))
-        );
+        ) || matches!(self.previous, Some(TokenKind::Open(b'(')))
+            && self
+                .stack
+                .as_slice()
+                .last()
+                .is_some_and(|frame| frame.purpose == FramePurpose::EnumPayload);
         let standalone = token.newline_before
             || opening_boundary
             || self.previous.is_none()
@@ -471,17 +509,20 @@ impl FormatterEngine<'_, '_> {
         self.append_source(token.start, token.end, out.reborrow())?;
         let same_line_after_comma = matches!(
             (self.previous, self.stack.as_slice().last()),
-            (Some(TokenKind::Comma), Some(frame)) if is_container(frame.opener)
+            (Some(TokenKind::Comma), Some(frame)) if SourceScanner::is_container(frame.opener)
         ) && !token.newline_before;
         let before_container_close = if token.kind == TokenKind::BlockComment && !standalone {
             let mut cursor = token.end;
-            matches!(
-                self.next_scanned_token(&mut cursor, out.reborrow())?,
-                Some(ScannedToken {
-                    kind: TokenKind::Close(b'}' | b']'),
-                    ..
-                })
-            )
+            let next = self.next_scanned_token(&mut cursor, out.reborrow())?;
+            let enum_payload_close = self
+                .stack
+                .as_slice()
+                .last()
+                .is_some_and(|frame| frame.purpose == FramePurpose::EnumPayload)
+                && next.is_some_and(|token| SourceScanner::closes(token, b')'));
+            next.is_some_and(|token| {
+                SourceScanner::closes(token, b'}') || SourceScanner::closes(token, b']')
+            }) || enum_payload_close
         } else {
             false
         };
@@ -491,7 +532,7 @@ impl FormatterEngine<'_, '_> {
             self.append_text(" ", out.reborrow())?;
         }
         if let Some(frame) = self.stack.as_mut_slice().last_mut() {
-            if is_container(frame.opener) {
+            if SourceScanner::is_container(frame.opener) {
                 frame.content = true;
             }
         }
@@ -522,10 +563,10 @@ impl FormatterEngine<'_, '_> {
         let Some(frame) = self.stack.as_slice().last().copied() else {
             return Ok(());
         };
-        if !is_container(frame.opener) || !frame.item || frame.after_comma {
+        if !SourceScanner::is_container(frame.opener) || !frame.item || frame.after_comma {
             return Ok(());
         }
-        let Some(closer) = matching_close(frame.opener) else {
+        let Some(closer) = SourceScanner::matching_close(frame.opener) else {
             return Err(out.fail(ConfigFormatError::new(
                 ConfigFormatErrorKind::InvalidStructure,
             )));
@@ -621,6 +662,7 @@ impl FormatterEngine<'_, '_> {
     fn push_frame<'slot>(
         &mut self,
         opener: u8,
+        purpose: FramePurpose,
         content: bool,
         mut out: Out<'slot, '_, ConfigFormatError>,
     ) -> OResult<'slot, ()> {
@@ -644,6 +686,7 @@ impl FormatterEngine<'_, '_> {
         self.stack.try_push(
             FormatFrame {
                 opener,
+                purpose,
                 content,
                 item: false,
                 after_comma: false,
@@ -658,7 +701,7 @@ impl FormatterEngine<'_, '_> {
         opener: u8,
         mut out: Out<'slot, '_, ConfigFormatError>,
     ) -> OResult<'slot, bool> {
-        if !is_container(opener) {
+        if !SourceScanner::is_container(opener) {
             return Ok(true);
         }
         let bytes = self.source.as_bytes();
@@ -674,7 +717,7 @@ impl FormatterEngine<'_, '_> {
                 if let Some(budget) = self.budget {
                     budget.consume(scanned_bytes, out.reborrow())?;
                 }
-                return Ok(byte == matching_close(opener).unwrap_or_default());
+                return Ok(byte == SourceScanner::matching_close(opener).unwrap_or_default());
             }
             cursor = cursor.checked_add(1).ok_or_else(|| {
                 out.reborrow().fail(ConfigFormatError::new(
@@ -688,6 +731,32 @@ impl FormatterEngine<'_, '_> {
         Err(out.fail(ConfigFormatError::new(
             ConfigFormatErrorKind::InvalidStructure,
         )))
+    }
+
+    fn frame_purpose(&self, opener: u8) -> FramePurpose {
+        if SourceScanner::is_container(opener) {
+            return FramePurpose::Container;
+        }
+        if opener != b'(' {
+            return FramePurpose::Parenthesized;
+        }
+        let Some(token) = self.previous_significant else {
+            return FramePurpose::Parenthesized;
+        };
+        if token.kind != TokenKind::Atom {
+            return FramePurpose::Parenthesized;
+        }
+        if self.previous_significant_is_enum_variant {
+            return FramePurpose::EnumPayload;
+        }
+        let Some(text) = self.source.get(token.start..token.end) else {
+            return FramePurpose::Parenthesized;
+        };
+        if text.starts_with('.') {
+            FramePurpose::EnumPayload
+        } else {
+            FramePurpose::Parenthesized
+        }
     }
 
     fn append_source<'slot>(
@@ -783,18 +852,5 @@ impl FormatterEngine<'_, '_> {
             ScanError::InvalidStructure => ConfigFormatErrorKind::InvalidStructure,
             ScanError::ResourceLimitExceeded => ConfigFormatErrorKind::ResourceLimitExceeded,
         })
-    }
-}
-
-fn is_container(opener: u8) -> bool {
-    matches!(opener, b'{' | b'[')
-}
-
-fn matching_close(opener: u8) -> Option<u8> {
-    match opener {
-        b'{' => Some(b'}'),
-        b'[' => Some(b']'),
-        b'(' => Some(b')'),
-        _ => None,
     }
 }
