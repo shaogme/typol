@@ -23,9 +23,9 @@ mod value_validation;
 pub use api::{ConfigDiagnosticRedactor, ConfigParser, ConfigValueProcessor};
 pub use diagnostics::{ConfigFailureStage, ConfigParseErrors, ConfigValueErrors};
 pub use document::{
-    ConfigDocument, ConfigEdit, ConfigEditError, ConfigEditErrorKind, ConfigFormatError,
-    ConfigFormatErrorKind, ConfigFormatOptions, ConfigFormatter, ConfigPath, ConfigPathSegment,
-    ConfigReplacement, FormattedConfig,
+    ConfigDocument, ConfigEdit, ConfigEditError, ConfigEditErrorKind, ConfigEditOptions,
+    ConfigFieldInsertion, ConfigFormatError, ConfigFormatErrorKind, ConfigFormatOptions,
+    ConfigFormatter, ConfigPath, ConfigPathSegment, ConfigReplacement, FormattedConfig,
 };
 pub use environment::{EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext};
 pub use opeo;
@@ -33,6 +33,8 @@ pub use options::{
     ConfigLimits, ConfigParseOptions, ConfigParseRequest, ConfigValidationOptions,
     ConfigValidationRequest,
 };
-pub use typol_core::{SourceCommitError, SourceExpectation, SourceRevision, SourceWriter};
+pub use typol_core::{
+    SourceCommitError, SourceExpectation, SourceRevision, SourceWriter, TextLayout,
+};
 pub use typol_syntax::{StreamLimits, StreamLimitsError};
 pub use value::{NormalizedConfigValue, ValidatedConfigValue};

@@ -1,5 +1,5 @@
 use opeo::{ErrSlot, OResult, Out};
-use typol_core::{BudgetError, ChargedString, ChargedVec, ExecutionBudget, Span};
+use typol_core::{BudgetError, ChargedString, ChargedVec, ExecutionBudget, Span, TextLayout};
 
 use super::{ConfigEditError, ConfigEditErrorKind, path::PathValueKind};
 
@@ -22,37 +22,295 @@ pub(super) struct SourceLayout<'source> {
     pub(super) multiline: bool,
     pub(super) line_break: &'static str,
     pub(super) indent: &'source str,
+    pub(super) indent_unit: &'source str,
+    pub(super) indent_levels: usize,
     pub(super) colon_spacing: &'source str,
 }
 
 struct LexicalSpan {
     end: usize,
     comment: bool,
+    block_string: bool,
+}
+
+struct EmptyIndentation<'source> {
+    indent: &'source str,
+    unit: &'source str,
+    levels: usize,
 }
 
 pub(super) struct SourceSyntax;
 
+fn repeated_scan_steps(bytes: usize, passes: usize) -> Result<usize, ConfigEditErrorKind> {
+    bytes
+        .checked_mul(passes)
+        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)
+}
+
 impl SourceSyntax {
+    pub(super) fn document_line_break(
+        source: &str,
+        budget: Option<&ExecutionBudget>,
+    ) -> Result<&'static str, ConfigEditErrorKind> {
+        consume(budget, source.len())?;
+        Ok(if source.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        })
+    }
+
+    pub(super) fn edit_line_break(
+        source: &str,
+        budget: Option<&ExecutionBudget>,
+        layout: TextLayout,
+        encodes_values: bool,
+    ) -> Result<&'static str, ConfigEditErrorKind> {
+        if layout == TextLayout::Pretty && encodes_values {
+            Self::document_line_break(source, budget)
+        } else {
+            Ok("\n")
+        }
+    }
+
+    pub(super) fn indent_context<'source>(
+        source: &'source str,
+        position: usize,
+        budget: Option<&ExecutionBudget>,
+    ) -> Result<(&'source str, usize), ConfigEditErrorKind> {
+        let prefix = source
+            .get(..position)
+            .ok_or(ConfigEditErrorKind::EditConflict)?;
+        consume(budget, position)?;
+        let line_start = prefix
+            .rfind('\n')
+            .map_or(0, |index| index.saturating_add(1));
+        let line_prefix = source
+            .get(line_start..position)
+            .ok_or(ConfigEditErrorKind::EditConflict)?;
+        consume(budget, line_prefix.len())?;
+        let indent_len = line_prefix
+            .bytes()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        let indent = line_prefix
+            .get(..indent_len)
+            .ok_or(ConfigEditErrorKind::EditConflict)?;
+        consume(budget, position)?;
+        let mut cursor = 0usize;
+        let mut depth = 0usize;
+        let bytes = source.as_bytes();
+        while cursor < position {
+            if let Some(lexeme) = lexical_span(source, cursor)? {
+                cursor = lexeme.end.min(position);
+                continue;
+            }
+            let Some(byte) = bytes.get(cursor).copied() else {
+                return Err(ConfigEditErrorKind::EditConflict);
+            };
+            if cursor >= line_start {
+                if matches!(byte, b'{' | b'[' | b'(') {
+                    depth = depth
+                        .checked_add(1)
+                        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                } else if matches!(byte, b'}' | b']' | b')') {
+                    depth = depth.saturating_sub(1);
+                }
+            }
+            cursor = cursor
+                .checked_add(1)
+                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+        }
+        Ok((indent, depth))
+    }
+
     pub(super) fn layout<'source>(
         source: &'source str,
         bounds: SourceContainer,
+        infer_empty_indent: bool,
         budget: Option<&ExecutionBudget>,
     ) -> Result<SourceLayout<'source>, ConfigEditErrorKind> {
         let content = source
             .get(bounds.open + 1..bounds.close)
             .ok_or(ConfigEditErrorKind::EditConflict)?;
         consume(budget, content.len())?;
-        let multiline = content.contains('\n') || content.contains('\r');
-        let line_break = if content.contains("\r\n") {
-            "\r\n"
+        let bytes = source.as_bytes();
+        let mut cursor = bounds.open + 1;
+        let mut multiline = false;
+        let mut line_break = "\n";
+        while cursor < bounds.close {
+            if let Some(lexeme) = lexical_span(source, cursor)? {
+                if lexeme.comment {
+                    let comment = source
+                        .get(cursor..lexeme.end)
+                        .ok_or(ConfigEditErrorKind::EditConflict)?;
+                    let comment_bytes = comment.as_bytes();
+                    for (index, byte) in comment_bytes.iter().copied().enumerate() {
+                        if byte == b'\r' {
+                            multiline = true;
+                        } else if byte == b'\n' {
+                            multiline = true;
+                            if comment_bytes.get(index.saturating_sub(1)) == Some(&b'\r') {
+                                line_break = "\r\n";
+                            }
+                        }
+                    }
+                }
+                cursor = lexeme.end.min(bounds.close);
+                continue;
+            }
+            match bytes.get(cursor).copied() {
+                Some(b'\n') => {
+                    multiline = true;
+                    if bytes.get(cursor.saturating_sub(1)) == Some(&b'\r') {
+                        line_break = "\r\n";
+                    }
+                }
+                Some(b'\r') => multiline = true,
+                Some(_) => {}
+                None => return Err(ConfigEditErrorKind::EditConflict),
+            }
+            cursor = cursor
+                .checked_add(1)
+                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+        }
+        let indentation = if multiline && infer_empty_indent {
+            Self::empty_container_indent(source, bounds.open, budget)?
         } else {
-            "\n"
+            EmptyIndentation {
+                indent: "    ",
+                unit: "    ",
+                levels: 0,
+            }
         };
         Ok(SourceLayout {
             multiline,
             line_break,
-            indent: "    ",
+            indent: indentation.indent,
+            indent_unit: indentation.unit,
+            indent_levels: indentation.levels,
             colon_spacing: " ",
+        })
+    }
+
+    fn empty_container_indent<'source>(
+        source: &'source str,
+        open: usize,
+        budget: Option<&ExecutionBudget>,
+    ) -> Result<EmptyIndentation<'source>, ConfigEditErrorKind> {
+        let prefix = source
+            .get(..open)
+            .ok_or(ConfigEditErrorKind::EditConflict)?;
+        consume(budget, open)?;
+        let line_start = prefix
+            .rfind('\n')
+            .map_or(0, |index| index.saturating_add(1));
+        let line_prefix = source
+            .get(line_start..open)
+            .ok_or(ConfigEditErrorKind::EditConflict)?;
+        consume(budget, repeated_scan_steps(line_prefix.len(), 2)?)?;
+        let indent_len = line_prefix
+            .bytes()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        let indent = line_prefix
+            .get(..indent_len)
+            .ok_or(ConfigEditErrorKind::EditConflict)?;
+        let mut indent_unit = "    ";
+        if indent_len > 0 {
+            let preceding_source = source
+                .get(..line_start)
+                .ok_or(ConfigEditErrorKind::EditConflict)?;
+            consume(budget, repeated_scan_steps(preceding_source.len(), 4)?)?;
+            let mut previous_start = 0usize;
+            let mut block_string_end = 0usize;
+            let mut lexical_end = 0usize;
+            while previous_start < line_start {
+                let remaining = preceding_source
+                    .get(previous_start..)
+                    .ok_or(ConfigEditErrorKind::EditConflict)?;
+                let line_end = remaining
+                    .find('\n')
+                    .map_or(line_start, |index| previous_start.saturating_add(index));
+                let previous_line = source
+                    .get(previous_start..line_end)
+                    .ok_or(ConfigEditErrorKind::EditConflict)?;
+                if previous_start >= block_string_end {
+                    let previous_indent_len = previous_line
+                        .bytes()
+                        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                        .count();
+                    let previous_content = previous_line
+                        .get(previous_indent_len..)
+                        .ok_or(ConfigEditErrorKind::EditConflict)?;
+                    if previous_content
+                        .bytes()
+                        .any(|byte| !matches!(byte, b' ' | b'\t' | b'\r'))
+                        && previous_indent_len < indent_len
+                    {
+                        let previous_indent = previous_line
+                            .get(..previous_indent_len)
+                            .ok_or(ConfigEditErrorKind::EditConflict)?;
+                        if indent.starts_with(previous_indent) {
+                            indent_unit = indent
+                                .get(previous_indent_len..)
+                                .ok_or(ConfigEditErrorKind::EditConflict)?;
+                        }
+                    }
+                    let mut cursor = previous_start.max(lexical_end);
+                    while cursor < line_end {
+                        if let Some(lexeme) = lexical_span(source, cursor)? {
+                            if lexeme.block_string {
+                                block_string_end = lexeme.end;
+                                break;
+                            }
+                            lexical_end = lexeme.end;
+                            cursor = lexeme.end;
+                            continue;
+                        }
+                        cursor = cursor
+                            .checked_add(1)
+                            .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                    }
+                }
+                previous_start = if line_end < line_start {
+                    line_end
+                        .checked_add(1)
+                        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?
+                } else {
+                    line_start
+                };
+            }
+        }
+        let mut cursor = line_start;
+        let mut same_line_depth = 0usize;
+        let bytes = source.as_bytes();
+        while cursor < open {
+            if let Some(lexeme) = lexical_span(source, cursor)? {
+                cursor = lexeme.end.min(open);
+                continue;
+            }
+            let Some(byte) = bytes.get(cursor).copied() else {
+                return Err(ConfigEditErrorKind::EditConflict);
+            };
+            if matches!(byte, b'{' | b'[' | b'(') {
+                same_line_depth = same_line_depth
+                    .checked_add(1)
+                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+            } else if matches!(byte, b'}' | b']' | b')') {
+                same_line_depth = same_line_depth.saturating_sub(1);
+            }
+            cursor = cursor
+                .checked_add(1)
+                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+        }
+        let indent_levels = same_line_depth
+            .checked_add(1)
+            .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+        Ok(EmptyIndentation {
+            indent,
+            unit: indent_unit,
+            levels: indent_levels,
         })
     }
 
@@ -258,7 +516,10 @@ impl SourceSyntax {
         let (opening, closing) = match kind {
             PathValueKind::Structure | PathValueKind::Map => (b'{', b'}'),
             PathValueKind::Array => (b'[', b']'),
-            PathValueKind::Scalar | PathValueKind::Enumeration | PathValueKind::Other => {
+            PathValueKind::Scalar
+            | PathValueKind::Enumeration
+            | PathValueKind::Payload
+            | PathValueKind::Other => {
                 return Err(ConfigEditErrorKind::InvalidContainer);
             }
         };
@@ -363,13 +624,26 @@ fn lexical_span(source: &str, start: usize) -> Result<Option<LexicalSpan>, Confi
             Some(LexicalSpan {
                 end,
                 comment: false,
+                block_string: bytes.get(start..start.saturating_add(3)) == Some(b"\"\"\""),
             })
         }),
         Some(b'/') if bytes.get(start.saturating_add(1)) == Some(&b'/') => {
-            skip_line_comment(source, start).map(|end| Some(LexicalSpan { end, comment: true }))
+            skip_line_comment(source, start).map(|end| {
+                Some(LexicalSpan {
+                    end,
+                    comment: true,
+                    block_string: false,
+                })
+            })
         }
         Some(b'/') if bytes.get(start.saturating_add(1)) == Some(&b'*') => {
-            skip_block_comment(source, start).map(|end| Some(LexicalSpan { end, comment: true }))
+            skip_block_comment(source, start).map(|end| {
+                Some(LexicalSpan {
+                    end,
+                    comment: true,
+                    block_string: false,
+                })
+            })
         }
         _ => Ok(None),
     }
@@ -484,5 +758,93 @@ fn edit_budget_error(error: BudgetError) -> ConfigEditErrorKind {
         BudgetError::Allocation | BudgetError::InvariantViolation(_) => {
             ConfigEditErrorKind::AllocationFailed
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConfigEditErrorKind, SourceSyntax};
+    use alloc::format;
+    use typol_core::{ExecutionBudget, ExecutionLimits};
+    use typol_test_support::{
+        TestFailure, TestOpeo, TestResult, test_verify as test_assert, test_verify_eq as test_eq,
+    };
+
+    fn expected_scan_steps(bytes: usize, passes: usize) -> TestResult<usize> {
+        bytes
+            .checked_mul(passes)
+            .ok_or_else(|| TestFailure::new("scan budget overflowed"))
+    }
+
+    fn budget_with_steps(max_steps: usize) -> TestResult<ExecutionBudget> {
+        TestOpeo::value(|out| ExecutionBudget::new(ExecutionLimits::new(max_steps, 1_048_576), out))
+    }
+
+    #[test]
+    fn indent_context_charges_prefix_indentation_and_depth_scans() -> TestResult<()> {
+        let source = " ".repeat(4096);
+        let position = source.len();
+        let limit = expected_scan_steps(position, 3)?;
+        let budget = budget_with_steps(limit)?;
+
+        let context = SourceSyntax::indent_context(&source, position, Some(&budget))
+            .map_err(|_| TestFailure::new("two charged scans did not fit"))?;
+
+        test_eq!(context, (source.as_str(), 0));
+        test_eq!(budget.steps(), limit);
+        Ok(())
+    }
+
+    #[test]
+    fn indent_context_rejects_budget_that_covers_only_one_source_pass() -> TestResult<()> {
+        let source = "x".repeat(4096);
+        let position = source.len();
+        let budget = budget_with_steps(position)?;
+
+        let result = SourceSyntax::indent_context(&source, position, Some(&budget));
+
+        test_eq!(result, Err(ConfigEditErrorKind::ResourceLimitExceeded));
+        test_eq!(budget.steps(), position);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_container_indent_charges_prefix_and_repeated_line_scans() -> TestResult<()> {
+        let preceding = "x".repeat(4096);
+        let source = format!("{preceding}\n  {{");
+        let open = source.len() - 1;
+        let line_start = preceding.len() + 1;
+        let line_prefix_len = open - line_start;
+        let limit =
+            open + expected_scan_steps(line_prefix_len, 2)? + expected_scan_steps(line_start, 4)?;
+        let budget = budget_with_steps(limit)?;
+
+        let indentation = SourceSyntax::empty_container_indent(&source, open, Some(&budget))
+            .map_err(|_| TestFailure::new("charged indentation scans did not fit"))?;
+
+        test_eq!(indentation.indent, "  ");
+        test_eq!(indentation.levels, 1);
+        test_eq!(budget.steps(), limit);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_container_indent_rejects_budget_that_covers_only_old_charge() -> TestResult<()> {
+        let preceding = "x".repeat(4096);
+        let source = format!("{preceding}\n  {{");
+        let open = source.len() - 1;
+        let line_start = preceding.len() + 1;
+        let line_prefix_len = open - line_start;
+        let old_charge = line_prefix_len + line_start;
+        let budget = budget_with_steps(old_charge)?;
+
+        let result = SourceSyntax::empty_container_indent(&source, open, Some(&budget));
+
+        test_assert!(matches!(
+            result,
+            Err(ConfigEditErrorKind::ResourceLimitExceeded)
+        ));
+        test_eq!(budget.steps(), open);
+        Ok(())
     }
 }

@@ -1,17 +1,46 @@
 mod analysis;
 mod error;
 
-use opeo::{ErrSlot, OResult, Out};
-use typol_core::{BudgetError, ChargedString, ChargedVec, ConfigValue, ExecutionBudget, ValueView};
-
-pub use error::ConfigEditError;
-
 use self::analysis::{ContainerAnalysis, PreparedEdits, RemovalEntry};
 use super::{
-    encoding::{ConfigEditErrorKind, EntryEncoding, ScalarEncoder},
+    encoding::{EntryEncoding, ScalarEncoder, ValueEncodingContext},
     path::{ConfigPath, ConfigPathSegment, ConfigReplacement, PathValueKind, SourcePathIndex},
     syntax::{SourceLayout, SourceSyntax},
 };
+use opeo::{ErrSlot, OResult, Out};
+use typol_core::{
+    BudgetError, ChargedString, ChargedVec, ConfigValue, ExecutionBudget, TextLayout, ValueView,
+};
+
+pub use error::{ConfigEditError, ConfigEditErrorKind};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConfigEditOptions {
+    layout: TextLayout,
+}
+
+impl ConfigEditOptions {
+    pub const fn new() -> Self {
+        Self {
+            layout: TextLayout::Compact,
+        }
+    }
+
+    pub const fn layout(self) -> TextLayout {
+        self.layout
+    }
+
+    pub const fn with_layout(mut self, layout: TextLayout) -> Self {
+        self.layout = layout;
+        self
+    }
+}
+
+impl Default for ConfigEditOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 const MAX_PATH_LOOKUPS_PER_EDIT: usize = 4;
 
@@ -47,6 +76,7 @@ pub(super) struct EditContext<'a> {
     pub(super) index: &'a SourcePathIndex,
     pub(super) budget: Option<&'a ExecutionBudget>,
     pub(super) source_limit: usize,
+    pub(super) options: ConfigEditOptions,
 }
 
 enum InsertionValue<'value, 'name> {
@@ -101,26 +131,54 @@ impl<'a> DocumentEditEngine<'a> {
         }
         let mut container_ids = ChargedVec::new(self.context.budget, out.reborrow())?;
         let mut removals = ChargedVec::new(self.context.budget, out.reborrow())?;
+        let mut appends = ChargedVec::new(self.context.budget, out.reborrow())?;
+        let mut encodes_values = false;
         for edit in edits {
             self.consume_path_work(edit, out.reborrow())?;
             match edit {
-                ConfigEdit::Replace(_) => {}
+                ConfigEdit::Replace(_) => encodes_values = true,
                 ConfigEdit::InsertField { path, .. } => {
+                    encodes_values = true;
                     let Some(id) = self.context.index.parent_id(path) else {
                         return Err(
                             out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath))
                         );
                     };
                     container_ids.try_push(id, out.reborrow())?;
+                    appends.try_push(id, out.reborrow())?;
                 }
-                ConfigEdit::InsertMapEntry { container, .. }
-                | ConfigEdit::InsertArrayItem { container, .. } => {
+                ConfigEdit::InsertMapEntry { container, .. } => {
+                    encodes_values = true;
                     let Some(id) = self.context.index.node_id(container) else {
                         return Err(
                             out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath))
                         );
                     };
                     container_ids.try_push(id, out.reborrow())?;
+                    appends.try_push(id, out.reborrow())?;
+                }
+                ConfigEdit::InsertArrayItem {
+                    container, index, ..
+                } => {
+                    encodes_values = true;
+                    let Some(id) = self.context.index.node_id(container) else {
+                        return Err(
+                            out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath))
+                        );
+                    };
+                    container_ids.try_push(id, out.reborrow())?;
+                    let Some(children) = self.context.index.direct_children_by_id(id) else {
+                        return Err(
+                            out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath))
+                        );
+                    };
+                    let child_count = children.count();
+                    if let Some(budget) = self.context.budget {
+                        budget.consume(child_count, out.reborrow())?;
+                    }
+                    if *index == child_count {
+                        appends.try_push(id, out.reborrow())?;
+                    }
                 }
                 ConfigEdit::Remove { path } => {
                     let Some(target) = self.context.index.info(path) else {
@@ -144,6 +202,14 @@ impl<'a> DocumentEditEngine<'a> {
             }
         }
 
+        let line_break = SourceSyntax::edit_line_break(
+            self.context.source,
+            self.context.budget,
+            self.context.options.layout,
+            encodes_values,
+        )
+        .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
+
         container_ids.sort_by(
             |left, right, mut sort_out| {
                 if let Some(budget) = self.context.budget {
@@ -154,6 +220,16 @@ impl<'a> DocumentEditEngine<'a> {
             out.reborrow(),
         )?;
         container_ids.dedup();
+        appends.sort_by(
+            |left, right, mut sort_out| {
+                if let Some(budget) = self.context.budget {
+                    budget.consume(1, sort_out.reborrow())?;
+                }
+                Ok(left.cmp(right))
+            },
+            out.reborrow(),
+        )?;
+        appends.dedup();
         removals.sort_by(
             |left, right, mut sort_out| {
                 if let Some(budget) = self.context.budget {
@@ -181,14 +257,14 @@ impl<'a> DocumentEditEngine<'a> {
                 out.reborrow(),
             )?;
         }
-        let prepared = PreparedEdits::new(containers, removals);
+        let prepared = PreparedEdits::new(containers, removals, appends);
         if let Some(budget) = self.context.budget {
             budget.consume(edits.len(), out.reborrow())?;
         }
         let mut patches = ChargedVec::new(self.context.budget, out.reborrow())?;
         for edit in edits {
             patches.try_push(
-                self.resolve_edit(edit, &prepared, out.reborrow())?,
+                self.resolve_edit(edit, &prepared, line_break, out.reborrow())?,
                 out.reborrow(),
             )?;
         }
@@ -239,6 +315,7 @@ impl<'a> DocumentEditEngine<'a> {
         &self,
         edit: &ConfigEdit<'_>,
         prepared: &PreparedEdits<'_>,
+        line_break: &'static str,
         mut out: Out<'slot, '_, ConfigEditError>,
     ) -> OResult<'slot, SourcePatch> {
         let budget = self.context.budget;
@@ -253,8 +330,15 @@ impl<'a> DocumentEditEngine<'a> {
                 };
                 let start = span.start();
                 let end = span.end();
+                let context = self
+                    .value_context(
+                        start,
+                        self.context.index.parent_id(replacement.path()),
+                        line_break,
+                    )
+                    .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
                 let mut encoded =
-                    ScalarEncoder::encode_value(replacement.value().root(), budget, limit)
+                    ScalarEncoder::encode_value(replacement.value().root(), context, budget, limit)
                         .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
                 let comments = SourceSyntax::comments_in(self.context.source, start, end, budget)
                     .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
@@ -302,6 +386,7 @@ impl<'a> DocumentEditEngine<'a> {
                         },
                     },
                     prepared,
+                    line_break,
                     out,
                 )
             }
@@ -343,6 +428,7 @@ impl<'a> DocumentEditEngine<'a> {
                         },
                     },
                     prepared,
+                    line_break,
                     out,
                 )
             }
@@ -370,6 +456,7 @@ impl<'a> DocumentEditEngine<'a> {
                         value: InsertionValue::Value(value.root()),
                     },
                     prepared,
+                    line_break,
                     out,
                 )
             }
@@ -381,6 +468,7 @@ impl<'a> DocumentEditEngine<'a> {
         &self,
         plan: InsertionPlan<'_, '_, '_, '_>,
         prepared: &PreparedEdits<'_>,
+        line_break: &'static str,
         mut out: Out<'slot, '_, ConfigEditError>,
     ) -> OResult<'slot, SourcePatch> {
         let InsertionPlan {
@@ -456,7 +544,7 @@ impl<'a> DocumentEditEngine<'a> {
                 suffix_line_start: false,
             }
         };
-        Self::append_spacing(
+        self.append_spacing(
             &mut insertion,
             SpacingRequest {
                 comma: details.prefix_comma,
@@ -467,11 +555,26 @@ impl<'a> DocumentEditEngine<'a> {
             },
         )
         .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
+        let context =
+            if self.context.options.layout == TextLayout::Pretty && details.prefix_line_start {
+                ValueEncodingContext {
+                    layout: self.context.options.layout,
+                    line_break,
+                    indent: layout.indent,
+                    indent_unit: layout.indent_unit,
+                    indent_levels: layout.indent_levels,
+                    depth: 0,
+                }
+            } else {
+                self.value_context(details.position, Some(analysis.id()), line_break)
+                    .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?
+            };
         match value {
             InsertionValue::Value(value) => {
                 ScalarEncoder::encode_value_into(
                     &mut insertion,
                     value,
+                    context,
                     self.context.budget,
                     self.context.source_limit,
                 )
@@ -489,6 +592,7 @@ impl<'a> DocumentEditEngine<'a> {
                         value,
                         map_key,
                         colon_spacing: layout.colon_spacing,
+                        context,
                         budget: self.context.budget,
                         limit: self.context.source_limit,
                     },
@@ -496,7 +600,7 @@ impl<'a> DocumentEditEngine<'a> {
                 .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
             }
         }
-        Self::append_spacing(
+        self.append_spacing(
             &mut insertion,
             SpacingRequest {
                 comma: details.suffix_comma,
@@ -537,12 +641,17 @@ impl<'a> DocumentEditEngine<'a> {
         let Some(item) = container.item_bounds(span, self.context.budget, out.reborrow())? else {
             return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::EditConflict)));
         };
+        let preserve_tail = container.last_span() == Some(span)
+            && prepared.appends(container_id, self.context.budget, out.reborrow())?;
         let (start, end) = if let Some(comma) = item.next_comma {
             (item.start, comma + 1)
         } else if let Some(comma) = item.previous_comma {
-            (comma + 1, item.end)
+            (comma + 1, if preserve_tail { span.end() } else { item.end })
         } else {
-            (item.start, item.end)
+            (
+                item.start,
+                if preserve_tail { span.end() } else { item.end },
+            )
         };
         let comments =
             SourceSyntax::comments_in(self.context.source, start, end, self.context.budget)
@@ -555,19 +664,87 @@ impl<'a> DocumentEditEngine<'a> {
     }
 
     fn append_spacing(
+        &self,
         output: &mut ChargedString,
         request: SpacingRequest<'_>,
     ) -> Result<(), ConfigEditErrorKind> {
+        let spacing_bytes = if request.line_start {
+            request
+                .layout
+                .indent_unit
+                .len()
+                .checked_mul(request.layout.indent_levels)
+                .and_then(|length| length.checked_add(request.layout.indent.len()))
+                .and_then(|length| length.checked_add(request.layout.line_break.len()))
+                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?
+        } else if request.space {
+            1
+        } else {
+            0
+        };
+        let total_bytes = spacing_bytes
+            .checked_add(usize::from(request.comma))
+            .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+        let mut errors = ErrSlot::<BudgetError>::new();
+        errors
+            .try_call(|out| {
+                if let Some(budget) = self.context.budget {
+                    budget.consume(total_bytes, out)?;
+                }
+                Ok(())
+            })
+            .map_err(|caught| ConfigEditError::budget_kind(caught.take()))?;
         if request.comma {
             append_charged(output, ",", request.limit)?;
         }
         if request.line_start {
             append_charged(output, request.layout.line_break, request.limit)?;
             append_charged(output, request.layout.indent, request.limit)?;
+            for _ in 0..request.layout.indent_levels {
+                append_charged(output, request.layout.indent_unit, request.limit)?;
+            }
         } else if request.space {
             append_charged(output, " ", request.limit)?;
         }
         Ok(())
+    }
+
+    fn value_context(
+        &self,
+        position: usize,
+        fallback_container: Option<usize>,
+        line_break: &'static str,
+    ) -> Result<ValueEncodingContext<'_>, ConfigEditErrorKind> {
+        if self.context.options.layout == TextLayout::Compact {
+            return Ok(ValueEncodingContext {
+                layout: TextLayout::Compact,
+                line_break,
+                indent: "",
+                indent_unit: "",
+                indent_levels: 0,
+                depth: 0,
+            });
+        }
+        let (indent, depth) = match SourceSyntax::indent_context(
+            self.context.source,
+            position,
+            self.context.budget,
+        ) {
+            Ok(context) => context,
+            Err(ConfigEditErrorKind::EditConflict) => (
+                "",
+                fallback_container.map_or(0, |id| self.context.index.container_depth(id)),
+            ),
+            Err(kind) => return Err(kind),
+        };
+        Ok(ValueEncodingContext {
+            layout: self.context.options.layout,
+            line_break,
+            indent,
+            indent_unit: "    ",
+            indent_levels: 0,
+            depth,
+        })
     }
 }
 

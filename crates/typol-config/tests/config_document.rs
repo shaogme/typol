@@ -4,20 +4,21 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 use typol_config::{
-    ConfigDocument, ConfigEdit, ConfigEditErrorKind, ConfigFormatErrorKind, ConfigFormatOptions,
-    ConfigFormatter, ConfigLimits, ConfigParseOptions, ConfigParseRequest, ConfigParser,
-    ConfigPath, ConfigReplacement, EmptyEnvironment, Environment, EnvironmentError,
-    EnvironmentReadContext, SourceCommitError, SourceExpectation, SourceRevision, SourceWriter,
+    ConfigDocument, ConfigEdit, ConfigEditErrorKind, ConfigEditOptions, ConfigFormatErrorKind,
+    ConfigFormatOptions, ConfigFormatter, ConfigLimits, ConfigParseErrors, ConfigParseOptions,
+    ConfigParseRequest, ConfigParser, ConfigPath, ConfigReplacement, EmptyEnvironment, Environment,
+    EnvironmentError, EnvironmentReadContext, SourceCommitError, SourceExpectation, SourceRevision,
+    SourceWriter,
 };
 use typol_core::{
-    ConfigValue, ConfigValueBuilder, ExecutionBudget, ExecutionLimits, SliceSource, ValueKind,
-    ValueScalar, ValueSource,
+    ConfigValue, ConfigValueBuilder, ExecutionBudget, ExecutionLimits, SliceSource, TextLayout,
+    ValueKind, ValueScalar, ValueSource,
 };
 use typol_schema::{SchemaCompileOptions, SchemaSource};
 use typol_semantic::CompiledSchema;
 use typol_test_support::{
-    ConfigTestSupport as Support, TestExtract, TestFailure, TestOpeo, TestResult,
-    test_verify as test_assert, test_verify_eq as test_eq,
+    ConfigTestSupport as Support, Payload, TestExtract, TestFailure, TestOpeo, TestOpeoOutcome,
+    TestResult, ValueFactory as Values, test_verify as test_assert, test_verify_eq as test_eq,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,6 +116,42 @@ fn parse_document_with_options<'schema>(
             out,
         )
     })
+}
+
+fn parse_document_with_step_limit<'schema>(
+    schema: &'schema CompiledSchema,
+    source: &str,
+    max_steps: usize,
+) -> TestOpeoOutcome<ConfigDocument<'schema>, ConfigParseErrors> {
+    let options = ConfigParseOptions::default()
+        .with_execution(ExecutionLimits::new(max_steps, 64 * 1024 * 1024));
+    let mut input = SliceSource::new(source.as_bytes());
+    TestOpeo::outcome(|out| {
+        ConfigParser::new(schema).parse_document(
+            ConfigParseRequest::new(&mut input, "document", options),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })
+}
+
+fn minimum_parse_steps(schema: &CompiledSchema, source: &str) -> TestResult<usize> {
+    let mut upper = source.len().max(1024);
+    while !parse_document_with_step_limit(schema, source, upper).is_ok() {
+        upper = upper
+            .checked_mul(2)
+            .ok_or_else(|| TestFailure::new("parse step limit overflowed"))?;
+    }
+    let mut lower = 0usize;
+    while lower < upper {
+        let middle = lower + (upper - lower) / 2;
+        if parse_document_with_step_limit(schema, source, middle).is_ok() {
+            upper = middle;
+        } else {
+            lower = middle + 1;
+        }
+    }
+    Ok(lower)
 }
 
 fn format_document(
@@ -367,7 +404,14 @@ fn multiline_strings_are_opaque_to_formatting_and_document_edits() -> TestResult
         path: &extra,
         value: &value,
     };
-    TestOpeo::value(|out| document.apply_edits(&[edit], &mut EmptyEnvironment, out))?;
+    TestOpeo::value(|out| {
+        document.apply_edits(
+            &[edit],
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_assert!(document.source().contains("extra: 7"));
     parse_document(&schema, document.source())?;
     Ok(())
@@ -579,12 +623,65 @@ fn retained_source_round_trips_and_batch_replaces_only_value_spans() -> TestResu
         ConfigReplacement::new(&port, &port_value),
         ConfigReplacement::new(&name, &name_value),
     ];
-    TestOpeo::value(|out| document.replace_values(&replacements, &mut EmptyEnvironment, out))?;
+    TestOpeo::value(|out| {
+        document.replace_values(
+            &replacements,
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
 
     test_eq!(
         document.source(),
         "{\r\n  port: 9090, // port comment\r\n  name: \"updated\"\r\n}\r\n"
     );
+    Ok(())
+}
+
+#[test]
+fn pretty_value_encoding_does_not_spend_steps_for_empty_or_removal_batches() -> TestResult {
+    let schema = compile("entry struct Root { note: string }")?;
+    let note = "x".repeat(32_768);
+    let source = format!("{{note: \"{note}\"}}");
+    let parse_steps = minimum_parse_steps(&schema, &source)?;
+    let mut empty_document = match parse_document_with_step_limit(&schema, &source, parse_steps) {
+        TestOpeoOutcome::Value(document) => document,
+        TestOpeoOutcome::Error(_) => {
+            return Err(TestFailure::new(
+                "document did not parse at its minimum step limit",
+            ));
+        }
+    };
+    let pretty = ConfigEditOptions::new().with_layout(TextLayout::Pretty);
+    TestOpeo::value(|out| empty_document.replace_values(&[], pretty, &mut EmptyEnvironment, out))?;
+    test_eq!(empty_document.source(), source);
+
+    let schema = compile("entry struct Root { note: string, items: [u16] }")?;
+    let source = format!("{{note: \"{note}\", items: [1, 2]}}");
+    let parse_steps = minimum_parse_steps(&schema, &source)?;
+    let max_steps = parse_steps
+        .checked_mul(2)
+        .and_then(|steps| steps.checked_add(4096))
+        .ok_or_else(|| TestFailure::new("parse step limit overflowed"))?;
+    let mut document = match parse_document_with_step_limit(&schema, &source, max_steps) {
+        TestOpeoOutcome::Value(document) => document,
+        TestOpeoOutcome::Error(_) => {
+            return Err(TestFailure::new(
+                "document did not parse at the derived step limit",
+            ));
+        }
+    };
+    let item = ConfigPath::new().field("items").index(0);
+    TestOpeo::value(|out| {
+        document.apply_edits(
+            &[ConfigEdit::Remove { path: &item }],
+            pretty,
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_assert!(document.source().ends_with("2]}"));
     Ok(())
 }
 
@@ -600,13 +697,25 @@ fn failed_batch_validation_preserves_document_source() -> TestResult {
         ConfigReplacement::new(&path, &replacement),
         ConfigReplacement::new(&path, &replacement),
     ];
-    let conflict =
-        TestOpeo::error(|out| document.replace_values(&conflicts, &mut EmptyEnvironment, out))?;
+    let conflict = TestOpeo::error(|out| {
+        document.replace_values(
+            &conflicts,
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_eq!(conflict.kind(), ConfigEditErrorKind::EditConflict);
     test_eq!(document.source(), original);
 
-    let error =
-        TestOpeo::error(|out| document.set_value(&path, &invalid, &mut EmptyEnvironment, out))?;
+    let error = TestOpeo::error(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &invalid),
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_eq!(error.kind(), ConfigEditErrorKind::ValidationFailed);
     test_eq!(document.source(), original);
     Ok(())
@@ -620,7 +729,14 @@ fn environment_replacement_preserves_reference_and_rejects_unauthorized_name() -
     let replacement = environment_text("SERVICE_TOKEN", "local-token", "provider-secret")?;
     let mut document = parse_document(&schema, original)?;
 
-    TestOpeo::value(|out| document.set_value(&path, &replacement, &mut EmptyEnvironment, out))?;
+    TestOpeo::value(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &replacement),
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_eq!(
         document.source(),
         "{ token: env(\"SERVICE_TOKEN\", \"local-token\") }"
@@ -628,8 +744,14 @@ fn environment_replacement_preserves_reference_and_rejects_unauthorized_name() -
     test_assert!(!document.source().contains("provider-secret"));
 
     let invalid = environment_text("OTHER_TOKEN", "local-token", "provider-secret")?;
-    let error =
-        TestOpeo::error(|out| document.set_value(&path, &invalid, &mut EmptyEnvironment, out))?;
+    let error = TestOpeo::error(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &invalid),
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_eq!(error.kind(), ConfigEditErrorKind::ValidationFailed);
     test_eq!(
         document.source(),
@@ -648,7 +770,12 @@ fn string_encoding_rejects_unrepresentable_control_characters_before_validation(
     for invalid in ["nul\0value", "c1\u{0085}value"] {
         let replacement = text(invalid)?;
         let error = TestOpeo::error(|out| {
-            document.set_value(&path, &replacement, &mut EmptyEnvironment, out)
+            document.set_value(
+                ConfigReplacement::new(&path, &replacement),
+                ConfigEditOptions::default(),
+                &mut EmptyEnvironment,
+                out,
+            )
         })?;
         test_eq!(error.kind(), ConfigEditErrorKind::EncodingFailed);
         test_eq!(document.source(), original);
@@ -663,8 +790,14 @@ fn validation_failure_does_not_expose_a_secret_source_value() -> TestResult {
     let mut document = parse_document(&schema, original)?;
     let path = ConfigPath::new().field("port");
     let replacement = text("invalid")?;
-    let error =
-        TestOpeo::error(|out| document.set_value(&path, &replacement, &mut EmptyEnvironment, out))?;
+    let error = TestOpeo::error(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &replacement),
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     let display = format!("{error}");
     let debug = format!("{error:?}");
     let source_debug = format!("{:?}", Error::source(&error));
@@ -684,7 +817,12 @@ fn environment_provider_failure_rolls_back_the_edit() -> TestResult {
     let path = ConfigPath::new().field("label");
     let replacement = text("after")?;
     let error = TestOpeo::error(|out| {
-        document.set_value(&path, &replacement, &mut FailingEnvironment, out)
+        document.set_value(
+            ConfigReplacement::new(&path, &replacement),
+            ConfigEditOptions::default(),
+            &mut FailingEnvironment,
+            out,
+        )
     })?;
     test_eq!(error.kind(), ConfigEditErrorKind::ValidationFailed);
     test_eq!(document.source(), original);
@@ -700,9 +838,390 @@ fn candidate_source_limit_is_enforced_before_document_commit() -> TestResult {
     let mut document = parse_document_with_options(&schema, original, options)?;
     let path = ConfigPath::new().field("value");
     let replacement = unsigned(10_000)?;
-    let error =
-        TestOpeo::error(|out| document.set_value(&path, &replacement, &mut EmptyEnvironment, out))?;
+    let error = TestOpeo::error(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &replacement),
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_eq!(error.kind(), ConfigEditErrorKind::ResourceLimitExceeded);
+    test_eq!(document.source(), original);
+    Ok(())
+}
+
+#[test]
+fn pretty_replacement_uses_document_line_endings_and_preserves_unedited_source() -> TestResult {
+    let schema = compile("entry struct Root { value: [u16], other: u16 }")?;
+    let original = "{\r\n  value: [1, 2], // keep\r\n  other: 9\r\n}";
+    let mut document = parse_document(&schema, original)?;
+    let path = ConfigPath::new().field("value");
+    let replacement = unsigned_array(5, 6)?;
+    TestOpeo::value(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &replacement),
+            ConfigEditOptions::new().with_layout(TextLayout::Pretty),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_eq!(
+        document.source(),
+        "{\r\n  value: [\r\n      5,\r\n      6,\r\n  ], // keep\r\n  other: 9\r\n}"
+    );
+    Ok(())
+}
+
+#[test]
+fn pretty_newlines_follow_document_crlf_even_when_only_a_block_string_uses_it() -> TestResult {
+    let schema = compile("entry struct Root { values: [u16], note: string }")?;
+    let original = "{\n  values: [1],\n  note: \"\"\"\r\n    text\r\n  \"\"\",\n}";
+    let mut document = parse_document(&schema, original)?;
+    let path = ConfigPath::new().field("values");
+    let replacement = unsigned_array(5, 6)?;
+    TestOpeo::value(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &replacement),
+            ConfigEditOptions::new().with_layout(TextLayout::Pretty),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_assert!(
+        document
+            .source()
+            .contains("values: [\r\n      5,\r\n      6,\r\n  ],")
+    );
+    test_assert!(
+        document
+            .source()
+            .contains("note: \"\"\"\r\n    text\r\n  \"\"")
+    );
+    Ok(())
+}
+
+#[test]
+fn pretty_replacement_counts_inline_parent_containers_after_physical_indent() -> TestResult {
+    let schema =
+        compile("struct Nested { value: [u16] } entry struct Root { nested: Nested, other: u16 }")?;
+    let original = "{\n  nested: { value: [1, 2] },\n  other: 9\n}";
+    let mut document = parse_document(&schema, original)?;
+    let path = ConfigPath::new().field("nested").field("value");
+    let replacement = unsigned_array(5, 6)?;
+    TestOpeo::value(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &replacement),
+            ConfigEditOptions::new().with_layout(TextLayout::Pretty),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_eq!(
+        document.source(),
+        "{\n  nested: { value: [\n          5,\n          6,\n      ] },\n  other: 9\n}"
+    );
+    Ok(())
+}
+
+#[test]
+fn pretty_insertion_formats_new_value_without_reformatting_its_parent() -> TestResult {
+    let schema = compile("entry struct Root { items: [[u16]] }")?;
+    let original = "{\n  items: [\n    [1, 2],\n  ],\n}";
+    let mut document = parse_document(&schema, original)?;
+    let items = ConfigPath::new().field("items");
+    let value = unsigned_array(3, 4)?;
+    let edit = ConfigEdit::InsertArrayItem {
+        container: &items,
+        index: 1,
+        value: &value,
+    };
+    TestOpeo::value(|out| {
+        document.apply_edits(
+            &[edit],
+            ConfigEditOptions::new().with_layout(TextLayout::Pretty),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_eq!(
+        document.source(),
+        "{\n  items: [\n    [1, 2],\n    [\n        3,\n        4,\n    ],\n  ],\n}"
+    );
+    Ok(())
+}
+
+#[test]
+fn pretty_field_insertion_in_nested_empty_container_keeps_local_indent_depth() -> TestResult {
+    let schema = compile(
+        "struct Inner { value: u16 = 0 } struct Outer { inner: Inner } entry struct Root { outer: Outer }",
+    )?;
+    let original = "{\n  outer: {\n    inner: {\n    }\n  }\n}";
+    let mut document = parse_document(&schema, original)?;
+    let value_path = ConfigPath::new()
+        .field("outer")
+        .field("inner")
+        .field("value");
+    let value = unsigned(7)?;
+    let edit = ConfigEdit::InsertField {
+        path: &value_path,
+        value: &value,
+    };
+    TestOpeo::value(|out| {
+        document.apply_edits(
+            &[edit],
+            ConfigEditOptions::new().with_layout(TextLayout::Pretty),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_eq!(
+        document.source(),
+        "{\n  outer: {\n    inner: {\n      value: 7\n    }\n  }\n}"
+    );
+    Ok(())
+}
+
+#[test]
+fn pretty_empty_nested_container_ignores_block_string_body_when_inferring_indent() -> TestResult {
+    let schema = compile(
+        "struct Inner { value: u16 = 0 } struct Outer { note: string, inner: Inner } entry struct Root { outer: Outer }",
+    )?;
+    let original = concat!(
+        "{\n",
+        "  outer: {\n",
+        "    note: \"\"\"\n",
+        "x\n",
+        "    \"\"\",\n",
+        "    inner: {\n",
+        "    }\n",
+        "  }\n",
+        "}",
+    );
+    let mut document = parse_document(&schema, original)?;
+    let value_path = ConfigPath::new()
+        .field("outer")
+        .field("inner")
+        .field("value");
+    let value = unsigned(7)?;
+    let edit = ConfigEdit::InsertField {
+        path: &value_path,
+        value: &value,
+    };
+    TestOpeo::value(|out| {
+        document.apply_edits(
+            &[edit],
+            ConfigEditOptions::new().with_layout(TextLayout::Pretty),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_eq!(
+        document.source(),
+        concat!(
+            "{\n",
+            "  outer: {\n",
+            "    note: \"\"\"\n",
+            "x\n",
+            "    \"\"\",\n",
+            "    inner: {\n",
+            "      value: 7\n",
+            "    }\n",
+            "  }\n",
+            "}",
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn pretty_insertion_keeps_local_boundary_newlines_and_document_value_newlines() -> TestResult {
+    let schema = compile("entry struct Root { items: [[u16]], note: string }")?;
+    let original = "{\n  items: [\n    [1, 2],\n  ],\n  note: \"\"\"\r\n    text\r\n  \"\"\",\n}";
+    let mut document = parse_document(&schema, original)?;
+    let items = ConfigPath::new().field("items");
+    let value = unsigned_array(3, 4)?;
+    let edit = ConfigEdit::InsertArrayItem {
+        container: &items,
+        index: 1,
+        value: &value,
+    };
+    TestOpeo::value(|out| {
+        document.apply_edits(
+            &[edit],
+            ConfigEditOptions::new().with_layout(TextLayout::Pretty),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_assert!(
+        document
+            .source()
+            .contains("[1, 2],\n    [\r\n        3,\r\n        4,\r\n    ],\n  ]")
+    );
+    Ok(())
+}
+
+#[test]
+fn pretty_optional_and_map_values_keep_transparent_layout_and_entry_order() -> TestResult {
+    let schema =
+        compile("entry struct Root { optional: option<[u16]>, mapping: map<string, u16> }")?;
+    let mut document = parse_document(&schema, "{\n  optional: none,\n  mapping: {},\n}")?;
+    let pretty = ConfigEditOptions::new().with_layout(TextLayout::Pretty);
+    let optional_path = ConfigPath::new().field("optional");
+    let optional = Values::some(unsigned_array(1, 2)?)?;
+    TestOpeo::value(|out| {
+        document.set_value(
+            ConfigReplacement::new(&optional_path, &optional),
+            pretty,
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_assert!(
+        document
+            .source()
+            .contains("  optional: [\n      1,\n      2,\n  ],")
+    );
+
+    let mapping_path = ConfigPath::new().field("mapping");
+    let mapping = Values::map(vec![
+        Values::named("z", unsigned(1)?),
+        Values::named("a", unsigned(2)?),
+    ])?;
+    TestOpeo::value(|out| {
+        document.set_value(
+            ConfigReplacement::new(&mapping_path, &mapping),
+            pretty,
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_assert!(
+        document
+            .source()
+            .contains("  mapping: {\n      \"z\": 1,\n      \"a\": 2,\n  },")
+    );
+    Ok(())
+}
+
+#[test]
+fn pretty_enum_payloads_use_multiline_groups_while_empty_and_environment_values_stay_inline()
+-> TestResult {
+    let schema = compile(
+        "enum Choice { Unit, Single([u16]), Object { values: [u16] } } entry struct Root { choice: Choice, empty: [u16] }",
+    )?;
+    let original = "{\n  choice: .Unit,\n  empty: [1],\n}";
+    let mut document = parse_document(&schema, original)?;
+    let choice = ConfigPath::new().field("choice");
+    let single = Values::enumeration("Single", Payload::Single(Box::new(unsigned_array(1, 2)?)))?;
+    let pretty = ConfigEditOptions::new().with_layout(TextLayout::Pretty);
+    TestOpeo::value(|out| {
+        document.set_value(
+            ConfigReplacement::new(&choice, &single),
+            pretty,
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_assert!(
+        document
+            .source()
+            .contains("  choice: .Single(\n      [\n          1,\n          2,\n      ]\n  ),")
+    );
+
+    let object = Values::enumeration(
+        "Object",
+        Payload::Structure(vec![Values::named("values", unsigned_array(3, 4)?)]),
+    )?;
+    TestOpeo::value(|out| {
+        document.set_value(
+            ConfigReplacement::new(&choice, &object),
+            pretty,
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_assert!(document.source().contains(
+        "  choice: .Object {\n      values: [\n          3,\n          4,\n      ],\n  },"
+    ));
+
+    let empty_path = ConfigPath::new().field("empty");
+    let empty = Values::array(Vec::new())?;
+    TestOpeo::value(|out| {
+        document.set_value(
+            ConfigReplacement::new(&empty_path, &empty),
+            pretty,
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_assert!(document.source().contains("  empty: [],"));
+
+    let environment_schema = compile("entry struct Root { source: string @env(\"MODE\") }")?;
+    let mut environment_document = parse_document(&environment_schema, "{source: \"initial\"}")?;
+    let source_path = ConfigPath::new().field("source");
+    let environment = environment_text("MODE", "safe", "ignored")?;
+    TestOpeo::value(|out| {
+        environment_document.set_value(
+            ConfigReplacement::new(&source_path, &environment),
+            pretty,
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_eq!(
+        environment_document.source(),
+        "{source: env(\"MODE\", \"safe\")}"
+    );
+    Ok(())
+}
+
+#[test]
+fn candidate_source_is_charged_to_constructed_text_before_parse() -> TestResult {
+    let schema = compile("entry struct Root { value: u16 }")?;
+    let original = "{value:1}";
+    let limits = ConfigLimits::default().with_max_constructed_text_bytes(original.len());
+    let options = ConfigParseOptions::default().with_config(limits);
+    let mut document = parse_document_with_options(&schema, original, options)?;
+    let path = ConfigPath::new().field("value");
+    let replacement = unsigned(2)?;
+    let error = TestOpeo::error(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &replacement),
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_eq!(error.kind(), ConfigEditErrorKind::ResourceLimitExceeded);
+    test_eq!(document.source(), original);
+    Ok(())
+}
+
+#[test]
+fn candidate_parser_resource_diagnostics_are_classified_and_preserved() -> TestResult {
+    let schema = compile("entry struct Root { items: [u16] }")?;
+    let options =
+        ConfigParseOptions::default().with_config(ConfigLimits::default().with_max_value_nodes(2));
+    let original = "{items:[]}";
+    let mut document = parse_document_with_options(&schema, original, options)?;
+    let path = ConfigPath::new().field("items");
+    let replacement = unsigned_array(1, 2)?;
+    let error = TestOpeo::error(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &replacement),
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_eq!(error.kind(), ConfigEditErrorKind::ResourceLimitExceeded);
+    test_assert!(error.validation_errors().is_some_and(|errors| {
+        errors.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code() == typol_core::DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        })
+    }));
     test_eq!(document.source(), original);
     Ok(())
 }
@@ -713,8 +1232,14 @@ fn defaulted_values_are_not_given_fabricated_source_spans() -> TestResult {
     let mut document = parse_document(&schema, "{}")?;
     let path = ConfigPath::new().field("port");
     let replacement = unsigned(9000)?;
-    let error =
-        TestOpeo::error(|out| document.set_value(&path, &replacement, &mut EmptyEnvironment, out))?;
+    let error = TestOpeo::error(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &replacement),
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_eq!(error.kind(), ConfigEditErrorKind::InvalidPath);
     test_eq!(document.source(), "{}");
     Ok(())
@@ -730,7 +1255,14 @@ fn float_and_anonymous_enum_paths_use_parser_metadata() -> TestResult {
         .variant("Object")
         .field("ratio");
     let value = float32(-0.0)?;
-    TestOpeo::value(|out| document.set_value(&path, &value, &mut EmptyEnvironment, out))?;
+    TestOpeo::value(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &value),
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_eq!(document.source(), "{choice: .Object {ratio: -0.0}}");
     Ok(())
 }
@@ -780,7 +1312,14 @@ fn successful_source_commit_advances_the_document_snapshot() -> TestResult {
     let path = ConfigPath::new().field("port");
 
     let replacement = unsigned(2)?;
-    TestOpeo::value(|out| document.set_value(&path, &replacement, &mut EmptyEnvironment, out))?;
+    TestOpeo::value(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &replacement),
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     let expectation = document.source_expectation();
     let revision = document
         .write_source("config", &mut writer, expectation)
@@ -789,7 +1328,14 @@ fn successful_source_commit_advances_the_document_snapshot() -> TestResult {
     test_eq!(writer.contents.as_deref(), Some(b"{port: 2}".as_slice()));
 
     let replacement = unsigned(3)?;
-    TestOpeo::value(|out| document.set_value(&path, &replacement, &mut EmptyEnvironment, out))?;
+    TestOpeo::value(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &replacement),
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     let expectation = document.source_expectation();
     let revision = document
         .write_source("config", &mut writer, expectation)
@@ -826,7 +1372,14 @@ fn structural_edit_batch_inserts_fields_map_entries_and_array_items() -> TestRes
             value: &item_value,
         },
     ];
-    TestOpeo::value(|out| document.apply_edits(&edits, &mut EmptyEnvironment, out))?;
+    TestOpeo::value(|out| {
+        document.apply_edits(
+            &edits,
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_eq!(
         document.source(),
         "{labels: {\"one\":1, \"ø\":2}, items: [1, 9, 2], port: 9000}"
@@ -845,27 +1398,115 @@ fn source_document_reports_explicit_and_defaulted_paths() -> TestResult {
 
 #[test]
 fn structural_edit_batch_can_remove_and_append_the_last_array_item() -> TestResult {
+    struct RemovalAppendCase {
+        source: &'static str,
+        expected: &'static str,
+        last_index: usize,
+    }
+
     let schema = compile("entry struct Root { items: [u16] }")?;
     let items = ConfigPath::new().field("items");
-    let last = items.clone().index(1);
     let value = unsigned(3)?;
 
-    for (source, expected) in [
-        ("{items:[1,2]}", "{items:[1, 3]}"),
-        ("{items:[1,2,]}", "{items:[1, 3,]}"),
+    for case in [
+        RemovalAppendCase {
+            source: "{items:[1,2]}",
+            expected: "{items:[1, 3]}",
+            last_index: 1,
+        },
+        RemovalAppendCase {
+            source: "{items:[1,2,]}",
+            expected: "{items:[1, 3,]}",
+            last_index: 1,
+        },
+        RemovalAppendCase {
+            source: "{items: [1, 2 ]}",
+            expected: "{items: [1, 3 ]}",
+            last_index: 1,
+        },
+        RemovalAppendCase {
+            source: "{items: [2 ]}",
+            expected: "{items: [ 3 ]}",
+            last_index: 0,
+        },
+        RemovalAppendCase {
+            source: "{items: [\n  1,\n  2 \n]}",
+            expected: "{items: [\n  1,\n  3 \n]}",
+            last_index: 1,
+        },
     ] {
-        let mut document = parse_document(&schema, source)?;
+        let mut document = parse_document(&schema, case.source)?;
+        let last = items.clone().index(case.last_index);
         let edits = [
             ConfigEdit::Remove { path: &last },
             ConfigEdit::InsertArrayItem {
                 container: &items,
-                index: 2,
+                index: case.last_index + 1,
                 value: &value,
             },
         ];
-        TestOpeo::value(|out| document.apply_edits(&edits, &mut EmptyEnvironment, out))?;
-        test_eq!(document.source(), expected);
+        TestOpeo::value(|out| {
+            document.apply_edits(
+                &edits,
+                ConfigEditOptions::default(),
+                &mut EmptyEnvironment,
+                out,
+            )
+        })?;
+        test_eq!(document.source(), case.expected);
     }
+    Ok(())
+}
+
+#[test]
+fn structural_edit_batch_can_remove_and_append_last_fields_and_map_entries() -> TestResult {
+    let field_schema =
+        compile("entry struct Root { first: u16, second: u16 = 2, third: u16 = 0 }")?;
+    let field_source = "{first: 1, second: 2 }";
+    let mut field_document = parse_document(&field_schema, field_source)?;
+    let second = ConfigPath::new().field("second");
+    let third = ConfigPath::new().field("third");
+    let field_value = unsigned(3)?;
+    let field_edits = [
+        ConfigEdit::Remove { path: &second },
+        ConfigEdit::InsertField {
+            path: &third,
+            value: &field_value,
+        },
+    ];
+    TestOpeo::value(|out| {
+        field_document.apply_edits(
+            &field_edits,
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_eq!(field_document.source(), "{first: 1, third: 3 }");
+
+    let map_schema = compile("entry struct Root { values: map<string, u16> }")?;
+    let map_source = "{values: {\"a\": 1, \"b\": 2 }}";
+    let mut map_document = parse_document(&map_schema, map_source)?;
+    let values = ConfigPath::new().field("values");
+    let second = values.clone().map_key("b");
+    let map_value = unsigned(3)?;
+    let map_edits = [
+        ConfigEdit::Remove { path: &second },
+        ConfigEdit::InsertMapEntry {
+            container: &values,
+            key: "c",
+            value: &map_value,
+        },
+    ];
+    TestOpeo::value(|out| {
+        map_document.apply_edits(
+            &map_edits,
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_eq!(map_document.source(), "{values: {\"a\": 1, \"c\": 3 }}");
     Ok(())
 }
 
@@ -880,7 +1521,14 @@ fn inserted_map_keys_escape_quotes_and_backslashes() -> TestResult {
         key: "quote\"and\\slash",
         value: &replacement,
     };
-    TestOpeo::value(|out| document.apply_edits(&[edit], &mut EmptyEnvironment, out))?;
+    TestOpeo::value(|out| {
+        document.apply_edits(
+            &[edit],
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_eq!(
         document.source(),
         "{values: {\"quote\\\"and\\\\slash\": 7}}"
@@ -900,7 +1548,14 @@ fn map_entry_insertion_rejects_an_existing_key_without_changing_source() -> Test
         key: "m",
         value: &value,
     };
-    let error = TestOpeo::error(|out| document.apply_edits(&[edit], &mut EmptyEnvironment, out))?;
+    let error = TestOpeo::error(|out| {
+        document.apply_edits(
+            &[edit],
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_eq!(error.kind(), ConfigEditErrorKind::EntryAlreadyExists);
     test_eq!(document.source(), source);
     Ok(())
@@ -926,7 +1581,14 @@ fn structural_insertions_follow_multiline_crlf_indentation() -> TestResult {
             value: &item_value,
         },
     ];
-    TestOpeo::value(|out| document.apply_edits(&edits, &mut EmptyEnvironment, out))?;
+    TestOpeo::value(|out| {
+        document.apply_edits(
+            &edits,
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_eq!(
         document.source(),
         "{\r\n  items: [\r\n    1,\r\n    9,\r\n    2,\r\n  ],\r\n  port: 9000,\r\n}"
@@ -945,8 +1607,59 @@ fn structural_insertion_uses_the_nearest_multiline_item_layout() -> TestResult {
         value: &value,
     };
 
-    TestOpeo::value(|out| document.apply_edits(&[edit], &mut EmptyEnvironment, out))?;
+    TestOpeo::value(|out| {
+        document.apply_edits(
+            &[edit],
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_eq!(document.source(), "{first:1,\n  second:2,\n  third:3}");
+    Ok(())
+}
+
+#[test]
+fn outer_insertion_layout_ignores_block_string_line_endings() -> TestResult {
+    let schema = compile("entry struct Root { note: string, values: [u16] = [] }")?;
+    let source = concat!(
+        "{\n",
+        "  note: \"\"\"\r\n",
+        "    first\r\n",
+        "    second\r\n",
+        "    \"\"\",\n",
+        "}\n",
+    );
+    let mut document = parse_document(&schema, source)?;
+    let values = ConfigPath::new().field("values");
+    let value = unsigned_array(1, 2)?;
+    let edit = ConfigEdit::InsertField {
+        path: &values,
+        value: &value,
+    };
+    TestOpeo::value(|out| {
+        document.apply_edits(
+            &[edit],
+            ConfigEditOptions::new().with_layout(TextLayout::Pretty),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_eq!(
+        document.source(),
+        concat!(
+            "{\n",
+            "  note: \"\"\"\r\n",
+            "    first\r\n",
+            "    second\r\n",
+            "    \"\"\",\n",
+            "  values: [\r\n",
+            "      1,\r\n",
+            "      2,\r\n",
+            "  ],\n",
+            "}\n",
+        )
+    );
     Ok(())
 }
 
@@ -961,7 +1674,14 @@ fn array_insertion_handles_empty_containers_and_composite_values() -> TestResult
         index: 0,
         value: &value,
     };
-    TestOpeo::value(|out| document.apply_edits(&[edit], &mut EmptyEnvironment, out))?;
+    TestOpeo::value(|out| {
+        document.apply_edits(
+            &[edit],
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_eq!(document.source(), "{items: [[3, 4]]}");
     Ok(())
 }
@@ -1012,7 +1732,14 @@ fn structural_edit_failures_leave_the_document_unchanged() -> TestResult {
         index: 2,
         value: &value,
     };
-    let error = TestOpeo::error(|out| document.apply_edits(&[edit], &mut EmptyEnvironment, out))?;
+    let error = TestOpeo::error(|out| {
+        document.apply_edits(
+            &[edit],
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_eq!(error.kind(), ConfigEditErrorKind::InvalidPath);
     test_eq!(document.source(), original);
 
@@ -1022,7 +1749,14 @@ fn structural_edit_failures_leave_the_document_unchanged() -> TestResult {
         index: 1,
         value: &invalid,
     };
-    let error = TestOpeo::error(|out| document.apply_edits(&[edit], &mut EmptyEnvironment, out))?;
+    let error = TestOpeo::error(|out| {
+        document.apply_edits(
+            &[edit],
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
     test_eq!(error.kind(), ConfigEditErrorKind::ValidationFailed);
     test_eq!(document.source(), original);
     Ok(())

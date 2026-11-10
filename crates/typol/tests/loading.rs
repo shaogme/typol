@@ -8,10 +8,11 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 use typol::{
-    BoundSchema, ConfigParseOptions, ConfigPath, EmptyEnvironment, Environment, EnvironmentError,
-    EnvironmentReadContext, LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits,
-    SchemaLoader, SourceCommitError, SourceExpectation, Sourced, TextLayout, Typol, TypolError,
-    TypolOptions, TypolStage, ValidatedConfigValue, WriteOptions,
+    BoundSchema, ConfigEditOptions, ConfigParseOptions, ConfigPath, ConfigReplacement,
+    EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext, LoadedSchema,
+    ProcessEnvironment, ProcessEnvironmentLimits, SchemaLoader, SourceCommitError,
+    SourceExpectation, Sourced, TextLayout, Typol, TypolError, TypolOptions, TypolStage,
+    ValidatedConfigValue, WriteOptions,
     binding::{
         BindOptions, CodecStage, ConversionLimits, MAX_CONVERSION_DEPTH, Typol as TypolTrait,
     },
@@ -568,7 +569,14 @@ fn loaded_schema_writes_the_edited_document_with_its_original_snapshot() -> Test
         builder.finish(root, out)
     })?;
     let path = ConfigPath::new().field("value");
-    TestOpeo::value(|out| document.set_value(&path, &value, &mut environment, out))?;
+    TestOpeo::value(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &value),
+            ConfigEditOptions::default(),
+            &mut environment,
+            out,
+        )
+    })?;
     let revision = loaded
         .write_file_with_expectation(&mut document, &config, SourceExpectation::ReplaceAny)
         .test_value()?;

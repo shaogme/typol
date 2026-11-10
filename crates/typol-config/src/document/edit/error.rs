@@ -4,8 +4,20 @@ use core::{
 };
 use typol_core::BudgetError;
 
-use super::super::encoding::ConfigEditErrorKind;
 use crate::ConfigParseErrors;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigEditErrorKind {
+    InvalidPath,
+    ValueNotExplicit,
+    EncodingFailed,
+    EditConflict,
+    InvalidContainer,
+    EntryAlreadyExists,
+    ValidationFailed,
+    ResourceLimitExceeded,
+    AllocationFailed,
+}
 
 pub struct ConfigEditError {
     kind: ConfigEditErrorKind,
@@ -28,9 +40,9 @@ impl ConfigEditError {
         }
     }
 
-    pub(crate) fn validation(errors: ConfigParseErrors) -> Self {
+    pub(crate) fn validation(kind: ConfigEditErrorKind, errors: ConfigParseErrors) -> Self {
         Self {
-            kind: ConfigEditErrorKind::ValidationFailed,
+            kind,
             validation: Some(errors),
         }
     }

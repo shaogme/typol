@@ -49,6 +49,7 @@ pub(super) enum PathValueKind {
     Map,
     Structure,
     Enumeration,
+    Payload,
     Other,
 }
 
@@ -213,6 +214,14 @@ impl SourcePathIndex {
                             entry.span = parent_span;
                             entry.kind = PathValueKind::Structure;
                         }
+                    } else if let ValueKind::Enumeration {
+                        payload: ValuePayloadView::Single(_),
+                        ..
+                    } = parent_value.as_ref()
+                    {
+                        if let Some(entry) = entries.get_mut(path_id) {
+                            entry.kind = PathValueKind::Payload;
+                        }
                     }
                 }
                 insertion_parent = path_id;
@@ -365,6 +374,27 @@ impl SourcePathIndex {
 
     pub(super) fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub(super) fn container_depth(&self, id: usize) -> usize {
+        let mut current = id;
+        let mut depth = 0usize;
+        while let Some(entry) = self.entries.get(current) {
+            if matches!(
+                entry.kind,
+                PathValueKind::Array
+                    | PathValueKind::Map
+                    | PathValueKind::Structure
+                    | PathValueKind::Payload
+            ) {
+                depth = depth.saturating_add(1);
+            }
+            if current == 0 {
+                break;
+            }
+            current = entry.parent;
+        }
+        depth
     }
 }
 

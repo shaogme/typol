@@ -293,7 +293,33 @@ let mut document = loaded.read_file(
 )?;
 ```
 
-Apply a batch of typed replacements, insertions, or removals with `ConfigDocument::apply_edits` and `ConfigPath`. Array indexes in one batch refer to the original document, and overlapping edits are rejected; a batch can remove the last item and append a new one at the same time. Patches are applied to a candidate and the result is parsed and validated before commit, so failures leave the document unchanged. Replacements rewrite only the selected value; insertions follow the nearest available item's line ending and indentation. If the application only needs a validated value, use `read_file_value` or a bound schema's `read_file`.
+Apply a batch of typed replacements, insertions, or removals with `ConfigDocument::apply_edits` and `ConfigPath`. Array indexes in one batch refer to the original document, and overlapping edits are rejected; a batch can remove the last item and append a new one at the same time. Patches are applied to a candidate and the result is parsed and validated before commit, so failures leave the document unchanged. Use `ConfigEditOptions::default()` to keep the compact encoding, or select `TextLayout::Pretty` to lay out newly encoded values. Pretty affects only the inserted or replaced value fragment. It leaves surrounding source and untouched entries byte-for-byte intact; insertion boundaries still follow the container's local spacing and indentation. Pretty uses the document-wide newline rule (CRLF if the source contains CRLF, otherwise LF), four additional spaces per encoded container, trailing commas on nonempty containers, and multiline parentheses for single-value enum payloads. Empty containers, unit variants, and `env(...)` remain inline. `remove` keeps its existing signature because it does not encode a value.
+
+```rust
+use typol::{ConfigEditOptions, ConfigFieldInsertion, ConfigReplacement, TextLayout};
+
+let compact = ConfigEditOptions::default();
+document.set_value(
+    ConfigReplacement::new(&path, &compact_value),
+    compact,
+    &mut environment,
+    out,
+)?;
+
+let pretty = ConfigEditOptions::new().with_layout(TextLayout::Pretty);
+document.apply_edits(&[edit], pretty, &mut environment, out)?;
+document.insert_field(
+    ConfigFieldInsertion::new(&field_path, &field_value),
+    pretty,
+    &mut environment,
+    out,
+)?;
+
+// Removal does not need a layout option.
+document.remove(&path, &mut environment, out)?;
+```
+
+`replace_values`, `apply_edits`, `set_value`, and `insert_field` take the options before the environment argument. `set_value` accepts a `ConfigReplacement`, while `insert_field` accepts a `ConfigFieldInsertion`, so each convenience method groups its path and value in one named argument. A batch has one layout for all values in that batch. If the application only needs a validated value, use `read_file_value` or a bound schema's `read_file`.
 
 Writing a document back is a separate source operation. The standard filesystem adapter cannot atomically compare the retained source snapshot and replace a path, so `write_file` reports `AtomicReplaceUnsupported` for that expectation. Use `write_file_with_expectation` with `MustBeAbsent` for a new path or `ReplaceAny` when overwriting is intentional. A custom target can implement `SourceWriter` with its own atomic replacement behavior.
 

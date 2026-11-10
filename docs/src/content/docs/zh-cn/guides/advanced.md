@@ -293,7 +293,33 @@ let mut document = loaded.read_file(
 )?;
 ```
 
-使用 `ConfigDocument::apply_edits` 与 `ConfigPath` 批量替换、插入或删除类型化值。同一批次中的数组索引按原文解释，重叠编辑会被拒绝；删除末项后可在同批末尾追加。所有补丁会先应用到候选文本，再重新解析并校验；任何失败都会保留原文档。替换只重写目标值；插入会沿用附近可用项的换行和缩进。只需要校验值时，使用 `read_file_value` 或绑定对象的 `read_file`。
+使用 `ConfigDocument::apply_edits` 与 `ConfigPath` 批量替换、插入或删除类型化值。同一批次中的数组索引按原文解释，重叠编辑会被拒绝；删除末项后可在同批末尾追加。所有补丁会先应用到候选文本，再重新解析并校验；任何失败都会保留原文档。使用 `ConfigEditOptions::default()` 保持紧凑编码，或选择 `TextLayout::Pretty` 格式化新编码的值片段。Pretty 只影响插入或替换的新值，外围源码和未编辑条目逐字节保留；插入边界仍沿用容器的局部空格和缩进。Pretty 使用整份文档的换行规则（源码含 CRLF 时用 CRLF，否则用 LF）、每层增加 4 个空格、非空容器尾逗号，以及枚举单值载荷的多行圆括号。空容器、unit variant 和 `env(...)` 保持内联。`remove` 不编码值，因此保留原有签名。
+
+```rust
+use typol::{ConfigEditOptions, ConfigFieldInsertion, ConfigReplacement, TextLayout};
+
+let compact = ConfigEditOptions::default();
+document.set_value(
+    ConfigReplacement::new(&path, &compact_value),
+    compact,
+    &mut environment,
+    out,
+)?;
+
+let pretty = ConfigEditOptions::new().with_layout(TextLayout::Pretty);
+document.apply_edits(&[edit], pretty, &mut environment, out)?;
+document.insert_field(
+    ConfigFieldInsertion::new(&field_path, &field_value),
+    pretty,
+    &mut environment,
+    out,
+)?;
+
+// 删除操作无需布局选项。
+document.remove(&path, &mut environment, out)?;
+```
+
+`replace_values`、`apply_edits`、`set_value` 和 `insert_field` 都在 environment 参数之前接收 options。`set_value` 接收 `ConfigReplacement`，`insert_field` 接收 `ConfigFieldInsertion`，分别用一个具名参数封装路径和值。同一批次中的所有值使用同一布局。只需要校验值时，使用 `read_file_value` 或绑定对象的 `read_file`。
 
 写回文档是独立的源文件操作。标准文件系统适配器无法原子地比较保留的源快照并替换路径，因此 `write_file` 对该类期望会返回 `AtomicReplaceUnsupported`。新路径使用 `write_file_with_expectation` 和 `MustBeAbsent`；有意覆盖时选择 `ReplaceAny`。自定义目标可以实现 `SourceWriter`，提供自己的原子替换行为。
 

@@ -72,6 +72,10 @@ ConfigParser::new(schema).parse(request, environment)
 
 `ConfigDocument::write_to` 原样输出保留的文本。`apply_edits` 通过 parser 索引解析带类型的替换、字段/map 项/数组元素插入和删除操作。事务按父容器分组子节点索引，并为每个受影响容器只准备一次边界、条目位置、逗号和布局。它拒绝重叠源范围，组装一个候选文档，再重解析并校验后提交内存文档。重解析只记录位置，不会再保留一份候选源码；校验成功后，候选缓冲区会直接成为新文档保留的源码。替换会编码目标子树；插入会推断容器换行、缩进和键分隔空格。插入值直接编码到最终补丁缓冲区；map 项存在性检查使用已解析的父节点，不克隆完整路径。删除和复合值替换会提取受影响范围内的注释，并把注释字节保留在替换区域。未触及的源范围逐字节不变。编辑数量、排序、索引遍历和有界源扫描均计入共享执行额度。相关修改应通过一次 `apply_edits` 或 `replace_values` 批量提交，这样候选文档只会解析和校验一次；分开的 `set_value` 调用会各自付出一次成本。编辑器扫描受限的源切片定位分隔符和注释，并把两种字符串形式都当作不透明范围，因此块字符串中的括号、逗号和注释标记不会干扰容器配对；它不另建 token/trivia CST。
 
+`set_value` 使用 `ConfigReplacement` 封装路径和值，`insert_field` 使用 `ConfigFieldInsertion` 封装路径和值；两者都通过构造函数创建，再把 options 传给文档方法，以满足仓库的方法参数上限。默认布局为 `Compact`；`with_layout(TextLayout::Pretty)` 只格式化新写入的值片段。`remove` 保留原签名，并在内部使用默认选项。一批编辑中的所有值共用一份布局。Pretty 保持 `ConfigValue` 的 entry 顺序，不规范化外围文档：非空 array、map 和 structure 每项单独一行，逐层增加四个空格并使用尾逗号；空容器保持内联。枚举单值载荷使用多行圆括号且不加尾逗号；unit variant 和 `env(...)` 保持紧凑。新行沿用 formatter 的整文档规则（源码任意位置含 CRLF 时选 CRLF，否则选 LF），值片段本身不附加文件级末尾换行。替换缩进以目标行的前导空格或 Tab 为基线，再为该行此前仍打开的实际编码容器增加四个空格；新插入行使用容器布局选定的缩进。Compact 编码和现有外围插入标点保持不变。`ConfigEditOptions` 从 `typol_config` 根导出；`TextLayout` 可从 `typol_config`、`typol`、`typol::core` 和 `typol::config` 使用。
+
+候选源码同时受 `max_source_bytes` 与 `max_constructed_text_bytes` 限制。编辑器在分配候选缓冲区前，以候选完整长度向 constructed-text 额度计费一次；补丁片段不重复计费，校验期间 parser 新建的文本仍按现有路径计费。候选解析若报告 allocation 或 resource/capacity 诊断，编辑错误类型会映射到对应类别，并继续保留完整 `ConfigParseErrors`。
+
 `ConfigFormatter::format(&document, options, out)` 只格式化成功解析得到的 `ConfigDocument`。它使用显式分隔符栈直接扫描保留的源文，不构造配置 AST，也不重新编码 `ConfigValue`。`FormattedConfig` 独立拥有完整结果，提供只读字符串视图，并可通过 `typol_core::Write` sink 消费写出。`ConfigFormatter::is_formatted` 使用相同格式化流程，将每段输出直接与原文比较，不分配完整输出缓冲区；CLI 的 `config fmt --check` 使用此路径。原文档及其源位置保持不变。格式化按顺序保留所有非空白源 token 和注释，包括字符串/数值写法和 `env(...)` 表达式。每个块字符串都是不透明 token，内部字节、缩进和 LF/CRLF 写法均保持原样；`format` 与 `is_formatted` 使用相同的边界扫描器。非空容器按每行一个条目展开，使用 4 空格缩进并添加尾逗号；空容器保持紧凑，除非其中含有注释。枚举单值载荷使用多行圆括号分组且不加尾逗号，`env(...)` 调用仍保持紧凑。输入采用 LF 或 CRLF 时保留对应风格，输出以相应换行符结束，并满足幂等性。
 
 `ConfigFormatOptions` 只提供输出字节、格式化工作区和嵌套深度额度，不提供会产生多种规范格式的样式选项。格式化还受文档的源码和构造文本额度约束；栈存储和扫描工作计入文档共享执行预算。`format` 会构造拥有型计费输出缓冲区，并计量构造文本；`is_formatted` 使用相同的输出额度逐段比较，不构造或保留该缓冲区。尾部注释的逗号前瞻每串连续注释只执行一次，因此含 `k` 条注释的串只增加线性扫描工作。拥有型结果只有在扫描、范围检查和输出计量全部成功后才返回。结构错误、资源超限、分配失败和后续输出 sink 错误保持不同类别；格式化中断时不会把部分缓冲区作为成功结果返回。
@@ -143,7 +147,7 @@ Schema 编译期为授权名称建立规范化槽位；同名授权共享一个�
 
 若表达式包含回退字面值，解析器先按字段标量类型解析并校验回退，即使环境最终已设置也必须有效。环境缺失时优先采用显式回退；结果来源是 `ExplicitFallback`，不会携带环境引用。无显式回退时，解析器将字段标记为延后处理，再沿用对象闭合时的默认值、可选值或必填字段规则。只有 provider 值成功转换且通过校验后，才会保留表达式名称和 fallback 供 typed 往返。
 
-Schema-aware writer 会将保留的引用写成 `env("NAME"[, fallback])`，而已选用的 fallback 写成标量字面值。完整值和 Schema 校验会在 writer 写入首字节前检查引用名、标量/option 形状、字段精确授权和 typed fallback。`ConfigDocument` 对替换和插入使用相同的标量编码，再重新解析并校验候选文本后才提交；候选无效时保留原文档。formatter 仍保留未编辑范围中的原始 token 和注释。
+Schema-aware writer 会将保留的引用写成 `env("NAME"[, fallback])`，而已选用的 fallback 写成标量字面值。完整值和 Schema 校验会在 writer 写入首字节前检查引用名、标量/option 形状、字段精确授权和 typed fallback。`ConfigDocument` 的替换与插入共享 writer 的 scalar/token 规则；可选 Pretty 布局使用编辑片段的空白规则，不采用完整输出布局。候选文本会重新解析并校验后才提交；候选无效时保留原文档。formatter 仍保留未编辑范围中的原始 token 和注释。
 
 `typol_config::Environment` 不依赖进程环境。`typol_std::ProcessEnvironment` 是可选宿主适配器：按名称查询进程环境，不枚举或修改环境；Unix 字节在配置层校验 UTF-8，Windows 转为 UTF-8 并拒绝孤立代理项。
 

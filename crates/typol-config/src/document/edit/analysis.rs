@@ -3,11 +3,10 @@ use typol_core::{ChargedVec, ExecutionBudget, Span};
 
 use super::{
     super::{
-        encoding::ConfigEditErrorKind,
         path::{PathValueKind, SourcePathIndex},
         syntax::{SourceContainer, SourceItemBounds, SourceLayout, SourceSyntax},
     },
-    error::ConfigEditError,
+    error::{ConfigEditError, ConfigEditErrorKind},
 };
 
 pub(super) struct AnalyzedChild<'source> {
@@ -34,6 +33,7 @@ pub(super) struct RemovalEntry {
 pub(super) struct PreparedEdits<'source> {
     containers: ChargedVec<ContainerAnalysis<'source>>,
     removals: ChargedVec<RemovalEntry>,
+    appends: ChargedVec<usize>,
 }
 
 impl<'source> ContainerAnalysis<'source> {
@@ -57,8 +57,6 @@ impl<'source> ContainerAnalysis<'source> {
             return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::ValueNotExplicit)));
         };
         let bounds = SourceSyntax::scan_container(source, span, info.kind, budget)
-            .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
-        let layout = SourceSyntax::layout(source, bounds, budget)
             .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
         consume_search(budget, index.len(), out.reborrow())?;
         consume_search(budget, index.len(), out.reborrow())?;
@@ -86,6 +84,8 @@ impl<'source> ContainerAnalysis<'source> {
             },
             out.reborrow(),
         )?;
+        let layout = SourceSyntax::layout(source, bounds, spans.is_empty(), budget)
+            .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
         let items =
             SourceSyntax::entry_bounds(source, bounds, spans.as_slice(), budget, out.reborrow())?;
         let mut children = ChargedVec::new(budget, out.reborrow())?;
@@ -190,6 +190,8 @@ impl<'source> ContainerAnalysis<'source> {
         let mut layout = self.layout;
         if let Some(reference) = reference {
             layout.indent = reference.indent.unwrap_or("    ");
+            layout.indent_unit = "";
+            layout.indent_levels = 0;
             layout.colon_spacing = reference.colon_spacing;
         }
         Ok(Some(layout))
@@ -229,10 +231,12 @@ impl<'source> PreparedEdits<'source> {
     pub(super) const fn new(
         containers: ChargedVec<ContainerAnalysis<'source>>,
         removals: ChargedVec<RemovalEntry>,
+        appends: ChargedVec<usize>,
     ) -> Self {
         Self {
             containers,
             removals,
+            appends,
         }
     }
 
@@ -269,6 +273,17 @@ impl<'source> PreparedEdits<'source> {
                     .then_with(|| entry.span.end().cmp(&span.end()))
             })
             .is_ok())
+    }
+
+    pub(super) fn appends<'slot>(
+        &self,
+        container_id: usize,
+        budget: Option<&ExecutionBudget>,
+        out: Out<'slot, '_, ConfigEditError>,
+    ) -> OResult<'slot, bool> {
+        let appends = self.appends.as_slice();
+        consume_search(budget, appends.len(), out)?;
+        Ok(appends.binary_search(&container_id).is_ok())
     }
 }
 

@@ -1,35 +1,49 @@
+use super::edit::ConfigEditErrorKind;
 use core::{
     fmt::{self, LowerExp, Write as FmtWrite},
     str,
 };
 use opeo::ErrSlot;
 use typol_core::{
-    BudgetError, ChargedString, ChargedVec, ExecutionBudget, ValueEntries, ValueKind,
+    BudgetError, ChargedString, ChargedVec, ExecutionBudget, TextLayout, ValueEntries, ValueKind,
     ValuePayloadView, ValueScalar, ValueSource, ValueView,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ConfigEditErrorKind {
-    InvalidPath,
-    ValueNotExplicit,
-    EncodingFailed,
-    EditConflict,
-    InvalidContainer,
-    EntryAlreadyExists,
-    ValidationFailed,
-    ResourceLimitExceeded,
-    AllocationFailed,
-}
-
 pub(super) struct ScalarEncoder;
 
-pub(super) struct EntryEncoding<'value, 'source> {
+#[derive(Clone, Copy)]
+pub(super) struct ValueEncodingContext<'indent> {
+    pub(super) layout: TextLayout,
+    pub(super) line_break: &'static str,
+    pub(super) indent: &'indent str,
+    pub(super) indent_unit: &'indent str,
+    pub(super) indent_levels: usize,
+    pub(super) depth: usize,
+}
+
+pub(super) struct EntryEncoding<'value, 'source, 'indent> {
     pub(super) name: &'source str,
     pub(super) value: ValueView<'value>,
     pub(super) map_key: bool,
     pub(super) colon_spacing: &'source str,
+    pub(super) context: ValueEncodingContext<'indent>,
     pub(super) budget: Option<&'source ExecutionBudget>,
     pub(super) limit: usize,
+}
+
+#[derive(Clone, Copy)]
+struct EncodeOptions<'budget, 'indent> {
+    context: ValueEncodingContext<'indent>,
+    budget: Option<&'budget ExecutionBudget>,
+    limit: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ContainerEncoding<'value> {
+    entries: ValueEntries<'value>,
+    map_keys: bool,
+    close: &'static str,
+    depth: usize,
 }
 
 struct FixedText {
@@ -37,23 +51,19 @@ struct FixedText {
     length: usize,
 }
 
-struct EntriesEncoding<'value> {
-    entries: ValueEntries<'value>,
-    open: &'static str,
-    close: &'static str,
-    limit: usize,
-}
-
 enum EncodeFrame<'value> {
-    Value(ValueView<'value>),
-    Entries(ValueEntries<'value>, bool),
-    Text(&'value str),
-    Quoted(&'value str),
+    Value(ValueView<'value>, usize),
+    Entries(ContainerEncoding<'value>),
+    Text(&'static str),
+    FieldText(&'value str, bool),
+    Indent(usize),
+    PrettyNext(ContainerEncoding<'value>, usize),
 }
 
 impl ScalarEncoder {
     pub(super) fn encode_value(
         value: ValueView<'_>,
+        context: ValueEncodingContext<'_>,
         budget: Option<&ExecutionBudget>,
         limit: usize,
     ) -> Result<ChargedString, ConfigEditErrorKind> {
@@ -61,50 +71,99 @@ impl ScalarEncoder {
         let mut output = errors
             .try_call(|out| ChargedString::with_capacity(0, budget, out))
             .map_err(|caught| budget_error_kind(caught.take()))?;
-        Self::encode_value_into(&mut output, value, budget, limit)?;
+        Self::encode_value_into(&mut output, value, context, budget, limit)?;
         Ok(output)
     }
 
     pub(super) fn encode_value_into(
         output: &mut ChargedString,
         value: ValueView<'_>,
+        context: ValueEncodingContext<'_>,
         budget: Option<&ExecutionBudget>,
         limit: usize,
     ) -> Result<(), ConfigEditErrorKind> {
+        let options = EncodeOptions {
+            context,
+            budget,
+            limit,
+        };
         let mut errors = ErrSlot::<BudgetError>::new();
         let mut frames = errors
             .try_call(|out| ChargedVec::new(budget, out))
             .map_err(|caught| budget_error_kind(caught.take()))?;
-        errors
-            .try_call(|out| frames.try_push(EncodeFrame::Value(value), out))
-            .map_err(|caught| budget_error_kind(caught.take()))?;
+        push_frame(&mut frames, EncodeFrame::Value(value, context.depth))?;
         while let Some(frame) = frames.pop() {
+            consume(options.budget, 1)?;
             match frame {
-                EncodeFrame::Text(text) => append_text(output, text, limit)?,
-                EncodeFrame::Quoted(text) => append_escaped(output, text, limit)?,
-                EncodeFrame::Entries(entries, map_keys) => {
-                    append_text(output, "{", limit)?;
-                    push_frame(&mut frames, EncodeFrame::Text("}"))?;
-                    push_entries(&mut frames, entries, map_keys)?;
+                EncodeFrame::Text(text) => append_text(output, text, options.limit)?,
+                EncodeFrame::FieldText(text, map_key) => {
+                    if map_key {
+                        append_user_escaped(output, text, options.budget, options.limit)?;
+                    } else {
+                        append_user_text(output, text, options.budget, options.limit)?;
+                    }
                 }
-                EncodeFrame::Value(value) => {
+                EncodeFrame::Indent(depth) => {
+                    append_indent(output, depth, options)?;
+                }
+                EncodeFrame::Entries(container) => {
+                    push_compact_entries(&mut frames, container, options)?;
+                }
+                EncodeFrame::PrettyNext(container, index) => {
+                    append_text(output, ",", options.limit)?;
+                    append_text(output, options.context.line_break, options.limit)?;
+                    if index == container.entries.len() {
+                        append_indent(output, container.depth, options)?;
+                        append_text(output, container.close, options.limit)?;
+                    } else {
+                        append_indent(output, container.depth.saturating_add(1), options)?;
+                        append_pretty_entry_prefix(output, container, index, options)?;
+                        push_frame(
+                            &mut frames,
+                            EncodeFrame::PrettyNext(container, index.saturating_add(1)),
+                        )?;
+                        let Some(entry) = container.entries.get(index) else {
+                            return Err(ConfigEditErrorKind::EncodingFailed);
+                        };
+                        push_frame(
+                            &mut frames,
+                            EncodeFrame::Value(entry.value(), container.depth.saturating_add(1)),
+                        )?;
+                    }
+                }
+                EncodeFrame::Value(value, depth) => {
                     if let Some(reference) = value.environment_reference() {
-                        append_environment(output, reference.name(), reference.fallback(), limit)?;
+                        append_environment(
+                            output,
+                            reference.name(),
+                            reference.fallback(),
+                            options,
+                        )?;
                     } else if value.source() == ValueSource::EnvironmentVariable {
                         return Err(ConfigEditErrorKind::EncodingFailed);
                     } else {
                         match value.as_ref() {
                             ValueKind::Signed(number) => {
-                                append_format(output, format_args!("{number}"), limit)?;
+                                append_format(output, format_args!("{number}"), options.limit)?;
                             }
                             ValueKind::Unsigned(number) => {
-                                append_format(output, format_args!("{number}"), limit)?;
+                                append_format(output, format_args!("{number}"), options.limit)?;
                             }
-                            ValueKind::Float32(number) => append_float(output, number, limit)?,
-                            ValueKind::Float64(number) => append_float(output, number, limit)?,
-                            ValueKind::String(text) => append_escaped(output, text, limit)?,
+                            ValueKind::Float32(number) => {
+                                append_float(output, number, options.limit)?
+                            }
+                            ValueKind::Float64(number) => {
+                                append_float(output, number, options.limit)?
+                            }
+                            ValueKind::String(text) => {
+                                append_user_escaped(output, text, options.budget, options.limit)?;
+                            }
                             ValueKind::Bool(value) => {
-                                append_text(output, if value { "true" } else { "false" }, limit)?;
+                                append_text(
+                                    output,
+                                    if value { "true" } else { "false" },
+                                    options.limit,
+                                )?;
                             }
                             ValueKind::Optional(Some(value)) => {
                                 if let Some(reference) = value.environment_reference() {
@@ -112,48 +171,100 @@ impl ScalarEncoder {
                                         output,
                                         reference.name(),
                                         reference.fallback(),
-                                        limit,
+                                        options,
                                     )?;
                                 } else {
-                                    push_frame(&mut frames, EncodeFrame::Value(value))?;
+                                    push_frame(&mut frames, EncodeFrame::Value(value, depth))?;
                                 }
                             }
-                            ValueKind::Optional(None) => append_text(output, "none", limit)?,
-                            ValueKind::Array(entries) => {
-                                encode_entries(
-                                    output,
-                                    &mut frames,
-                                    EntriesEncoding {
-                                        entries,
-                                        open: "[",
-                                        close: "]",
-                                        limit,
-                                    },
-                                )?;
+                            ValueKind::Optional(None) => {
+                                append_text(output, "none", options.limit)?
                             }
-                            ValueKind::Map(entries) => {
-                                append_text(output, "{", limit)?;
-                                push_frame(&mut frames, EncodeFrame::Text("}"))?;
-                                push_entries(&mut frames, entries, true)?;
-                            }
-                            ValueKind::Structure(entries) => {
-                                push_frame(&mut frames, EncodeFrame::Entries(entries, false))?;
-                            }
+                            ValueKind::Array(entries) => start_value_container(
+                                output,
+                                &mut frames,
+                                ContainerEncoding {
+                                    entries,
+                                    map_keys: false,
+                                    close: "]",
+                                    depth,
+                                },
+                                "[",
+                                options,
+                            )?,
+                            ValueKind::Map(entries) => start_value_container(
+                                output,
+                                &mut frames,
+                                ContainerEncoding {
+                                    entries,
+                                    map_keys: true,
+                                    close: "}",
+                                    depth,
+                                },
+                                "{",
+                                options,
+                            )?,
+                            ValueKind::Structure(entries) => start_value_container(
+                                output,
+                                &mut frames,
+                                ContainerEncoding {
+                                    entries,
+                                    map_keys: false,
+                                    close: "}",
+                                    depth,
+                                },
+                                "{",
+                                options,
+                            )?,
                             ValueKind::Enumeration { variant, payload } => {
-                                append_text(output, ".", limit)?;
-                                append_text(output, variant, limit)?;
+                                append_text(output, ".", options.limit)?;
+                                append_user_text(output, variant, options.budget, options.limit)?;
                                 match payload {
                                     ValuePayloadView::Unit => {}
                                     ValuePayloadView::Single(value) => {
-                                        append_text(output, "(", limit)?;
-                                        push_frame(&mut frames, EncodeFrame::Text(")"))?;
-                                        push_frame(&mut frames, EncodeFrame::Value(value))?;
+                                        append_text(output, "(", options.limit)?;
+                                        if options.context.layout == TextLayout::Pretty {
+                                            append_text(
+                                                output,
+                                                options.context.line_break,
+                                                options.limit,
+                                            )?;
+                                            append_indent(
+                                                output,
+                                                depth.saturating_add(1),
+                                                options,
+                                            )?;
+                                            push_frame(&mut frames, EncodeFrame::Text(")"))?;
+                                            push_frame(&mut frames, EncodeFrame::Indent(depth))?;
+                                            push_frame(
+                                                &mut frames,
+                                                EncodeFrame::Text(options.context.line_break),
+                                            )?;
+                                            push_frame(
+                                                &mut frames,
+                                                EncodeFrame::Value(value, depth.saturating_add(1)),
+                                            )?;
+                                        } else {
+                                            push_frame(&mut frames, EncodeFrame::Text(")"))?;
+                                            push_frame(
+                                                &mut frames,
+                                                EncodeFrame::Value(value, depth),
+                                            )?;
+                                        }
                                     }
                                     ValuePayloadView::Structure(entries) => {
-                                        append_text(output, " ", limit)?;
-                                        push_frame(
+                                        append_text(output, " ", options.limit)?;
+                                        append_text(output, "{", options.limit)?;
+                                        start_container(
+                                            output,
                                             &mut frames,
-                                            EncodeFrame::Entries(entries, false),
+                                            ContainerEncoding {
+                                                entries,
+                                                map_keys: false,
+                                                close: "}",
+                                                depth,
+                                            },
+                                            options,
                                         )?;
                                     }
                                 }
@@ -168,43 +279,172 @@ impl ScalarEncoder {
 
     pub(super) fn encode_entry_into(
         output: &mut ChargedString,
-        request: EntryEncoding<'_, '_>,
+        request: EntryEncoding<'_, '_, '_>,
     ) -> Result<(), ConfigEditErrorKind> {
+        let options = EncodeOptions {
+            context: request.context,
+            budget: request.budget,
+            limit: request.limit,
+        };
         if request.map_key {
-            append_escaped(output, request.name, request.limit)?;
+            append_user_escaped(output, request.name, options.budget, options.limit)?;
         } else {
-            append_text(output, request.name, request.limit)?;
+            append_user_text(output, request.name, options.budget, options.limit)?;
         }
-        append_text(output, ":", request.limit)?;
-        append_text(output, request.colon_spacing, request.limit)?;
-        Self::encode_value_into(output, request.value, request.budget, request.limit)
+        append_text(output, ":", options.limit)?;
+        consume(options.budget, request.colon_spacing.len())?;
+        append_text(output, request.colon_spacing, options.limit)?;
+        Self::encode_value_into(
+            output,
+            request.value,
+            options.context,
+            options.budget,
+            options.limit,
+        )
     }
+}
+
+fn start_value_container<'value>(
+    output: &mut ChargedString,
+    frames: &mut ChargedVec<EncodeFrame<'value>>,
+    container: ContainerEncoding<'value>,
+    open: &'static str,
+    options: EncodeOptions<'_, '_>,
+) -> Result<(), ConfigEditErrorKind> {
+    append_text(output, open, options.limit)?;
+    start_container(output, frames, container, options)
+}
+
+fn start_container<'value>(
+    output: &mut ChargedString,
+    frames: &mut ChargedVec<EncodeFrame<'value>>,
+    container: ContainerEncoding<'value>,
+    options: EncodeOptions<'_, '_>,
+) -> Result<(), ConfigEditErrorKind> {
+    if options.context.layout == TextLayout::Compact {
+        push_frame(frames, EncodeFrame::Entries(container))?;
+    } else if container.entries.len() == 0 {
+        append_text(output, container.close, options.limit)?;
+    } else {
+        consume(options.budget, container.entries.len())?;
+        append_text(output, options.context.line_break, options.limit)?;
+        append_indent(output, container.depth.saturating_add(1), options)?;
+        append_pretty_entry_prefix(output, container, 0, options)?;
+        push_frame(frames, EncodeFrame::PrettyNext(container, 1))?;
+        let Some(entry) = container.entries.get(0) else {
+            return Err(ConfigEditErrorKind::EncodingFailed);
+        };
+        push_frame(
+            frames,
+            EncodeFrame::Value(entry.value(), container.depth.saturating_add(1)),
+        )?;
+    }
+    Ok(())
+}
+
+fn append_pretty_entry_prefix(
+    output: &mut ChargedString,
+    container: ContainerEncoding<'_>,
+    index: usize,
+    options: EncodeOptions<'_, '_>,
+) -> Result<(), ConfigEditErrorKind> {
+    let Some(entry) = container.entries.get(index) else {
+        return Err(ConfigEditErrorKind::EncodingFailed);
+    };
+    if let Some(name) = entry.name() {
+        if container.map_keys {
+            append_user_escaped(output, name, options.budget, options.limit)?;
+        } else {
+            append_user_text(output, name, options.budget, options.limit)?;
+        }
+        append_text(output, ": ", options.limit)?;
+    }
+    Ok(())
 }
 
 fn append_environment(
     output: &mut ChargedString,
     name: &str,
     fallback: Option<&ValueScalar<'_>>,
-    limit: usize,
+    options: EncodeOptions<'_, '_>,
 ) -> Result<(), ConfigEditErrorKind> {
-    append_text(output, "env(", limit)?;
-    append_escaped(output, name, limit)?;
+    append_text(output, "env(", options.limit)?;
+    append_user_escaped(output, name, options.budget, options.limit)?;
     if let Some(fallback) = fallback {
-        append_text(output, ", ", limit)?;
+        append_text(output, ", ", options.limit)?;
         match fallback {
-            ValueScalar::Signed(value) => append_format(output, format_args!("{value}"), limit)?,
-            ValueScalar::Unsigned(value) => {
-                append_format(output, format_args!("{value}"), limit)?;
+            ValueScalar::Signed(value) => {
+                append_format(output, format_args!("{value}"), options.limit)?
             }
-            ValueScalar::Float32(value) => append_float(output, *value, limit)?,
-            ValueScalar::Float64(value) => append_float(output, *value, limit)?,
-            ValueScalar::String(value) => append_escaped(output, value, limit)?,
+            ValueScalar::Unsigned(value) => {
+                append_format(output, format_args!("{value}"), options.limit)?;
+            }
+            ValueScalar::Float32(value) => append_float(output, *value, options.limit)?,
+            ValueScalar::Float64(value) => append_float(output, *value, options.limit)?,
+            ValueScalar::String(value) => {
+                append_user_escaped(output, value, options.budget, options.limit)?;
+            }
             ValueScalar::Bool(value) => {
-                append_text(output, if *value { "true" } else { "false" }, limit)?;
+                append_text(output, if *value { "true" } else { "false" }, options.limit)?;
             }
         }
     }
-    append_text(output, ")", limit)
+    append_text(output, ")", options.limit)
+}
+
+fn push_compact_entries<'value>(
+    frames: &mut ChargedVec<EncodeFrame<'value>>,
+    container: ContainerEncoding<'value>,
+    options: EncodeOptions<'_, '_>,
+) -> Result<(), ConfigEditErrorKind> {
+    consume(options.budget, container.entries.len())?;
+    push_frame(frames, EncodeFrame::Text(container.close))?;
+    for index in (0..container.entries.len()).rev() {
+        let Some(entry) = container.entries.get(index) else {
+            return Err(ConfigEditErrorKind::EncodingFailed);
+        };
+        push_frame(frames, EncodeFrame::Value(entry.value(), container.depth))?;
+        if let Some(name) = entry.name() {
+            push_frame(frames, EncodeFrame::Text(": "))?;
+            push_frame(frames, EncodeFrame::FieldText(name, container.map_keys))?;
+        }
+        if index > 0 {
+            push_frame(frames, EncodeFrame::Text(", "))?;
+        }
+    }
+    Ok(())
+}
+
+fn append_indent(
+    output: &mut ChargedString,
+    depth: usize,
+    options: EncodeOptions<'_, '_>,
+) -> Result<(), ConfigEditErrorKind> {
+    let base_indent_bytes = options
+        .context
+        .indent_unit
+        .len()
+        .checked_mul(options.context.indent_levels)
+        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+    let pretty_indent_bytes = depth
+        .checked_mul(4)
+        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+    let length = options
+        .context
+        .indent
+        .len()
+        .checked_add(base_indent_bytes)
+        .and_then(|length| length.checked_add(pretty_indent_bytes))
+        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+    consume(options.budget, length)?;
+    append_text(output, options.context.indent, options.limit)?;
+    for _ in 0..options.context.indent_levels {
+        append_text(output, options.context.indent_unit, options.limit)?;
+    }
+    for _ in 0..depth {
+        append_text(output, "    ", options.limit)?;
+    }
+    Ok(())
 }
 
 fn push_frame<'value>(
@@ -215,44 +455,6 @@ fn push_frame<'value>(
     errors
         .try_call(|out| frames.try_push(frame, out))
         .map_err(|caught| budget_error_kind(caught.take()))
-}
-
-fn encode_entries<'value>(
-    output: &mut ChargedString,
-    frames: &mut ChargedVec<EncodeFrame<'value>>,
-    request: EntriesEncoding<'value>,
-) -> Result<(), ConfigEditErrorKind> {
-    append_text(output, request.open, request.limit)?;
-    push_frame(frames, EncodeFrame::Text(request.close))?;
-    push_entries(frames, request.entries, false)
-}
-
-fn push_entries<'value>(
-    frames: &mut ChargedVec<EncodeFrame<'value>>,
-    entries: ValueEntries<'value>,
-    map_keys: bool,
-) -> Result<(), ConfigEditErrorKind> {
-    for index in (0..entries.len()).rev() {
-        let Some(entry) = entries.get(index) else {
-            return Err(ConfigEditErrorKind::AllocationFailed);
-        };
-        push_frame(frames, EncodeFrame::Value(entry.value()))?;
-        if let Some(name) = entry.name() {
-            push_frame(frames, EncodeFrame::Text(": "))?;
-            push_frame(
-                frames,
-                if map_keys {
-                    EncodeFrame::Quoted(name)
-                } else {
-                    EncodeFrame::Text(name)
-                },
-            )?;
-        }
-        if index > 0 {
-            push_frame(frames, EncodeFrame::Text(", "))?;
-        }
-    }
-    Ok(())
 }
 
 impl FixedText {
@@ -372,6 +574,26 @@ fn append_format(
     append_text(output, formatted.as_str()?, limit)
 }
 
+fn append_user_escaped(
+    output: &mut ChargedString,
+    text: &str,
+    budget: Option<&ExecutionBudget>,
+    limit: usize,
+) -> Result<(), ConfigEditErrorKind> {
+    consume(budget, text.len())?;
+    append_escaped(output, text, limit)
+}
+
+fn append_user_text(
+    output: &mut ChargedString,
+    text: &str,
+    budget: Option<&ExecutionBudget>,
+    limit: usize,
+) -> Result<(), ConfigEditErrorKind> {
+    consume(budget, text.len())?;
+    append_text(output, text, limit)
+}
+
 fn append_escaped(
     output: &mut ChargedString,
     text: &str,
@@ -415,6 +637,16 @@ fn append_text(
         .try_call(|out| output.try_push_str(text, out))
         .map_err(|caught| budget_error_kind(caught.take()))?;
     Ok(())
+}
+
+fn consume(budget: Option<&ExecutionBudget>, steps: usize) -> Result<(), ConfigEditErrorKind> {
+    let Some(budget) = budget else {
+        return Ok(());
+    };
+    let mut errors = ErrSlot::<BudgetError>::new();
+    errors
+        .try_call(|out| budget.consume(steps, out))
+        .map_err(|caught| budget_error_kind(caught.take()))
 }
 
 fn budget_error_kind(error: BudgetError) -> ConfigEditErrorKind {

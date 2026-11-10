@@ -7,21 +7,33 @@ use value_support::ValueSupport;
 
 use std::{collections::HashMap, fmt::Debug, io::Cursor, marker::PhantomData, ptr::eq};
 use typol::{
+    ConfigEditOptions as FacadeRootEditOptions, ConfigFieldInsertion as FacadeRootFieldInsertion,
     ConfigParseOptions, ConfigParser, ConfigValue, ConfigValueProcessor, DefaultConfigOptions,
     EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext, LoadedSchema,
-    SchemaLoader, Sourced, TextLayout, Typol, TypolOptions, TypolStage, ValidatedConfigValue,
-    WriteOptions,
+    SchemaLoader, Sourced, TextLayout, TextLayout as FacadeRootTextLayout, Typol, TypolOptions,
+    TypolStage, ValidatedConfigValue, WriteOptions,
     binding::{
         BindOptions, BindingLimitError, BindingLimits, BindingMismatchKind, BindingShape,
         BudgetedTypol, CodecStage, ConversionLimits, MAX_CONVERSION_DEPTH, TypedSchema,
     },
-    config::{ConfigLimits, ConfigParseRequest, ConfigValidationOptions, ConfigValidationRequest},
-    core::{BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, ValueKind, ValueSource},
+    config::{
+        ConfigEditOptions as ConfigEditOptionsFromConfig,
+        ConfigFieldInsertion as ConfigFieldInsertionFromConfig, ConfigLimits, ConfigParseRequest,
+        ConfigValidationOptions, ConfigValidationRequest, TextLayout as ConfigTextLayout,
+    },
+    core::{
+        BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits,
+        TextLayout as CoreTextLayout, ValueKind, ValueSource,
+    },
     host::{Language, RenderOptions, Translator},
     io::ReadRequest,
     opeo::{OResult, Out},
     schema::{SchemaCompileOptions, SchemaCompiler, SchemaSource},
     semantic::CompiledSchema,
+};
+use typol_config::{
+    ConfigEditOptions as LowLevelEditOptions, ConfigFieldInsertion as LowLevelFieldInsertion,
+    TextLayout as LowLevelTextLayout,
 };
 use typol_core::SliceSource;
 use typol_test_support::{
@@ -1175,5 +1187,20 @@ fn facade_depth_contract_roundtrips_at_127_and_128_and_rejects_129_early() -> Te
         .test_value()?;
     assert_eq!(limit_error.requested_depth(), 129);
     assert_eq!(limit_error.maximum_depth(), MAX_CONVERSION_DEPTH);
+    Ok(())
+}
+
+#[test]
+fn config_edit_options_and_text_layout_are_exported_from_public_paths() -> TestResult {
+    let low_level: LowLevelEditOptions = LowLevelEditOptions::default();
+    let facade_root: FacadeRootEditOptions = FacadeRootEditOptions::default();
+    let facade_module: ConfigEditOptionsFromConfig = ConfigEditOptionsFromConfig::default();
+    assert_eq!(low_level.layout(), LowLevelTextLayout::Compact);
+    assert_eq!(facade_root.layout(), FacadeRootTextLayout::Compact);
+    assert_eq!(facade_module.layout(), ConfigTextLayout::Compact);
+    let _: CoreTextLayout = CoreTextLayout::Pretty;
+    let _: Option<LowLevelFieldInsertion<'_>> = None;
+    let _: Option<FacadeRootFieldInsertion<'_>> = None;
+    let _: Option<ConfigFieldInsertionFromConfig<'_>> = None;
     Ok(())
 }

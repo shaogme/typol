@@ -21,7 +21,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -31,22 +31,22 @@ homepage = "https://github.com/shaogme/typol"
 readme = "README.md"
 
 [workspace.dependencies]
-typol-core = { path = "crates/typol-core", version = "0.1.2" }
-typol-model = { path = "crates/typol-model", version = "0.1.2" }
-typol-policy = { path = "crates/typol-policy", version = "0.1.2" }
-typol-report = { path = "crates/typol-report", version = "0.1.2" }
-typol-syntax = { path = "crates/typol-syntax", version = "0.1.2" }
-typol-regex = { path = "crates/typol-regex", version = "0.1.2" }
-typol-semantic = { path = "crates/typol-semantic", version = "0.1.2" }
-typol-schema = { path = "crates/typol-schema", version = "0.1.2" }
-typol-config = { path = "crates/typol-config", version = "0.1.2" }
+typol-core = { path = "crates/typol-core", version = "0.1.3" }
+typol-model = { path = "crates/typol-model", version = "0.1.3" }
+typol-policy = { path = "crates/typol-policy", version = "0.1.3" }
+typol-report = { path = "crates/typol-report", version = "0.1.3" }
+typol-syntax = { path = "crates/typol-syntax", version = "0.1.3" }
+typol-regex = { path = "crates/typol-regex", version = "0.1.3" }
+typol-semantic = { path = "crates/typol-semantic", version = "0.1.3" }
+typol-schema = { path = "crates/typol-schema", version = "0.1.3" }
+typol-config = { path = "crates/typol-config", version = "0.1.3" }
 typol-opeo-test-support = { path = "crates/typol-opeo-test-support" }
 typol-test-support = { path = "crates/typol-test-support" }
-typol-std = { path = "crates/typol-std", version = "0.1.2" }
-typol = { path = "crates/typol", version = "0.1.2" }
+typol-std = { path = "crates/typol-std", version = "0.1.3" }
+typol = { path = "crates/typol", version = "0.1.3" }
 hashbrown = { version = "0.17.1", default-features = false, features = ["default-hasher"] }
-typol-i18n = { path = "crates/typol-i18n", version = "0.1.2", default-features = false }
-typol-macros = { path = "crates/typol-macros", version = "0.1.2" }
+typol-i18n = { path = "crates/typol-i18n", version = "0.1.3", default-features = false }
+typol-macros = { path = "crates/typol-macros", version = "0.1.3" }
 u18n = "0.3.1"
 u18n-compiler = "0.3.1"
 syn = { version = "=2.0.106", default-features = false, features = ["derive", "parsing", "printing", "proc-macro", "visit"] }

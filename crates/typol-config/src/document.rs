@@ -12,21 +12,22 @@ use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, ConfigValue, Diagnostic, DiagnosticCode,
     DiagnosticContext, ExecutionBudget, SliceSource, SourceCommitError, SourceExpectation,
-    SourceRevision, SourceWriter, Write, WriteError, diagnostic_context,
+    SourceRevision, SourceWriter, TextLayout, Write, WriteError, diagnostic_context,
 };
 use typol_semantic::CompiledSchema;
 
+use self::edit::{DocumentEditEngine, EditContext, SourcePatch};
 use crate::{
     ConfigParseErrors, ConfigParseOptions, ConfigParseRequest, ConfigParser, Environment,
     ValidatedConfigValue, instance::LocationIndex,
 };
-use edit::{DocumentEditEngine, EditContext, SourcePatch};
-use encoding::ScalarEncoder;
+use encoding::{ScalarEncoder, ValueEncodingContext};
 use path::{PathLookup, SourcePathIndex};
 use syntax::SourceSyntax;
 
-pub use edit::{ConfigEdit, ConfigEditError};
-pub use encoding::ConfigEditErrorKind;
+pub use crate::document::edit::{
+    ConfigEdit, ConfigEditError, ConfigEditErrorKind, ConfigEditOptions,
+};
 pub use formatter::{
     ConfigFormatError, ConfigFormatErrorKind, ConfigFormatOptions, FormattedConfig,
 };
@@ -51,6 +52,17 @@ pub struct ConfigDocument<'schema> {
 
 /// Formats a validated configuration document while preserving its source tokens and comments.
 pub struct ConfigFormatter;
+
+pub struct ConfigFieldInsertion<'a> {
+    path: &'a ConfigPath,
+    value: &'a ConfigValue,
+}
+
+impl<'a> ConfigFieldInsertion<'a> {
+    pub const fn new(path: &'a ConfigPath, value: &'a ConfigValue) -> Self {
+        Self { path, value }
+    }
+}
 
 pub(crate) struct ConfigDocumentInput<'schema, 'display, 'budget> {
     pub(crate) schema: &'schema CompiledSchema,
@@ -182,19 +194,20 @@ impl<'schema> ConfigDocument<'schema> {
 
     pub fn set_value<'slot>(
         &mut self,
-        path: &ConfigPath,
-        replacement: &ConfigValue,
+        replacement: ConfigReplacement<'_>,
+        options: ConfigEditOptions,
         environment: &mut dyn Environment,
         out: Out<'slot, '_, ConfigEditError>,
     ) -> OResult<'slot, ()> {
-        let replacements = [ConfigReplacement::new(path, replacement)];
-        self.replace_values(&replacements, environment, out)
+        let replacements = [replacement];
+        self.replace_values(&replacements, options, environment, out)
     }
 
     /// Applies non-overlapping edits as one parse-and-validation transaction.
     pub fn replace_values<'slot>(
         &mut self,
         replacements: &[ConfigReplacement<'_>],
+        options: ConfigEditOptions,
         environment: &mut dyn Environment,
         mut out: Out<'slot, '_, ConfigEditError>,
     ) -> OResult<'slot, ()> {
@@ -202,6 +215,13 @@ impl<'schema> ConfigDocument<'schema> {
             budget.consume(replacements.len(), out.reborrow())?;
         }
         let source = self.source.as_str();
+        let line_break = SourceSyntax::edit_line_break(
+            source,
+            self.workspace_budget(),
+            options.layout(),
+            !replacements.is_empty(),
+        )
+        .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
         let mut patches = ChargedVec::new(self.workspace_budget(), out.reborrow())?;
         for replacement in replacements {
             self.consume_path_steps(replacement.path(), out.reborrow())?;
@@ -220,8 +240,17 @@ impl<'schema> ConfigDocument<'schema> {
             {
                 return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::InvalidPath)));
             }
+            let context = self
+                .value_context(
+                    start,
+                    self.index.parent_id(replacement.path()),
+                    options,
+                    line_break,
+                )
+                .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?;
             let mut encoded = ScalarEncoder::encode_value(
                 replacement.value().root(),
+                context,
                 self.workspace_budget(),
                 self.options.config().max_source_bytes(),
             )
@@ -250,6 +279,7 @@ impl<'schema> ConfigDocument<'schema> {
     pub fn apply_edits<'slot>(
         &mut self,
         edits: &[ConfigEdit<'_>],
+        options: ConfigEditOptions,
         environment: &mut dyn Environment,
         mut out: Out<'slot, '_, ConfigEditError>,
     ) -> OResult<'slot, ()> {
@@ -258,6 +288,7 @@ impl<'schema> ConfigDocument<'schema> {
             index: &self.index,
             budget: self.workspace_budget(),
             source_limit: self.options.config().max_source_bytes(),
+            options,
         })
         .resolve(edits, out.reborrow())?;
         self.commit_patches(patches, environment, out)
@@ -265,12 +296,20 @@ impl<'schema> ConfigDocument<'schema> {
 
     pub fn insert_field<'slot>(
         &mut self,
-        path: &ConfigPath,
-        value: &ConfigValue,
+        insertion: ConfigFieldInsertion<'_>,
+        options: ConfigEditOptions,
         environment: &mut dyn Environment,
         out: Out<'slot, '_, ConfigEditError>,
     ) -> OResult<'slot, ()> {
-        self.apply_edits(&[ConfigEdit::InsertField { path, value }], environment, out)
+        self.apply_edits(
+            &[ConfigEdit::InsertField {
+                path: insertion.path,
+                value: insertion.value,
+            }],
+            options,
+            environment,
+            out,
+        )
     }
 
     pub fn remove<'slot>(
@@ -279,7 +318,51 @@ impl<'schema> ConfigDocument<'schema> {
         environment: &mut dyn Environment,
         out: Out<'slot, '_, ConfigEditError>,
     ) -> OResult<'slot, ()> {
-        self.apply_edits(&[ConfigEdit::Remove { path }], environment, out)
+        self.apply_edits(
+            &[ConfigEdit::Remove { path }],
+            ConfigEditOptions::default(),
+            environment,
+            out,
+        )
+    }
+
+    fn value_context(
+        &self,
+        position: usize,
+        fallback_parent: Option<usize>,
+        options: ConfigEditOptions,
+        line_break: &'static str,
+    ) -> Result<ValueEncodingContext<'_>, ConfigEditErrorKind> {
+        if options.layout() == TextLayout::Compact {
+            return Ok(ValueEncodingContext {
+                layout: TextLayout::Compact,
+                line_break,
+                indent: "",
+                indent_unit: "",
+                indent_levels: 0,
+                depth: 0,
+            });
+        }
+        let (indent, depth) = match SourceSyntax::indent_context(
+            self.source.as_str(),
+            position,
+            self.workspace_budget(),
+        ) {
+            Ok(context) => context,
+            Err(ConfigEditErrorKind::EditConflict) => (
+                "",
+                fallback_parent.map_or(0, |id| self.index.container_depth(id)),
+            ),
+            Err(kind) => return Err(kind),
+        };
+        Ok(ValueEncodingContext {
+            layout: options.layout(),
+            line_break,
+            indent,
+            indent_unit: "    ",
+            indent_levels: 0,
+            depth,
+        })
     }
 
     fn commit_patches<'slot>(
@@ -343,15 +426,23 @@ impl<'schema> ConfigDocument<'schema> {
                 ConfigEditErrorKind::ResourceLimitExceeded,
             )));
         }
+        let Some(budget) = self.workspace_budget() else {
+            return Err(out.fail(ConfigEditError::new(
+                ConfigEditErrorKind::ResourceLimitExceeded,
+            )));
+        };
+        budget.construct_text(
+            candidate_len,
+            self.options.config().max_constructed_text_bytes(),
+            out.reborrow(),
+        )?;
         let mut budget_errors = ErrSlot::<BudgetError>::new();
         let candidate = match budget_errors.try_call(|mut budget_out| {
-            let mut candidate = ChargedVec::new(self.workspace_budget(), budget_out.reborrow())?;
+            let mut candidate = ChargedVec::new(Some(budget), budget_out.reborrow())?;
             candidate.try_reserve_exact(candidate_len, budget_out.reborrow())?;
             let mut cursor = 0usize;
             for patch in &patches {
-                if let Some(budget) = self.workspace_budget() {
-                    budget.consume(1, budget_out.reborrow())?;
-                }
+                budget.consume(1, budget_out.reborrow())?;
                 let Some(original) = source.as_bytes().get(cursor..patch.start) else {
                     return Err(budget_out.fail(BudgetError::invariant(&EDIT_SOURCE_RANGE_INVALID)));
                 };
@@ -370,11 +461,6 @@ impl<'schema> ConfigDocument<'schema> {
                 return Err(out.fail(ConfigEditError::new(edit_budget_error(caught.take()))));
             }
         };
-        let Some(budget) = self.workspace_budget() else {
-            return Err(out.fail(ConfigEditError::new(
-                ConfigEditErrorKind::ResourceLimitExceeded,
-            )));
-        };
         let mut parse_errors = ErrSlot::new();
         let parsed = {
             let mut input = SliceSource::new(candidate.as_slice());
@@ -391,7 +477,11 @@ impl<'schema> ConfigDocument<'schema> {
         };
         let parsed = match parsed {
             Ok(parsed) => parsed,
-            Err(caught) => return Err(out.fail(ConfigEditError::validation(caught.take()))),
+            Err(caught) => {
+                let errors = caught.take();
+                let kind = validation_error_kind(&errors);
+                return Err(out.fail(ConfigEditError::validation(kind, errors)));
+            }
         };
         let mut document_errors = ErrSlot::new();
         let updated = document_errors.try_call(|document_out| {
@@ -410,7 +500,11 @@ impl<'schema> ConfigDocument<'schema> {
         });
         let mut updated = match updated {
             Ok(document) => document,
-            Err(caught) => return Err(out.fail(ConfigEditError::validation(caught.take()))),
+            Err(caught) => {
+                let errors = caught.take();
+                let kind = validation_error_kind(&errors);
+                return Err(out.fail(ConfigEditError::validation(kind, errors)));
+            }
         };
         let mut budget_errors = ErrSlot::<BudgetError>::new();
         let empty_source = match budget_errors
@@ -470,6 +564,25 @@ impl Debug for ConfigDocument<'_> {
             .field("source_nodes", &self.index.len())
             .field("value_nodes", &self.value.as_config_value().node_count())
             .finish()
+    }
+}
+
+fn validation_error_kind(errors: &ConfigParseErrors) -> ConfigEditErrorKind {
+    let diagnostics = errors.diagnostics();
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code() == DiagnosticCode::ALLOCATION_FAILED)
+    {
+        ConfigEditErrorKind::AllocationFailed
+    } else if diagnostics.iter().any(|diagnostic| {
+        matches!(
+            diagnostic.code(),
+            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED | DiagnosticCode::CAPACITY_EXCEEDED
+        )
+    }) {
+        ConfigEditErrorKind::ResourceLimitExceeded
+    } else {
+        ConfigEditErrorKind::ValidationFailed
     }
 }
 
