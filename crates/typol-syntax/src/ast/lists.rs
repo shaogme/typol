@@ -1,13 +1,14 @@
 use crate::{
     ast::{
         Annotation, Assertion, BraceEntry, Declaration, DefaultValue, FieldDecl, Name,
-        TopLevelItem, VariantDecl,
+        StringLiteral, TopLevelItem, VariantDecl,
     },
     storage::{
         Annotation as StoredAnnotation, Assertion as StoredAssertion, AstAccessError,
         BraceEntry as StoredBraceEntry, Declaration as StoredDeclaration,
         DefaultValue as StoredDefaultValue, FieldDecl as StoredFieldDecl, Id, Name as StoredName,
-        Storage, TopLevelItem as StoredTopLevelItem, VariantDecl as StoredVariantDecl,
+        Storage, StringLiteral as StoredStringLiteral, TopLevelItem as StoredTopLevelItem,
+        VariantDecl as StoredVariantDecl,
     },
 };
 use core::fmt::{Debug, Formatter, Result as FmtResult};
@@ -223,6 +224,19 @@ ast_list!(
         storage
             .get(*value, out.reborrow())
             .map(|record| Name::project(storage, record))
+            .map(Some)
+    }
+);
+
+ast_list!(
+    StringLiteralList,
+    StringLiteralIter,
+    StringLiteral,
+    Id<StoredStringLiteral>,
+    |storage, value, out| {
+        storage
+            .get(*value, out.reborrow())
+            .map(|record| StringLiteral::project(storage, record))
             .map(Some)
     }
 );

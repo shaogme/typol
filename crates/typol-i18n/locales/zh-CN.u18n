@@ -158,6 +158,7 @@ message diagnostic.validation.regex_constraint_failed = "字符串不符合正�
 message diagnostic.validation.host_format_constraint_failed = "字符串不符合主机格式约束";
 message diagnostic.validation.email_format_constraint_failed = "字符串不符合电子邮件格式约束";
 message diagnostic.validation.cidr_format_constraint_failed = "字符串不符合 CIDR 格式约束";
+message diagnostic.validation.variants_restriction_failed = "所选枚举变体不符合 @variants 限制";
 message diagnostic.validation.duplicate_array_elements = "数组包含重复元素";
 message diagnostic.validation.collection_boundary_failed = "集合不符合边界约束";
 message diagnostic.config.required_field_missing = "缺少必需字段";
@@ -216,6 +217,8 @@ message diagnostic.syntax.mismatched_closing_delimiter = "闭合分隔符与当�
 message diagnostic.syntax.assertion_annotation_name_required = "断言注解必须提供名称";
 message diagnostic.syntax.expected_assert_annotation = "此处应为 @assert";
 message diagnostic.syntax.cidr_v4_only_argument = "@cidr 参数必须是 v4_only";
+message diagnostic.syntax.variants_mode = "@variants 模式必须是 allow 或 deny";
+message diagnostic.syntax.variants_list_nonempty = "@variants 至少需要一个字符串字面量";
 message diagnostic.config.enum_payload_shape_mismatch = "枚举载荷形状不匹配";
 message diagnostic.config.enum_variant_undeclared = "枚举变体未声明";
 message diagnostic.config.undeclared_object_field = "对象包含未声明的字段";
@@ -254,6 +257,11 @@ message diagnostic.schema.annotation_unique_path_final_field = "@unique(by=...) 
 message diagnostic.schema.annotation_unique_path_intermediate_field = "@unique(by=...) 的中间字段必须是非可选结构体";
 message diagnostic.schema.annotation_unique_path_invalid = "@unique(by=...) 路径格式无效";
 message diagnostic.schema.annotation_unique_requires_array = "@unique 仅适用于数组";
+message diagnostic.schema.annotation_variants_target_invalid = "@variants 仅适用于 enum 或 option<enum> 类型";
+message diagnostic.schema.annotation_variants_unknown_name = "@variants 引用了未知的枚举变体";
+message diagnostic.schema.annotation_variants_name_repeated = "@variants 重复列出了同一枚举变体";
+message diagnostic.schema.annotation_variants_combination_empty = "组合后的 @variants 限制拒绝所有枚举变体";
+message diagnostic.schema.annotation_variants_value_rejected = "Schema 默认值选择了被 @variants 拒绝的枚举变体";
 message diagnostic.schema.default_all_constraint_failed = "Schema 默认值不符合 @all 约束";
 message diagnostic.schema.default_array_length_mismatch = "定长数组默认值的元素数量不匹配";
 message diagnostic.schema.default_array_type_mismatch = "数组默认值与目标类型不匹配";

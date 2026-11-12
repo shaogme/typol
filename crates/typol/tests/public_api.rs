@@ -22,8 +22,8 @@ use typol::{
         ConfigValidationOptions, ConfigValidationRequest, TextLayout as ConfigTextLayout,
     },
     core::{
-        BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits,
-        TextLayout as CoreTextLayout, ValueKind, ValueSource,
+        BudgetError, ConfigValueBuilder, DiagnosticCode, ExecutionBudget, ExecutionLimits,
+        TextLayout as CoreTextLayout, ValueKind, ValuePayload, ValueSource,
     },
     host::{Language, RenderOptions, Translator},
     io::ReadRequest,
@@ -173,6 +173,18 @@ fn derive_generics_payloads_rename_and_reordered_text_roundtrip() -> TestResult 
 #[derive(Debug, PartialEq, Typol)]
 struct Root {
     value: u8,
+}
+
+#[derive(Debug, PartialEq, Typol)]
+enum RestrictedMode {
+    Fast,
+    Legacy,
+}
+
+#[derive(Debug, PartialEq, Typol)]
+#[typol(rename = "Root")]
+struct RestrictedModeRoot {
+    value: RestrictedMode,
 }
 
 #[test]
@@ -391,6 +403,109 @@ fn full_validation_errors_own_schema_snapshots_and_safe_diagnostics() -> TestRes
 fn object(value: ConfigValue) -> TestResult<ConfigValue> {
     let field = ValueSupport::field("value".to_owned(), value);
     TestOpeo::value(|out| ValueSupport::structure(vec![field], None, out))
+}
+
+fn unit_variant(name: &str) -> TestResult<ConfigValue> {
+    TestOpeo::value(|mut out| {
+        let mut builder = ConfigValueBuilder::new(None, out.reborrow())?;
+        let root = builder.add_enumeration(
+            name,
+            ValuePayload::Unit,
+            ValueSource::RustValue,
+            out.reborrow(),
+        )?;
+        builder.finish(root, out)
+    })
+}
+
+#[test]
+fn typed_rust_io_enforces_enum_variant_restrictions() -> TestResult {
+    let loaded = compile_loaded(
+        "enum RestrictedMode { Fast, Legacy } entry struct Root { value: RestrictedMode @variants(allow = [\"Fast\"]) }",
+    )?;
+    let binding = TestOpeo::value(|out| {
+        TypedSchema::<RestrictedModeRoot>::bind(loaded.schema(), BindOptions::default(), out)
+    })?;
+    let accepted = RestrictedModeRoot {
+        value: RestrictedMode::Fast,
+    };
+    let text = TestOpeo::value(|out| {
+        binding.serialize_to_string(&accepted, WriteOptions::default(), out)
+    })?;
+    assert_eq!(text, "{value: .Fast}");
+    assert_eq!(
+        TestOpeo::value(|out| binding.deserialize(
+            request(&mut SliceSource::new(text.as_bytes())),
+            &mut NoEnvironment,
+            ConversionLimits::default(),
+            out,
+        ))?,
+        accepted
+    );
+
+    let rejected = RestrictedModeRoot {
+        value: RestrictedMode::Legacy,
+    };
+    let write_error = TestOpeo::error(|out| {
+        binding.serialize_to_string(&rejected, WriteOptions::default(), out)
+    })?;
+    assert_eq!(
+        write_error
+            .diagnostics()
+            .first()
+            .test_expect("restricted Rust writes should include a validation diagnostic")?
+            .code(),
+        DiagnosticCode::CONFIG_VALIDATION_ERROR
+    );
+    let read_error = TestOpeo::error(|out| {
+        binding.deserialize(
+            request(&mut SliceSource::new(b"{value: .Legacy}")),
+            &mut NoEnvironment,
+            ConversionLimits::default(),
+            out,
+        )
+    })?;
+    assert_eq!(
+        read_error
+            .diagnostics()
+            .first()
+            .test_expect("restricted Rust reads should include a validation diagnostic")?
+            .code(),
+        DiagnosticCode::CONFIG_VALIDATION_ERROR
+    );
+    Ok(())
+}
+
+#[test]
+fn config_value_processor_enforces_enum_variant_restrictions() -> TestResult {
+    let schema = compile(
+        "enum Mode { Fast, Legacy } entry struct Root { value: Mode @variants(allow = [\"Fast\"]) }",
+    )?;
+    let accepted = object(unit_variant("Fast")?)?;
+    TestOpeo::value(|out| {
+        ConfigValueProcessor::new(&schema).validate(
+            accepted,
+            ConfigValidationRequest::new(ConfigValidationOptions::default()),
+            out,
+        )
+    })?;
+    let rejected = object(unit_variant("Legacy")?)?;
+    let errors = TestOpeo::error(|out| {
+        ConfigValueProcessor::new(&schema).validate(
+            rejected,
+            ConfigValidationRequest::new(ConfigValidationOptions::default()),
+            out,
+        )
+    })?;
+    assert_eq!(
+        errors
+            .diagnostics()
+            .first()
+            .test_expect("restricted external values should include a validation diagnostic")?
+            .code(),
+        DiagnosticCode::CONFIG_VALIDATION_ERROR
+    );
+    Ok(())
 }
 
 #[test]
@@ -747,6 +862,26 @@ fn loaded_schema_generates_defaults_without_a_rust_binding() -> TestResult {
         reread.as_config_value().as_ref(),
         ValueKind::Structure(_)
     ));
+    Ok(())
+}
+
+#[test]
+fn default_generation_validates_restricted_enum_defaults() -> TestResult {
+    let loaded = compile_loaded(
+        r#"
+        enum Mode { Fast, Legacy }
+        entry struct Root {
+            mode: Mode @variants(allow = ["Fast"]) = .Fast,
+            optional: option<Mode> @variants(allow = ["Fast"]),
+        }
+        "#,
+    )?;
+    assert_eq!(
+        TestOpeo::value(|out| {
+            loaded.default_config_to_string(DefaultConfigOptions::default(), out)
+        })?,
+        "{mode: .Fast, optional: none}"
+    );
     Ok(())
 }
 

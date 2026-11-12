@@ -9,6 +9,7 @@ use crate::{
         Annotation, AnnotationData, AnnotationKind, BooleanLiteral, Id, NamedArgument, NamedBounds,
         NumberLiteral, SizeArguments, StringLiteral,
     },
+    token::VariantRestrictionMode,
 };
 use opeo::{OResult, Out};
 use typol_core::{BudgetError, ChargedVec, Diagnostic, ExecutionBudget};
@@ -52,11 +53,8 @@ impl AnnotationParser {
             );
         };
         let data = AnnotationParser::parse_annotation_data(parser, kind, out.reborrow())?;
-        parser.ast.annotation_new(
-            data,
-            ParserControl::span_from_start(parser, start, out.reborrow())?,
-            out.reborrow(),
-        )
+        let span = ParserControl::span_from_start(parser, start, out.reborrow())?;
+        parser.ast.annotation_new(data, span, out.reborrow())
     }
 
     fn parse_annotation_data<'slot>(
@@ -82,7 +80,67 @@ impl AnnotationParser {
             AnnotationKind::Size => AnnotationParser::parse_size(parser, out.reborrow()),
             AnnotationKind::All => AnnotationParser::parse_all(parser, out.reborrow()),
             AnnotationKind::Sum => AnnotationParser::parse_sum(parser, out.reborrow()),
+            AnnotationKind::Variants => AnnotationParser::parse_variants(parser, out.reborrow()),
         }
+    }
+
+    fn parse_variants<'slot>(
+        parser: &mut ParserState<'_>,
+        mut out: Out<'slot, '_, Diagnostic>,
+    ) -> OResult<'slot, AnnotationData> {
+        ParserControl::expect_symbol(parser, Symbol::LeftParen, out.reborrow())?;
+        let mode_name = ParserControl::take_name(parser, out.reborrow())?;
+        let mode_span = parser.ast.span(mode_name, out.reborrow())?;
+        let mode = if ParserControl::name_is(parser, mode_name, "allow", out.reborrow())? {
+            VariantRestrictionMode::Allow
+        } else if ParserControl::name_is(parser, mode_name, "deny", out.reborrow())? {
+            VariantRestrictionMode::Deny
+        } else {
+            return ParserControl::syntax_failure(
+                parser,
+                mode_span,
+                diagnostic_message!(
+                    "diagnostic.syntax.variants_mode",
+                    "@variants mode must be allow or deny"
+                ),
+                out.reborrow(),
+            );
+        };
+        ParserControl::expect_symbol(parser, Symbol::Equal, out.reborrow())?;
+        let open = ParserControl::expect_symbol(parser, Symbol::LeftBracket, out.reborrow())?;
+        let mut names = ParserControl::new_vec(parser, open.span, out.reborrow())?;
+        if ParserControl::peek(parser, out.reborrow())?.kind
+            == TokenKind::Symbol(Symbol::RightBracket)
+        {
+            let span = ParserControl::peek(parser, out.reborrow())?.span;
+            return ParserControl::syntax_failure(
+                parser,
+                span,
+                diagnostic_message!(
+                    "diagnostic.syntax.variants_list_nonempty",
+                    "@variants requires at least one string literal"
+                ),
+                out.reborrow(),
+            );
+        }
+        loop {
+            let name = ParserControl::take_string(parser, out.reborrow())?;
+            let span = parser.ast.span(name, out.reborrow())?;
+            ParserControl::try_push(&mut names, name, span, out.reborrow())?;
+            if ParserControl::eat_symbol(parser, Symbol::Comma, out.reborrow())?.is_none() {
+                break;
+            }
+            if ParserControl::peek(parser, out.reborrow())?.kind
+                == TokenKind::Symbol(Symbol::RightBracket)
+            {
+                break;
+            }
+        }
+        let close = ParserControl::expect_symbol(parser, Symbol::RightBracket, out.reborrow())?;
+        let list_span = ParserControl::span_between(parser, open.span, close.span, out.reborrow())?;
+        let names = parser.ast.store_list(names, list_span, out.reborrow())?;
+        ParserControl::expect_symbol(parser, Symbol::RightParen, out.reborrow())?;
+        Ok(AnnotationData::Variants { mode, names })
     }
 
     fn parse_unique<'slot>(
@@ -357,6 +415,7 @@ where
         ("all", AnnotationKind::All),
         ("sum", AnnotationKind::Sum),
         ("secret", AnnotationKind::Secret),
+        ("variants", AnnotationKind::Variants),
     ] {
         execution.consume_with(1, out.reborrow(), E::from)?;
         if execution.compare_text(name, text, out.reborrow())?.is_eq() {

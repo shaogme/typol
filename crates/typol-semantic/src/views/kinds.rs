@@ -1,5 +1,5 @@
 use crate::{
-    CompiledSchema, NumberValue,
+    CompiledSchema, NumberValue, VariantId, VariantRestrictionMode,
     regex::CompiledRegexConstraint,
     views::{ExpressionView, FieldList, TypeView, VariantList},
 };
@@ -95,6 +95,10 @@ pub enum ConstraintData<'a> {
     SumBounds {
         min: Option<NumberValue>,
         max: Option<NumberValue>,
+    },
+    VariantRestriction {
+        mode: VariantRestrictionMode,
+        variants: &'a [VariantId],
     },
 }
 

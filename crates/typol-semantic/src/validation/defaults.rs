@@ -2,7 +2,7 @@ use crate::{
     AllItemRequest, AllItemValue, BuildError, CompiledSchema, ConstraintList, EffectiveRules,
     EvalError, EvalFailure, FieldId, RegexExecutionError, RegexExecutionFailure, RegexExecutor,
     RegexMatchOptions, StoredPayloadInfo, StoredRuleView, StoredTypeKind, SumBoundsRequest, TypeId,
-    TypedExpression, ValueRules, VariantId, engine::Evaluator,
+    TypedExpression, ValueRules, VariantId, VariantRestrictionMode, engine::Evaluator,
 };
 use core::cell::RefCell;
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
@@ -520,6 +520,51 @@ impl RuleExecution<'_> {
                             eval_out,
                         )
                     })?
+                }
+                StoredRuleView::VariantRestriction { mode, variants } => {
+                    let leaf = Self::optional_leaf(value, self.execution, out.reborrow())?;
+                    let Some(leaf) = leaf else {
+                        continue;
+                    };
+                    let ValueKind::Enumeration { variant, .. } = leaf.as_ref() else {
+                        return Err(out.fail(BuildError::internal(DEFAULT_VALIDATION_INTERNAL)));
+                    };
+                    let mut target = ty;
+                    loop {
+                        let target_info = self
+                            .schema
+                            .type_info(target)
+                            .store_err_into(out.reborrow())?
+                            .ok_or(BuildError::internal(DEFAULT_VALIDATION_INTERNAL))
+                            .store_err_into(out.reborrow())?;
+                        match target_info.kind() {
+                            StoredTypeKind::Option { inner } => target = inner,
+                            StoredTypeKind::Enum {
+                                variants: enum_variants,
+                            } => {
+                                let selected = DefaultValidation::find_variant(
+                                    self.schema,
+                                    enum_variants,
+                                    variant,
+                                    self.execution,
+                                    out.reborrow(),
+                                )?;
+                                self.execution.consume(variants.len(), out.reborrow())?;
+                                let contained = variants
+                                    .binary_search_by_key(&selected.index(), |id| id.index())
+                                    .is_ok();
+                                break match mode {
+                                    VariantRestrictionMode::Allow => contained,
+                                    VariantRestrictionMode::Deny => !contained,
+                                };
+                            }
+                            _ => {
+                                return Err(
+                                    out.fail(BuildError::internal(DEFAULT_VALIDATION_INTERNAL))
+                                );
+                            }
+                        }
+                    }
                 }
             };
             if !valid {

@@ -6,6 +6,16 @@ use crate::{
 use typol_core::{ConfigValue, SourceSpan};
 use typol_model::BuiltinType;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ModelCounts {
+    pub shapes: usize,
+    pub type_uses: usize,
+    pub constraints: usize,
+    pub refinements: usize,
+    pub programs: usize,
+    pub expression_nodes: usize,
+}
+
 #[derive(Clone, Copy)]
 pub enum StoredPayloadInfo<'a> {
     Unit,

@@ -157,7 +157,7 @@ Schema-aware writer 会将保留的引用写成 `env("NAME"[, fallback])`，而�
 
 每个值完成构造时，校验器先确认其运行期形态与 Schema 类型相符，再通过编译 Schema 的有效约束视图收集使用点规则和可选包装继承的规则。标量校验由 `ScalarValidator` 执行，使用 `SchemaRules` 和预编译的正则程序；运行期正则使用本次调用的 `RegexExecutor` scratch 与执行额度，不重新编译模式。
 
-可选值的规则作用于其有值的标量/容器内容；`none` 本身没有叶值可供标量比较。嵌套值逐层按目标 Schema 类型检查。默认值和 fallback 在写入最终树前也需通过相同的形态与约束检查；已验证的 fallback 会携带本次调用内的验证凭证，写入实例时登记定位节点但不重复运行规则。
+可选值的规则作用于其有值的标量/容器内容；`none` 本身没有叶值可供标量比较。`@variants` 会把有值枚举解析为已编译的 `VariantId`，并检查 allow/deny 列表；`none` 满足合法的 option 限制。嵌套值逐层按目标 Schema 类型检查，因此数组元素、map value 和枚举载荷上的限制只作用于相应节点。默认值和 fallback 在写入最终树前也需通过相同的形态与约束检查；已验证的 fallback 会携带本次调用内的验证凭证，写入实例时登记定位节点但不重复运行规则。
 
 ### 5.2 集合约束
 
@@ -171,7 +171,7 @@ Schema-aware writer 会将保留的引用写成 `env("NAME"[, fallback])`，而�
 
 ### 5.4 外来值处理的结果类型
 
-`ConfigValueProcessor::normalize` 和 `ConfigValueProcessor::normalize_with_budget` 返回 `NormalizedConfigValue`，表示输入树的形态符合 Schema 且默认值已补齐；该类型不表示约束或完整树断言通过。`ConfigValueProcessor::validate`、`ConfigValueProcessor::validate_with_budget`、`ConfigParser::parse` 和 `ConfigParser::parse_with_budget` 返回 `ValidatedConfigValue`，表示输入树已完成规范化、约束校验和完整树断言。两个包装类型都私有持有 `ConfigValue`，调用方可通过 `as_config_value()` 只读访问，或显式调用 `into_config_value()` 消费状态标记。
+`ConfigValueProcessor::normalize` 和 `ConfigValueProcessor::normalize_with_budget` 返回 `NormalizedConfigValue`，表示输入树的形态符合 Schema 且默认值已补齐；该类型不表示约束或完整树断言通过。`ConfigValueProcessor::validate`、`ConfigValueProcessor::validate_with_budget`、`ConfigParser::parse` 和 `ConfigParser::parse_with_budget` 返回 `ValidatedConfigValue`，表示输入树已完成规范化、约束校验和完整树断言。两个包装类型都私有持有 `ConfigValue`，调用方可通过 `as_config_value()` 只读访问，或显式调用 `into_config_value()` 消费状态标记。`ValidatedConfigValue` 还保留用于校验的精确编译 Schema 的不透明身份；`belongs_to_schema()` 可检查该关联。
 
 ## 6. 错误恢复与诊断
 
@@ -262,7 +262,7 @@ let limits = ConfigLimits::default()
 
 `SchemaLoader` 持有编译 Schema 和源名称。文件配置通过 `typol_std::FileConfigInput` 打开并由词法器按需读取；标准 I/O reader 配置通过 `ReadSource` 将 `std::io::Read` 适配为 `typol_core::Read`。这些适配器负责宿主 I/O 和有限错误分类，配置语法及 Schema 校验仍由 `typol-config` 完成。
 
-启用 `typol` 的 `config-ir` feature 后，Rust 调用方可通过 `ConfigIr::serialize` 导出 Config IR v1，格式定义见 [Config IR v1 规范](../config-ir/)。默认模式先补齐默认值并执行完整 Schema 校验；需要跳过约束校验时，必须显式选择 `AsProvided`。类型和值遍历、秘密标记、确定性排序、输出/排序工作区/嵌套深度额度及序列化错误分类由 facade 实现；输出超限与排序工作区超限使用独立错误类别。默认嵌套深度为 128，可由 `ConfigIrOptions` 降低，序列化器不会允许提高该上限。`typol-cli` 在配置读取阶段已完成校验，因此以 `AsProvided` 编码已校验值，避免重复校验；它只选择环境模式、加载值、调用该 API 并将完整结果写入 stdout。其 `config fmt` 命令则读取 `ConfigDocument`、格式化保留源文并原子替换同一文件；`--check` 只比较格式化结果，不写文件。它不会把环境解析结果或补齐的默认值序列化回源文。命令用法见 [CLI 使用指南](../../guides/cli/)。IR 中 `secret: true` 仍保留对应真实值，调用方须按敏感数据处理。
+启用 `typol` 的 `config-ir` feature 后，Rust 调用方可通过 `ConfigIr::serialize` 导出 Config IR v1，格式定义见 [Config IR v1 规范](../config-ir/)。原始 `ConfigValue` 会先补齐默认值并完整执行 Schema 校验。已持有 `ValidatedConfigValue` 的调用方可使用 `ConfigIr::serialize_validated` 避免重复遍历；凭据必须属于相同的编译 Schema。类型和值遍历、秘密标记、确定性排序、输出/排序工作区/嵌套深度额度及序列化错误分类由 facade 实现；输出超限与排序工作区超限使用独立错误类别。默认嵌套深度为 128，可由 `ConfigIrOptions` 降低，序列化器不会允许提高该上限。`typol-cli` 将配置读取时获得的验证凭据传入快速入口；它只选择环境模式、加载值、调用该 API 并将完整结果写入 stdout。其 `config fmt` 命令则读取 `ConfigDocument`、格式化保留源文并原子替换同一文件；`--check` 只比较格式化结果，不写文件。它不会把环境解析结果或补齐的默认值序列化回源文。命令用法见 [CLI 使用指南](../../guides/cli/)。IR 中 `secret: true` 仍保留对应真实值，调用方须按敏感数据处理。
 
 `TypedSchema::deserialize` 先复用同一个配置解析和完整校验，再将拥有型值转换为 Rust 类型。`typol` 编解码器和上下文 serde 对外来/序列化值调用 `ConfigValueProcessor::validate_with_budget`，再编码或解码；绑定、配置解析和转换可共享外层通用执行余额，每次校验仍根据自身选项创建正则预算。没有 Schema 上下文的普通 serde trait 调用不属于此配置校验保证。
 

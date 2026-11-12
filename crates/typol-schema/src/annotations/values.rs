@@ -4,11 +4,14 @@ pub(crate) use bounds::AnnotationBounds;
 
 use crate::{
     SchemaLimits,
-    annotations::{AnnotationCompilation, AnnotationOwner, AnnotationTask, TypedNumber},
+    annotations::{
+        AnnotationCompilation, AnnotationOwner, AnnotationTask, CompiledConstraint, ConstraintData,
+        TypedNumber,
+    },
     context::CompileContext,
     diagnostics::{BuildFailure, DiagnosticCollector, EmergencyDiagnostics},
     module_tree::TypeDeclarationKind,
-    symbols::{FieldSymbolId, LookupResult, SymbolTable, TypeSymbolId},
+    symbols::{FieldSymbolId, LookupResult, SymbolTable, TypeSymbolId, VariantSymbolId},
     types::{ResolvedTypeGraph, ResolvedTypeKind, TypeUseId},
 };
 use core::cmp::Ordering;
@@ -18,12 +21,17 @@ use typol_core::{
     NumericTokenKind, SourceSpan,
 };
 use typol_i18n::diagnostic_message;
+use typol_semantic::VariantRestrictionMode;
 use typol_syntax::{AstAccessError, BuiltinType, NumberKind, NumberLiteral};
 
 use summary::ConstraintSummary;
 
 pub(crate) enum AnnotationError {
     Invalid(DiagnosticMessage<'static>),
+    InvalidAt {
+        message: DiagnosticMessage<'static>,
+        span: SourceSpan,
+    },
     DuplicateBound {
         message: DiagnosticMessage<'static>,
         span: SourceSpan,
@@ -63,12 +71,30 @@ impl From<AstAccessError> for AnnotationError {
 
 pub(crate) struct AnnotationValues;
 
-pub(super) struct ConstraintValidationInput<'task, 'src, 'output, 'types, 'context, 'diagnostics> {
+pub(super) struct ConstraintValidationInput<
+    'task,
+    'src,
+    'symbols,
+    'output,
+    'types,
+    'context,
+    'diagnostics,
+> {
     pub(super) task: &'task AnnotationTask<'src>,
+    pub(super) symbols: &'symbols SymbolTable<'src>,
     pub(super) output: &'output AnnotationCompilation,
     pub(super) types: &'types ResolvedTypeGraph,
     pub(super) context: &'context CompileContext,
     pub(super) diagnostics: &'diagnostics mut DiagnosticCollector,
+}
+
+struct VariantRuleCheck<'rules, 'context, 'diagnostics> {
+    rules: &'rules [CompiledConstraint],
+    candidate: VariantSymbolId,
+    first_span: &'rules mut Option<SourceSpan>,
+    found_restriction: &'rules mut bool,
+    context: &'context CompileContext,
+    diagnostics: &'diagnostics mut DiagnosticCollector,
 }
 
 pub(super) struct UniquePathInput<'path, 'symbols, 'types, 'limits> {
@@ -81,11 +107,12 @@ pub(super) struct UniquePathInput<'path, 'symbols, 'types, 'limits> {
 
 impl AnnotationValues {
     pub(crate) fn validate_combined_constraints<'slot>(
-        input: ConstraintValidationInput<'_, '_, '_, '_, '_, '_>,
+        input: ConstraintValidationInput<'_, '_, '_, '_, '_, '_, '_>,
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, ()> {
         let ConstraintValidationInput {
             task,
+            symbols,
             output,
             types,
             context,
@@ -177,7 +204,217 @@ impl AnnotationValues {
                 ));
             }
         }
+        Self::validate_variant_restrictions(
+            ConstraintValidationInput {
+                task,
+                symbols,
+                output,
+                types,
+                context,
+                diagnostics,
+            },
+            out.reborrow(),
+        )?;
         Ok(())
+    }
+
+    fn validate_variant_restrictions<'slot>(
+        input: ConstraintValidationInput<'_, '_, '_, '_, '_, '_, '_>,
+        mut out: Out<'slot, '_, BuildFailure>,
+    ) -> OResult<'slot, ()> {
+        let ConstraintValidationInput {
+            task,
+            symbols,
+            output,
+            types,
+            context,
+            diagnostics,
+        } = input;
+        let option_inner = match Self::resolved_kind(types, task.target) {
+            Some(ResolvedTypeKind::Option(inner)) => Some(inner),
+            _ => None,
+        };
+        let Ok((ResolvedTypeKind::User(enum_owner), _)) = Self::unwrap_option(types, task.target)
+        else {
+            return Ok(());
+        };
+        let Some(owner_symbol) = symbols.type_symbol(enum_owner) else {
+            diagnostics.abort(schema_internal!(task.span));
+            return Err(out.fail(BuildFailure::empty()));
+        };
+        if !matches!(owner_symbol.declaration(), TypeDeclarationKind::Enum(_)) {
+            return Ok(());
+        }
+        let candidates = owner_symbol.variants();
+        for (index, candidate) in candidates.iter().enumerate() {
+            context.consume(1, task.span, diagnostics, out.reborrow())?;
+            let mut first_span = None;
+            let mut found_restriction = false;
+            let mut accepted = true;
+            let mut alias = types
+                .type_use(task.target)
+                .and_then(|type_use| type_use.alias_chain());
+            while accepted {
+                let Some(link_id) = alias else {
+                    break;
+                };
+                context.consume(1, task.span, diagnostics, out.reborrow())?;
+                let Some(link) = types.alias_link(link_id) else {
+                    diagnostics.abort(schema_internal!(task.span));
+                    return Err(out.fail(BuildFailure::empty()));
+                };
+                let constraints = diagnostics.require(
+                    output.alias_constraints(link.symbol()),
+                    task.span,
+                    out.reborrow(),
+                )?;
+                accepted = Self::variant_rules_accept(
+                    VariantRuleCheck {
+                        rules: constraints,
+                        candidate: *candidate,
+                        first_span: &mut first_span,
+                        found_restriction: &mut found_restriction,
+                        context,
+                        diagnostics,
+                    },
+                    out.reborrow(),
+                )?;
+                alias = link.next();
+            }
+            let local = match task.owner {
+                AnnotationOwner::Alias(id) => {
+                    diagnostics.require(output.alias_constraints(id), task.span, out.reborrow())?
+                }
+                AnnotationOwner::Field(id) => {
+                    diagnostics.require(output.field_constraints(id), task.span, out.reborrow())?
+                }
+                AnnotationOwner::VariantPayload(id) => diagnostics.require(
+                    output.variant_payload_constraints(id),
+                    task.span,
+                    out.reborrow(),
+                )?,
+                AnnotationOwner::TypeUse(id) => diagnostics.require(
+                    output.type_use_constraints(id),
+                    task.span,
+                    out.reborrow(),
+                )?,
+            };
+            if accepted {
+                accepted = Self::variant_rules_accept(
+                    VariantRuleCheck {
+                        rules: local,
+                        candidate: *candidate,
+                        first_span: &mut first_span,
+                        found_restriction: &mut found_restriction,
+                        context,
+                        diagnostics,
+                    },
+                    out.reborrow(),
+                )?;
+            }
+            let mut inner_alias = option_inner
+                .and_then(|inner| types.type_use(inner))
+                .and_then(|inner| inner.alias_chain());
+            while accepted {
+                let Some(link_id) = inner_alias else {
+                    break;
+                };
+                context.consume(1, task.span, diagnostics, out.reborrow())?;
+                let Some(link) = types.alias_link(link_id) else {
+                    diagnostics.abort(schema_internal!(task.span));
+                    return Err(out.fail(BuildFailure::empty()));
+                };
+                let constraints = diagnostics.require(
+                    output.alias_constraints(link.symbol()),
+                    task.span,
+                    out.reborrow(),
+                )?;
+                accepted = Self::variant_rules_accept(
+                    VariantRuleCheck {
+                        rules: constraints,
+                        candidate: *candidate,
+                        first_span: &mut first_span,
+                        found_restriction: &mut found_restriction,
+                        context,
+                        diagnostics,
+                    },
+                    out.reborrow(),
+                )?;
+                inner_alias = link.next();
+            }
+            if accepted {
+                if let Some(inner) = option_inner {
+                    let constraints = diagnostics.require(
+                        output.type_use_constraints(inner),
+                        task.span,
+                        out.reborrow(),
+                    )?;
+                    accepted = Self::variant_rules_accept(
+                        VariantRuleCheck {
+                            rules: constraints,
+                            candidate: *candidate,
+                            first_span: &mut first_span,
+                            found_restriction: &mut found_restriction,
+                            context,
+                            diagnostics,
+                        },
+                        out.reborrow(),
+                    )?;
+                }
+            }
+            if accepted {
+                return Ok(());
+            }
+            if !found_restriction {
+                return Ok(());
+            }
+            if index + 1 == candidates.len() {
+                diagnostics.push(diagnostics.make_semantic(
+                    diagnostic_message!(
+                        "diagnostic.schema.annotation_variants_combination_empty",
+                        "combined @variants restrictions reject every enum variant"
+                    ),
+                    first_span.unwrap_or(task.span),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn variant_rules_accept<'slot>(
+        input: VariantRuleCheck<'_, '_, '_>,
+        mut out: Out<'slot, '_, BuildFailure>,
+    ) -> OResult<'slot, bool> {
+        let VariantRuleCheck {
+            rules,
+            candidate,
+            first_span,
+            found_restriction,
+            context,
+            diagnostics,
+        } = input;
+        for rule in rules {
+            context.consume(1, rule.span(), diagnostics, out.reborrow())?;
+            let ConstraintData::VariantRestriction { mode, variants } = rule.data() else {
+                continue;
+            };
+            *found_restriction = true;
+            if first_span.is_none() {
+                *first_span = Some(rule.span());
+            }
+            context
+                .execution()
+                .consume(variants.len(), out.reborrow())?;
+            let listed = variants
+                .binary_search_by_key(&candidate.index(), |id| id.index())
+                .is_ok();
+            match mode {
+                VariantRestrictionMode::Allow if !listed => return Ok(false),
+                VariantRestrictionMode::Deny if listed => return Ok(false),
+                _ => {}
+            }
+        }
+        Ok(true)
     }
 
     fn ast_access<'slot, 'borrow, T>(

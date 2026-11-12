@@ -722,6 +722,39 @@ fn failed_batch_validation_preserves_document_source() -> TestResult {
 }
 
 #[test]
+fn enum_variant_restrictions_validate_document_edits_before_commit() -> TestResult {
+    let schema = compile(
+        "enum Mode { Fast, Safe, Legacy } entry struct Root { mode: Mode @variants(allow = [\"Fast\", \"Safe\"]) }",
+    )?;
+    let original = "{mode: .Fast}";
+    let mut document = parse_document(&schema, original)?;
+    let path = ConfigPath::new().field("mode");
+    let accepted = Values::enumeration("Safe", Payload::Unit)?;
+    TestOpeo::value(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &accepted),
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_eq!(document.source(), "{mode: .Safe}");
+
+    let rejected = Values::enumeration("Legacy", Payload::Unit)?;
+    let error = TestOpeo::error(|out| {
+        document.set_value(
+            ConfigReplacement::new(&path, &rejected),
+            ConfigEditOptions::default(),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?;
+    test_eq!(error.kind(), ConfigEditErrorKind::ValidationFailed);
+    test_eq!(document.source(), "{mode: .Safe}");
+    Ok(())
+}
+
+#[test]
 fn environment_replacement_preserves_reference_and_rejects_unauthorized_name() -> TestResult {
     let schema = compile("entry struct Root { token: string @env(\"SERVICE_TOKEN\") }")?;
     let original = "{ token: \"initial\" }";

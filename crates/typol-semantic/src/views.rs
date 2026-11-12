@@ -473,6 +473,10 @@ impl fmt::Debug for VariantView<'_> {
 }
 
 impl<'a> VariantView<'a> {
+    pub fn id(self) -> VariantId {
+        self.id
+    }
+
     fn info(self) -> Result<VariantInfo<'a>, SchemaAccessError> {
         self.schema
             .variant_info(self.id)?

@@ -148,6 +148,20 @@ struct RetryPolicy {
 
 The `@min(1)` annotation is attached to each `u32` item, while `@size` and `@all` apply to the array itself. An annotation applies only to the type expression it immediately follows, so nested arrays and map values can each have their own rules. `@all` checks every array item or map value. `@unique(by = "...")` checks a field path on an array of structs, and `@sum` applies to numeric arrays. Expressions are type-checked when the Schema is compiled. Struct and active enum-variant assertions run after the full configuration value is constructed; a parse or local validation failure prevents those assertions from running.
 
+Enum restrictions compose through transparent aliases and apply to exact type nodes, including array elements:
+
+```tschem
+enum Transport { Tcp, Quic, Legacy }
+type ModernTransport = Transport @variants(allow = ["Tcp", "Quic"]);
+type TcpOnly = ModernTransport @variants(deny = ["Quic"]);
+entry struct Proxy {
+    transport: TcpOnly,
+    history: [Transport @variants(deny = ["Legacy"])],
+}
+```
+
+The alias allow list and use-site deny list both apply. A present `option<Enum>` value must pass its restriction; `none` passes. Schema compilation rejects unknown or repeated names, unsupported targets, and combinations that leave no enum variant available, including optional enums.
+
 Regular expressions use search semantics, so any matching substring is sufficient. Add `^` and `$` when the whole string must match, for example `@regex("^[a-z][a-z0-9-]*$")`. Typol implements the documented regex subset, not every feature of a general-purpose regex engine. See the [Schema DSL reference](../../specification/schema-dsl/).
 
 ## Keep environment access explicit
@@ -364,7 +378,7 @@ Enable `config-ir` to serialize a validated value as Config IR v1. It also enabl
 typol = { version = "0.1", features = ["config-ir"] }
 ```
 
-`ConfigIrOptions::default()` selects `Validated`: it validates the supplied value but does not add missing defaults. Select `ConfigIrValueMode::WithDefaults` to fill Schema defaults and validate, or `AsProvided` to deliberately skip both. Values returned by `LoadedSchema::read_value` already have defaults applied; pass `into_config_value()` to the serializer.
+`ConfigIr::serialize` fills Schema defaults and fully validates a raw `ConfigValue` before writing. If a parse/load call already returned `ValidatedConfigValue`, pass it by reference to `ConfigIr::serialize_validated` to avoid a second validation walk; the credential is accepted only by the exact `CompiledSchema` that produced it.
 
 Map entries and struct fields have deterministic output order. Integers are JSON strings so the full `i128` and `u128` ranges are preserved. A node marked `"secret": true` still contains its value; the marker is metadata, not encryption or redaction. Treat that node and its subtree as sensitive. See the [Config IR v1 reference](../../specification/config-ir/).
 

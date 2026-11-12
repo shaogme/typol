@@ -1,12 +1,13 @@
 pub use crate::token::AnnotationKind;
 use crate::{
-    ast::{BooleanLiteral, Expr, Name, NumberLiteral, StringLiteral},
+    ast::{BooleanLiteral, Expr, Name, NumberLiteral, StringLiteral, StringLiteralList},
     storage::{
         Annotation as StoredAnnotation, AnnotationData as StoredAnnotationData,
         Assertion as StoredAssertion, AstAccessError, Id, NamedArgument as StoredNamedArgument,
         NamedBounds as StoredNamedBounds, NumberLiteral as StoredNumberLiteral,
         SizeArguments as StoredSizeArguments, Storage,
     },
+    token::VariantRestrictionMode,
 };
 use core::fmt::{Debug, Formatter, Result as FmtResult};
 use opeo::{OResult, Out};
@@ -74,6 +75,10 @@ pub enum AnnotationData<'a> {
     All(Assertion<'a>),
     Sum(NamedBounds<'a>),
     Secret,
+    Variants {
+        mode: VariantRestrictionMode,
+        names: StringLiteralList<'a>,
+    },
 }
 
 impl<'a> SizeArguments<'a> {
@@ -172,6 +177,13 @@ impl<'a> AnnotationData<'a> {
             }
             StoredAnnotationData::Sum(value) => Ok(Self::Sum(NamedBounds::project(storage, value))),
             StoredAnnotationData::Secret => Ok(Self::Secret),
+            StoredAnnotationData::Variants { mode, names } => {
+                let records = storage.list(*names, out.reborrow())?;
+                Ok(Self::Variants {
+                    mode: *mode,
+                    names: StringLiteralList::project(storage, records),
+                })
+            }
         }
     }
 }
@@ -256,6 +268,7 @@ impl<'a> Annotation<'a> {
             AnnotationData::All(_) => AnnotationKind::All,
             AnnotationData::Sum(_) => AnnotationKind::Sum,
             AnnotationData::Secret => AnnotationKind::Secret,
+            AnnotationData::Variants { .. } => AnnotationKind::Variants,
         };
         Ok(kind)
     }

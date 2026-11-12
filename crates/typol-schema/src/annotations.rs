@@ -9,10 +9,11 @@ pub(crate) use compilation::{
 use compiler::{AnnotationRuleCompiler, CompiledAnnotation};
 use tasks::{AnnotationTaskCollector, MakeTasksInput};
 use typol_i18n::diagnostic_message;
+use values::AnnotationValues;
 
 use crate::{
     SchemaLimits,
-    annotations::values::{AnnotationError, AnnotationValues, ConstraintValidationInput},
+    annotations::values::{AnnotationError, ConstraintValidationInput},
     context::CompileContext,
     diagnostics::{BuildFailure, DiagnosticCollector, EmergencyDiagnostics},
     module_tree::ModuleTree,
@@ -181,6 +182,7 @@ impl AnnotationCompiler {
             AnnotationValues::validate_combined_constraints(
                 ConstraintValidationInput {
                     task,
+                    symbols,
                     output: &output,
                     types,
                     context,
@@ -337,6 +339,9 @@ fn report_annotation_error(
     match error {
         AnnotationError::Invalid(message) => {
             diagnostics.push(diagnostics.make_semantic(message, fallback));
+        }
+        AnnotationError::InvalidAt { message, span } => {
+            diagnostics.push(diagnostics.make_semantic(message, span));
         }
         AnnotationError::DuplicateBound {
             message,

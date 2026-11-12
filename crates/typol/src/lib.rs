@@ -193,8 +193,7 @@ pub use typol_std::{ProcessEnvironment, ProcessEnvironmentLimits};
 
 #[cfg(feature = "config-ir")]
 pub use config_ir::{
-    ConfigIr, ConfigIrError, ConfigIrErrorKind, ConfigIrOptions, ConfigIrValueMode,
-    ConfigValueErrors,
+    ConfigIr, ConfigIrError, ConfigIrErrorKind, ConfigIrOptions, ConfigValueErrors,
 };
 
 pub mod io {

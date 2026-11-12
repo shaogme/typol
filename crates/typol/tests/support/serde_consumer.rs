@@ -157,6 +157,20 @@ struct Application {
     values: [u8; 2],
 }
 
+#[derive(Debug, PartialEq, Typol, Serialize, Deserialize)]
+#[typol(crate = "renamed_typol")]
+enum RestrictedMode {
+    Fast,
+    Legacy,
+}
+
+#[derive(Debug, PartialEq, Typol, Serialize, Deserialize)]
+#[typol(crate = "renamed_typol", rename = "Root")]
+#[serde(rename = "Root")]
+struct RestrictedRoot {
+    value: RestrictedMode,
+}
+
 fn roundtrips_and_validation() {
     let schema = compile(
         "struct Child { low: u8, high: u8 } @assert(self.low < self.high, \"low value is less than high value\")\n enum Choice { Unit, Single(u8), Object { label: string, n: u8 @range(1, 9) } @assert(self.n < root.child.high, \"payload is less than root high value\"), Empty {} }\n entry struct Root { name: string @secret @env(\"SECRET\"), choice: Choice, optional: option<u8>, dictionary: map<string, u8>, values: [u8; 2] @unique, child: Child }",
@@ -237,6 +251,53 @@ fn roundtrips_and_validation() {
             CodecStage::Parsing
         );
     }
+}
+
+fn serde_io_enforces_enum_variant_restrictions() {
+    let schema = compile(
+        "enum RestrictedMode { Fast, Legacy } entry struct Root { value: RestrictedMode @variants(allow = [\"Fast\"]) }",
+    );
+    let binding = invoke(|out| TypedSchema::<RestrictedRoot>::bind(&schema, BindOptions::default(), out));
+    let accepted = RestrictedRoot {
+        value: RestrictedMode::Fast,
+    };
+    let text = invoke(|out| {
+        binding.serialize_serde_to_string(&accepted, WriteOptions::default(), out)
+    });
+    assert_eq!(text, "{value: .Fast}");
+    assert_eq!(
+        invoke(|out| binding.deserialize_serde(
+            request(&mut SliceSource::new(text.as_bytes())),
+            &mut Provider,
+            ConversionLimits::default(),
+            out,
+        )),
+        accepted
+    );
+
+    let rejected = RestrictedRoot {
+        value: RestrictedMode::Legacy,
+    };
+    let mut output = String::new();
+    let errors = invoke_error(|out| {
+        binding.serialize_serde(
+            &rejected,
+            &mut output,
+            WriteOptions::default(),
+            out,
+        )
+    });
+    assert_eq!(errors.stage(), CodecStage::Validation);
+    assert!(output.is_empty());
+    let errors = invoke_error(|out| {
+        binding.deserialize_serde(
+            request(&mut SliceSource::new(b"{value: .Legacy}")),
+            &mut Provider,
+            ConversionLimits::default(),
+            out,
+        )
+    });
+    assert_eq!(errors.stage(), CodecStage::Parsing);
 }
 
 fn serde_default() -> u8 {
@@ -599,6 +660,7 @@ fn loaded_serde() {
 
 fn main() {
     roundtrips_and_validation();
+    serde_io_enforces_enum_variant_restrictions();
     defaults_and_output_limits();
     reject_custom::<0>();
     reject_custom::<1>();

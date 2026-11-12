@@ -325,6 +325,13 @@ pub enum AnnotationKind {
     All,
     Sum,
     Secret,
+    Variants,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum VariantRestrictionMode {
+    Allow,
+    Deny,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

@@ -211,6 +211,8 @@ annotation ::= "@min" "(" number ")"
              | "@all" "(" expression "," string_literal ")"
              | "@sum" "(" sum_args ")"
              | "@secret"
+             | "@variants" "(" variant_restriction ")"
+variant_restriction ::= ("allow" | "deny") "=" "[" string_literal ("," string_literal)* ","? "]"
 size_args ::= decimal_integer "," decimal_integer
             | size_bound ("," size_bound)?
 size_bound ::= ("min" | "max") "=" decimal_integer
@@ -234,8 +236,22 @@ number ::= numeric_literal | "-" numeric_literal
 | `@all(expression, "message")` | 数组、映射 | 要求每个数组元素或每个映射值满足表达式。 |
 | `@sum(...)` | 数值数组 | 按数组顺序求和，并检查总和是否满足指定的包含边界；可指定 `min`、`max` 或两者。 |
 | `@secret` | 任意类型表达式节点 | 将该精确值标记为敏感值，在诊断和安全展示中隐藏其实际内容；别名根上的标记传播到其使用位置。 |
+| `@variants(allow = ["A", "B"])` 或 `@variants(deny = ["A"])` | 枚举或 `option<Enum>` | 只允许列表中的变体，或拒绝列表中的变体；仅作用于该精确类型节点。 |
 
 `@min`、`@max`、`@range`、`@size` 和 `@sum` 的边界均包含端点。数值注解边界是上下文数值：整数边界可用于浮点目标，并直接按 IEEE 754 最近值、平分取偶数规则舍入到目标浮点精度；浮点边界不能用于整数目标。所有边界值及组合必须与目标类型相容；不适用的注解、重复注解、无效参数或不兼容组合均使 Schema 无效。
+
+`@variants` 必须提供非空字符串列表。名称按 Schema 字符串字面量规则解码后，与别名解析所得枚举的变体名进行大小写敏感的精确匹配；未知名称或列表内重复名称会使 Schema 无效。注解节点解析后必须是枚举或单层 `option<Enum>`，限制不会传播到容器或枚举载荷。别名链和本地节点上的多条限制按 AND 组合；多个 allow 列表取交集，deny 列表取并集后排除。有效枚举集合为空时 Schema 编译失败，`option<Enum>` 也不例外。运行时 `none` 满足合法的可选限制；有值时必须通过全部规则。
+
+```tschem
+enum Connection { Connected, Disconnected, Legacy }
+type CurrentConnection = Connection @variants(allow = ["Connected", "Disconnected"]);
+type NonLegacyConnection = CurrentConnection @variants(deny = ["Disconnected"]);
+entry struct Settings {
+    active: NonLegacyConnection,
+    history: [Connection @variants(deny = ["Legacy"])],
+    optional: option<Connection> @variants(allow = ["Connected"]),
+}
+```
 
 字符串相等以及 `@unique` 比较元素中的字符串值时，均按原始 Unicode 文本精确比较，不执行 Unicode 归一化、大小写折叠、DNS 根点移除或 IP 地址解析。`@host` 仅验证字符串格式，不改变相等或唯一性语义。DSL 表达式不提供主机规范化比较；需要这种比较时，宿主代码可显式调用 `ValueComparison::host_equal`：该方法对可解析的 IP 地址按地址比较，否则移除一个末尾点并按 ASCII 大小写不敏感方式比较文本。
 

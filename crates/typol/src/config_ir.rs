@@ -5,7 +5,7 @@ use core::{error::Error, fmt};
 use opeo::ErrSlot;
 pub use typol_config::{
     ConfigValidationOptions, ConfigValidationRequest, ConfigValueErrors, ConfigValueProcessor,
-    NormalizedConfigValue, ValidatedConfigValue,
+    ValidatedConfigValue,
 };
 use typol_core::{ConfigValue, Write};
 use typol_semantic::CompiledSchema;
@@ -17,19 +17,11 @@ const DEFAULT_MAX_NESTING_DEPTH: usize = 128;
 pub struct ConfigIr;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ConfigIrValueMode {
-    AsProvided,
-    WithDefaults,
-    Validated,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConfigIrOptions {
     pretty: bool,
     max_output_bytes: usize,
     max_workspace_bytes: usize,
     max_nesting_depth: usize,
-    value_mode: ConfigIrValueMode,
     validation_options: Option<ConfigValidationOptions>,
     reject_secrets: bool,
 }
@@ -38,6 +30,7 @@ pub struct ConfigIrOptions {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConfigIrErrorKind {
     SchemaAccess,
+    SchemaMismatch,
     ValueShapeMismatch,
     UnsupportedFloat,
     OutputLimitExceeded,
@@ -54,6 +47,7 @@ pub enum ConfigIrErrorKind {
 #[derive(Debug)]
 pub enum ConfigIrError {
     SchemaAccess,
+    SchemaMismatch,
     ValueShapeMismatch,
     UnsupportedFloat,
     OutputLimitExceeded,
@@ -72,6 +66,7 @@ impl ConfigIrError {
     pub const fn kind(&self) -> ConfigIrErrorKind {
         match self {
             Self::SchemaAccess => ConfigIrErrorKind::SchemaAccess,
+            Self::SchemaMismatch => ConfigIrErrorKind::SchemaMismatch,
             Self::ValueShapeMismatch => ConfigIrErrorKind::ValueShapeMismatch,
             Self::UnsupportedFloat => ConfigIrErrorKind::UnsupportedFloat,
             Self::OutputLimitExceeded => ConfigIrErrorKind::OutputLimitExceeded,
@@ -106,47 +101,42 @@ impl ConfigIr {
         options: ConfigIrOptions,
         output: &mut dyn Write,
     ) -> Result<(), ConfigIrError> {
-        match options.value_mode() {
-            ConfigIrValueMode::AsProvided => {
-                serializer::ConfigIrSerializer::serialize_to(schema, &value, options, output)
-            }
-            ConfigIrValueMode::WithDefaults => {
-                let value = Self::normalize(schema, value, options.validation_options())?;
-                serializer::ConfigIrSerializer::serialize_to(
-                    schema,
-                    value.as_config_value(),
-                    options,
-                    output,
-                )
-            }
-            ConfigIrValueMode::Validated => {
-                let value = Self::validate(schema, value, options.validation_options())?;
-                serializer::ConfigIrSerializer::serialize_to(
-                    schema,
-                    value.as_config_value(),
-                    options,
-                    output,
-                )
-            }
-        }
+        let value = Self::validate(schema, value, options.validation_options())?;
+        serializer::ConfigIrSerializer::serialize_to(
+            schema,
+            value.as_config_value(),
+            options,
+            output,
+        )
     }
 
-    fn normalize(
+    /// Encode a value already validated against this exact compiled Schema.
+    pub fn serialize_validated(
         schema: &CompiledSchema,
-        value: ConfigValue,
-        options: ConfigValidationOptions,
-    ) -> Result<NormalizedConfigValue, ConfigIrError> {
-        let mut errors = ErrSlot::<ConfigValueErrors>::new();
-        match errors.try_call(|out| {
-            ConfigValueProcessor::new(schema).normalize(
-                value,
-                ConfigValidationRequest::new(options),
-                out,
-            )
-        }) {
-            Ok(value) => Ok(value),
-            Err(caught) => Err(ConfigIrError::NormalizationFailed(caught.take())),
+        value: &ValidatedConfigValue,
+        options: ConfigIrOptions,
+    ) -> Result<Vec<u8>, ConfigIrError> {
+        let mut output = Vec::new();
+        Self::serialize_validated_to(schema, value, options, &mut output)?;
+        Ok(output)
+    }
+
+    /// Stream an already validated value without walking it through Schema validation again.
+    pub fn serialize_validated_to(
+        schema: &CompiledSchema,
+        value: &ValidatedConfigValue,
+        options: ConfigIrOptions,
+        output: &mut dyn Write,
+    ) -> Result<(), ConfigIrError> {
+        if !value.belongs_to_schema(schema) {
+            return Err(ConfigIrError::SchemaMismatch);
         }
+        serializer::ConfigIrSerializer::serialize_to(
+            schema,
+            value.as_config_value(),
+            options,
+            output,
+        )
     }
 
     fn validate(
@@ -175,7 +165,6 @@ impl ConfigIrOptions {
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             max_workspace_bytes: DEFAULT_MAX_WORKSPACE_BYTES,
             max_nesting_depth: DEFAULT_MAX_NESTING_DEPTH,
-            value_mode: ConfigIrValueMode::Validated,
             validation_options: None,
             reject_secrets: false,
         }
@@ -216,11 +205,6 @@ impl ConfigIrOptions {
         Ok(self)
     }
 
-    pub const fn with_value_mode(mut self, value_mode: ConfigIrValueMode) -> Self {
-        self.value_mode = value_mode;
-        self
-    }
-
     pub const fn with_validation_options(mut self, options: ConfigValidationOptions) -> Self {
         self.validation_options = Some(options);
         self
@@ -246,10 +230,6 @@ impl ConfigIrOptions {
         self.max_nesting_depth
     }
 
-    pub const fn value_mode(&self) -> ConfigIrValueMode {
-        self.value_mode
-    }
-
     pub fn validation_options(&self) -> ConfigValidationOptions {
         self.validation_options.unwrap_or_default()
     }
@@ -265,6 +245,9 @@ impl fmt::Display for ConfigIrError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SchemaAccess => formatter.write_str("failed to read compiled schema"),
+            Self::SchemaMismatch => {
+                formatter.write_str("validated configuration belongs to a different Schema")
+            }
             Self::ValueShapeMismatch => {
                 formatter.write_str("configuration value does not match the compiled type")
             }

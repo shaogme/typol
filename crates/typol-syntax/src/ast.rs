@@ -29,8 +29,8 @@ pub use expression::{
 pub use lists::{
     AnnotationIter, AnnotationList, AssertionIter, AssertionList, BraceEntryIter, BraceEntryList,
     DeclarationIter, DeclarationList, DefaultValueIter, DefaultValueList, FieldDeclIter,
-    FieldDeclList, NameIter, NameList, TopLevelItemIter, TopLevelItemList, VariantDeclIter,
-    VariantDeclList,
+    FieldDeclList, NameIter, NameList, StringLiteralIter, StringLiteralList, TopLevelItemIter,
+    TopLevelItemList, VariantDeclIter, VariantDeclList,
 };
 use opeo::{OResult, Out};
 pub use type_expr::{ArrayLength, BuiltinType, TypeExpr, TypeExprKind, TypePath};

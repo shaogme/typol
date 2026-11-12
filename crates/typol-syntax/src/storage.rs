@@ -51,6 +51,7 @@ pub(crate) struct Storage {
     default_value_edges: ChargedVec<Id<DefaultValue>>,
     field_decl_edges: ChargedVec<Id<FieldDecl>>,
     name_edges: ChargedVec<Id<Name>>,
+    variant_name_edges: ChargedVec<Id<StringLiteral>>,
     variant_decl_edges: ChargedVec<Id<VariantDecl>>,
     source_id: SourceId,
     source_limit: usize,
@@ -98,7 +99,7 @@ impl Storage {
         macro_rules! add_capacities { ($total:ident, $storage:ident; $($field:ident),+ $(,)?) => { $($total = $total.checked_add(capacity_bytes(&$storage.$field)?)?;)+ }; }
         add_capacities!(bytes, self;
             annotation_edges, assertion_edges, brace_entry_edges, declaration_edges,
-            default_value_edges, field_decl_edges, name_edges, variant_decl_edges,
+            default_value_edges, field_decl_edges, name_edges, variant_name_edges, variant_decl_edges,
             annotation, array_default, array_length, assertion, boolean_literal, brace_entry,
             braced_default, default_value, enum_decl, enum_default, enum_default_payload,
             expr, extern_mod_decl, field_decl, method_argument, module_decl, name,
@@ -347,6 +348,7 @@ impl Storage {
             default_value_edges: new_vec!(out),
             field_decl_edges: new_vec!(out),
             name_edges: new_vec!(out),
+            variant_name_edges: new_vec!(out),
             variant_decl_edges: new_vec!(out),
             annotation: new_vec!(out),
             array_default: new_vec!(out),

@@ -14,7 +14,7 @@ sidebar:
 | 主题 | 关键规则 |
 | --- | --- |
 | 顶层对象 | 成员依次为 `format`、`version`、`root_type`、`value`；成功输出以一个 LF 结束。 |
-| 导出模式 | 默认 `Validated` 会校验约束；`WithDefaults` 补默认值但不校验约束；`AsProvided` 两者都跳过。 |
+| 校验 | 原始 `ConfigValue` 导出会补齐默认值并完整执行 Schema 校验；已校验值可使用绑定同一 Schema 的快速入口。 |
 | 敏感值 | `secret: true` 仅作标记，不会遮蔽或加密数据；消费者必须保护整个标记子树。 |
 
 本文定义 `typol-config-ir` JSON 格式第 1 版（Config IR v1）的输出结构、排序、敏感值标记和资源边界。Config IR 是编译后 Schema 与完整 `ConfigValue` 的导出格式，不是 `.tconf` 配置语法。配置值的语法和语义见[配置 DSL 规范](../config-dsl/)，Schema 类型和约束见[Schema DSL 规范](../schema-dsl/)。
@@ -34,15 +34,9 @@ Config IR 是 UTF-8 JSON 文本。顶层对象恰有以下成员，并按所列�
 
 v1 输出完整配置值，不包含源位置、值来源、环境引用名称或 fallback、默认值来源、约束定义或校验结果。省略引用元数据并不代表解析后的值已脱敏：环境变量实际值以及 `@secret` 下的值仍会作为数据导出，必须按敏感信息保护。类型别名透明：输出描述别名展开后的类型形态，结构体和枚举保留 Schema 限定名。`map<string, T>` 的键类型固定为字符串，不在 map 类型描述中单独编码。
 
-`ConfigIr::serialize` 不读取环境变量。调用方可通过 `ConfigIrOptions` 选择序列化前的配置值处理模式：
+`ConfigIr::serialize` 和 `ConfigIr::serialize_to` 不读取环境变量。它们接收拥有型原始 `ConfigValue`，先补齐 Schema 默认值，再执行完整 Schema 校验，之后才编码。必填字段缺失、值形态错误、约束或断言失败都会导致导出失败。
 
-| 模式 | 默认值补全 | Schema 约束与断言 | 用途 |
-| --- | --- | --- | --- |
-| `Validated`（默认） | 执行 | 执行完整校验 | 补齐默认值后检查字段、类型、标量和集合约束，以及结构体和活动枚举变体断言。 |
-| `AsProvided` | 不执行 | 不执行 | 显式跳过规范化和约束校验，直接编码已完整构造的值，并检查本规范列出的值形态。 |
-| `WithDefaults` | 执行 | 不执行 | 按 Schema 补齐缺省字段、可选值、嵌套结构体和活动枚举结构载荷；显式值（包括显式 `none`）优先保留。 |
-
-`WithDefaults` 只规范化值，不会因用户显式值违反 Schema 约束而失败；但后续序列化仍会执行值类型、整数范围、定长数组长度及载荷形态检查。`Validated` 使用相同的配置资源与执行额度设置，且约束检查总是在补齐默认值之后进行。所有模式都不改变 IR v1 的输出结构。
+调用方若已持有 `ValidatedConfigValue`，可调用 `ConfigIr::serialize_validated(schema, &value, options)` 或 `serialize_validated_to`，避免再次遍历值并校验。该值携带验证它的精确编译 Schema 身份；身份不匹配时会在序列化前返回 `SchemaMismatch`。两个入口生成相同的 Config IR v1 数据模型，并使用相同的输出和工作区额度。
 
 ## 2. 类型描述
 
@@ -175,8 +169,7 @@ map 节点使用 `entries` 数组，每项为 `{"key":"<字符串键>","value":<
 | `max_output_bytes` | 16,777,216 字节 | 限制最终 JSON 字节数，包含末尾 LF。 |
 | `max_workspace_bytes` | 16,777,216 字节 | 限制 map 和结构体字段排序所用的临时引用工作区。 |
 | `max_nesting_depth` | 128 | 分别限制值节点和嵌套容器类型描述的递归深度。 |
-| `value_mode` | `Validated` | 选择默认值规范化和 Schema 校验策略。跳过校验必须显式选择 `AsProvided`。 |
-| `validation_options` | `ConfigValidationOptions::default()` | 仅在 `WithDefaults` 和 `Validated` 中使用，控制配置资源额度与执行预算。 |
+| `validation_options` | `ConfigValidationOptions::default()` | 为原始 `ConfigValue` 导出配置默认值补齐和完整 Schema 校验的额度。 |
 
 调用方可覆盖输出和工作区额度。嵌套深度可以调低，但最大固定为 128；设置为 0 时，根值或根类型描述无法进入，导出失败。工作区额度按排序所需引用项的逻辑字节数计量，不代表进程的总内存上限。
 
@@ -187,6 +180,7 @@ JSON 输出缓冲区从 8 字节开始按倍数增长，每次预留的目标容
 | 错误 | 含义 |
 | --- | --- |
 | `SchemaAccess` | 无法读取编译 Schema 的必要信息或限定名。 |
+| `SchemaMismatch` | `ValidatedConfigValue` 是由另一个编译 Schema 校验的。 |
 | `ValueShapeMismatch` | 值与 Schema 形态不匹配，包括标量类型/整数范围、定长数组长度、结构体字段集合或枚举载荷不匹配。 |
 | `UnsupportedFloat` | 浮点值为 NaN 或正负无穷。 |
 | `OutputLimitExceeded` | 最终 JSON 输出超过 `max_output_bytes`。 |
@@ -195,10 +189,9 @@ JSON 输出缓冲区从 8 字节开始按倍数增长，每次预留的目标容
 | `InvalidNestingDepthLimit` | 请求的嵌套深度超过固定安全上限。 |
 | `AllocationFailed` | 创建输出缓冲区或临时排序向量时分配失败。 |
 | `SerializationFailed` | JSON 序列化发生其他失败。 |
-| `NormalizationFailed` | `WithDefaults` 规范化失败；错误携带经敏感信息策略处理的 `ConfigValueErrors` 诊断。 |
-| `ValidationFailed` | `Validated` 的规范化或 Schema 校验失败；错误携带经敏感信息策略处理的 `ConfigValueErrors` 诊断。 |
+| `ValidationFailed` | 原始值的默认值补齐或完整 Schema 校验失败；错误携带经敏感信息策略处理的 `ConfigValueErrors` 诊断。 |
 
-`ConfigIrError::kind()` 返回 `ConfigIrErrorKind`，可用于稳定地比较错误类别；它不表示完整错误值相等。`ConfigIrError` 本身不实现 `PartialEq` 或 `Eq`，以免忽略规范化/校验错误携带的诊断差异。规范化和校验错误仍分别携带 `ConfigValueErrors`，调用方可通过错误变体或 `Error::source()` 读取安全诊断及可用的 Schema 位置；诊断不会输出敏感值。序列化错误不包含被序列化的配置值。实现可以调整内部存储方式，但成功输出的 v1 数据形状和上述额度/失败语义保持不变。
+`ConfigIrError::kind()` 返回 `ConfigIrErrorKind`，可用于稳定地比较错误类别；它不表示完整错误值相等。`ConfigIrError` 本身不实现 `PartialEq` 或 `Eq`，以免忽略规范化/校验错误携带的诊断差异。校验错误携带 `ConfigValueErrors`，调用方可通过错误变体或 `Error::source()` 读取安全诊断及可用的 Schema 位置；诊断不会输出敏感值。序列化错误不包含被序列化的配置值。实现可以调整内部存储方式，但成功输出的 v1 数据形状和上述额度/失败语义保持不变。
 
 ## 8. 版本兼容
 

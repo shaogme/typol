@@ -211,6 +211,8 @@ annotation ::= "@min" "(" number ")"
              | "@all" "(" expression "," string_literal ")"
              | "@sum" "(" sum_args ")"
              | "@secret"
+             | "@variants" "(" variant_restriction ")"
+variant_restriction ::= ("allow" | "deny") "=" "[" string_literal ("," string_literal)* ","? "]"
 size_args ::= decimal_integer "," decimal_integer
             | size_bound ("," size_bound)?
 size_bound ::= ("min" | "max") "=" decimal_integer
@@ -234,8 +236,22 @@ number ::= numeric_literal | "-" numeric_literal
 | `@all(expression, "message")` | Array or map | Requires every array element or map value to satisfy the expression. |
 | `@sum(...)` | Numeric array | Sums elements in array order and checks inclusive bounds; either or both of `min` and `max` may be given. |
 | `@secret` | Any type-expression node | Marks that exact value as sensitive for diagnostics and safe display. A marker on an alias root propagates to uses of that alias. |
+| `@variants(allow = ["A", "B"])` or `@variants(deny = ["A"])` | Enum or `option<Enum>` | Allows only listed variants or rejects listed variants on this exact type node. |
 
 The bounds of `@min`, `@max`, `@range`, `@size`, and `@sum` are inclusive. Numeric bounds are contextual: an integer bound may be used for a float target and is rounded directly to that target precision using IEEE 754 round-to-nearest, ties-to-even. A float bound cannot be used for an integer target. Bounds and combinations must be compatible with the target type; an inapplicable annotation, duplicate annotation, invalid argument, or incompatible combination invalidates the Schema.
+
+`@variants` requires a non-empty string list. Names are decoded using Schema string-literal rules, then matched exactly and case-sensitively against variants of the resolved enum. Unknown and repeated names invalidate the Schema. After transparent aliases are resolved, the annotated node must be an enum or one `option<Enum>`; the rule does not spread into containers or enum payloads. Multiple restrictions on one value combine with AND across its alias chain and local node. Multiple allow lists intersect, and deny lists remove their union; an empty effective enum set is a Schema error, including for `option<Enum>`. At runtime `none` satisfies a valid optional restriction, while a present value must pass every rule.
+
+```tschem
+enum Connection { Connected, Disconnected, Legacy }
+type CurrentConnection = Connection @variants(allow = ["Connected", "Disconnected"]);
+type NonLegacyConnection = CurrentConnection @variants(deny = ["Disconnected"]);
+entry struct Settings {
+    active: NonLegacyConnection,
+    history: [Connection @variants(deny = ["Legacy"])],
+    optional: option<Connection> @variants(allow = ["Connected"]),
+}
+```
 
 String equality and string values compared by `@unique` use exact Unicode text. No Unicode normalization, case folding, DNS trailing-dot removal, or IP parsing is performed. `@host` validates string form without changing equality or uniqueness. DSL expressions do not offer normalized host comparison. Host code can explicitly call `ValueComparison::host_equal`, which compares parseable IP addresses as addresses, or otherwise removes one trailing dot and compares text using ASCII case-insensitive rules.
 

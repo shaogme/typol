@@ -361,7 +361,7 @@ fn parse_source<'slot, R: Read + ?Sized>(
         .try_call(|parse_out| Parser::parse_slot(parser_slot.take(), source_id, parse_out));
     drop(parser_slot);
     match parse_result {
-        Ok(value) => Ok(ValidatedConfigValue::from_config_value(value)),
+        Ok(value) => Ok(ValidatedConfigValue::from_config_value(schema, value)),
         Err(caught) => finish_parse_failure(
             ParseFailureRequest {
                 errors: caught.take(),
@@ -429,7 +429,7 @@ fn parse_document_source<'slot, 'schema, R: Read + ?Sized>(
     drop(parser_slot);
     match parse_result {
         Ok((value, locations)) => Ok(DocumentParseOutput {
-            value: ValidatedConfigValue::from_config_value(value),
+            value: ValidatedConfigValue::from_config_value(schema, value),
             locations,
             source: input.take_retained_source(),
         }),
@@ -692,7 +692,7 @@ fn validate_for_schema_with_budget<'slot, 'borrow>(
             validation_out,
         )
     }) {
-        Ok(value) => Ok(ValidatedConfigValue::from_config_value(value)),
+        Ok(value) => Ok(ValidatedConfigValue::from_config_value(schema, value)),
         Err(caught) => {
             let errors = caught.take();
             let excerpts = errors.schema_excerpts(schema, *request.options().excerpts(), budget);
@@ -736,7 +736,7 @@ fn validate_complete_for_schema_with_budget<'slot, 'borrow>(
             validation_out,
         )
     }) {
-        Ok(value) => Ok(ValidatedConfigValue::from_config_value(value)),
+        Ok(value) => Ok(ValidatedConfigValue::from_config_value(schema, value)),
         Err(caught) => {
             let errors = caught.take();
             let excerpts = errors.schema_excerpts(schema, *request.options().excerpts(), budget);

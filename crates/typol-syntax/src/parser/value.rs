@@ -397,11 +397,8 @@ impl DefaultParser {
         start: SourceSpan,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<DefaultValue>> {
-        parser.ast.default_value_new(
-            kind,
-            ParserControl::span_from_start(parser, start, out.reborrow())?,
-            out.reborrow(),
-        )
+        let span = ParserControl::span_from_start(parser, start, out.reborrow())?;
+        parser.ast.default_value_new(kind, span, out.reborrow())
     }
 
     fn finish_default_list<'slot>(

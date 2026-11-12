@@ -197,6 +197,33 @@ impl ProgramValidation {
                 }
                 _ => false,
             },
+            (
+                ConstraintKind::Variants,
+                StoredConstraintData::VariantRestriction { variants, .. },
+            ) => match kind {
+                StoredTypeKind::Enum {
+                    variants: enum_variants,
+                } => {
+                    if variants.is_empty() {
+                        false
+                    } else {
+                        let mut previous = None;
+                        let mut valid = true;
+                        for variant in variants {
+                            execution.consume(enum_variants.len(), out.reborrow())?;
+                            if previous.is_some_and(|index| index >= variant.index())
+                                || !enum_variants.contains(variant)
+                            {
+                                valid = false;
+                                break;
+                            }
+                            previous = Some(variant.index());
+                        }
+                        valid
+                    }
+                }
+                _ => false,
+            },
             _ => false,
         };
         ProgramValidationState::ensure(valid).store_err_into(out.reborrow())?;

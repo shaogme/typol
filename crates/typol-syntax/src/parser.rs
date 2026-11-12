@@ -285,67 +285,7 @@ impl SchemaParser {
                 return Err(out.reborrow().fail(SyntaxErrors::inline(error)));
             }
         };
-
-        while !parser.stopped {
-            let info = match try_diagnostic(errors, |out| ParserControl::peek(&mut parser, out)) {
-                ParseAttempt::Success(info) => info,
-                ParseAttempt::Failure(diagnostic) => {
-                    let failed_at = diagnostic
-                        .primary()
-                        .map(|span| span.span().start())
-                        .unwrap_or_else(|| ParserControl::eof_span(&parser).span().start());
-                    SchemaParser::push_diagnostic(&mut parser, errors, diagnostic, out.reborrow())?;
-                    match try_diagnostic(errors, |out| {
-                        RecoveryParser::recover_top_level(&mut parser, failed_at, out)
-                    }) {
-                        ParseAttempt::Success(()) => {}
-                        ParseAttempt::Failure(error) => SchemaParser::push_diagnostic(
-                            &mut parser,
-                            errors,
-                            error,
-                            out.reborrow(),
-                        )?,
-                    }
-                    continue;
-                }
-            };
-            if info.kind == TokenKind::Eof {
-                break;
-            }
-
-            let failed_at = info.span.span().start();
-            match try_diagnostic(errors, |out| {
-                SchemaParser::parse_top_level_item(&mut parser, out)
-            }) {
-                ParseAttempt::Success(item) => {
-                    match try_diagnostic(errors, |out| {
-                        ParserControl::try_push(&mut items, item, info.span, out)
-                    }) {
-                        ParseAttempt::Success(()) => {}
-                        ParseAttempt::Failure(error) => SchemaParser::push_diagnostic(
-                            &mut parser,
-                            errors,
-                            error,
-                            out.reborrow(),
-                        )?,
-                    }
-                }
-                ParseAttempt::Failure(error) => {
-                    SchemaParser::push_diagnostic(&mut parser, errors, error, out.reborrow())?;
-                    match try_diagnostic(errors, |out| {
-                        RecoveryParser::recover_top_level(&mut parser, failed_at, out)
-                    }) {
-                        ParseAttempt::Success(()) => {}
-                        ParseAttempt::Failure(error) => SchemaParser::push_diagnostic(
-                            &mut parser,
-                            errors,
-                            error,
-                            out.reborrow(),
-                        )?,
-                    }
-                }
-            }
-        }
+        SchemaParser::parse_top_level_items(&mut parser, errors, &mut items, out.reborrow())?;
 
         let known_position = ParserControl::eof_span(&parser);
         if let Some(errors) = parser.diagnostics.finish() {
@@ -364,11 +304,71 @@ impl SchemaParser {
         }) {
             ParseAttempt::Success(()) => {
                 let positions = parser.cursor.into_positions(source_len);
-                let ast = SchemaAst::finish(parser.ast, items, file_span);
+                let ast = SchemaAst::finish(parser.ast.into_inner(), items, file_span);
                 Ok(SchemaParseOutput { ast, positions })
             }
             ParseAttempt::Failure(error) => Err(out.reborrow().fail(SyntaxErrors::inline(error))),
         }
+    }
+
+    fn parse_top_level_items<'slot>(
+        parser: &mut ParserState<'_>,
+        errors: &mut ErrSlot<Diagnostic>,
+        items: &mut ChargedVec<TopLevelItem>,
+        mut out: Out<'slot, '_, SyntaxErrors>,
+    ) -> OResult<'slot, ()> {
+        while !parser.stopped {
+            let info = match try_diagnostic(errors, |out| ParserControl::peek(parser, out)) {
+                ParseAttempt::Success(info) => info,
+                ParseAttempt::Failure(diagnostic) => {
+                    let failed_at = diagnostic
+                        .primary()
+                        .map(|span| span.span().start())
+                        .unwrap_or_else(|| ParserControl::eof_span(parser).span().start());
+                    SchemaParser::push_diagnostic(parser, errors, diagnostic, out.reborrow())?;
+                    match try_diagnostic(errors, |out| {
+                        RecoveryParser::recover_top_level(parser, failed_at, out)
+                    }) {
+                        ParseAttempt::Success(()) => {}
+                        ParseAttempt::Failure(error) => {
+                            SchemaParser::push_diagnostic(parser, errors, error, out.reborrow())?
+                        }
+                    }
+                    continue;
+                }
+            };
+            if info.kind == TokenKind::Eof {
+                break;
+            }
+
+            let failed_at = info.span.span().start();
+            match try_diagnostic(errors, |out| {
+                SchemaParser::parse_top_level_item(parser, out)
+            }) {
+                ParseAttempt::Success(item) => {
+                    match try_diagnostic(errors, |out| {
+                        ParserControl::try_push(items, item, info.span, out)
+                    }) {
+                        ParseAttempt::Success(()) => {}
+                        ParseAttempt::Failure(error) => {
+                            SchemaParser::push_diagnostic(parser, errors, error, out.reborrow())?
+                        }
+                    }
+                }
+                ParseAttempt::Failure(error) => {
+                    SchemaParser::push_diagnostic(parser, errors, error, out.reborrow())?;
+                    match try_diagnostic(errors, |out| {
+                        RecoveryParser::recover_top_level(parser, failed_at, out)
+                    }) {
+                        ParseAttempt::Success(()) => {}
+                        ParseAttempt::Failure(error) => {
+                            SchemaParser::push_diagnostic(parser, errors, error, out.reborrow())?
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn push_diagnostic<'slot>(

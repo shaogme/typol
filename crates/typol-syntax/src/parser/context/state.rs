@@ -5,7 +5,7 @@ use crate::{
 };
 use opeo::{OResult, Out};
 use typol_core::{
-    ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, SourceId, SourceSpan,
+    ChargedBox, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, SourceId, SourceSpan,
     diagnostic_context,
 };
 
@@ -22,7 +22,7 @@ pub(crate) struct SyntaxBudget {
 
 pub(crate) struct ParserState<'src> {
     pub(crate) cursor: TokenCursor<'src>,
-    pub(crate) ast: Storage,
+    pub(crate) ast: ChargedBox<Storage>,
     pub(crate) source_id: SourceId,
     pub(crate) source_limit: usize,
     pub(crate) actual_source_len: Option<usize>,

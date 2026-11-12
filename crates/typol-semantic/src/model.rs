@@ -1,12 +1,17 @@
 mod access;
 mod info;
 
-pub use access::{EnvironmentAuthorization, FieldId, SchemaAccessError, TypeId, VariantId};
-pub use info::{StoredPayloadInfo, StoredTypeKind};
+pub use access::{
+    EnvironmentAuthorization, FieldId, SchemaAccessError, SchemaIdentity, TypeId, VariantId,
+};
+pub use info::{ModelCounts, StoredPayloadInfo, StoredTypeKind};
 
 pub(crate) use self::info::{FieldInfo, FieldInfoParts, VariantInfo, VariantInfoParts};
 use crate::{
-    constraints::{ConstraintList, ConstraintRecord, NumberValue, Refinement, RefinementId},
+    constraints::{
+        ConstraintList, ConstraintRecord, NumberValue, Refinement, RefinementId,
+        VariantRestrictionMode,
+    },
     engine::{EvalError, ExecutionField, ExecutionModel, ExecutionType, ExecutionVariant},
     expressions::{AssertionInfo, AssertionList, ProgramId},
     indexes::SchemaIndexes,
@@ -146,6 +151,10 @@ pub enum StoredConstraintData {
         min: Option<NumberValue>,
         max: Option<NumberValue>,
     },
+    VariantRestriction {
+        mode: VariantRestrictionMode,
+        variants: ChargedVec<VariantId>,
+    },
 }
 
 pub(crate) struct SchemaRecords {
@@ -166,6 +175,7 @@ pub(crate) struct SchemaRecords {
 
 pub struct CompiledSchema {
     records: SchemaRecords,
+    identity: SchemaIdentity,
 }
 
 pub(crate) struct TypeInfo<'a> {
@@ -177,17 +187,11 @@ pub(crate) struct TypeInfo<'a> {
     assertions: &'a [ProgramId],
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ModelCounts {
-    pub shapes: usize,
-    pub type_uses: usize,
-    pub constraints: usize,
-    pub refinements: usize,
-    pub programs: usize,
-    pub expression_nodes: usize,
-}
-
 impl CompiledSchema {
+    pub const fn identity(&self) -> SchemaIdentity {
+        self.identity
+    }
+
     pub fn excerpts(&self) -> &SourceExcerptSet {
         &self.records.excerpts
     }
@@ -219,7 +223,9 @@ impl CompiledSchema {
     where
         E: From<BudgetError>,
     {
+        let identity = SchemaIdentity::next(out.reborrow())?;
         Ok(Self {
+            identity,
             records: SchemaRecords {
                 indexes: SchemaIndexes::new(execution, out.reborrow())?,
                 entry_type: TypeId::new(0),

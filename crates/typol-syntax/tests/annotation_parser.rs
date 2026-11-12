@@ -1,7 +1,7 @@
 use typol_core::{BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId};
 use typol_syntax::{
     AnnotationData, AstAccessError, Declaration, SchemaAst, SchemaParseOptions, SchemaParser,
-    SizeArguments, SyntaxErrors, SyntaxLimits,
+    SizeArguments, SyntaxErrors, SyntaxLimits, VariantRestrictionMode,
 };
 
 use typol_test_support::TestSlot;
@@ -322,6 +322,13 @@ fn all_annotation_grammar_rejections_remain_syntax_errors() -> TestResult {
         "@sum(0, 1)",
         "@sum(value = 1)",
         "@sum(min = 0, max = 1, min = 2)",
+        "@variants()",
+        "@variants(block = [\"A\"])",
+        "@variants(allow = [])",
+        "@variants(deny = [])",
+        "@variants(allow = [1])",
+        "@variants(allow = [\"A\";])",
+        "@variants(allow = [\"A\"]",
     ] {
         let source = format!("type A = u8 {annotation};");
         let errors = parse_with_slot(
@@ -337,6 +344,68 @@ fn all_annotation_grammar_rejections_remain_syntax_errors() -> TestResult {
             "{annotation}"
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn variant_restrictions_keep_the_mode_names_and_literal_spans() -> TestResult {
+    let execution = new_execution()?;
+    let mut syntax_errors = TestSlot::<SyntaxErrors>::default();
+    let mut ast_errors = TestSlot::<AstAccessError>::default();
+    let source = r#"type Choice = string @variants(allow = ["Alpha", "Beta",]);
+        type Excluded = string @variants(deny = ["Legacy"]);"#;
+    let schema = parse_with_slot(
+        &mut syntax_errors,
+        source,
+        &SyntaxLimits::default(),
+        &execution,
+    )
+    .test_value()?;
+    let item = ast_errors
+        .access(|out| schema.items().first(out))
+        .test_value()?
+        .test_value()?;
+    let Some(Declaration::TypeAlias(alias)) = item.declaration() else {
+        return Err(TestFailure);
+    };
+    let AnnotationData::Variants { mode, names } = annotation_data!(ast_errors, alias, 0) else {
+        return Err(TestFailure);
+    };
+    test_assert_eq!(mode, VariantRestrictionMode::Allow);
+    let literals = ast_errors
+        .access(|mut out| {
+            let values = names.iter(out.reborrow()).collect::<Vec<_>>();
+            let mut literals = Vec::new();
+            for value in values {
+                literals.push(value?);
+            }
+            Ok(literals)
+        })
+        .test_value()?;
+    test_assert_eq!(literals.len(), 2);
+    for (literal, expected) in literals.into_iter().zip(["Alpha", "Beta"]) {
+        test_assert_eq!(
+            ast_errors.access(|out| literal.value(out)).test_value()?,
+            expected
+        );
+        let span = literal.span().span();
+        let raw = format!("\"{expected}\"");
+        test_assert_eq!(&source[span.start()..span.end()], raw.as_str());
+    }
+
+    let excluded_item = ast_errors
+        .access(|out| schema.items().get(1, out))
+        .test_value()?
+        .test_value()?;
+    let Some(Declaration::TypeAlias(excluded)) = excluded_item.declaration() else {
+        return Err(TestFailure);
+    };
+    let AnnotationData::Variants { mode, names } = annotation_data!(ast_errors, excluded, 0) else {
+        return Err(TestFailure);
+    };
+    test_assert_eq!(mode, VariantRestrictionMode::Deny);
+    test_assert_eq!(names.len(), 1);
 
     Ok(())
 }

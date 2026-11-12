@@ -1,3 +1,4 @@
+mod constraint_checks;
 mod regex_errors;
 
 use crate::{
@@ -14,6 +15,10 @@ use crate::{
     symbols::{FieldSymbol, FieldSymbolId, SymbolTable, VariantSymbol, VariantSymbolId},
     types::{ResolvedTypeGraph, ResolvedTypeKind, TypeUseId},
 };
+use constraint_checks::{
+    DefaultScalarConstraint, DefaultVariantRestriction, ScalarConstraintCheck,
+    VariantRestrictionCheck, VariantRestrictionDiagnostic,
+};
 use core::{
     cell::RefCell,
     ops::{Deref, DerefMut},
@@ -21,11 +26,11 @@ use core::{
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, ChargedVec, ConfigValue, ConfigValueBuilder, Diagnostic, DiagnosticMessage,
-    ExecutionBudget, SourceSpan, ValueError, ValueId, ValueKind, ValueSource,
+    ExecutionBudget, SourceSpan, ValueError, ValueId, ValueSource,
 };
 use typol_semantic::{
     CopyError, CopyOptions, CopyRequest, EvalError, RegexExecutionError, RegexExecutor,
-    RegexMatchOptions, SchemaDefaultValidation, StoredRuleView as RuleData, ValueCopy, ValueRules,
+    RegexMatchOptions, SchemaDefaultValidation, ValueCopy,
 };
 use typol_syntax::{AstAccessError, BuiltinType, ScalarLiteral};
 
@@ -546,9 +551,36 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
                     },
                     out.reborrow(),
                 )?,
+                ConstraintData::VariantRestriction { mode, variants } => {
+                    DefaultVariantRestriction::matches(
+                        VariantRestrictionCheck {
+                            context: self.data.context,
+                            diagnostics: &mut *self.data.diagnostics,
+                            symbols: self.data.symbols,
+                            types: self.data.types,
+                            target,
+                            value: &value.value,
+                            span: value.span,
+                            mode: *mode,
+                            variants,
+                        },
+                        out.reborrow(),
+                    )?
+                }
             };
             if !matched {
                 valid = false;
+                if matches!(constraint.data(), ConstraintData::VariantRestriction { .. }) {
+                    DefaultVariantRestriction::report_rejection(
+                        VariantRestrictionDiagnostic {
+                            context: self.data.context,
+                            diagnostics: &mut *self.data.diagnostics,
+                            value_span: value.span,
+                            constraint_span: constraint.span(),
+                        },
+                        out.reborrow(),
+                    )?;
+                }
             }
         }
         Ok(valid)
@@ -560,52 +592,17 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
         constraint: &CompiledConstraint,
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, bool> {
-        let mut leaf = value.value.root();
-        while let ValueKind::Optional(inner) = leaf.as_ref() {
-            self.data
-                .context
-                .consume(1, value.span, self.data.diagnostics, out.reborrow())?;
-            let Some(inner) = inner else {
-                return Ok(true);
-            };
-            leaf = inner;
-        }
-        let data = match *constraint.data() {
-            ConstraintData::NumberBounds { min, max } => RuleData::NumberBounds { min, max },
-            ConstraintData::LengthBounds { min, max } => RuleData::LengthBounds { min, max },
-            ConstraintData::SizeBounds { min, max } => RuleData::SizeBounds { min, max },
-            ConstraintData::Host => RuleData::Host,
-            ConstraintData::Email => RuleData::Email,
-            ConstraintData::Cidr { v4_only } => RuleData::Cidr { v4_only },
-            _ => {
-                self.data.diagnostics.push(schema_internal!(value.span));
-                return Err(out.fail(BuildFailure::empty()));
-            }
-        };
-        let execution = self.data.context.execution();
-        let result = {
-            let mut errors = self.evaluation_errors.borrow_mut();
-            match errors
-                .try_call(|eval_out| ValueRules::scalar(leaf, data, Some(execution), eval_out))
-            {
-                Ok(value) => Ok(value),
-                Err(caught) => Err(caught.take()),
-            }
-        };
-        let Some(matched) = (match result {
-            Ok(value) => value,
-            Err(error) => {
-                self.data.diagnostics.push(DefaultDiagnostic::execution(
-                    error,
-                    value.span,
-                    self.diagnostics,
-                ));
-                return Err(out.fail(BuildFailure::empty()));
-            }
-        }) else {
-            self.data.diagnostics.push(schema_internal!(value.span));
-            return Err(out.fail(BuildFailure::empty()));
-        };
+        let matched = DefaultScalarConstraint::matches(
+            ScalarConstraintCheck {
+                context: self.data.context,
+                diagnostics: &mut *self.data.diagnostics,
+                evaluation_errors: &self.evaluation_errors,
+                value: &value.value,
+                value_span: value.span,
+                constraint,
+            },
+            out.reborrow(),
+        )?;
         if matched {
             Ok(true)
         } else {

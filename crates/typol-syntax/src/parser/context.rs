@@ -7,7 +7,8 @@ use crate::{
 };
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
-    ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage, SourceSpan, Span,
+    ChargedBox, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage,
+    SourceSpan, Span,
 };
 use typol_i18n::{diagnostic_key, diagnostic_message};
 
@@ -59,6 +60,7 @@ impl ParserControl {
 
         let cursor_span = SourceSpan::new(source_id, Span::empty());
         let ast = Storage::new(source_id, source_limit, limits, execution, out.reborrow())?;
+        let ast = ChargedBox::new(ast, Some(execution), out.reborrow())?;
         let delimiters = SyntaxDiagnostic::new_vec(execution, cursor_span, out.reborrow())?;
         let execution = execution.try_clone_with(out.reborrow(), |error| {
             SyntaxDiagnostic::budget(error, cursor_span)

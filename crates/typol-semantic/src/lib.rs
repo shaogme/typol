@@ -25,7 +25,7 @@ pub use {
     constraints::{
         Bounds, Constraint, ConstraintId, ConstraintKind, ConstraintLayer, ConstraintList,
         ConstraintRecord, EffectiveRules, NumberValue, RefinementId, RefinementSummary,
-        RuleIdentity, RuleOwner, RuleOwnerError, StoredRuleView,
+        RuleIdentity, RuleOwner, RuleOwnerError, StoredRuleView, VariantRestrictionMode,
     },
     engine::{
         AllItemRequest, AllItemValue, Bindings, ComparisonOptions, CopyError, CopyOptions,
@@ -42,7 +42,7 @@ pub use {
     },
     model::{
         CompiledSchema, EnvironmentAuthorization, EnvironmentRecord, FieldId, FieldRecord,
-        ModelCounts, SchemaAccessError, ShapeId, ShapeKind, StoredConstraintData,
+        ModelCounts, SchemaAccessError, SchemaIdentity, ShapeId, ShapeKind, StoredConstraintData,
         StoredPayloadInfo, StoredTypeKind, StoredVariantPayload, TypeId, TypeRecord,
         TypeRecordOptions, VariantId, VariantRecord,
     },

@@ -17,7 +17,7 @@ use typol_i18n::{diagnostic_key, diagnostic_message};
 use typol_regex::{RegexMatchError, RegexScratchError};
 use typol_semantic::{
     Constraint, ConstraintData, EvalError, RegexExecutionError, RegexExecutionFailure,
-    RegexMatchOptions, SchemaRules,
+    RegexMatchOptions, SchemaRules, VariantRestrictionMode,
 };
 
 static SCALAR_VALUE_SHAPE: DiagnosticContext = diagnostic_context!(
@@ -99,6 +99,10 @@ fn failure<'slot>(
         ConstraintData::Cidr { .. } => (
             diagnostic_key!("diagnostic.validation.cidr_format_constraint_failed"),
             "string does not satisfy the CIDR format constraint",
+        ),
+        ConstraintData::VariantRestriction { .. } => (
+            diagnostic_key!("diagnostic.validation.variants_restriction_failed"),
+            "the selected enum variant is rejected by @variants",
         ),
         _ => return Err(out.fail(internal(metadata))),
     };
@@ -372,6 +376,37 @@ impl ScalarValidator {
                 out.reborrow(),
             )?;
             let matched = match data {
+                ConstraintData::VariantRestriction { mode, variants } => {
+                    let ValueKind::Enumeration { variant, .. } = value.as_ref() else {
+                        return Err(out.fail(internal(metadata)));
+                    };
+                    let selected = Validator::budget_call(
+                        &mut resources.budget_errors,
+                        |budget_out| {
+                            metadata.expected.variant_named_budgeted(
+                                variant,
+                                &resources.budget,
+                                budget_out,
+                            )
+                        },
+                        out.reborrow(),
+                    )?;
+                    let Some(selected) = selected else {
+                        return Err(out.fail(internal(metadata)));
+                    };
+                    Validator::budget_call(
+                        &mut resources.budget_errors,
+                        |budget_out| resources.budget.consume(variants.len(), budget_out),
+                        out.reborrow(),
+                    )?;
+                    let listed = variants
+                        .binary_search_by_key(&selected.id().index(), |id| id.index())
+                        .is_ok();
+                    match mode {
+                        VariantRestrictionMode::Allow => listed,
+                        VariantRestrictionMode::Deny => !listed,
+                    }
+                }
                 ConstraintData::Regex { program } => {
                     let text = string(value, metadata, out.reborrow())?;
                     let result = resources

@@ -1,7 +1,10 @@
 mod nodes;
 
-use super::{ids::Id, text::TextRef};
-use crate::token::NumberKind;
+use super::{
+    ids::{Id, ListId},
+    text::TextRef,
+};
+use crate::token::{NumberKind, VariantRestrictionMode};
 pub(crate) use nodes::{
     Annotation, ArrayDefault, ArrayLength, Assertion, BraceEntry, BracedDefault, DefaultValue,
     EnumDecl, EnumDefault, EnumDefaultPayload, Expr, ExternModDecl, FieldDecl, FieldParams,
@@ -82,6 +85,10 @@ pub(crate) enum AnnotationData {
     All(Id<Assertion>),
     Sum(NamedBounds),
     Secret,
+    Variants {
+        mode: VariantRestrictionMode,
+        names: ListId<Id<StringLiteral>>,
+    },
 }
 
 #[derive(Debug)]

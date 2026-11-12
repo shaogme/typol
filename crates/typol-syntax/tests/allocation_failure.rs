@@ -534,8 +534,8 @@ fn collected_error_return_preallocates_terminal_storage_once() -> TestResult {
     test_assert!(failed);
     test_assert_eq!(
         state.attempts,
-        7,
-        "input window, location index, and lexical diagnostic storage perform only expected allocations"
+        8,
+        "parser state, input window, location index, and lexical diagnostic storage perform only expected allocations"
     );
     test_assert_eq!(state.live_bytes, 0);
 

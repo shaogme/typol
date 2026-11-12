@@ -184,6 +184,9 @@ impl ChildHeight<AnnotationData> for Height {
             }
             AnnotationData::All(assertion) => Height::children(assertion, storage, out.reborrow())?,
             AnnotationData::Sum(bounds) => Height::children(bounds, storage, out.reborrow())?,
+            AnnotationData::Variants { names, .. } => {
+                Height::children(names, storage, out.reborrow())?
+            }
             AnnotationData::Host | AnnotationData::Email | AnnotationData::Secret => None,
         };
         Ok(height)

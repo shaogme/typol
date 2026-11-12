@@ -7,10 +7,10 @@ use std::{
 };
 use typol::{
     ConfigDocument, ConfigFormatOptions, ConfigFormatter, ConfigIr, ConfigIrErrorKind,
-    ConfigIrOptions, ConfigIrValueMode, ConfigValue, EmptyEnvironment, LoadedSchema,
-    ProcessEnvironment, ProcessEnvironmentLimits, SchemaFormatError, SchemaFormatOptions,
-    SchemaFormatter, SchemaLoader, SchemaParseOptions, SchemaParser, SourceExpectation,
-    SourceWriter, SyntaxErrors, TypolError, TypolOptions,
+    ConfigIrOptions, EmptyEnvironment, LoadedSchema, ProcessEnvironment, ProcessEnvironmentLimits,
+    SchemaFormatError, SchemaFormatOptions, SchemaFormatter, SchemaLoader, SchemaParseOptions,
+    SchemaParser, SourceExpectation, SourceWriter, SyntaxErrors, TypolError, TypolOptions,
+    ValidatedConfigValue,
     core::{
         DiagnosticCode, ExcerptLimits, ExecutionBudget, ExecutionLimits, SourceCapture,
         SourceExcerptSet, SourceId, SourceLocation, SourceSpan,
@@ -301,13 +301,12 @@ impl Commands {
             Ok(value) => value,
             Err(errors) => return Self::load_failure(&errors, translator),
         };
-        let bytes = match ConfigIr::serialize(
+        let bytes = match ConfigIr::serialize_validated(
             loaded.schema(),
-            value,
+            &value,
             ConfigIrOptions::default()
                 .with_pretty(request.pretty())
-                .with_reject_secrets(request.reject_secrets())
-                .with_value_mode(ConfigIrValueMode::AsProvided),
+                .with_reject_secrets(request.reject_secrets()),
         ) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == ConfigIrErrorKind::SecretValueRejected => {
@@ -380,7 +379,10 @@ impl Commands {
         }
     }
 
-    fn load_config(loaded: &LoadedSchema, request: &ConfigRequest) -> LoadResult<ConfigValue> {
+    fn load_config(
+        loaded: &LoadedSchema,
+        request: &ConfigRequest,
+    ) -> LoadResult<ValidatedConfigValue> {
         match request.environment() {
             EnvironmentMode::Inherit => Self::load_inherited(loaded, request),
             EnvironmentMode::Empty => Self::load_empty(loaded, request),
@@ -415,24 +417,30 @@ impl Commands {
         }
     }
 
-    fn load_inherited(loaded: &LoadedSchema, request: &ConfigRequest) -> LoadResult<ConfigValue> {
+    fn load_inherited(
+        loaded: &LoadedSchema,
+        request: &ConfigRequest,
+    ) -> LoadResult<ValidatedConfigValue> {
         let mut environment = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
         let mut errors = ErrSlot::<TypolError>::new();
         match errors
             .try_call(|out| loaded.read_file_value(request.config_path(), &mut environment, out))
         {
-            Ok(value) => Ok(value.into_config_value()),
+            Ok(value) => Ok(value),
             Err(caught) => Err(Box::new(caught.take())),
         }
     }
 
-    fn load_empty(loaded: &LoadedSchema, request: &ConfigRequest) -> LoadResult<ConfigValue> {
+    fn load_empty(
+        loaded: &LoadedSchema,
+        request: &ConfigRequest,
+    ) -> LoadResult<ValidatedConfigValue> {
         let mut environment = EmptyEnvironment;
         let mut errors = ErrSlot::<TypolError>::new();
         match errors
             .try_call(|out| loaded.read_file_value(request.config_path(), &mut environment, out))
         {
-            Ok(value) => Ok(value.into_config_value()),
+            Ok(value) => Ok(value),
             Err(caught) => Err(Box::new(caught.take())),
         }
     }

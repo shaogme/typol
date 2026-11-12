@@ -1,6 +1,6 @@
 use crate::{
     expressions::TypedExpression,
-    model::{CompiledSchema, FieldId, SchemaAccessError, StoredConstraintData, TypeId},
+    model::{CompiledSchema, FieldId, SchemaAccessError, StoredConstraintData, TypeId, VariantId},
     views::{ConstraintData, ExpressionView, FieldList, RegexView, TypeView},
 };
 use core::{fmt, iter::once, ptr};
@@ -42,6 +42,13 @@ pub enum ConstraintKind {
     Unique,
     All,
     Sum,
+    Variants,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VariantRestrictionMode {
+    Allow,
+    Deny,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,6 +110,10 @@ pub enum StoredRuleView<'a> {
     SumBounds {
         min: Option<NumberValue>,
         max: Option<NumberValue>,
+    },
+    VariantRestriction {
+        mode: VariantRestrictionMode,
+        variants: &'a [VariantId],
     },
 }
 
@@ -245,6 +256,12 @@ impl<'a> Constraint<'a> {
                 min: *min,
                 max: *max,
             },
+            StoredConstraintData::VariantRestriction { mode, variants } => {
+                StoredRuleView::VariantRestriction {
+                    mode: *mode,
+                    variants: variants.as_slice(),
+                }
+            }
         };
         Ok(data)
     }
@@ -831,6 +848,9 @@ impl<'a> Constraint<'a> {
                 message,
             },
             StoredRuleView::SumBounds { min, max } => ConstraintData::SumBounds { min, max },
+            StoredRuleView::VariantRestriction { mode, variants } => {
+                ConstraintData::VariantRestriction { mode, variants }
+            }
         };
         Ok(data)
     }

@@ -180,5 +180,6 @@ edge_table! {
     Id<DefaultValue> => default_value_edges,
     Id<FieldDecl> => field_decl_edges,
     Id<Name> => name_edges,
+    Id<StringLiteral> => variant_name_edges,
     Id<VariantDecl> => variant_decl_edges
 }

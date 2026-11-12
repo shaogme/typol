@@ -5,6 +5,7 @@ use typol_core::{
     ValueEntries, ValueError, ValueErrorKind, ValueId, ValueKind, ValuePayload, ValueScalar,
     ValueSource, ValueView, diagnostic_context,
 };
+use typol_semantic::{CompiledSchema, SchemaIdentity};
 
 /// A schema-shaped value with defaults applied, before constraints and assertions run.
 #[derive(Debug)]
@@ -26,19 +27,29 @@ impl NormalizedConfigValue {
 
 /// A configuration value that passed schema constraints and complete-tree assertions.
 #[derive(Debug)]
-pub struct ValidatedConfigValue(ConfigValue);
+pub struct ValidatedConfigValue {
+    value: ConfigValue,
+    schema: SchemaIdentity,
+}
 
 impl ValidatedConfigValue {
-    pub(crate) fn from_config_value(value: ConfigValue) -> Self {
-        Self(value)
+    pub(crate) fn from_config_value(schema: &CompiledSchema, value: ConfigValue) -> Self {
+        Self {
+            value,
+            schema: schema.identity(),
+        }
     }
 
     pub fn as_config_value(&self) -> &ConfigValue {
-        &self.0
+        &self.value
     }
 
     pub fn into_config_value(self) -> ConfigValue {
-        self.0
+        self.value
+    }
+
+    pub fn belongs_to_schema(&self, schema: &CompiledSchema) -> bool {
+        self.schema == schema.identity()
     }
 }
 

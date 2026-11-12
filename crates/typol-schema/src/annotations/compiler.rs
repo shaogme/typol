@@ -6,13 +6,16 @@ use crate::{
     },
     context::CompileContext,
     module_tree::TypeDeclarationKind,
+    symbols::LookupResult,
     types::{ResolvedTypeKind, TypeUseId},
 };
 use opeo::{OResult, Out};
-use typol_core::ChargedString;
+use typol_core::{ChargedString, ChargedVec};
 use typol_i18n::diagnostic_message;
-use typol_semantic::ProgramId;
-use typol_syntax::{Annotation, AnnotationData, AnnotationKind, BuiltinType, NumberLiteral};
+use typol_semantic::{ProgramId, VariantRestrictionMode as CompiledVariantRestrictionMode};
+use typol_syntax::{
+    Annotation, AnnotationData, AnnotationKind, BuiltinType, NumberLiteral, VariantRestrictionMode,
+};
 
 pub(super) enum CompiledAnnotation {
     Constraint(ConstraintData),
@@ -291,6 +294,94 @@ impl AnnotationRuleCompiler {
                     max: max_value,
                 }))
             }
+            AnnotationData::Variants { mode, names } => {
+                let ResolvedTypeKind::User(enum_symbol) = value_kind else {
+                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
+                        "diagnostic.schema.annotation_variants_target_invalid",
+                        "@variants applies only to enum or option<enum> types"
+                    ))));
+                };
+                let Some(symbol) = symbols.type_symbol(enum_symbol) else {
+                    return Err(out.fail(AnnotationError::internal(schema_context!(
+                        "annotation-compile",
+                        "variant-restriction-enum-missing"
+                    ))));
+                };
+                if !matches!(symbol.declaration(), TypeDeclarationKind::Enum(_)) {
+                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
+                        "diagnostic.schema.annotation_variants_target_invalid",
+                        "@variants applies only to enum or option<enum> types"
+                    ))));
+                }
+                let mut variants =
+                    ChargedVec::new(Some(context.budget.execution()), out.reborrow())?;
+                for index in 0..names.len() {
+                    let item = context.budget.ast_access(
+                        out.reborrow(),
+                        |ast_out| names.get(index, ast_out),
+                        AnnotationError::from,
+                    )?;
+                    let Some(item) = item else {
+                        return Err(out.fail(AnnotationError::internal(schema_context!(
+                            "annotation-compile",
+                            "variant-restriction-name-missing"
+                        ))));
+                    };
+                    let name = context.budget.ast_access(
+                        out.reborrow(),
+                        |ast_out| item.value(ast_out),
+                        AnnotationError::from,
+                    )?;
+                    context
+                        .budget
+                        .execution()
+                        .consume(name.len(), out.reborrow())?;
+                    context
+                        .budget
+                        .execution()
+                        .consume(variants.len(), out.reborrow())?;
+                    let variant = match symbols.lookup_variant::<AnnotationError>(
+                        enum_symbol,
+                        name,
+                        out.reborrow(),
+                    )? {
+                        LookupResult::Found(variant) => variant,
+                        LookupResult::Missing | LookupResult::Ambiguous => {
+                            return Err(out.fail(AnnotationError::InvalidAt {
+                                message: diagnostic_message!(
+                                    "diagnostic.schema.annotation_variants_unknown_name",
+                                    "@variants refers to an unknown enum variant"
+                                ),
+                                span: item.span(),
+                            }));
+                        }
+                    };
+                    if variants.contains(&variant) {
+                        return Err(out.fail(AnnotationError::InvalidAt {
+                            message: diagnostic_message!(
+                                "diagnostic.schema.annotation_variants_name_repeated",
+                                "@variants lists the same enum variant more than once"
+                            ),
+                            span: item.span(),
+                        }));
+                    }
+                    variants.try_push(variant, out.reborrow())?;
+                }
+                if variants.is_empty() {
+                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
+                        "diagnostic.schema.annotation_variants_target_invalid",
+                        "@variants requires at least one enum variant"
+                    ))));
+                }
+                variants.sort_unstable_by_key(|variant| variant.index());
+                let mode = match mode {
+                    VariantRestrictionMode::Allow => CompiledVariantRestrictionMode::Allow,
+                    VariantRestrictionMode::Deny => CompiledVariantRestrictionMode::Deny,
+                };
+                Ok(CompiledAnnotation::Constraint(
+                    ConstraintData::VariantRestriction { mode, variants },
+                ))
+            }
             AnnotationData::Env(value) => {
                 if !matches!(layer, ConstraintLayer::Field) {
                     return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
@@ -360,6 +451,7 @@ impl AnnotationRuleCompiler {
             AnnotationKind::Unique => ConstraintKind::Unique,
             AnnotationKind::All => ConstraintKind::All,
             AnnotationKind::Sum => ConstraintKind::Sum,
+            AnnotationKind::Variants => ConstraintKind::Variants,
             AnnotationKind::Env | AnnotationKind::Secret => return None,
         })
     }

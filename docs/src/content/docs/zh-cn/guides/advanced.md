@@ -148,6 +148,20 @@ struct RetryPolicy {
 
 `@min(1)` 附着于每个 `u32` 元素；`@size` 和 `@all` 则作用于数组本身。注解只作用于其紧邻的类型表达式，因此嵌套数组和 map 值也可以各自设置规则。`@all` 检查数组中的每个元素或 map 中的每个值。`@unique(by = "...")` 检查结构体数组中指定字段路径的唯一性；`@sum` 适用于数值数组。Schema 编译时会对表达式进行类型检查。完整配置值构造后才执行结构体和当前枚举变体的断言；若解析或局部校验失败，则不会执行这些断言。
 
+枚举限制可通过透明别名组合，并可单独作用于数组元素等精确类型节点：
+
+```tschem
+enum Transport { Tcp, Quic, Legacy }
+type ModernTransport = Transport @variants(allow = ["Tcp", "Quic"]);
+type TcpOnly = ModernTransport @variants(deny = ["Quic"]);
+entry struct Proxy {
+    transport: TcpOnly,
+    history: [Transport @variants(deny = ["Legacy"])],
+}
+```
+
+别名 allow 列表和使用点 deny 列表会同时生效。`option<Enum>` 的有值内容必须通过限制；`none` 可以通过。未知或重复名称、不支持的目标、以及没有剩余可用变体的组合（包括可选枚举）都会在 Schema 编译时报错。
+
 正则表达式采用搜索语义：子串匹配即成功。需要匹配整个字符串时，请加上 `^` 和 `$`，例如 `@regex("^[a-z][a-z0-9-]*$")`。Typol 只实现文档定义的正则子集，并不支持通用正则引擎的全部功能。详见 [Schema DSL 参考](../../specification/schema-dsl/)。
 
 ## 显式控制环境访问
@@ -364,7 +378,7 @@ serde = { version = "1", features = ["derive"] }
 typol = { version = "0.1", features = ["config-ir"] }
 ```
 
-`ConfigIrOptions::default()` 选择 `Validated`：校验提供的值，但不会补入缺失的默认值。选择 `ConfigIrValueMode::WithDefaults` 可补齐 Schema 默认值并校验；选择 `AsProvided` 则会跳过这两步。`LoadedSchema::read_value` 返回的值已经应用默认值，可将其 `into_config_value()` 交给序列化器。
+`ConfigIr::serialize` 会为原始 `ConfigValue` 补齐 Schema 默认值并完整校验，然后再写入。若解析或加载调用已返回 `ValidatedConfigValue`，可通过引用传给 `ConfigIr::serialize_validated`，避免再次遍历校验；凭据只适用于生成它的那个 `CompiledSchema`。
 
 Map 条目和结构体字段按确定顺序输出。整数以 JSON 字符串编码，以保留完整的 `i128` 和 `u128` 范围。标记为 `"secret": true` 的节点仍包含实际值；标记只是元数据，不会加密或脱敏。节点及其子树都应作为敏感数据处理。详见 [Config IR v1 参考](../../specification/config-ir/)。
 

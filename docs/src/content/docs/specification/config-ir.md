@@ -14,7 +14,7 @@ You are consuming or producing Config IR v1 JSON and need exact value shapes, or
 | Topic | Rule to remember |
 | --- | --- |
 | Envelope | The ordered root members are `format`, `version`, `root_type`, and `value`; successful output ends in one LF. |
-| Export mode | `Validated` is the default and checks constraints; `WithDefaults` fills defaults without constraint validation; `AsProvided` skips both. |
+| Validation | Raw `ConfigValue` exports fill defaults and run full Schema validation; validated values can use a same-Schema fast path. |
 | Sensitive values | `secret: true` marks data but does not redact or encrypt it; consumers must protect the entire marked subtree. |
 
 This document defines the output structure, ordering, sensitive-value markers, and resource boundaries for version 1 of the `typol-config-ir` JSON format (Config IR v1). Config IR exports a compiled Schema and a complete `ConfigValue`; it is not the `.tconf` configuration syntax. See the [Config DSL](../config-dsl/) for configuration values and the [Schema DSL](../schema-dsl/) for types and constraints.
@@ -34,15 +34,9 @@ Every successful output ends with exactly one LF (`U+000A`), in both compact and
 
 V1 exports the complete configuration value. It does not include source locations, value origins, environment reference names or fallbacks, default origins, constraint definitions, or validation results. Omitting the reference metadata does not redact the resolved value: an environment value and values under `@secret` are still exported as data and must be protected accordingly. Type aliases are transparent: the format describes the expanded type shape, while structs and enums retain their qualified Schema names. The key type of `map<string, T>` is always string and is not encoded separately in the map type description.
 
-`ConfigIr::serialize` does not read environment variables. `ConfigIrOptions` selects the value handling mode before serialization:
+`ConfigIr::serialize` and `ConfigIr::serialize_to` do not read environment variables. They accept an owned raw `ConfigValue`, apply Schema defaults, then perform complete Schema validation before encoding. Missing required fields, invalid shapes, constraints, or assertions prevent any successful result.
 
-| Mode | Fill defaults | Schema constraints and assertions | Use |
-| --- | --- | --- | --- |
-| `Validated` (default) | Yes | Full validation | Fill defaults, then check fields, types, scalar and collection constraints, and struct and active enum variant assertions. |
-| `AsProvided` | No | No | Explicitly skip normalization and constraint validation, encode the already constructed value, and check the value shapes listed in this specification. |
-| `WithDefaults` | Yes | No | Fill omitted fields and optional values, including nested structs and active enum struct payloads; explicit values, including `none`, are kept. |
-
-`WithDefaults` normalizes values without failing because an explicit value violates a Schema constraint. Serialization still checks value types, integer ranges, fixed array lengths, and payload shapes. `Validated` uses the same configuration resource and execution limits, with constraints checked after defaults are filled. All modes produce the same IR v1 shape.
+Callers that already hold a `ValidatedConfigValue` can use `ConfigIr::serialize_validated(schema, &value, options)` or `serialize_validated_to` to avoid walking the value through validation again. The value carries the identity of the exact compiled Schema that validated it; a mismatch returns `SchemaMismatch` before serialization. Both entry paths emit the same Config IR v1 data model and retain the same output and workspace limits.
 
 ## 2. Type descriptions
 
@@ -175,8 +169,7 @@ Arrays keep their order, struct fields follow Schema declaration order, and map 
 | `max_output_bytes` | 16,777,216 bytes | Limit final JSON bytes, including the final LF. |
 | `max_workspace_bytes` | 16,777,216 bytes | Limit temporary reference workspace used to sort map entries and struct fields. |
 | `max_nesting_depth` | 128 | Limit recursive depth for value nodes and nested container type descriptions. |
-| `value_mode` | `Validated` | Select default normalization and Schema validation. Skipping validation requires `AsProvided`. |
-| `validation_options` | `ConfigValidationOptions::default()` | In `WithDefaults` and `Validated` only, configure value resource limits and execution budget. |
+| `validation_options` | `ConfigValidationOptions::default()` | Configure default filling and full Schema validation for raw `ConfigValue` exports. |
 
 Callers may override output and workspace limits. Nesting depth can be lowered but has a fixed maximum of 128; zero rejects the root value or type description. Workspace is measured as the logical byte size of references required for sorting, not total process memory.
 
@@ -185,6 +178,7 @@ The JSON output buffer starts at 8 bytes and grows geometrically. Each reservati
 | Error | Meaning |
 | --- | --- |
 | `SchemaAccess` | Required compiled Schema information or a qualified name cannot be read. |
+| `SchemaMismatch` | A `ValidatedConfigValue` was validated against a different compiled Schema. |
 | `ValueShapeMismatch` | Value and Schema shapes disagree, including scalar type/range, fixed array length, struct field set, or enum payload. |
 | `UnsupportedFloat` | A float is NaN or positive/negative infinity. |
 | `OutputLimitExceeded` | Final JSON exceeds `max_output_bytes`. |
@@ -193,10 +187,9 @@ The JSON output buffer starts at 8 bytes and grows geometrically. Each reservati
 | `InvalidNestingDepthLimit` | Requested nesting limit exceeds the fixed safety maximum. |
 | `AllocationFailed` | Output buffer or temporary sorting-vector allocation failed. |
 | `SerializationFailed` | Another JSON serialization failure occurred. |
-| `NormalizationFailed` | `WithDefaults` normalization failed; the error carries secret-policy-filtered `ConfigValueErrors` diagnostics. |
-| `ValidationFailed` | `Validated` normalization or Schema validation failed, with secret-policy-filtered diagnostics. |
+| `ValidationFailed` | Default filling or full Schema validation of a raw value failed; the error carries secret-policy-filtered `ConfigValueErrors` diagnostics. |
 
-`ConfigIrError::kind()` returns a stable `ConfigIrErrorKind` for comparing error categories, not complete error values. `ConfigIrError` does not implement `PartialEq` or `Eq`, since that would ignore differences in normalization and validation diagnostics. Those failures retain `ConfigValueErrors`, which callers can read through the error variant or `Error::source()` for safe diagnostics and available Schema locations. Diagnostics do not include secret values. Serialization errors do not contain the serialized configuration. Implementations may change internal storage, but the v1 output shape and limit/failure semantics remain stable.
+`ConfigIrError::kind()` returns a stable `ConfigIrErrorKind` for comparing error categories, not complete error values. `ConfigIrError` does not implement `PartialEq` or `Eq`, since that would ignore differences in normalization and validation diagnostics. Validation failures retain `ConfigValueErrors`, which callers can read through the error variant or `Error::source()` for safe diagnostics and available Schema locations. Diagnostics do not include secret values. Serialization errors do not contain the serialized configuration. Implementations may change internal storage, but the v1 output shape and limit/failure semantics remain stable.
 
 ## 8. Version compatibility
 

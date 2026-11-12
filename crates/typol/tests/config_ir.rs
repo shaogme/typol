@@ -14,11 +14,12 @@ use std::{
 
 use serde_json::{Value, from_slice};
 use typol::{
-    ConfigIr, ConfigIrError, ConfigIrErrorKind, ConfigIrOptions, ConfigIrValueMode,
-    ConfigValidationOptions, ConfigValue, ConfigValueErrors, EmptyEnvironment, Environment,
-    EnvironmentError, EnvironmentReadContext, LoadedSchema, SchemaLoader, TypolOptions,
+    ConfigIr, ConfigIrError, ConfigIrErrorKind, ConfigIrOptions, ConfigParseOptions,
+    ConfigParseRequest, ConfigParser, ConfigValidationOptions, ConfigValue, ConfigValueErrors,
+    EmptyEnvironment, Environment, EnvironmentError, EnvironmentReadContext, LoadedSchema,
+    SchemaLoader, TypolOptions, ValidatedConfigValue,
     config::ConfigLimits,
-    core::{ChargedVec, ConfigValueBuilder, ValueError, ValueSource},
+    core::{ChargedVec, ConfigValueBuilder, SliceSource, ValueError, ValueSource},
     opeo::{OResult, Out},
 };
 use typol_test_support::TestOpeo;
@@ -346,7 +347,6 @@ fn recursive_values_obey_ir_and_normalization_budgets_and_rules() -> Result<(), 
     let mut node_limits = ConfigLimits::default();
     node_limits = node_limits.with_max_value_nodes(3);
     let node_limited_options = ConfigIrOptions::default()
-        .with_value_mode(ConfigIrValueMode::WithDefaults)
         .with_validation_options(ConfigValidationOptions::default().with_config(node_limits));
     ensure(
         matches!(
@@ -355,15 +355,14 @@ fn recursive_values_obey_ir_and_normalization_budgets_and_rules() -> Result<(), 
                 recursive_config(1)?,
                 node_limited_options,
             ),
-            Err(error) if error.kind() == ConfigIrErrorKind::NormalizationFailed
+            Err(error) if error.kind() == ConfigIrErrorKind::ValidationFailed
         ),
-        "recursive external-value normalization should stop at its node budget",
+        "recursive external-value validation should stop at its node budget",
     )?;
 
     let mut depth_limits = ConfigLimits::default();
     depth_limits = depth_limits.with_max_nesting_depth(1);
     let depth_limited_options = ConfigIrOptions::default()
-        .with_value_mode(ConfigIrValueMode::WithDefaults)
         .with_validation_options(ConfigValidationOptions::default().with_config(depth_limits));
     ensure(
         matches!(
@@ -372,14 +371,12 @@ fn recursive_values_obey_ir_and_normalization_budgets_and_rules() -> Result<(), 
                 recursive_config(1)?,
                 depth_limited_options,
             ),
-            Err(error) if error.kind() == ConfigIrErrorKind::NormalizationFailed
+            Err(error) if error.kind() == ConfigIrErrorKind::ValidationFailed
         ),
-        "recursive external-value normalization should stop at its depth limit",
+        "recursive external-value validation should stop at its depth limit",
     )?;
 
-    let ir_depth_options = ConfigIrOptions::default()
-        .with_value_mode(ConfigIrValueMode::AsProvided)
-        .try_with_max_nesting_depth(1)?;
+    let ir_depth_options = ConfigIrOptions::default().try_with_max_nesting_depth(1)?;
     ensure(
         matches!(
             ConfigIr::serialize(loaded.schema(), recursive_config(1)?, ir_depth_options),
@@ -422,9 +419,7 @@ fn strings_escape_control_characters_and_preserve_utf8_in_both_modes() -> Result
         let bytes = ConfigIr::serialize(
             loaded.schema(),
             value,
-            ConfigIrOptions::default()
-                .with_value_mode(ConfigIrValueMode::AsProvided)
-                .with_pretty(pretty),
+            ConfigIrOptions::default().with_pretty(pretty),
         )?;
         let document: Value = from_slice(&bytes)?;
         let fields = document
@@ -679,11 +674,7 @@ fn empty_map_keys_survive_default_normalization_and_ir_serialization() -> Result
         )
     })?;
     let value = capture::<_, ValueError>(|out| ValueSupport::structure(Vec::new(), None, out))?;
-    let bytes = ConfigIr::serialize(
-        loaded.schema(),
-        value,
-        ConfigIrOptions::default().with_value_mode(ConfigIrValueMode::WithDefaults),
-    )?;
+    let bytes = ConfigIr::serialize(loaded.schema(), value, ConfigIrOptions::default())?;
     ensure(
         String::from_utf8(bytes)?.contains("\"key\":\"\""),
         "empty-string map keys should remain in normalized Config IR",
@@ -805,11 +796,11 @@ fn value_shape_and_non_finite_float_errors_are_classified_safely() -> Result<(),
             ValueSupport::scalar(|builder, out| {
                 builder.add_string("must-not-appear", ValueSource::RustValue, out)
             }),
-            ConfigIrOptions::default().with_value_mode(ConfigIrValueMode::AsProvided),
+            ConfigIrOptions::default(),
             ),
-            Err(error) if error.kind() == ConfigIrErrorKind::ValueShapeMismatch
+            Err(error) if error.kind() == ConfigIrErrorKind::ValidationFailed
         ),
-        "a value-kind mismatch should return a shape error",
+        "a value-kind mismatch should fail schema validation",
     )?;
 
     let fields = vec![ValueSupport::field(
@@ -819,17 +810,13 @@ fn value_shape_and_non_finite_float_errors_are_classified_safely() -> Result<(),
         }),
     )];
     let value = capture::<_, ValueError>(|out| ValueSupport::structure(fields, None, out))?;
-    let error = match ConfigIr::serialize(
-        loaded.schema(),
-        value,
-        ConfigIrOptions::default().with_value_mode(ConfigIrValueMode::AsProvided),
-    ) {
+    let error = match ConfigIr::serialize(loaded.schema(), value, ConfigIrOptions::default()) {
         Ok(_) => return Err(io::Error::other("a non-finite float was not rejected").into()),
         Err(error) => error,
     };
     ensure(
-        error.kind() == ConfigIrErrorKind::UnsupportedFloat,
-        "non-finite float error category",
+        error.kind() == ConfigIrErrorKind::ValidationFailed,
+        "non-finite floats should fail schema validation before serialization",
     )?;
     ensure(
         !format!("{error:?} {error}").contains("must-not-appear"),
@@ -865,11 +852,11 @@ fn value_shape_and_non_finite_float_errors_are_classified_safely() -> Result<(),
             ConfigIr::serialize(
             shape_schema.schema(),
             out_of_range,
-            ConfigIrOptions::default().with_value_mode(ConfigIrValueMode::AsProvided),
+            ConfigIrOptions::default(),
             ),
-            Err(error) if error.kind() == ConfigIrErrorKind::ValueShapeMismatch
+            Err(error) if error.kind() == ConfigIrErrorKind::ValidationFailed
         ),
-        "an integer outside its bit width should return a shape error",
+        "an integer outside its bit width should fail schema validation",
     )?;
 
     let wrong_array_length = capture::<_, ValueError>(|out| {
@@ -902,11 +889,11 @@ fn value_shape_and_non_finite_float_errors_are_classified_safely() -> Result<(),
             ConfigIr::serialize(
             shape_schema.schema(),
             wrong_array_length,
-            ConfigIrOptions::default().with_value_mode(ConfigIrValueMode::AsProvided),
+            ConfigIrOptions::default(),
             ),
-            Err(error) if error.kind() == ConfigIrErrorKind::ValueShapeMismatch
+            Err(error) if error.kind() == ConfigIrErrorKind::ValidationFailed
         ),
-        "a fixed-array length mismatch should return a shape error",
+        "a fixed-array length mismatch should fail schema validation",
     )?;
     Ok(())
 }
@@ -973,44 +960,216 @@ fn processing_value(
     Ok(capture(|out| ValueSupport::structure(fields, None, out))?)
 }
 
+fn restricted_schema() -> Result<LoadedSchema, Box<dyn Error>> {
+    let schema = "enum Mode { Fast, Safe, Legacy }\n\
+        type Current = Mode @variants(allow = [\"Fast\", \"Safe\"]);\n\
+        type Recent = Current @variants(allow = [\"Safe\", \"Legacy\"]);\n\
+        type CurrentWithoutLegacy = Recent @variants(deny = [\"Legacy\"]);\n\
+        entry struct Root {\n\
+            mode: CurrentWithoutLegacy,\n\
+            history: [Mode @variants(deny = [\"Legacy\"])],\n\
+            lookup: map<string, Mode @variants(deny = [\"Legacy\"])> = {},\n\
+            optional: option<Mode> @variants(allow = [\"Fast\"]),\n\
+        }";
+    let loader = SchemaLoader::new(TypolOptions::default());
+    Ok(capture(|out| {
+        loader.compile_text(b"variant-restrictions", schema, out)
+    })?)
+}
+
+fn parse_restricted_value(
+    loaded: &LoadedSchema,
+    source: &str,
+) -> Result<ValidatedConfigValue, Box<dyn Error>> {
+    let mut input = SliceSource::new(source.as_bytes());
+    Ok(capture(|out| {
+        ConfigParser::new(loaded.schema()).parse(
+            ConfigParseRequest::new(&mut input, "variant-test", ConfigParseOptions::default()),
+            &mut EmptyEnvironment,
+            out,
+        )
+    })?)
+}
+
 #[test]
-fn value_modes_fill_defaults_preserve_explicit_none_and_validate_constraints()
+fn enum_variant_restrictions_cover_aliases_containers_and_optional_values()
 -> Result<(), Box<dyn Error>> {
-    ensure_equal(
-        ConfigIrOptions::default().value_mode(),
-        ConfigIrValueMode::Validated,
-        "default mode should perform full schema validation",
+    let loaded = restricted_schema()?;
+    for text in [
+        "{mode: .Safe, history: [.Fast, .Safe], optional: none}",
+        "{mode: .Safe, history: [.Fast], optional: .Fast}",
+        "{mode: .Safe, history: [], lookup: {\"safe\": .Fast}, optional: none}",
+    ] {
+        if parse_restricted_value(&loaded, text).is_err() {
+            return Err(io::Error::other(format!("expected valid config to parse: {text}")).into());
+        }
+    }
+    for text in [
+        "{mode: .Fast, history: [], optional: none}",
+        "{mode: .Safe, history: [.Legacy], optional: none}",
+        "{mode: .Safe, history: [], lookup: {\"legacy\": .Legacy}, optional: none}",
+        "{mode: .Safe, history: [], optional: .Legacy}",
+    ] {
+        ensure(
+            parse_restricted_value(&loaded, text).is_err(),
+            "a rejected enum variant should fail shared configuration validation",
+        )?;
+    }
+
+    let forbidden_enum = capture(|out| ValueSupport::structure(Vec::new(), Some("Fast"), out))?;
+    let input = capture(|out| {
+        ValueSupport::structure(
+            vec![
+                ValueSupport::field("mode".into(), forbidden_enum),
+                ValueSupport::field("history".into(), array_unmetered(Vec::new())),
+                ValueSupport::field(
+                    "optional".into(),
+                    ValueSupport::scalar(|builder, out| {
+                        builder.add_optional(None, ValueSource::RustValue, out)
+                    }),
+                ),
+            ],
+            None,
+            out,
+        )
+    })?;
+    ensure(
+        matches!(
+            ConfigIr::serialize(loaded.schema(), input, ConfigIrOptions::default()),
+            Err(error) if error.kind() == ConfigIrErrorKind::ValidationFailed
+        ),
+        "raw Config IR serialization should reject restricted external values",
     )?;
+
+    let valid = parse_restricted_value(&loaded, "{mode: .Safe, history: [.Fast], optional: none}")?;
+    ensure(
+        valid.belongs_to_schema(loaded.schema()),
+        "validated configuration should retain its schema identity",
+    )?;
+    ConfigIr::serialize_validated(loaded.schema(), &valid, ConfigIrOptions::default())?;
+
+    let other_loader = SchemaLoader::new(TypolOptions::default());
+    let other = capture(|out| {
+        other_loader.compile_text(
+            b"other-variant-schema",
+            "entry struct Other { mode: string }",
+            out,
+        )
+    })?;
+    ensure(
+        !valid.belongs_to_schema(other.schema()),
+        "validated configuration should not match another compiled schema",
+    )?;
+    ensure(
+        matches!(
+            ConfigIr::serialize_validated(other.schema(), &valid, ConfigIrOptions::default()),
+            Err(error) if error.kind() == ConfigIrErrorKind::SchemaMismatch
+        ),
+        "validated Config IR serialization should reject a different schema identity",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn invalid_variant_restrictions_fail_during_schema_compilation() -> Result<(), Box<dyn Error>> {
+    let loader = SchemaLoader::new(TypolOptions::default());
+    let _ = capture(|out| {
+        loader.compile_text(
+            b"optional-none-default",
+            "enum Mode { Fast } entry struct Root { mode: option<Mode> @variants(allow = [\"Fast\"]) = none }",
+            out,
+        )
+    })?;
+    let _ = capture(|out| {
+        loader.compile_text(
+            b"nonempty-optional-combination",
+            "enum Mode { Fast, Safe } type FastOnly = Mode @variants(allow = [\"Fast\", \"Safe\"]); entry struct Root { mode: option<FastOnly> @variants(deny = [\"Fast\"]) }",
+            out,
+        )
+    })?;
+    let _ = capture(|out| {
+        loader.compile_text(
+            b"nonempty-optional-type-use-combination",
+            "enum Mode { Fast, Safe } entry struct Root { mode: option<Mode @variants(allow = [\"Fast\", \"Safe\"])> @variants(deny = [\"Fast\"]) }",
+            out,
+        )
+    })?;
+    for (identity, source) in [
+        (
+            b"unknown-variant".as_slice(),
+            "enum Mode { Fast } entry struct Root { mode: Mode @variants(allow = [\"Missing\"]) }",
+        ),
+        (
+            b"duplicate-variant".as_slice(),
+            "enum Mode { Fast } entry struct Root { mode: Mode @variants(allow = [\"Fast\", \"Fast\"]) }",
+        ),
+        (
+            b"duplicate-annotation".as_slice(),
+            "enum Mode { Fast, Safe } entry struct Root { mode: Mode @variants(allow = [\"Fast\"]) @variants(deny = [\"Safe\"]) }",
+        ),
+        (
+            b"wrong-target".as_slice(),
+            "entry struct Root { value: u8 @variants(allow = [\"Fast\"]) }",
+        ),
+        (
+            b"empty-combination".as_slice(),
+            "enum Mode { Fast, Safe } type Current = Mode @variants(allow = [\"Fast\"]); entry struct Root { mode: Current @variants(deny = [\"Fast\"]) }",
+        ),
+        (
+            b"empty-alias-combination".as_slice(),
+            "enum Mode { Fast, Safe } type NoMode = Mode @variants(deny = [\"Fast\", \"Safe\"]); entry struct Root { mode: Mode }",
+        ),
+        (
+            b"empty-optional-alias-combination".as_slice(),
+            "enum Mode { Fast, Safe } type FastOnly = Mode @variants(allow = [\"Fast\"]); entry struct Root { mode: option<FastOnly> @variants(deny = [\"Fast\"]) }",
+        ),
+        (
+            b"empty-optional-type-use-combination".as_slice(),
+            "enum Mode { Fast, Safe } entry struct Root { mode: option<Mode @variants(allow = [\"Fast\"])> @variants(deny = [\"Fast\"]) }",
+        ),
+        (
+            b"restricted-default".as_slice(),
+            "enum Mode { Fast, Safe } entry struct Root { mode: Mode @variants(allow = [\"Fast\"]) = .Safe }",
+        ),
+        (
+            b"restricted-optional-default".as_slice(),
+            "enum Mode { Fast, Legacy } entry struct Root { mode: option<Mode> @variants(allow = [\"Fast\"]) = .Legacy }",
+        ),
+    ] {
+        if capture(|out| loader.compile_text(identity, source, out)).is_ok() {
+            return Err(io::Error::other(format!(
+                "invalid enum restriction compiled successfully: {source}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn config_ir_normalizes_defaults_and_validates_before_serializing() -> Result<(), Box<dyn Error>> {
     let loaded = processing_schema()?;
     let schema = loaded.schema();
     let empty = capture::<_, ValueError>(|out| ValueSupport::structure(Vec::new(), None, out))?;
-    let normalization_error = match ConfigIr::serialize(
-        schema,
-        empty,
-        ConfigIrOptions::default().with_value_mode(ConfigIrValueMode::WithDefaults),
-    ) {
+    let missing_required = match ConfigIr::serialize(schema, empty, ConfigIrOptions::default()) {
         Ok(_) => {
             return Err(io::Error::other(
-                "configuration missing a required field did not trigger a normalization error",
+                "configuration missing a required field passed validation",
             )
             .into());
         }
         Err(error) => error,
     };
     ensure(
-        matches!(&normalization_error, ConfigIrError::NormalizationFailed(_)),
-        "a missing required field should return a normalization error",
+        missing_required.kind() == ConfigIrErrorKind::ValidationFailed,
+        "a missing required field should return a validation error",
     )?;
-    ensure(
-        normalization_error.kind() == ConfigIrErrorKind::NormalizationFailed,
-        "normalization errors should report the corresponding category",
-    )?;
-    let source = Error::source(&normalization_error)
+    let source = Error::source(&missing_required)
         .and_then(|source| source.downcast_ref::<ConfigValueErrors>())
-        .ok_or("normalization errors did not expose ConfigValueErrors")?;
+        .ok_or("validation errors did not expose ConfigValueErrors")?;
     ensure(
         !source.diagnostics().is_empty(),
-        "normalization errors should include diagnostics",
+        "validation errors should include diagnostics",
     )?;
     ensure(
         source
@@ -1018,7 +1177,7 @@ fn value_modes_fill_defaults_preserve_explicit_none_and_validate_constraints()
             .iter()
             .flat_map(|diagnostic| diagnostic.labels())
             .any(|label| source.span_location(label.span()).is_some()),
-        "normalization errors should preserve schema locations",
+        "validation errors should preserve schema locations",
     )?;
 
     let mut limited_config = ConfigLimits::default();
@@ -1027,34 +1186,33 @@ fn value_modes_fill_defaults_preserve_explicit_none_and_validate_constraints()
     let budget_error = ConfigIr::serialize(
         schema,
         processing_value(None, "safe", vec![1, 2])?,
-        ConfigIrOptions::default()
-            .with_value_mode(ConfigIrValueMode::WithDefaults)
-            .with_validation_options(limited_options),
+        ConfigIrOptions::default().with_validation_options(limited_options),
     );
     ensure(
-        matches!(budget_error, Err(ConfigIrError::NormalizationFailed(_))),
+        matches!(budget_error, Err(ConfigIrError::ValidationFailed(_))),
         "configuration processing should respect the value-node limit",
     )?;
 
     let invalid = processing_value(Some(0), "PRIVATE-IR-SECRET", vec![1, 1])?;
+    let validation_error = match ConfigIr::serialize(schema, invalid, ConfigIrOptions::default()) {
+        Ok(_) => return Err(io::Error::other("an invalid configuration was serialized").into()),
+        Err(error) => error,
+    };
     ensure(
-        matches!(
-            ConfigIr::serialize(
-                schema,
-                invalid,
-                ConfigIrOptions::default().with_value_mode(ConfigIrValueMode::AsProvided),
-            ),
-            Err(error) if error.kind() == ConfigIrErrorKind::ValueShapeMismatch
-        ),
-        "AsProvided should preserve full structure requirements",
+        validation_error.kind() == ConfigIrErrorKind::ValidationFailed,
+        "constraints should be checked before raw Config IR serialization",
+    )?;
+    ensure(
+        !format!("{validation_error:?} {validation_error}").contains("PRIVATE-IR-SECRET"),
+        "schema error text must not leak sensitive values",
     )?;
 
-    let normalized = ConfigIr::serialize(
+    let valid = ConfigIr::serialize(
         schema,
-        processing_value(Some(0), "PRIVATE-IR-SECRET", vec![1, 1])?,
-        ConfigIrOptions::default().with_value_mode(ConfigIrValueMode::WithDefaults),
+        processing_value(None, "safe", vec![1, 2])?,
+        ConfigIrOptions::default(),
     )?;
-    let document: Value = from_slice(&normalized)?;
+    let document: Value = from_slice(&valid)?;
     let fields = document
         .get("value")
         .and_then(|value| value.get("fields"))
@@ -1062,8 +1220,8 @@ fn value_modes_fill_defaults_preserve_explicit_none_and_validate_constraints()
         .ok_or("normalized root field is missing")?;
     ensure_equal(
         field_value(fields, "amount").and_then(|value| value.get("value")),
-        Some(&Value::String("0".into())),
-        "WithDefaults should preserve explicit values without checking constraints",
+        Some(&Value::String("2".into())),
+        "omitted root fields should receive their defaults",
     )?;
     ensure_equal(
         field_value(fields, "note").and_then(|value| value.get("value")),
@@ -1077,7 +1235,7 @@ fn value_modes_fill_defaults_preserve_explicit_none_and_validate_constraints()
     ensure_equal(
         field_value(nested, "depth").and_then(|value| value.get("value")),
         Some(&Value::String("7".into())),
-        "nested struct field default",
+        "nested struct field defaults should be applied before serialization",
     )?;
     let choice = field_value(fields, "choice")
         .and_then(|value| value.get("payload"))
@@ -1087,7 +1245,7 @@ fn value_modes_fill_defaults_preserve_explicit_none_and_validate_constraints()
     ensure_equal(
         field_value(choice, "count").and_then(|value| value.get("value")),
         Some(&Value::String("9".into())),
-        "active enum anonymous struct payload default",
+        "active enum payload defaults should be applied before serialization",
     )?;
     ensure_equal(
         field_value(fields, "title")
@@ -1100,58 +1258,8 @@ fn value_modes_fill_defaults_preserve_explicit_none_and_validate_constraints()
         field_value(fields, "title")
             .and_then(|value| value.get("value"))
             .and_then(Value::as_str),
-        Some("PRIVATE-IR-SECRET"),
+        Some("safe"),
         "the IR sensitive marker does not hide the payload",
-    )?;
-
-    let validation_error = match ConfigIr::serialize(
-        schema,
-        processing_value(Some(0), "PRIVATE-IR-SECRET", vec![1, 1])?,
-        ConfigIrOptions::default().with_validation_options(ConfigValidationOptions::default()),
-    ) {
-        Ok(_) => {
-            return Err(io::Error::other(
-                "default mode allowed configuration that violates schema constraints",
-            )
-            .into());
-        }
-        Err(error) => error,
-    };
-    ensure(
-        matches!(&validation_error, ConfigIrError::ValidationFailed(_)),
-        "invalid configuration should return a validation error",
-    )?;
-    ensure(
-        validation_error.kind() == ConfigIrErrorKind::ValidationFailed,
-        "validation errors should report the corresponding category",
-    )?;
-    let source = Error::source(&validation_error)
-        .and_then(|source| source.downcast_ref::<ConfigValueErrors>())
-        .ok_or("validation errors did not expose ConfigValueErrors")?;
-    ensure(
-        !source.diagnostics().is_empty(),
-        "validation errors should include diagnostics",
-    )?;
-    ensure(
-        !format!("{validation_error:?} {validation_error}").contains("PRIVATE-IR-SECRET"),
-        "schema error text must not leak sensitive values",
-    )?;
-
-    let valid = ConfigIr::serialize(
-        schema,
-        processing_value(None, "safe", vec![1, 2])?,
-        ConfigIrOptions::default().with_value_mode(ConfigIrValueMode::Validated),
-    )?;
-    let document: Value = from_slice(&valid)?;
-    let fields = document
-        .get("value")
-        .and_then(|value| value.get("fields"))
-        .and_then(Value::as_array)
-        .ok_or("root field is missing after full validation")?;
-    ensure_equal(
-        field_value(fields, "amount").and_then(|value| value.get("value")),
-        Some(&Value::String("2".into())),
-        "Validated should fill in root field defaults first",
     )?;
     Ok(())
 }
