@@ -10,7 +10,7 @@ use crate::{
     symbols::{LookupResult, SymbolState, VariantSymbolId},
     types::{ResolvedTypeKind, TypeUseId},
 };
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 
 use opeo::{OResult, Out};
 use typol_core::{ChargedVec, SourceSpan, ValueSource};
@@ -24,30 +24,16 @@ pub(super) struct ValueDefaultBuilder<'b, 'a, 'd> {
 }
 
 struct SingleArrayBuild {
-    supported: bool,
     value: Option<BuiltValue>,
 }
 
 impl SingleArrayBuild {
-    fn unsupported() -> Self {
-        Self {
-            supported: false,
-            value: None,
-        }
-    }
-
     fn invalid() -> Self {
-        Self {
-            supported: true,
-            value: None,
-        }
+        Self { value: None }
     }
 
     fn built(value: BuiltValue) -> Self {
-        Self {
-            supported: true,
-            value: Some(value),
-        }
+        Self { value: Some(value) }
     }
 }
 
@@ -62,6 +48,24 @@ struct ScalarDefaultTask<'a> {
     value: ScalarLiteral<'a>,
     span: SourceSpan,
     target: TypeUseId,
+}
+
+struct SingleArrayTask<'a> {
+    source: ArrayDefault<'a>,
+    depth: usize,
+    span: SourceSpan,
+    array_count: usize,
+    outer_member_span: Option<SourceSpan>,
+    scalar: ScalarDefaultTask<'a>,
+}
+
+struct ArrayValueInput<'a> {
+    source: ArrayDefault<'a>,
+    target: TypeUseId,
+    depth: usize,
+    span: SourceSpan,
+    element: TypeUseId,
+    length: Option<u32>,
 }
 
 impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
@@ -85,6 +89,7 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, ()> {
         let mut builder = Self { compiler };
+        let translator = builder.compiler.context.translator();
         let ValueTask {
             source,
             target,
@@ -101,7 +106,7 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
             builder
                 .compiler
                 .diagnostics
-                .abort(schema_internal!(source.span()));
+                .abort(schema_internal!(translator, source.span()));
             return Err(out.fail(BuildFailure::empty()));
         };
         builder.push_task(tasks, Task::Validate(target), out.reborrow())?;
@@ -131,10 +136,11 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
         match value_kind {
             DefaultValueKind::None => {
                 builder.compiler.report_invalid(
-                    diagnostic_message!(
-                        "diagnostic.schema.default_none_requires_option",
-                        "none can be used only with an option type"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.default_none_requires_option",
+                        locale: translator,
+                    }
+                    .into(),
                     source.span(),
                     out.reborrow(),
                 )?;
@@ -150,66 +156,28 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
             DefaultValueKind::Array(array) => {
                 let ResolvedTypeKind::Array { element, length } = kind else {
                     builder.compiler.report_invalid(
-                        diagnostic_message!(
-                            "diagnostic.schema.default_array_type_mismatch",
-                            "array default does not match the target type"
-                        ),
+                        t! {
+                            name: "diagnostic.schema.default_array_type_mismatch",
+                            locale: translator,
+                        }
+                        .into(),
                         array.span(),
                         out.reborrow(),
                     )?;
                     return Ok(());
                 };
-                let single_array = builder.single_array_chain(
-                    SingleArrayInput {
+                Self::build_array(
+                    builder.compiler,
+                    ArrayValueInput {
                         source: array,
                         target,
                         depth,
                         span: source.span(),
+                        element,
+                        length,
                     },
-                    out.reborrow(),
-                )?;
-                if single_array.supported {
-                    state.set_result(single_array.value);
-                    return Ok(());
-                }
-                let elements =
-                    builder.ast_access(out.reborrow(), |ast_out| array.elements(ast_out))?;
-                let mut valid = true;
-                if let Some(expected) = length {
-                    if usize::try_from(expected).ok() != Some(elements.len()) {
-                        builder.compiler.report_invalid(
-                            diagnostic_message!(
-                                "diagnostic.schema.default_array_length_mismatch",
-                                "fixed-size array default element count does not match"
-                            ),
-                            array.span(),
-                            out.reborrow(),
-                        )?;
-                        valid = false;
-                    }
-                }
-                let element_count = elements.len();
-                let values = DefaultFrames::new(builder.compiler).values(
-                    element_count,
-                    array.span(),
-                    out.reborrow(),
-                )?;
-                let spans = DefaultFrames::new(builder.compiler).spans(
-                    element_count,
-                    array.span(),
-                    out.reborrow(),
-                )?;
-                builder.push_task(
                     tasks,
-                    Task::Array(ArrayBuild {
-                        source: array,
-                        target: element,
-                        depth,
-                        index: 0,
-                        valid,
-                        values,
-                        spans,
-                    }),
+                    state,
                     out.reborrow(),
                 )?;
             }
@@ -233,7 +201,7 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
                         builder
                             .compiler
                             .diagnostics
-                            .push(schema_internal!(source.span()));
+                            .push(schema_internal!(translator, source.span()));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     let declaration = symbol.declaration();
@@ -259,10 +227,11 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
                         }
                         TypeDeclarationKind::Enum(_) => {
                             builder.compiler.report_invalid(
-                                diagnostic_message!(
-                                    "diagnostic.schema.default_enum_variant_syntax_required",
-                                    "enum default must use .Variant syntax"
-                                ),
+                                t! {
+                                    name: "diagnostic.schema.default_enum_variant_syntax_required",
+                                    locale: translator,
+                                }
+                                .into(),
                                 source.span(),
                                 out.reborrow(),
                             )?;
@@ -271,17 +240,18 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
                             builder
                                 .compiler
                                 .diagnostics
-                                .push(schema_internal!(source.span()));
+                                .push(schema_internal!(translator, source.span()));
                             return Err(out.fail(BuildFailure::empty()));
                         }
                     }
                 }
                 _ => {
                     builder.compiler.report_invalid(
-                        diagnostic_message!(
-                            "diagnostic.schema.default_braced_requires_struct_or_map",
-                            "brace-enclosed defaults apply only to structs or maps"
-                        ),
+                        t! {
+                            name: "diagnostic.schema.default_braced_requires_struct_or_map",
+                        locale: translator,
+                        }
+                        .into(),
                         source.span(),
                         out.reborrow(),
                     )?;
@@ -302,11 +272,84 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
         Ok(())
     }
 
+    fn build_array<'slot>(
+        compiler: &'b mut DefaultCompiler<'a, 'd>,
+        input: ArrayValueInput<'a>,
+        tasks: &mut ChargedVec<Task<'a>>,
+        state: &mut TaskState<'a>,
+        mut out: Out<'slot, '_, BuildFailure>,
+    ) -> OResult<'slot, ()> {
+        let mut builder = Self { compiler };
+        let ArrayValueInput {
+            source,
+            target,
+            depth,
+            span,
+            element,
+            length,
+        } = input;
+        if let Some(chain) = builder.single_array_chain(
+            SingleArrayInput {
+                source,
+                target,
+                depth,
+                span,
+            },
+            out.reborrow(),
+        )? {
+            if builder.consume_single_array_chain(&chain, out.reborrow())? {
+                let single_array = builder.build_single_array(chain, out.reborrow())?;
+                state.set_result(single_array.value);
+                return Ok(());
+            }
+        }
+        let elements = builder.ast_access(out.reborrow(), |ast_out| source.elements(ast_out))?;
+        let mut valid = true;
+        if let Some(expected) = length {
+            if usize::try_from(expected).ok() != Some(elements.len()) {
+                builder.compiler.report_invalid(
+                    t! {
+                        name: "diagnostic.schema.default_array_length_mismatch",
+                        locale: builder.compiler.context.translator(),
+                    }
+                    .into(),
+                    source.span(),
+                    out.reborrow(),
+                )?;
+                valid = false;
+            }
+        }
+        let element_count = elements.len();
+        let values = DefaultFrames::new(builder.compiler).values(
+            element_count,
+            source.span(),
+            out.reborrow(),
+        )?;
+        let spans = DefaultFrames::new(builder.compiler).spans(
+            element_count,
+            source.span(),
+            out.reborrow(),
+        )?;
+        builder.push_task(
+            tasks,
+            Task::Array(ArrayBuild {
+                source,
+                target: element,
+                depth,
+                index: 0,
+                valid,
+                values,
+                spans,
+            }),
+            out,
+        )
+    }
+
     fn single_array_chain<'slot>(
         &mut self,
         input: SingleArrayInput<'a>,
         mut out: Out<'slot, '_, BuildFailure>,
-    ) -> OResult<'slot, SingleArrayBuild> {
+    ) -> OResult<'slot, Option<SingleArrayTask<'a>>> {
         let SingleArrayInput {
             source: root,
             target: root_target,
@@ -325,24 +368,24 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
                 out.reborrow(),
             )?;
             if !self.unaliased(current_target) || self.has_type_use_metadata(current_target) {
-                return Ok(SingleArrayBuild::unsupported());
+                return Ok(None);
             }
             let Some(ResolvedTypeKind::Array { element, length }) =
                 self.compiler.type_kind(current_target)
             else {
-                return Ok(SingleArrayBuild::unsupported());
+                return Ok(None);
             };
             if length.is_some_and(|length| length != 1) {
-                return Ok(SingleArrayBuild::unsupported());
+                return Ok(None);
             }
             let elements = self.ast_access(out.reborrow(), |ast_out| current.elements(ast_out))?;
             if elements.len() != 1 {
-                return Ok(SingleArrayBuild::unsupported());
+                return Ok(None);
             }
             let Some(child) =
                 self.ast_access(out.reborrow(), |ast_out| elements.get(0, ast_out))?
             else {
-                return Ok(SingleArrayBuild::unsupported());
+                return Ok(None);
             };
             if outer_member_span.is_none() {
                 outer_member_span = Some(child.span());
@@ -370,18 +413,33 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
                         target: element,
                     };
                 }
-                _ => return Ok(SingleArrayBuild::unsupported()),
+                _ => return Ok(None),
             }
         };
 
-        let mut current = root;
-        let mut current_depth = root_depth;
-        for _ in 0..array_count {
+        Ok(Some(SingleArrayTask {
+            source: root,
+            depth: root_depth,
+            span: root_span,
+            array_count,
+            outer_member_span,
+            scalar,
+        }))
+    }
+
+    fn consume_single_array_chain<'slot>(
+        &mut self,
+        chain: &SingleArrayTask<'a>,
+        mut out: Out<'slot, '_, BuildFailure>,
+    ) -> OResult<'slot, bool> {
+        let mut current = chain.source;
+        let mut current_depth = chain.depth;
+        for _ in 0..chain.array_count {
             let elements = self.ast_access(out.reborrow(), |ast_out| current.elements(ast_out))?;
             let Some(child) =
                 self.ast_access(out.reborrow(), |ast_out| elements.get(0, ast_out))?
             else {
-                return Ok(SingleArrayBuild::unsupported());
+                return Ok(false);
             };
             self.compiler.context.consume(
                 1,
@@ -405,10 +463,24 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
             match self.ast_access(out.reborrow(), |ast_out| child.kind(ast_out))? {
                 DefaultValueKind::Array(array) => current = array,
                 DefaultValueKind::Scalar(_) => break,
-                _ => return Ok(SingleArrayBuild::unsupported()),
+                _ => return Ok(false),
             }
         }
+        Ok(true)
+    }
 
+    fn build_single_array<'slot>(
+        &mut self,
+        chain: SingleArrayTask<'a>,
+        mut out: Out<'slot, '_, BuildFailure>,
+    ) -> OResult<'slot, SingleArrayBuild> {
+        let SingleArrayTask {
+            span: root_span,
+            array_count,
+            outer_member_span,
+            scalar,
+            ..
+        } = chain;
         let Some(scalar_kind) = self.compiler.type_kind(scalar.target) else {
             return Err(out.fail(BuildFailure::empty()));
         };
@@ -487,8 +559,11 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
         span: SourceSpan,
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, BuiltValue> {
+        let translator = self.compiler.context.translator();
         let Some(variant) = self.compiler.variant_symbol(id) else {
-            self.compiler.diagnostics.abort(schema_internal!(span));
+            self.compiler
+                .diagnostics
+                .abort(schema_internal!(translator, span));
             return Err(out.fail(BuildFailure::empty()));
         };
         let name = self.ast_access(out.reborrow(), |ast_out| {
@@ -510,6 +585,7 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
         input: PrepareEnumInput<'_, 'a>,
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, Option<BuiltValue>> {
+        let translator = self.compiler.context.translator();
         let PrepareEnumInput {
             source,
             kind,
@@ -519,25 +595,29 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
         let span = source.span();
         let ResolvedTypeKind::User(owner) = kind else {
             self.compiler.report_invalid(
-                diagnostic_message!(
-                    "diagnostic.schema.default_enum_type_mismatch",
-                    "enum default does not match the target type"
-                ),
+                t! {
+                    name: "diagnostic.schema.default_enum_type_mismatch",
+                    locale: translator,
+                }
+                .into(),
                 source.span(),
                 out.reborrow(),
             )?;
             return Ok(None);
         };
         let Some(symbol) = self.compiler.symbols.type_symbol(owner) else {
-            self.compiler.diagnostics.push(schema_internal!(span));
+            self.compiler
+                .diagnostics
+                .push(schema_internal!(translator, span));
             return Err(out.fail(BuildFailure::empty()));
         };
         if !matches!(symbol.declaration(), TypeDeclarationKind::Enum(_)) {
             self.compiler.report_invalid(
-                diagnostic_message!(
-                    "diagnostic.schema.default_enum_type_mismatch",
-                    "enum default does not match the target type"
-                ),
+                t! {
+                    name: "diagnostic.schema.default_enum_type_mismatch",
+                    locale: translator,
+                }
+                .into(),
                 source.span(),
                 out.reborrow(),
             )?;
@@ -558,10 +638,11 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
             LookupResult::Found(id) => id,
             LookupResult::Missing => {
                 self.compiler.report_invalid(
-                    diagnostic_message!(
-                        "diagnostic.schema.default_enum_variant_unknown",
-                        "enum default refers to an unknown variant"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.default_enum_variant_unknown",
+                        locale: translator,
+                    }
+                    .into(),
                     variant_span,
                     out.reborrow(),
                 )?;
@@ -569,10 +650,11 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
             }
             LookupResult::Ambiguous => {
                 self.compiler.report_invalid(
-                    diagnostic_message!(
-                        "diagnostic.schema.default_enum_variant_ambiguous",
-                        "variant name in enum default is ambiguous"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.default_enum_variant_ambiguous",
+                        locale: translator,
+                    }
+                    .into(),
                     variant_span,
                     out.reborrow(),
                 )?;
@@ -582,7 +664,7 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
         let Some(variant) = self.compiler.symbols.variant_symbol(variant_id) else {
             self.compiler
                 .diagnostics
-                .push(schema_internal!(variant_span));
+                .push(schema_internal!(translator, variant_span));
             return Err(out.fail(BuildFailure::empty()));
         };
         if variant.state() != SymbolState::Valid {
@@ -635,10 +717,11 @@ impl<'b, 'a, 'd> ValueDefaultBuilder<'b, 'a, 'd> {
                     .ast_access(out.reborrow(), |ast_out| source.payload(ast_out))?
                     .span();
                 self.compiler.report_invalid(
-                    diagnostic_message!(
-                        "diagnostic.schema.default_enum_payload_mismatch",
-                        "enum default payload form does not match the variant declaration"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.default_enum_payload_mismatch",
+                        locale: translator,
+                    }
+                    .into(),
                     payload_span,
                     out.reborrow(),
                 )?;

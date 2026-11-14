@@ -120,7 +120,10 @@ impl<T: Typol> ReadStrategy for TypolDecode<'_, '_, T> {
             .config_parse_errors()
             .and_then(|errors| errors.source_read_error())
         {
-            return LoadSupport::read_source_error(source_error);
+            return LoadSupport::read_source_error(
+                source_error,
+                self.bound.loaded.options().translator(),
+            );
         }
         slot.codec(error, names)
     }
@@ -167,7 +170,10 @@ impl<T: Typol + DeserializeOwned> ReadStrategy for SerdeDecode<'_, '_, T> {
             .config_parse_errors()
             .and_then(|errors| errors.source_read_error())
         {
-            return LoadSupport::read_source_error(source_error);
+            return LoadSupport::read_source_error(
+                source_error,
+                self.bound.loaded.options().translator(),
+            );
         }
         slot.codec(error, names)
     }

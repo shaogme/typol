@@ -445,15 +445,10 @@ fn bound_write_inherits_loaded_conversion_limits_unless_explicitly_overridden() 
 
 #[test]
 fn explicit_translator_localizes_schema_error_reports() -> TestResult {
-    let loader = SchemaLoader::new(default_options());
+    let loader =
+        SchemaLoader::new(default_options().with_translator(Translator::new(Language::Chinese)));
     let errors = load_error(|out| loader.compile_text(b"root", "struct Root {}", out))?;
-    let rendered = TestOpeo::value(|out| {
-        errors.render(
-            Translator::new(Language::Chinese),
-            RenderOptions::default(),
-            out,
-        )
-    })?;
+    let rendered = TestOpeo::value(|out| errors.render(RenderOptions::default(), out))?;
 
     assert!(rendered.contains("Schema 编译失败"));
     assert!(rendered.contains("根 Schema 必须声明 entry 结构体"));
@@ -468,13 +463,7 @@ fn assert_file_display_name(
     path: &Path,
 ) -> TestResult {
     assert_eq!(errors.source_name(source_id), Some(expected_name));
-    let rendered = TestOpeo::value(|out| {
-        errors.render(
-            Translator::new(Language::English),
-            RenderOptions::default(),
-            out,
-        )
-    })?;
+    let rendered = TestOpeo::value(|out| errors.render(RenderOptions::default(), out))?;
     let output = format!("{errors}{rendered}");
     assert!(output.contains("config\\u{1b}\\n"));
     assert!(!output.contains('\x1b'));
@@ -682,13 +671,7 @@ fn sourced_environment_values_roundtrip_the_reference_and_typed_fallback() -> Te
     let value = match read {
         TestOpeoOutcome::Value(value) => value,
         TestOpeoOutcome::Error(error) => {
-            let rendered = TestOpeo::value(|out| {
-                error.render(
-                    Translator::new(Language::English),
-                    RenderOptions::default(),
-                    out,
-                )
-            })?;
+            let rendered = TestOpeo::value(|out| error.render(RenderOptions::default(), out))?;
             return Err(TestFailure::new(format!("{error:?}{rendered}")));
         }
     };
@@ -1105,13 +1088,7 @@ fn schema_and_config_errors_keep_names_and_locations_after_inputs_are_dropped() 
                 assert!(errors.span_location(label.span()).is_some());
             }
         }
-        let text = TestOpeo::value(|out| {
-            errors.render(
-                Translator::new(Language::English),
-                RenderOptions::default(),
-                out,
-            )
-        })?;
+        let text = TestOpeo::value(|out| errors.render(RenderOptions::default(), out))?;
         assert!(text.contains("rule\\u{1b}\\n"));
         assert!(!text.contains('\x1b'));
         assert_eq!(errors.stage(), TypolStage::Decoding);
@@ -1152,13 +1129,8 @@ fn named_file_inputs_keep_display_names_for_dynamic_and_typed_reads() -> TestRes
         .config_source_id()
         .test_value()?;
     assert_eq!(default_name.source_name(default_source_id), Some("config"));
-    let default_rendered = TestOpeo::value(|out| {
-        default_name.render(
-            Translator::new(Language::English),
-            RenderOptions::default(),
-            out,
-        )
-    })?;
+    let default_rendered =
+        TestOpeo::value(|out| default_name.render(RenderOptions::default(), out))?;
     assert!(
         !format!("{default_name}{default_rendered}").contains(config.to_string_lossy().as_ref())
     );
@@ -1210,13 +1182,7 @@ fn root_and_compile_failures_preserve_finite_classification() -> TestResult {
     );
     directory.cleanup()?;
     for errors in [&errors, &memory_errors] {
-        let rendered = TestOpeo::value(|out| {
-            errors.render(
-                Translator::new(Language::English),
-                RenderOptions::default(),
-                out,
-            )
-        })?;
+        let rendered = TestOpeo::value(|out| errors.render(RenderOptions::default(), out))?;
         let displayed = errors.to_string();
         assert!(rendered.contains("Location: schema#0:"));
         assert!(displayed.contains("Location: schema#0:"));
@@ -1350,13 +1316,7 @@ fn file_and_memory_compile_failures_retain_name_limits_without_copying() -> Test
                 .code(),
             DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
         );
-        TestOpeo::value(|out| {
-            errors.render(
-                Translator::new(Language::English),
-                RenderOptions::default(),
-                out,
-            )
-        })?;
+        TestOpeo::value(|out| errors.render(RenderOptions::default(), out))?;
     }
     Ok(())
 }
@@ -1440,17 +1400,12 @@ fn memory_compile_rejects_foreign_sessions_and_preserves_error_on_render_failure
     );
     assert!(
         TestOpeo::call(|out| {
-            errors.render(
-                Translator::new(Language::English),
-                RenderOptions::new(ExecutionLimits::new(0, 0), 0),
-                out,
-            )
+            errors.render(RenderOptions::new(ExecutionLimits::new(0, 0), 0), out)
         })
         .is_err()
     );
     let rendered = TestOpeo::value(|out| {
         errors.render(
-            Translator::new(Language::English),
             RenderOptions::new(ExecutionLimits::new(4096, 4096), 4096),
             out,
         )
@@ -1509,13 +1464,7 @@ fn invalid_secret_environment_never_enters_safe_error_outputs() -> TestResult {
     ] {
         let mut output = format!(
             "{errors:?}{errors}{}",
-            TestOpeo::value(|out| {
-                errors.render(
-                    Translator::new(Language::English),
-                    RenderOptions::default(),
-                    out,
-                )
-            })?
+            TestOpeo::value(|out| errors.render(RenderOptions::default(), out))?
         );
         if let Some(source) = errors.source() {
             output.push_str(&format!("{source:?}{source}"));
@@ -1625,13 +1574,7 @@ fn reader_paths_preserve_short_reads_and_map_read_failures() -> TestResult {
         assert!(
             !format!(
                 "{errors:?}{errors}{}",
-                TestOpeo::value(|out| {
-                    errors.render(
-                        Translator::new(Language::English),
-                        RenderOptions::default(),
-                        out,
-                    )
-                })?
+                TestOpeo::value(|out| errors.render(RenderOptions::default(), out))?
             )
             .contains("reader-secret-sentinel")
         );

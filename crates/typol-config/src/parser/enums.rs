@@ -1,9 +1,12 @@
 use crate::{
     context::CompletionState,
-    diagnostics::{BudgetDiagnostic, DiagnosticFactory},
+    diagnostics::{BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticFactory},
     parser::{
-        context::{ParserContext, ParserControl},
-        literals::{ContextDiagnosticRequest, LiteralParser, ParsedValue, Syntax},
+        context::{ParserContext, ParserControl, ValueCallContext},
+        literals::{
+            ContextDiagnosticRequest, ExpectedSymbol, ExpectedValueSymbol, LiteralParser,
+            ParsedValue, Syntax,
+        },
         recovery::ParseFailure,
     },
     value::{EnumPayload, FieldValue, ValueFactory},
@@ -13,7 +16,7 @@ use typol_core::{
     BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, LocatedSpan,
     SecretRange, ValueError, ValueErrorKind, ValueSource, diagnostic_context,
 };
-use typol_i18n::diagnostic_key;
+use typol_i18n::{Translator, t};
 use typol_semantic::{SchemaAccessError, TypeView, VariantPayloadInfo, VariantView};
 use typol_syntax::{Symbol, TokenKind};
 
@@ -49,8 +52,19 @@ impl<'schema> EnumFrame<'schema> {
     ) -> OResult<'slot, Self> {
         Syntax::expect_value_symbol(
             context,
-            Symbol::Dot,
-            "enum value requires a dot and variant name",
+            ExpectedValueSymbol {
+                expected: Symbol::Dot,
+                syntax_message: t! {
+                    name: "diagnostic.config.expected_enum_variant_prefix",
+                    locale: context.session.translator(),
+                }
+                .into(),
+                value_message: t! {
+                    name: "diagnostic.config.expected_enum_variant_prefix",
+                    locale: context.session.translator(),
+                }
+                .into(),
+            },
             out.reborrow(),
         )?;
         let token = {
@@ -65,8 +79,11 @@ impl<'schema> EnumFrame<'schema> {
                 ContextDiagnosticRequest {
                     context,
                     code: DiagnosticCode::CONFIG_SYNTAX_ERROR,
-                    message: "expected an enum variant name after the dot",
-                    key: Some(diagnostic_key!("diagnostic.syntax.expected_identifier")),
+                    message: t! {
+                        name: "diagnostic.config.enum_variant_name_expected",
+                        locale: context.session.translator(),
+                    }
+                    .into(),
                     span: token.span,
                     value_source: None,
                 },
@@ -83,13 +100,19 @@ impl<'schema> EnumFrame<'schema> {
         };
         if too_long {
             return Err(out.fail(
-                DiagnosticFactory::make_diagnostic(
-                    DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                    "enum variant name exceeded the string byte limit",
-                    Some(token.span),
-                    None,
-                    None,
-                )
+                DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                    code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                    message: t! {
+                        name: "diagnostic.config.enum_variant_name_byte_limit",
+                        locale: context.session.translator(),
+                    }
+                    .into(),
+                    primary: Some(token.span),
+                    path: None,
+                    value_source: None,
+                    context: None,
+                    translator: context.session.translator(),
+                })
                 .into(),
             ));
         }
@@ -105,8 +128,11 @@ impl<'schema> EnumFrame<'schema> {
                 ContextDiagnosticRequest {
                     context,
                     code: DiagnosticCode::CONFIG_VALUE_ERROR,
-                    message: "enum contains an undeclared variant",
-                    key: Some(diagnostic_key!("diagnostic.config.enum_variant_undeclared")),
+                    message: t! {
+                        name: "diagnostic.config.enum_variant_undeclared",
+                        locale: context.session.translator(),
+                    }
+                    .into(),
                     span: token.span,
                     value_source: None,
                 },
@@ -163,8 +189,19 @@ impl<'schema> EnumFrame<'schema> {
             VariantPayloadInfo::Single { .. } => {
                 Syntax::expect_value_symbol(
                     context,
-                    Symbol::LeftParen,
-                    "single-payload enum variant requires parentheses",
+                    ExpectedValueSymbol {
+                        expected: Symbol::LeftParen,
+                        syntax_message: t! {
+                            name: "diagnostic.config.expected_enum_payload",
+                            locale: context.session.translator(),
+                        }
+                        .into(),
+                        value_message: t! {
+                            name: "diagnostic.config.expected_enum_payload",
+                            locale: context.session.translator(),
+                        }
+                        .into(),
+                    },
                     out.reborrow(),
                 )?;
                 let name = schema_call(
@@ -184,10 +221,11 @@ impl<'schema> EnumFrame<'schema> {
                         ContextDiagnosticRequest {
                             context,
                             code: DiagnosticCode::CONFIG_VALUE_ERROR,
-                            message: "anonymous-struct enum variant requires an object payload",
-                            key: Some(diagnostic_key!(
-                                "diagnostic.config.enum_payload_shape_mismatch"
-                            )),
+                            message: t! {
+                                name: "diagnostic.config.enum_payload_shape_mismatch",
+                                locale: context.session.translator(),
+                            }
+                            .into(),
                             span,
                             value_source: Some(context.value_source),
                         },
@@ -235,10 +273,11 @@ impl<'schema> EnumFrame<'schema> {
                 ContextDiagnosticRequest {
                     context,
                     code: DiagnosticCode::CONFIG_VALUE_ERROR,
-                    message: "unit enum variant cannot have a payload",
-                    key: Some(diagnostic_key!(
-                        "diagnostic.config.enum_payload_shape_mismatch"
-                    )),
+                    message: t! {
+                        name: "diagnostic.config.enum_payload_shape_mismatch",
+                        locale: context.session.translator(),
+                    }
+                    .into(),
                     span,
                     value_source: Some(context.value_source),
                 },
@@ -263,10 +302,11 @@ impl<'schema> EnumFrame<'schema> {
                 ContextDiagnosticRequest {
                     context,
                     code: DiagnosticCode::CONFIG_VALUE_ERROR,
-                    message: "single-payload enum variant can contain only one value",
-                    key: Some(diagnostic_key!(
-                        "diagnostic.config.enum_payload_shape_mismatch"
-                    )),
+                    message: t! {
+                        name: "diagnostic.config.enum_payload_shape_mismatch",
+                        locale: context.session.translator(),
+                    }
+                    .into(),
                     span,
                     value_source: Some(context.value_source),
                 },
@@ -276,9 +316,15 @@ impl<'schema> EnumFrame<'schema> {
         }
         let close = Syntax::expect_symbol(
             context,
-            Symbol::RightParen,
-            DiagnosticCode::CONFIG_SYNTAX_ERROR,
-            "expected a closing parenthesis after the single-payload enum value",
+            ExpectedSymbol {
+                expected: Symbol::RightParen,
+                code: DiagnosticCode::CONFIG_SYNTAX_ERROR,
+                message: t! {
+                    name: "diagnostic.config.expected_enum_payload_close_parenthesis",
+                    locale: context.session.translator(),
+                }
+                .into(),
+            },
             out.reborrow(),
         )?;
         let payload = EnumPayload::single(parsed.value, Some(&context.budget), out.reborrow())?;
@@ -323,8 +369,11 @@ impl<'schema> EnumFrame<'schema> {
                     value_out,
                 )
             },
-            end,
-            context.value_source,
+            ValueCallContext {
+                span: end,
+                source: context.value_source,
+                translator: context.session.translator(),
+            },
             out.reborrow(),
         )?;
         Ok(ParsedValue {
@@ -333,7 +382,12 @@ impl<'schema> EnumFrame<'schema> {
             span: ParserControl::diagnostic_call(
                 &context.diagnostic_errors,
                 |diagnostic_out| {
-                    DiagnosticFactory::span_through(self.initial_span, end, diagnostic_out)
+                    DiagnosticFactory::span_through(
+                        self.initial_span,
+                        end,
+                        context.session.translator(),
+                        diagnostic_out,
+                    )
                 },
                 out.reborrow(),
             )?,
@@ -349,13 +403,19 @@ fn push_variant_path<'slot>(
 ) -> OResult<'slot, ()> {
     if name.len() > context.limits.max_string_bytes() {
         return Err(out.fail(
-            DiagnosticFactory::make_diagnostic(
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                "enum variant name exceeded the string byte limit",
-                Some(span),
-                None,
-                None,
-            )
+            DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                message: t! {
+                    name: "diagnostic.config.enum_variant_name_byte_limit",
+                    locale: context.session.translator(),
+                }
+                .into(),
+                primary: Some(span),
+                path: None,
+                value_source: None,
+                context: None,
+                translator: context.session.translator(),
+            })
             .into(),
         ));
     }
@@ -404,44 +464,70 @@ fn budget_call<'slot, 'borrow, T>(
 fn value_call<'slot, 'borrow, T>(
     errors: &mut ErrSlot<ValueError>,
     operation: impl for<'call> FnOnce(Out<'call, 'call, ValueError>) -> OResult<'call, T>,
-    span: LocatedSpan,
-    source: ValueSource,
+    context: ValueCallContext,
     out: Out<'slot, 'borrow, ParseFailure>,
 ) -> OResult<'slot, T> {
+    let ValueCallContext {
+        span,
+        source,
+        translator,
+    } = context;
     match errors.try_call(operation) {
         Ok(value) => Ok(value),
-        Err(caught) => Err(out.fail(value_error(caught.take(), span, source).into())),
+        Err(caught) => Err(out.fail(value_error(caught.take(), span, source, translator).into())),
     }
 }
 
-fn value_error(error: ValueError, span: LocatedSpan, source: ValueSource) -> Diagnostic {
+fn value_error(
+    error: ValueError,
+    span: LocatedSpan,
+    source: ValueSource,
+    translator: Translator,
+) -> Diagnostic {
     match error.kind() {
-        ValueErrorKind::ResourceLimitExceeded => DiagnosticFactory::make_diagnostic(
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-            "enum payload exceeded the resource limit",
-            Some(span),
-            None,
-            Some(source),
-        ),
+        ValueErrorKind::ResourceLimitExceeded => {
+            DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                message: t! {
+                    name: "diagnostic.config.enum_payload_resource_limit",
+                    locale: translator,
+                }
+                .into(),
+                primary: Some(span),
+                path: None,
+                value_source: Some(source),
+                context: None,
+                translator,
+            })
+        }
         ValueErrorKind::AllocationFailed => {
-            DiagnosticFactory::allocation_diagnostic(Some(span), None, Some(source))
+            DiagnosticFactory::allocation_diagnostic(Some(span), None, Some(source), translator)
         }
         ValueErrorKind::CapacityExceeded => {
-            BudgetDiagnostic::from_error(BudgetError::CapacityExceeded)
+            BudgetDiagnostic::from_error(BudgetError::CapacityExceeded, translator)
         }
         ValueErrorKind::InternalInvariantFailure => DiagnosticFactory::internal(
             error.context().unwrap_or(PARSER_ENUM_PAYLOAD_INVARIANT),
             Some(span),
             None,
             Some(source),
+            translator,
         ),
-        ValueErrorKind::EnvironmentReferenceRequired => DiagnosticFactory::make_diagnostic(
-            DiagnosticCode::CONFIG_VALUE_ERROR,
-            "environment source requires structured reference metadata",
-            Some(span),
-            None,
-            Some(source),
-        ),
+        ValueErrorKind::EnvironmentReferenceRequired => {
+            DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                code: DiagnosticCode::CONFIG_VALUE_ERROR,
+                message: t! {
+                    name: "diagnostic.config.environment_reference_metadata_required",
+                    locale: translator,
+                }
+                .into(),
+                primary: Some(span),
+                path: None,
+                value_source: Some(source),
+                context: None,
+                translator,
+            })
+        }
         ValueErrorKind::DuplicateFieldName | ValueErrorKind::DuplicateMapKey => {
             DiagnosticFactory::internal(
                 error
@@ -452,6 +538,7 @@ fn value_error(error: ValueError, span: LocatedSpan, source: ValueSource) -> Dia
                 Some(span),
                 None,
                 Some(source),
+                translator,
             )
         }
     }

@@ -1,5 +1,5 @@
 use crate::{
-    diagnostics::{BudgetDiagnostic, DiagnosticFactory},
+    diagnostics::{BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticFactory},
     value_validation::TreeContext,
 };
 use opeo::{ErrSlot, OResult, Out};
@@ -7,6 +7,7 @@ use typol_core::{
     BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, LocatedSpan,
     ValueSource, ValueView, diagnostic_context,
 };
+use typol_i18n::{Translator, t};
 use typol_semantic::SchemaAccessError;
 
 pub(super) static VALUE_TREE_SCHEMA_ACCESS: DiagnosticContext = diagnostic_context!(
@@ -21,25 +22,33 @@ impl TreeSupport {
     pub(super) fn push_task<'slot, 'borrow, T>(
         tasks: &mut ChargedVec<T>,
         errors: &mut ErrSlot<BudgetError>,
+        translator: Translator,
         task: T,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, ()> {
-        Self::budget_call(errors, |budget_out| tasks.try_push(task, budget_out), out)
+        Self::budget_call(
+            errors,
+            translator,
+            |budget_out| tasks.try_push(task, budget_out),
+            out,
+        )
     }
 
     pub(super) fn budget_call<'slot, 'borrow, T>(
         errors: &mut ErrSlot<BudgetError>,
+        translator: Translator,
         operation: impl for<'call> FnOnce(Out<'call, 'call, BudgetError>) -> OResult<'call, T>,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, T> {
         match errors.try_call(operation) {
             Ok(value) => Ok(value),
-            Err(caught) => Err(out.fail(BudgetDiagnostic::from_error(caught.take()))),
+            Err(caught) => Err(out.fail(BudgetDiagnostic::from_error(caught.take(), translator))),
         }
     }
 
     pub(super) fn schema_call<'slot, 'borrow, T>(
         errors: &mut ErrSlot<SchemaAccessError>,
+        translator: Translator,
         operation: impl for<'call> FnOnce(Out<'call, 'call, SchemaAccessError>) -> OResult<'call, T>,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, T> {
@@ -50,6 +59,7 @@ impl TreeSupport {
                 None,
                 None,
                 None,
+                translator,
             ))),
         }
     }
@@ -68,13 +78,15 @@ impl TreeSupport {
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, ()> {
         let Some(depth) = context.nesting_depth.checked_add(1) else {
-            return Err(out.fail(DiagnosticFactory::make_diagnostic(
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                "value tree nesting depth exceeded the limit",
-                span,
-                None,
-                source,
-            )));
+            return Err(out.fail(DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                message: t! { name: "diagnostic.config.value_tree_nesting_limit", locale: context.resources.translator }.into(),
+                primary: span,
+                path: None,
+                value_source: source,
+                context: None,
+                translator: context.resources.translator,
+            })));
         };
         context.nesting_depth = depth;
         Ok(())
@@ -90,13 +102,15 @@ impl TreeSupport {
         if context.resources.value_limits.allows_depth(depth) {
             return Ok(());
         }
-        Err(out.fail(DiagnosticFactory::make_diagnostic(
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-            "value tree nesting depth exceeded the limit",
-            span,
-            None,
-            source,
-        )))
+        Err(out.fail(DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+            code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+            message: t! { name: "diagnostic.config.value_tree_nesting_limit", locale: context.resources.translator }.into(),
+            primary: span,
+            path: None,
+            value_source: source,
+            context: None,
+            translator: context.resources.translator,
+        })))
     }
 
     pub(super) fn leave_nesting(context: &mut TreeContext<'_, '_, '_>) {
@@ -106,10 +120,12 @@ impl TreeSupport {
     pub(super) fn reserve_tasks<'slot, T>(
         tasks: &mut ChargedVec<T>,
         errors: &mut ErrSlot<BudgetError>,
+        translator: Translator,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ()> {
         Self::budget_call(
             errors,
+            translator,
             |budget_out| tasks.try_reserve(5, budget_out),
             out.reborrow(),
         )

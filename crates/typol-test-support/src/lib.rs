@@ -4,6 +4,9 @@ extern crate alloc;
 
 mod config_values;
 
+pub use config_values::{FieldValue, MapEntry, Named, Payload, ValueFactory, ValueViewInput};
+pub use typol_opeo_test_support::{TestFailure, TestOpeo, TestOpeoOutcome, TestResult, TestSlot};
+
 use alloc::{format, vec::Vec};
 use core::{fmt::Debug, ops::Range};
 use opeo::{OResult, Out};
@@ -16,10 +19,6 @@ use typol_schema::{
     SourceObserver,
 };
 use typol_semantic::CompiledSchema;
-
-pub use typol_opeo_test_support::{TestFailure, TestOpeo, TestOpeoOutcome, TestResult, TestSlot};
-
-pub use config_values::{FieldValue, MapEntry, Named, Payload, ValueFactory, ValueViewInput};
 
 pub struct OwnedReadSource {
     bytes: Vec<u8>,
@@ -241,6 +240,14 @@ where
 
     fn into_test_value(self) -> TestResult<T> {
         self.map_err(|error| TestFailure::new(format!("unexpected error: {error:?}")))
+    }
+}
+
+impl<T, E> TestValueExt<T> for TestOpeoOutcome<T, E> {
+    type Error = E;
+
+    fn into_test_value(self) -> TestResult<T> {
+        self.test_value()
     }
 }
 

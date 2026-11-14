@@ -44,6 +44,127 @@ fn compile(text: &str, limits: SchemaLimits) -> TestResult<CompiledSchema> {
     .test_value()
 }
 
+fn execute_assertion_expressions(depth: usize, schema_limits: SchemaLimits) -> TestResult<()> {
+    let mut config_limits = ConfigLimits::default();
+    config_limits = config_limits.with_max_nesting_depth(depth * 5 + 16);
+    for expression in [
+        format!("{}true", "!".repeat(depth)),
+        format!("true{}", " && true".repeat(depth)),
+        format!("1{} > 0", " + 1".repeat(depth)),
+    ] {
+        let text = format!("entry struct Root {{}} @assert({expression}, \"rule\")");
+        let schema = compile(&text, schema_limits)?;
+        drop(
+            Support::parse(
+                &schema,
+                config_request(
+                    (&mut SliceSource::new(("{}").as_bytes()), "config"),
+                    &config_limits,
+                ),
+                &mut NoHost,
+            )
+            .test_value()?,
+        );
+    }
+    Ok(())
+}
+
+fn execute_nested_quantifier(depth: usize, schema_limits: SchemaLimits) -> TestResult<()> {
+    let mut config_limits = ConfigLimits::default();
+    config_limits = config_limits.with_max_nesting_depth(depth * 5 + 16);
+    let ty = format!("{}u8{}", "[".repeat(depth), "]".repeat(depth));
+    let value = format!("{}1{}", "[".repeat(depth), "]".repeat(depth));
+    let expression = format!(
+        "item{} > 0{}",
+        ".all(|x| x".repeat(depth),
+        ")".repeat(depth)
+    );
+    let text =
+        format!("entry struct Root {{ values: [{ty}] @all({expression}, \"rule\") = [{value}] }}");
+    let schema = compile(&text, schema_limits)?;
+    let config = String::from("{}");
+    drop(
+        Support::parse_validated_config(
+            &schema,
+            config_request(
+                (&mut SliceSource::new(config.as_bytes()), "config"),
+                &config_limits,
+            ),
+            &mut NoHost,
+        )
+        .test_value()?,
+    );
+    drop(schema);
+    Ok(())
+}
+
+fn compare_nested_unique_values(depth: usize, schema_limits: SchemaLimits) -> TestResult<()> {
+    let mut schema_errors = TestSlot::default();
+    let mut evaluation_errors = TestSlot::default();
+    let mut config_limits = ConfigLimits::default();
+    config_limits = config_limits.with_max_nesting_depth(depth * 5 + 16);
+    let mut value_limits = ValueLimits::default();
+    value_limits.set_max_nesting_depth(depth * 5 + 16);
+    let regex_limits = RegexLimits::default();
+    let ty = format!("{}u8{}", "[".repeat(depth), "]".repeat(depth));
+    let value = format!("{}1{}", "[".repeat(depth), "]".repeat(depth));
+    let text =
+        format!("enum E {{ V({ty}) }} entry struct Root {{ values: [E] @unique = [.V({value})] }}");
+    let schema = compile(&text, schema_limits)?;
+    let root = Support::parse_validated_config(
+        &schema,
+        config_request(
+            (&mut SliceSource::new(("{}").as_bytes()), "config"),
+            &config_limits,
+        ),
+        &mut NoHost,
+    )
+    .test_value()?;
+    let ValueKind::Structure(fields) = root.as_config_value().as_ref() else {
+        return Err(TestFailure::new("parsed root value should be a struct"));
+    };
+    let field = schema_errors
+        .access(|out| schema.entry().field_named("values", out))
+        .map_err(|caught| {
+            let _ = caught;
+            TestFailure::new("failed to read schema field")
+        })?
+        .test_expect("schema is missing the values field")?;
+    let evaluator = Evaluator::new(&schema, &value_limits, &regex_limits, None);
+    let field_type = schema_errors
+        .access(|out| field.ty(out))
+        .map_err(|caught| {
+            let _ = caught;
+            TestFailure::new("failed to read schema field type")
+        })?;
+    let value = EvalValue::config(
+        fields.into_iter().next().test_value()?.value(),
+        field_type,
+        false,
+    );
+    let ordering = evaluation_errors
+        .access(|out| {
+            SchemaComparison::compare(
+                &evaluator,
+                value,
+                value,
+                ComparisonOptions {
+                    equality_only: true,
+                    depth: 0,
+                },
+                out,
+            )
+        })
+        .map_err(|caught| {
+            let _ = caught;
+            TestFailure::new("failed to compare schema values during execution")
+        })?;
+    test_eq!(ordering, Ordering::Equal)?;
+    drop(root);
+    drop(schema);
+    Ok(())
+}
+
 #[test]
 fn execution_stack_child() -> TestResult<()> {
     if env::var_os("TYPOL_EXECUTION_STACK_CHILD").is_none() {
@@ -52,114 +173,12 @@ fn execution_stack_child() -> TestResult<()> {
     thread::Builder::new()
         .stack_size(128 * 1024)
         .spawn(|| -> TestResult<()> {
-            let mut schema_errors = TestSlot::default();
-            let mut evaluation_errors = TestSlot::default();
             let depth = 4096;
             let mut schema_limits = SchemaLimits::default();
             schema_limits.set_max_nesting_depth(depth * 5 + 16);
-            let mut config_limits = ConfigLimits::default();
-            config_limits = config_limits.with_max_nesting_depth(depth * 5 + 16);
-            let mut value_limits = ValueLimits::default();
-            value_limits.set_max_nesting_depth(depth * 5 + 16);
-            let regex_limits = RegexLimits::default();
-            for expression in [
-                format!("{}true", "!".repeat(depth)),
-                format!("true{}", " && true".repeat(depth)),
-                format!("1{} > 0", " + 1".repeat(depth)),
-            ] {
-                let text = format!("entry struct Root {{}} @assert({expression}, \"rule\")");
-                let schema = compile(&text, schema_limits)?;
-                drop(
-                    Support::parse(
-                        &schema,
-                        config_request(
-                            (&mut SliceSource::new(("{}").as_bytes()), "config"),
-                            &config_limits,
-                        ),
-                        &mut NoHost,
-                    )
-                    .test_value()?,
-                );
-            }
-            let ty = format!("{}u8{}", "[".repeat(depth), "]".repeat(depth));
-            let value = format!("{}1{}", "[".repeat(depth), "]".repeat(depth));
-            let expression = format!(
-                "item{} > 0{}",
-                ".all(|x| x".repeat(depth),
-                ")".repeat(depth)
-            );
-            let text = format!(
-                "entry struct Root {{ values: [{ty}] @all({expression}, \"rule\") = [{value}] }}"
-            );
-            let schema = compile(&text, schema_limits)?;
-            let config = String::from("{}");
-            drop(
-                Support::parse_validated_config(
-                    &schema,
-                    config_request(
-                        (&mut SliceSource::new(config.as_bytes()), "config"),
-                        &config_limits,
-                    ),
-                    &mut NoHost,
-                )
-                .test_value()?,
-            );
-            drop(schema);
-            let text = format!(
-                "enum E {{ V({ty}) }} entry struct Root {{ values: [E] @unique = [.V({value})] }}"
-            );
-            let schema = compile(&text, schema_limits)?;
-            let root = Support::parse_validated_config(
-                &schema,
-                config_request(
-                    (&mut SliceSource::new(("{}").as_bytes()), "config"),
-                    &config_limits,
-                ),
-                &mut NoHost,
-            )
-            .test_value()?;
-            let ValueKind::Structure(fields) = root.as_config_value().as_ref() else {
-                return Err(TestFailure::new("parsed root value should be a struct"));
-            };
-            let field = schema_errors
-                .access(|out| schema.entry().field_named("values", out))
-                .map_err(|caught| {
-                    let _ = caught;
-                    TestFailure::new("failed to read schema field")
-                })?
-                .test_expect("schema is missing the values field")?;
-            let evaluator = Evaluator::new(&schema, &value_limits, &regex_limits, None);
-            let field_type = schema_errors
-                .access(|out| field.ty(out))
-                .map_err(|caught| {
-                    let _ = caught;
-                    TestFailure::new("failed to read schema field type")
-                })?;
-            let value = EvalValue::config(
-                fields.into_iter().next().test_value()?.value(),
-                field_type,
-                false,
-            );
-            let ordering = evaluation_errors
-                .access(|out| {
-                    SchemaComparison::compare(
-                        &evaluator,
-                        value,
-                        value,
-                        ComparisonOptions {
-                            equality_only: true,
-                            depth: 0,
-                        },
-                        out,
-                    )
-                })
-                .map_err(|caught| {
-                    let _ = caught;
-                    TestFailure::new("failed to compare schema values during execution")
-                })?;
-            test_eq!(ordering, Ordering::Equal)?;
-            drop(root);
-            drop(schema);
+            execute_assertion_expressions(depth, schema_limits)?;
+            execute_nested_quantifier(depth, schema_limits)?;
+            compare_nested_unique_values(depth, schema_limits)?;
             Ok(())
         })
         .test_value()?

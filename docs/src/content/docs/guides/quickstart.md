@@ -149,6 +149,7 @@ use std::{path::Path, process::ExitCode};
 use typol::{
     DefaultConfigOptions, EmptyEnvironment, SchemaLoader, TextLayout, Typol, TypolError,
     TypolOptions,
+    host::{Language, Translator},
     opeo::ErrSlot,
 };
 
@@ -180,7 +181,9 @@ impl ServiceConfig {
 fn main() -> ExitCode {
     let mut errors = ErrSlot::<TypolError>::new();
     match errors.try_call(|mut out| {
-        let loader = SchemaLoader::new(TypolOptions::default());
+        let options = TypolOptions::default()
+            .with_translator(Translator::new(Language::Chinese));
+        let loader = SchemaLoader::new(options);
         let loaded = loader.compile_file(Path::new("service.tschem"), out.reborrow())?;
         let binding = loaded.bind::<ServiceConfig>(out.reborrow())?;
         let mut environment = EmptyEnvironment;
@@ -218,6 +221,8 @@ The methods in this path are:
 | `binding.read_file(path, environment, out)` | Reads, applies defaults, validates, and converts one file to `ServiceConfig`. |
 
 `SchemaLoader::new` is an associated function: it is called on the type. `compile_file`, `bind`, and `read_file` are methods called on values. Fallible methods take an `Out` error context and return an OPEO result; `ErrSlot::try_call` provides that context and captures the resulting `TypolError`.
+
+The example selects Chinese in `TypolOptions` before compilation. Diagnostic reasons are translated when compilation, parsing, or validation creates them, then remain fixed when `Display` or JSON output reads them. `Diagnostic::message()` can itself return a formatting failure, so callers should propagate that result. The CLI follows the same timing by passing `--language` into each operation.
 
 If you need a starter `.tconf` without creating a Rust struct, generate it directly from the loaded Schema:
 

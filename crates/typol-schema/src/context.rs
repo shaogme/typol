@@ -1,5 +1,5 @@
 use core::{cell::RefCell, cmp::Ordering};
-use typol_i18n::diagnostic_message;
+use typol_i18n::{Translator, t};
 
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{BudgetError, Diagnostic, ExecutionBudget, RegexExecutionBudget, SourceSpan};
@@ -17,6 +17,8 @@ use crate::test_support::TestOperation;
 #[cfg(test)]
 use typol_core::{DiagnosticCode, ExecutionLimits, SourceId, Span};
 #[cfg(test)]
+use typol_i18n::Language;
+#[cfg(test)]
 use typol_test_support::*;
 
 /// All compilation phases explicitly share one execution budget; the diagnostic collector only receives failures.
@@ -25,22 +27,35 @@ pub(crate) struct CompileContext {
     regex_limits: RegexLimits,
     execution: ExecutionBudget,
     regex_execution: RegexExecutionBudget,
+    translator: Translator,
     ast_access_errors: RefCell<ErrSlot<AstAccessError>>,
     budget_errors: RefCell<ErrSlot<BudgetError>>,
     builder_errors: RefCell<ErrSlot<BuildError>>,
 }
 
+pub(crate) struct CompileContextOptions<'a> {
+    pub(crate) limits: SchemaLimits,
+    pub(crate) regex_limits: &'a RegexLimits,
+    pub(crate) execution: &'a ExecutionBudget,
+    pub(crate) regex_execution: &'a RegexExecutionBudget,
+    pub(crate) translator: Translator,
+}
+
 impl CompileContext {
     pub(crate) fn new<'slot, E>(
-        limits: SchemaLimits,
-        regex_limits: &RegexLimits,
-        execution: &ExecutionBudget,
-        regex_execution: &RegexExecutionBudget,
+        options: CompileContextOptions<'_>,
         mut out: Out<'slot, '_, E>,
     ) -> OResult<'slot, Self>
     where
         E: From<BudgetError>,
     {
+        let CompileContextOptions {
+            limits,
+            regex_limits,
+            execution,
+            regex_execution,
+            translator,
+        } = options;
         let execution = execution.try_clone(out.reborrow())?;
         let regex_execution = regex_execution.try_clone(out.reborrow())?;
         Ok(Self {
@@ -48,6 +63,7 @@ impl CompileContext {
             regex_limits: *regex_limits,
             execution,
             regex_execution,
+            translator,
             ast_access_errors: RefCell::new(ErrSlot::new()),
             budget_errors: RefCell::new(ErrSlot::new()),
             builder_errors: RefCell::new(ErrSlot::new()),
@@ -68,6 +84,10 @@ impl CompileContext {
 
     pub(crate) fn regex_execution(&self) -> &RegexExecutionBudget {
         &self.regex_execution
+    }
+
+    pub(crate) const fn translator(&self) -> Translator {
+        self.translator
     }
 
     pub(crate) fn ast_access<'slot, 'borrow, T, E>(
@@ -92,7 +112,11 @@ impl CompileContext {
         match self.budget_errors.borrow_mut().try_call(operation) {
             Ok(value) => Ok(value),
             Err(caught) => {
-                diagnostics.abort(BudgetDiagnostics::make(caught.take(), span));
+                diagnostics.abort(BudgetDiagnostics::make(
+                    caught.take(),
+                    span,
+                    diagnostics.translator(),
+                ));
                 Err(out.fail(BuildFailure::empty()))
             }
         }
@@ -139,7 +163,11 @@ impl CompileContext {
             return Err(out.fail(BuildFailure::empty()));
         }
         self.execution.consume_with(steps, out.reborrow(), |error| {
-            diagnostics.abort(BudgetDiagnostics::make(error, span));
+            diagnostics.abort(BudgetDiagnostics::make(
+                error,
+                span,
+                diagnostics.translator(),
+            ));
             BuildFailure::empty()
         })
     }
@@ -269,40 +297,52 @@ fn builder_diagnostic(
 ) -> Diagnostic {
     let span = error.source_span().unwrap_or(span);
     if let Some(access) = error.schema_access() {
-        EmergencyDiagnostics::internal(span, EmergencyDiagnostics::schema_access_context(access))
+        EmergencyDiagnostics::internal(
+            span,
+            EmergencyDiagnostics::schema_access_context(access),
+            diagnostics.translator(),
+        )
     } else if let Some(context) = error.context() {
-        EmergencyDiagnostics::internal(span, context)
+        EmergencyDiagnostics::internal(span, context, diagnostics.translator())
     } else {
         match error {
-            BuildError::Allocation => EmergencyDiagnostics::allocation(span),
-            BuildError::Resource => EmergencyDiagnostics::resource(span),
-            BuildError::Capacity => EmergencyDiagnostics::capacity(span),
+            BuildError::Allocation => {
+                EmergencyDiagnostics::allocation(span, diagnostics.translator())
+            }
+            BuildError::Resource => EmergencyDiagnostics::resource(span, diagnostics.translator()),
+            BuildError::Capacity => EmergencyDiagnostics::capacity(span, diagnostics.translator()),
             BuildError::Internal
             | BuildError::InternalAt { .. }
             | BuildError::SchemaAccess(_)
-            | BuildError::SchemaAccessAt { .. } => schema_internal!(span),
+            | BuildError::SchemaAccessAt { .. } => schema_internal!(diagnostics.translator(), span),
             BuildError::DefaultConstraintAt { .. } => diagnostics.make_semantic(
-                diagnostic_message!(
-                    "diagnostic.schema.default_constraint_failed",
-                    "schema default does not satisfy the constraint"
-                ),
+                t! {
+                    name: "diagnostic.schema.default_constraint_failed",
+                    locale: diagnostics.translator(),
+                },
                 span,
             ),
             BuildError::DefaultEvaluationAt { failure, .. } => match failure {
                 EvalFailure::Arithmetic => diagnostics.make_semantic(
-                    diagnostic_message!(
-                        "diagnostic.schema.default_numeric_evaluation_failed",
-                        "schema default numeric evaluation failed"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.default_numeric_evaluation_failed",
+                        locale: diagnostics.translator(),
+                    },
                     span,
                 ),
-                EvalFailure::Resource => EmergencyDiagnostics::resource(span),
-                EvalFailure::Allocation => EmergencyDiagnostics::allocation(span),
-                EvalFailure::Capacity => EmergencyDiagnostics::capacity(span),
+                EvalFailure::Resource => {
+                    EmergencyDiagnostics::resource(span, diagnostics.translator())
+                }
+                EvalFailure::Allocation => {
+                    EmergencyDiagnostics::allocation(span, diagnostics.translator())
+                }
+                EvalFailure::Capacity => {
+                    EmergencyDiagnostics::capacity(span, diagnostics.translator())
+                }
                 EvalFailure::Internal
                 | EvalFailure::InternalAt(_)
                 | EvalFailure::SchemaAccess(_) => {
-                    schema_internal!(span)
+                    schema_internal!(diagnostics.translator(), span)
                 }
             },
         }
@@ -321,7 +361,9 @@ fn freeze_default_failures_map_to_semantic_diagnostics() -> TestResult {
         .into_test_value()?;
     let span = SourceSpan::new(SourceId::new(0), span);
     let diagnostics = operations
-        .diagnostic(|out| DiagnosticCollector::new(4, span, &execution, out))
+        .diagnostic(|out| {
+            DiagnosticCollector::new(4, span, &execution, Translator::new(Language::English), out)
+        })
         .into_test_value()?;
 
     let constraint = builder_diagnostic(
@@ -331,7 +373,7 @@ fn freeze_default_failures_map_to_semantic_diagnostics() -> TestResult {
     );
     test_verify_eq!(constraint.code(), DiagnosticCode::SCHEMA_SEMANTIC_ERROR);
     test_verify_eq!(
-        constraint.message(),
+        constraint.message().test_value()?,
         "schema default does not satisfy the constraint"
     );
     test_verify_eq!(constraint.primary(), Some(span));
@@ -346,7 +388,7 @@ fn freeze_default_failures_map_to_semantic_diagnostics() -> TestResult {
     );
     test_verify_eq!(evaluation.code(), DiagnosticCode::SCHEMA_SEMANTIC_ERROR);
     test_verify_eq!(
-        evaluation.message(),
+        evaluation.message().test_value()?,
         "schema default numeric evaluation failed"
     );
     test_verify_eq!(evaluation.primary(), Some(span));

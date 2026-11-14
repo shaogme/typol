@@ -6,28 +6,28 @@ mod values;
 pub(crate) use compilation::{
     AnnotationCompilation, AnnotationParts, AnnotationSlot, AnnotationSlotParts,
 };
+pub(crate) use typol_semantic::{
+    ConstraintKind, ConstraintLayer, ConstraintRecord as CompiledConstraint, EnvironmentRecord,
+    NumberValue as TypedNumber, RegexId, StoredConstraintData as ConstraintData,
+};
+
 use compiler::{AnnotationRuleCompiler, CompiledAnnotation};
 use tasks::{AnnotationTaskCollector, MakeTasksInput};
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 use values::AnnotationValues;
 
 use crate::{
     SchemaLimits,
     annotations::values::{AnnotationError, ConstraintValidationInput},
     context::CompileContext,
-    diagnostics::{BuildFailure, DiagnosticCollector, EmergencyDiagnostics},
+    diagnostics::{BuildFailure, DiagnosticCollector, DuplicateLabel, EmergencyDiagnostics},
     module_tree::ModuleTree,
     regex::{CompiledRegexConstraints, RegexConstraintCompiler},
     symbols::{FieldSymbolId, SymbolTable, TypeSymbolId, VariantSymbolId},
     types::{ResolvedTypeGraph, TypeUseId},
 };
-pub(crate) use typol_semantic::{
-    ConstraintKind, ConstraintLayer, ConstraintRecord as CompiledConstraint, EnvironmentRecord,
-    NumberValue as TypedNumber, RegexId, StoredConstraintData as ConstraintData,
-};
-
 use opeo::{ErrSlot, OResult, Out};
-use typol_core::{ChargedVec, SourceSpan};
+use typol_core::{ChargedVec, RelatedLocationRole, SourceSpan};
 use typol_syntax::{AnnotationKind, AnnotationList, BuiltinType};
 
 pub(crate) struct AnnotationCompiler;
@@ -167,7 +167,7 @@ impl AnnotationCompiler {
                 out.reborrow(),
             )?;
             let Some(target) = task_output_mut(&mut output, task.owner, task.span) else {
-                diagnostics.push(schema_internal!(task.span));
+                diagnostics.push(schema_internal!(diagnostics.translator(), task.span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             *target = constraints;
@@ -224,7 +224,7 @@ fn compile_annotation_list<'slot>(
             BuildFailure::from,
         )?;
         let Some(annotation) = annotation else {
-            diagnostics.push(schema_internal!(span));
+            diagnostics.push(schema_internal!(diagnostics.translator(), span));
             return Err(out.fail(BuildFailure::empty()));
         };
         let annotation_kind = context.budget.ast_access(
@@ -242,18 +242,24 @@ fn compile_annotation_list<'slot>(
             return Err(out.fail(BuildFailure::empty()));
         }
         if let Some((_, earlier)) = seen.iter().find(|(kind, _)| *kind == annotation_kind) {
-            diagnostics.push(diagnostics.make_duplicate(
-                diagnostic_message!(
-                    "diagnostic.schema.annotation_repeated",
-                    "the same annotation cannot be repeated in one declaration"
+            diagnostics.push(
+                diagnostics.make_duplicate(
+                    t! {
+                        name: "diagnostic.schema.annotation_repeated",
+                        locale: diagnostics.translator(),
+                    },
+                    annotation.span(),
+                    DuplicateLabel {
+                        span: *earlier,
+                        role: RelatedLocationRole::PreviousDeclaration,
+                        message: t! {
+                            name: "diagnostic.label.annotation_first_appears_here",
+                            locale: diagnostics.translator(),
+                        }
+                        .into(),
+                    },
                 ),
-                annotation.span(),
-                *earlier,
-                diagnostic_message!(
-                    "diagnostic.label.annotation_first_appears_here",
-                    "the duplicate annotation first appears here"
-                ),
-            ));
+            );
             if diagnostics.is_stopped() {
                 return Err(out.fail(BuildFailure::empty()));
             }
@@ -262,8 +268,11 @@ fn compile_annotation_list<'slot>(
         seen.try_push((annotation_kind, annotation.span()), out.reborrow())?;
 
         if annotation_kind == AnnotationKind::Regex {
-            let valid_target = match AnnotationValues::effective_builtin(context.types, task.target)
-            {
+            let valid_target = match AnnotationValues::effective_builtin(
+                context.types,
+                task.target,
+                context.budget.translator(),
+            ) {
                 Ok(target) => matches!(target, Some((BuiltinType::String, _))),
                 Err(error) => {
                     report_annotation_error(error, annotation.span(), diagnostics);
@@ -310,7 +319,10 @@ fn compile_annotation_list<'slot>(
         }) {
             Ok(CompiledAnnotation::Constraint(data)) => {
                 let Some(kind) = AnnotationRuleCompiler::constraint_kind(annotation_kind) else {
-                    diagnostics.abort(schema_internal!(annotation.span()));
+                    diagnostics.abort(schema_internal!(
+                        diagnostics.translator(),
+                        annotation.span()
+                    ));
                     return Err(out.fail(BuildFailure::empty()));
                 };
                 output.rules_mut().try_push(
@@ -348,27 +360,46 @@ fn report_annotation_error(
             span,
             earlier_span,
         } => {
-            diagnostics.push(diagnostics.make_duplicate(
-                message,
-                span,
-                earlier_span,
-                diagnostic_message!(
-                    "diagnostic.label.bound_first_appears_here",
-                    "the bound first appears here"
+            diagnostics.push(
+                diagnostics.make_duplicate(
+                    message,
+                    span,
+                    DuplicateLabel {
+                        span: earlier_span,
+                        role: RelatedLocationRole::PreviousDeclaration,
+                        message: t! {
+                            name: "diagnostic.label.bound_first_appears_here",
+                            locale: diagnostics.translator(),
+                        }
+                        .into(),
+                    },
                 ),
-            ));
+            );
         }
         AnnotationError::Allocation => {
-            diagnostics.push(EmergencyDiagnostics::allocation(fallback));
+            diagnostics.push(EmergencyDiagnostics::allocation(
+                fallback,
+                diagnostics.translator(),
+            ));
         }
         AnnotationError::Resource => {
-            diagnostics.push(EmergencyDiagnostics::resource(fallback));
+            diagnostics.push(EmergencyDiagnostics::resource(
+                fallback,
+                diagnostics.translator(),
+            ));
         }
         AnnotationError::Capacity => {
-            diagnostics.push(EmergencyDiagnostics::capacity(fallback));
+            diagnostics.push(EmergencyDiagnostics::capacity(
+                fallback,
+                diagnostics.translator(),
+            ));
         }
         AnnotationError::Internal(context) => {
-            diagnostics.abort(EmergencyDiagnostics::internal(fallback, context));
+            diagnostics.abort(EmergencyDiagnostics::internal(
+                fallback,
+                context,
+                diagnostics.translator(),
+            ));
         }
     }
 }

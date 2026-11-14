@@ -8,8 +8,8 @@ use crate::{
     },
 };
 use opeo::{OResult, Out};
-use typol_core::{ChargedVec, Diagnostic, DiagnosticMessage, SourceSpan};
-use typol_i18n::{diagnostic_key, diagnostic_message};
+use typol_core::{ChargedVec, Diagnostic, SourceSpan};
+use typol_i18n::t;
 
 struct ArrayFrame {
     start: SourceSpan,
@@ -55,7 +55,7 @@ impl DefaultParser {
 
         loop {
             parser.execution.consume_with(1, out.reborrow(), |error| {
-                SyntaxDiagnostic::budget(error, ParserControl::eof_span(parser))
+                SyntaxDiagnostic::budget(error, ParserControl::eof_span(parser), parser.translator)
             })?;
 
             completed = match completed.take() {
@@ -128,6 +128,7 @@ impl DefaultParser {
             return Ok(Some(value));
         }
         ParserControl::try_push(
+            parser,
             frames,
             DefaultFrame::Array(ArrayFrame { start, elements }),
             start,
@@ -179,6 +180,7 @@ impl DefaultParser {
         let entries =
             ParserControl::new_vec(parser, ParserControl::eof_span(parser), out.reborrow())?;
         ParserControl::try_push(
+            parser,
             frames,
             DefaultFrame::Braced(BracedFrame {
                 start,
@@ -205,6 +207,7 @@ impl DefaultParser {
             TokenKind::Symbol(Symbol::LeftParen) => {
                 let open = ParserControl::bump(parser, out.reborrow())?.span;
                 ParserControl::try_push(
+                    parser,
                     frames,
                     DefaultFrame::Single(SingleFrame {
                         start,
@@ -280,9 +283,10 @@ impl DefaultParser {
             mut elements,
         } = frame;
         let value_span = parser.ast.span(value, out.reborrow())?;
-        ParserControl::try_push(&mut elements, value, value_span, out.reborrow())?;
+        ParserControl::try_push(parser, &mut elements, value, value_span, out.reborrow())?;
         if !DefaultParser::finish_default_list(parser, Symbol::RightBracket, out.reborrow())? {
             ParserControl::try_push(
+                parser,
                 frames,
                 DefaultFrame::Array(ArrayFrame { start, elements }),
                 start,
@@ -323,10 +327,11 @@ impl DefaultParser {
         let entry = parser
             .ast
             .brace_entry_new(key, value, span, out.reborrow())?;
-        ParserControl::try_push(&mut entries, entry, entry_start, out.reborrow())?;
+        ParserControl::try_push(parser, &mut entries, entry, entry_start, out.reborrow())?;
         if !DefaultParser::finish_default_list(parser, Symbol::RightBrace, out.reborrow())? {
             let key = DefaultParser::parse_brace_key(parser, variant.is_some(), out.reborrow())?;
             ParserControl::try_push(
+                parser,
                 frames,
                 DefaultFrame::Braced(BracedFrame {
                     start,
@@ -430,21 +435,17 @@ impl DefaultParser {
             }
             _ => {
                 let message = if identifier_only {
-                    "object field names must be identifiers"
+                    t! {
+                        name: "diagnostic.syntax.object_field_names",
+                        locale: parser.translator,
+                    }
                 } else {
-                    "braced literal keys must be identifiers or strings"
+                    t! {
+                        name: "diagnostic.syntax.braced_literal_keys",
+                        locale: parser.translator,
+                    }
                 };
-                let localizer = if identifier_only {
-                    diagnostic_key!("diagnostic.syntax.object_field_names")
-                } else {
-                    diagnostic_key!("diagnostic.syntax.braced_literal_keys")
-                };
-                return ParserControl::syntax_failure(
-                    parser,
-                    info.span,
-                    DiagnosticMessage::localized(message, localizer),
-                    out.reborrow(),
-                );
+                return ParserControl::syntax_failure(parser, info.span, message, out.reborrow());
             }
         };
         ParserControl::expect_symbol(parser, Symbol::Colon, out.reborrow())?;
@@ -480,10 +481,10 @@ impl DefaultParser {
                 return ParserControl::syntax_failure(
                     parser,
                     info.span,
-                    diagnostic_message!(
-                        "diagnostic.syntax.expected_schema_default",
-                        "expected a Schema default value here"
-                    ),
+                    t! {
+                        name: "diagnostic.syntax.expected_schema_default",
+                        locale: parser.translator,
+                    },
                     out.reborrow(),
                 );
             }

@@ -133,6 +133,7 @@ impl DescriptorProvider {
             _ => Err(out.reborrow().fail(CodecErrors::emergency(
                 CodecStage::Binding,
                 Failure::internal(PROVIDER_TYPE_MISMATCH.with_object_id(descriptor.slot as u64)),
+                context.session().translator(),
             ))),
         }
     }

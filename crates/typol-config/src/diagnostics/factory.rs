@@ -1,12 +1,18 @@
 use crate::context::SemanticStatus;
+use alloc::borrow::Cow;
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage,
-    DiagnosticMessageKey, ExecutionBudget, InstancePath, LocatedSpan, SourceSpan, ValueSource,
+    BudgetError, ChargedString, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext,
+    DiagnosticFieldStatus, DiagnosticLabelInput, DiagnosticMessage, DiagnosticParameters,
+    ExecutionBudget, InstancePath, LocatedSpan, RelatedLocationRole, SourceSpan, ValueSource,
     diagnostic_context,
 };
-use typol_i18n::{diagnostic_key, diagnostic_message};
+use typol_i18n::{Translator, t};
 use typol_semantic::{EvalError, EvalFailure, SchemaAccessError};
+use u18n::RenderError;
+
+#[cfg(test)]
+use typol_i18n::Language;
 
 #[cfg(test)]
 use typol_core::{SourceId, Span};
@@ -18,11 +24,6 @@ static CONFIG_EVALUATION_UNSPECIFIED: DiagnosticContext = diagnostic_context!(
     "value-validation",
     "evaluation-error-without-context",
 );
-static CONFIG_UNCLASSIFIED_INTERNAL: DiagnosticContext = diagnostic_context!(
-    "typol-config",
-    "diagnostic-construction",
-    "unclassified-internal-error",
-);
 static CONFIG_DIAGNOSTIC_LIMIT: DiagnosticContext = diagnostic_context!(
     "typol-config",
     "diagnostic-buffer",
@@ -31,12 +32,30 @@ static CONFIG_DIAGNOSTIC_LIMIT: DiagnosticContext = diagnostic_context!(
 
 pub(crate) struct DetailedDiagnosticRequest<'message> {
     pub(crate) code: DiagnosticCode,
-    pub(crate) key: Option<DiagnosticMessageKey>,
-    pub(crate) message: &'message str,
+    pub(crate) message: DiagnosticMessage<'message>,
     pub(crate) primary: Option<LocatedSpan>,
     pub(crate) path: Option<InstancePath>,
     pub(crate) value_source: Option<ValueSource>,
     pub(crate) context: Option<DiagnosticContext>,
+    pub(crate) translator: Translator,
+}
+
+pub(crate) struct WorkspaceDiagnosticRequest {
+    pub(crate) code: DiagnosticCode,
+    pub(crate) message: Result<ChargedString, RenderError>,
+    pub(crate) parameters: Option<DiagnosticParameters>,
+    pub(crate) primary: Option<LocatedSpan>,
+    pub(crate) path: Option<InstancePath>,
+    pub(crate) value_source: Option<ValueSource>,
+    pub(crate) context: Option<DiagnosticContext>,
+    pub(crate) translator: Translator,
+}
+
+pub(crate) struct LabelMessageRequest<S, M> {
+    pub(crate) span: S,
+    pub(crate) message: M,
+    pub(crate) role: RelatedLocationRole,
+    pub(crate) translator: Translator,
 }
 
 pub(crate) struct ExecutionDiagnostic;
@@ -49,51 +68,46 @@ pub(crate) struct RuleFailureLocation {
 }
 
 pub(crate) struct RuleFailureMessage<'message> {
-    pub(crate) text: &'message str,
+    pub(crate) message: DiagnosticMessage<'message>,
     pub(crate) redacted: bool,
-    pub(crate) key: Option<DiagnosticMessageKey>,
+    pub(crate) translator: Translator,
 }
 
 impl ExecutionDiagnostic {
     fn display_message<'message>(
         message: RuleFailureMessage<'message>,
         error: Option<EvalError>,
-    ) -> &'message str {
+    ) -> DiagnosticMessage<'message> {
+        let translator = message.translator;
         if message.redacted {
-            return "value is hidden";
+            return t! {
+                name: "diagnostic.validation.value_hidden",
+                locale: translator,
+            }
+            .into();
         }
         match error.map(EvalError::kind) {
-            Some(EvalFailure::Internal | EvalFailure::InternalAt(_)) => {
-                "runtime validation type or location relationship is invalid"
+            Some(EvalFailure::Internal | EvalFailure::InternalAt(_)) => t! {
+                name: "diagnostic.validation.runtime_internal",
+                locale: translator,
             }
-            Some(EvalFailure::Resource) => "runtime validation depth exceeded the limit",
-            Some(EvalFailure::Allocation) => "runtime validation allocation failed",
-            Some(EvalFailure::Arithmetic) => "constraint expression numeric evaluation failed",
-            _ => message.text,
-        }
-    }
-
-    fn key(
-        message: &RuleFailureMessage<'_>,
-        error: Option<EvalError>,
-    ) -> Option<DiagnosticMessageKey> {
-        if message.redacted {
-            return Some(diagnostic_key!("diagnostic.validation.value_hidden"));
-        }
-        match error.map(EvalError::kind) {
-            Some(EvalFailure::Internal | EvalFailure::InternalAt(_)) => {
-                Some(diagnostic_key!("diagnostic.validation.runtime_internal"))
+            .into(),
+            Some(EvalFailure::Resource) => t! {
+                name: "diagnostic.validation.runtime_limit",
+                locale: translator,
             }
-            Some(EvalFailure::Resource) => {
-                Some(diagnostic_key!("diagnostic.validation.runtime_limit"))
+            .into(),
+            Some(EvalFailure::Allocation) => t! {
+                name: "diagnostic.validation.runtime_allocation",
+                locale: translator,
             }
-            Some(EvalFailure::Allocation) => {
-                Some(diagnostic_key!("diagnostic.validation.runtime_allocation"))
+            .into(),
+            Some(EvalFailure::Arithmetic) => t! {
+                name: "diagnostic.validation.constraint_numeric_evaluation_failed",
+                locale: translator,
             }
-            Some(EvalFailure::Arithmetic) => Some(diagnostic_key!(
-                "diagnostic.validation.constraint_numeric_evaluation_failed"
-            )),
-            _ => message.key,
+            .into(),
+            _ => message.message,
         }
     }
 
@@ -115,23 +129,23 @@ impl ExecutionDiagnostic {
             Err(error) => ExecutionDiagnostic::code(error),
         };
         let error = result.err();
-        let key = Self::key(&message, error);
+        let translator = message.translator;
         let message = Self::display_message(message, error);
         let context = error.map(|error| error.context().unwrap_or(CONFIG_EVALUATION_UNSPECIFIED));
         let mut diagnostic = DiagnosticFactory::detailed_diagnostic(DetailedDiagnosticRequest {
             code,
-            key,
             message,
             primary: span,
             path: Some(path),
             value_source: source,
             context,
+            translator,
         });
         if let Some(error) = error {
             if diagnostic.code() == DiagnosticCode::ALLOCATION_FAILED {
                 return Err(out.fail(diagnostic));
             }
-            if diagnostic.message().is_empty() {
+            if diagnostic.is_emergency() {
                 return Ok(Some(diagnostic));
             }
             if let Some(error_span) = error.source_span() {
@@ -139,11 +153,15 @@ impl ExecutionDiagnostic {
                 if Some(error_span) != span && error_span.source_span() != constraint {
                     DiagnosticFactory::add_label_message(
                         &mut diagnostic,
-                        error_span,
-                        diagnostic_message!(
-                            "diagnostic.label.evaluation_failed_here",
-                            "evaluation failed here"
-                        ),
+                        LabelMessageRequest {
+                            span: error_span,
+                            message: t! {
+                                name: "diagnostic.label.evaluation_failed_here",
+                                locale: translator,
+                            },
+                            role: RelatedLocationRole::PreviousDeclaration,
+                            translator,
+                        },
                         out.reborrow(),
                     )?;
                 }
@@ -152,16 +170,20 @@ impl ExecutionDiagnostic {
         if diagnostic.code() == DiagnosticCode::ALLOCATION_FAILED {
             return Err(out.fail(diagnostic));
         }
-        if diagnostic.message().is_empty() {
+        if diagnostic.is_emergency() {
             return Ok(Some(diagnostic));
         }
         DiagnosticFactory::add_label_message(
             &mut diagnostic,
-            constraint,
-            diagnostic_message!(
-                "diagnostic.label.constraint_defined_here",
-                "constraint defined here"
-            ),
+            LabelMessageRequest {
+                span: constraint,
+                message: t! {
+                    name: "diagnostic.label.constraint_defined_here",
+                    locale: translator,
+                },
+                role: RelatedLocationRole::ConstraintDefinition,
+                translator,
+            },
             out.reborrow(),
         )?;
         Ok(Some(diagnostic))
@@ -201,10 +223,37 @@ impl BudgetDiagnostic {
         ChargedVec::new(budget, out)
     }
 
-    pub(crate) fn from_error(error: impl Into<BudgetError>) -> Diagnostic {
+    pub(crate) fn from_error(error: impl Into<BudgetError>, translator: Translator) -> Diagnostic {
         let error = error.into();
-        let mut diagnostic = Diagnostic::emergency(error.diagnostic_code());
-        diagnostic.set_context(error.context());
+        let code = error.diagnostic_code();
+        let context = error.context();
+        let message = match error {
+            BudgetError::Allocation => t! {
+                name: "diagnostic.emergency.allocation_failed",
+                locale: translator,
+            },
+            BudgetError::CapacityExceeded => t! {
+                name: "diagnostic.emergency.capacity_exceeded",
+                locale: translator,
+            },
+            BudgetError::InvariantViolation(_) => t! {
+                name: "diagnostic.emergency.internal_error",
+                locale: translator,
+            },
+            BudgetError::Resource
+            | BudgetError::RegexSteps
+            | BudgetError::RegexSearchSteps
+            | BudgetError::RegexWorkspace => t! {
+                name: "diagnostic.emergency.resource_limit_exceeded",
+                locale: translator,
+            },
+        };
+        let mut diagnostic = match message {
+            Ok(Cow::Borrowed(message)) => Diagnostic::emergency(code, message),
+            Ok(Cow::Owned(_)) => Diagnostic::translation_failure(code, RenderError::InvalidCatalog),
+            Err(error) => Diagnostic::translation_failure(code, error),
+        };
+        diagnostic.set_context(context);
         diagnostic
     }
 }
@@ -214,14 +263,28 @@ pub(crate) struct DiagnosticFactory;
 impl DiagnosticFactory {
     pub(crate) fn clear_path(diagnostic: &mut Diagnostic) {
         Self::bind_path(diagnostic, None);
+        diagnostic.set_path_status(DiagnosticFieldStatus::Redacted);
     }
 
-    pub(crate) fn add_label_message<'slot>(
+    pub(crate) fn add_label_message<'slot, 'message, S, M>(
         diagnostic: &mut Diagnostic,
-        span: impl Into<LocatedSpan>,
-        message: DiagnosticMessage<'_>,
+        request: LabelMessageRequest<S, M>,
         out: Out<'slot, '_, Diagnostic>,
-    ) -> OResult<'slot, ()> {
+    ) -> OResult<'slot, ()>
+    where
+        S: Into<LocatedSpan>,
+        M: Into<DiagnosticMessage<'message>>,
+    {
+        let LabelMessageRequest {
+            span,
+            message,
+            role,
+            translator,
+        } = request;
+        let message = message.into();
+        if let Some(error) = message.failure() {
+            return Err(out.fail(Diagnostic::translation_failure(diagnostic.code(), error)));
+        }
         let mut errors = ErrSlot::new();
         match errors.try_call(|mut budget_out| {
             let budget = match diagnostic.budget() {
@@ -229,105 +292,89 @@ impl DiagnosticFactory {
                 None => None,
             };
             diagnostic.try_add_label_with_text(
-                span,
-                message,
+                DiagnosticLabelInput {
+                    span,
+                    text: message.text(),
+                    role,
+                },
                 budget.as_ref(),
                 budget_out.reborrow(),
             )
         }) {
             Ok(()) => Ok(()),
-            Err(caught) => Err(out.fail(BudgetDiagnostic::from_error(caught.take()))),
+            Err(caught) => Err(out.fail(BudgetDiagnostic::from_error(caught.take(), translator))),
         }
     }
 
-    pub(crate) fn schema_access(error: SchemaAccessError) -> Diagnostic {
-        Self::internal(error.context(), None, None, None)
+    pub(crate) fn schema_access(error: SchemaAccessError, translator: Translator) -> Diagnostic {
+        Self::internal(error.context(), None, None, None, translator)
     }
 
-    pub(crate) fn make_diagnostic<'message>(
-        code: DiagnosticCode,
-        message: impl Into<DiagnosticMessage<'message>>,
-        primary: Option<LocatedSpan>,
-        path: Option<InstancePath>,
-        value_source: Option<ValueSource>,
-    ) -> Diagnostic {
-        let message = message.into();
+    pub(crate) fn make_diagnostic(request: DetailedDiagnosticRequest<'_>) -> Diagnostic {
+        Self::detailed_diagnostic(request)
+    }
+
+    pub(crate) fn detailed_diagnostic(request: DetailedDiagnosticRequest<'_>) -> Diagnostic {
+        let DetailedDiagnosticRequest {
+            code,
+            message,
+            primary,
+            path,
+            value_source,
+            context,
+            translator,
+        } = request;
         let budget = path.as_ref().and_then(InstancePath::budget);
-        if code == DiagnosticCode::INTERNAL_ERROR {
-            return Self::internal(CONFIG_UNCLASSIFIED_INTERNAL, primary, path, value_source);
-        }
-        if budget.is_none()
-            && matches!(
-                code,
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
-                    | DiagnosticCode::ALLOCATION_FAILED
-                    | DiagnosticCode::SOURCE_INPUT_ERROR
-            )
-        {
-            let mut diagnostic = Diagnostic::emergency(code);
-            diagnostic.set_located_primary(primary);
-            Self::bind_path(&mut diagnostic, path);
-            diagnostic.set_value_source(value_source);
-            return diagnostic;
-        }
         let mut errors = ErrSlot::new();
         let mut diagnostic =
             match errors.try_call(|out| Diagnostic::try_new(code, message, budget, out)) {
                 Ok(diagnostic) => diagnostic,
-                Err(caught) => {
-                    let mut diagnostic = BudgetDiagnostic::from_error(caught.take());
-                    diagnostic.set_located_primary(primary);
-                    Self::bind_path(&mut diagnostic, path);
-                    diagnostic.set_value_source(value_source);
-                    return diagnostic;
-                }
+                Err(caught) => BudgetDiagnostic::from_error(caught.take(), translator),
             };
-        if let Some(key) = message.key() {
-            diagnostic.set_message_key(Some(key));
-        }
+        diagnostic.set_context(context);
         diagnostic.set_located_primary(primary);
         Self::bind_path(&mut diagnostic, path);
         diagnostic.set_value_source(value_source);
         diagnostic
     }
 
-    pub(crate) fn detailed_diagnostic(request: DetailedDiagnosticRequest<'_>) -> Diagnostic {
-        let DetailedDiagnosticRequest {
+    pub(crate) fn workspace_diagnostic(request: WorkspaceDiagnosticRequest) -> Diagnostic {
+        let WorkspaceDiagnosticRequest {
             code,
-            key,
             message,
+            parameters,
             primary,
             path,
             value_source,
             context,
+            translator,
         } = request;
-        if matches!(
-            code,
-            DiagnosticCode::ALLOCATION_FAILED
-                | DiagnosticCode::SOURCE_INPUT_ERROR
-                | DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED
-        ) {
-            let mut diagnostic = Diagnostic::emergency(code);
-            diagnostic.set_context(context);
-            diagnostic.set_located_primary(primary);
-            diagnostic.set_value_source(value_source);
-            return diagnostic;
-        }
         let budget = path.as_ref().and_then(InstancePath::budget);
         let mut errors = ErrSlot::new();
-        let mut diagnostic = match errors.try_call(|out| match key {
-            Some(key) => Diagnostic::try_new(
-                code,
-                DiagnosticMessage::localized(message, key),
-                budget,
-                out,
-            ),
-            None => Diagnostic::try_new(code, message, budget, out),
-        }) {
-            Ok(diagnostic) => diagnostic,
-            Err(caught) => BudgetDiagnostic::from_error(caught.take()),
+        let mut diagnostic = match message {
+            Ok(text) => match errors
+                .try_call(|out| Diagnostic::try_new_with_text(code, text, parameters, budget, out))
+            {
+                Ok(diagnostic) => diagnostic,
+                Err(caught) => BudgetDiagnostic::from_error(caught.take(), translator),
+            },
+            Err(error) => Diagnostic::translation_failure(code, error),
         };
         diagnostic.set_context(context);
+        diagnostic.set_located_primary(primary);
+        Self::bind_path(&mut diagnostic, path);
+        diagnostic.set_value_source(value_source);
+        diagnostic
+    }
+
+    pub(crate) fn budget_failure(
+        error: impl Into<BudgetError>,
+        primary: Option<LocatedSpan>,
+        path: Option<InstancePath>,
+        value_source: Option<ValueSource>,
+        translator: Translator,
+    ) -> Diagnostic {
+        let mut diagnostic = BudgetDiagnostic::from_error(error, translator);
         diagnostic.set_located_primary(primary);
         Self::bind_path(&mut diagnostic, path);
         diagnostic.set_value_source(value_source);
@@ -339,8 +386,21 @@ impl DiagnosticFactory {
         primary: Option<LocatedSpan>,
         path: Option<InstancePath>,
         value_source: Option<ValueSource>,
+        translator: Translator,
     ) -> Diagnostic {
-        let mut diagnostic = Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR);
+        let mut diagnostic = match t! {
+            name: "diagnostic.emergency.internal_error",
+            locale: translator,
+        } {
+            Ok(Cow::Borrowed(message)) => {
+                Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR, message)
+            }
+            Ok(Cow::Owned(_)) => Diagnostic::translation_failure(
+                DiagnosticCode::INTERNAL_ERROR,
+                RenderError::InvalidCatalog,
+            ),
+            Err(error) => Diagnostic::translation_failure(DiagnosticCode::INTERNAL_ERROR, error),
+        };
         diagnostic.set_context(Some(context));
         diagnostic.set_located_primary(primary);
         Self::bind_path(&mut diagnostic, path);
@@ -349,8 +409,25 @@ impl DiagnosticFactory {
     }
 
     /// Bounded diagnostics avoid message allocation so failures preserve the terminal code.
-    pub(crate) fn limit_diagnostic(primary: Option<LocatedSpan>) -> Diagnostic {
-        let mut diagnostic = Diagnostic::emergency(DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED);
+    pub(crate) fn limit_diagnostic(
+        primary: Option<LocatedSpan>,
+        translator: Translator,
+    ) -> Diagnostic {
+        let mut diagnostic = match t! {
+            name: "diagnostic.emergency.diagnostic_limit_reached",
+            locale: translator,
+        } {
+            Ok(Cow::Borrowed(message)) => {
+                Diagnostic::emergency(DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED, message)
+            }
+            Ok(Cow::Owned(_)) => Diagnostic::translation_failure(
+                DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED,
+                RenderError::InvalidCatalog,
+            ),
+            Err(error) => {
+                Diagnostic::translation_failure(DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED, error)
+            }
+        };
         diagnostic.set_context(Some(CONFIG_DIAGNOSTIC_LIMIT));
         diagnostic.set_located_primary(primary);
         diagnostic
@@ -360,8 +437,9 @@ impl DiagnosticFactory {
         primary: Option<LocatedSpan>,
         _path: Option<InstancePath>,
         value_source: Option<ValueSource>,
+        translator: Translator,
     ) -> Diagnostic {
-        let mut diagnostic = Diagnostic::emergency(DiagnosticCode::ALLOCATION_FAILED);
+        let mut diagnostic = BudgetDiagnostic::from_error(BudgetError::Allocation, translator);
         diagnostic.set_located_primary(primary);
         diagnostic.set_value_source(value_source);
         diagnostic
@@ -376,14 +454,8 @@ impl DiagnosticFactory {
             };
             diagnostic.try_set_path(path, budget.as_ref(), out.reborrow())
         }) {
-            let error = BudgetDiagnostic::from_error(caught.take());
-            let primary = diagnostic.located_primary();
-            let value_source = diagnostic.value_source();
-            let context = diagnostic.context();
-            *diagnostic = error;
-            diagnostic.set_located_primary(primary);
-            diagnostic.set_value_source(value_source);
-            diagnostic.set_context(context);
+            let _ = caught.take();
+            diagnostic.set_path_status(DiagnosticFieldStatus::Unavailable);
         }
     }
 
@@ -395,13 +467,16 @@ impl DiagnosticFactory {
     pub(crate) fn span_through<'slot, 'borrow>(
         start: LocatedSpan,
         end: LocatedSpan,
+        translator: Translator,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, LocatedSpan> {
         match start.through(end) {
             Some(span) => Ok(span),
             None => {
-                let mut diagnostic =
-                    BudgetDiagnostic::from_error(BudgetError::invariant(&CONFIG_SPAN_COMBINATION));
+                let mut diagnostic = BudgetDiagnostic::from_error(
+                    BudgetError::invariant(&CONFIG_SPAN_COMBINATION),
+                    translator,
+                );
                 diagnostic.set_located_primary(Some(start));
                 Err(out.fail(diagnostic))
             }
@@ -412,26 +487,29 @@ impl DiagnosticFactory {
 #[cfg(test)]
 #[test]
 fn execution_redaction_uses_explicit_state() {
+    let translator = Translator::new(Language::English);
     let hidden = ExecutionDiagnostic::display_message(
         RuleFailureMessage {
-            text: "arbitrary non-secret text",
+            message: DiagnosticMessage::custom("arbitrary non-secret text"),
             redacted: true,
-            key: None,
+            translator,
         },
         Some(EvalError::Internal),
     );
-    assert_eq!(hidden, "value is hidden");
+    assert!(hidden.failure().is_none());
+    assert_eq!(hidden.text(), "value is hidden");
 
     let visible = ExecutionDiagnostic::display_message(
         RuleFailureMessage {
-            text: "value is hidden",
+            message: DiagnosticMessage::custom("value is hidden"),
             redacted: false,
-            key: None,
+            translator,
         },
         Some(EvalError::Internal),
     );
+    assert!(visible.failure().is_none());
     assert_eq!(
-        visible,
+        visible.text(),
         "runtime validation type or location relationship is invalid"
     );
 }

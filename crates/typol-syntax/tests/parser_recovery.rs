@@ -1,6 +1,6 @@
 use typol_core::{BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId};
 use typol_syntax::{SchemaAst, SchemaParseOptions, SchemaParser, SyntaxErrors, SyntaxLimits};
-use typol_test_support::TestSlot;
+use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
 
 struct TestErrors {
     budget: TestSlot<BudgetError>,
@@ -25,15 +25,21 @@ impl TestErrors {
         source: &str,
         limits: &SyntaxLimits,
         budget: &ExecutionBudget,
-    ) -> Result<SchemaAst, SyntaxErrors> {
+    ) -> TestOpeoOutcome<SchemaAst, SyntaxErrors> {
         let options = SchemaParseOptions::with_syntax(*limits);
         self.syntax
-            .access(|out| SchemaParser::parse_str(source_id, source, &options, budget, out))
+            .run(|out| SchemaParser::parse_str(source_id, source, &options, budget, out))
     }
 }
 
 #[derive(Debug)]
 struct TestFailure;
+
+impl From<OpeoTestFailure> for TestFailure {
+    fn from(_: OpeoTestFailure) -> Self {
+        Self
+    }
+}
 
 macro_rules! test_assert {
     ($condition:expr $(, $($message:tt)*)?) => {{
@@ -68,16 +74,6 @@ impl<T, E> TestValue<T> for Result<T, E> {
 impl<T> TestValue<T> for Option<T> {
     fn test_value(self) -> TestResult<T> {
         self.ok_or(TestFailure)
-    }
-}
-
-trait TestError<T> {
-    fn test_error(self) -> TestResult<T>;
-}
-
-impl<T, E> TestError<E> for Result<T, E> {
-    fn test_error(self) -> TestResult<E> {
-        self.err().ok_or(TestFailure)
     }
 }
 

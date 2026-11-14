@@ -1,11 +1,11 @@
-use crate::diagnostics::{BudgetDiagnostic, DiagnosticFactory};
+use crate::diagnostics::{BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticFactory};
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, ChargedVec, ConfigValue, Diagnostic, DiagnosticCode, DiagnosticContext,
     ExecutionBudget, InstancePath, LocatedSpan, ValueEntries, ValueError, ValueErrorKind,
     ValueView, diagnostic_context,
 };
-use typol_i18n::diagnostic_message;
+use typol_i18n::{Translator, t};
 use typol_policy::ValueLimits;
 use typol_semantic::{FieldList, FieldView, SchemaAccessError, TypeView};
 
@@ -36,6 +36,7 @@ pub(super) static NORMALIZE_VALUE_CONSTRUCTION: DiagnosticContext = diagnostic_c
 );
 
 pub(crate) struct NormalizeRequest<'a> {
+    pub(crate) translator: Translator,
     pub(crate) expected: TypeView<'a>,
     pub(crate) value: ValueView<'a>,
     pub(crate) depth: usize,
@@ -45,10 +46,25 @@ pub(crate) struct NormalizeRequest<'a> {
     pub(crate) allow_unvalidated_environment_sources: bool,
 }
 
+pub(super) struct NormalizeBudgetErrors {
+    pub(super) slot: ErrSlot<BudgetError>,
+    pub(super) translator: Translator,
+}
+
+pub(super) struct NormalizeSchemaErrors {
+    pub(super) slot: ErrSlot<SchemaAccessError>,
+    pub(super) translator: Translator,
+}
+
+pub(super) struct NormalizeValueErrors {
+    pub(super) slot: ErrSlot<ValueError>,
+    pub(super) translator: Translator,
+}
+
 pub(super) struct NormalizeErrors {
-    pub(super) budget: ErrSlot<BudgetError>,
-    pub(super) schema: ErrSlot<SchemaAccessError>,
-    pub(super) value: ErrSlot<ValueError>,
+    pub(super) budget: NormalizeBudgetErrors,
+    pub(super) schema: NormalizeSchemaErrors,
+    pub(super) value: NormalizeValueErrors,
 }
 
 pub(super) struct NormalizeState<'a, 'work> {
@@ -127,7 +143,7 @@ pub(super) struct NormalizeOps;
 impl NormalizeOps {
     pub(super) fn push<'slot, 'borrow, T>(
         values: &mut ChargedVec<T>,
-        errors: &mut ErrSlot<BudgetError>,
+        errors: &mut NormalizeBudgetErrors,
         value: T,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, ()> {
@@ -135,35 +151,41 @@ impl NormalizeOps {
     }
 
     pub(super) fn budget_call<'slot, 'borrow, T>(
-        errors: &mut ErrSlot<BudgetError>,
+        errors: &mut NormalizeBudgetErrors,
         operation: impl for<'call> FnOnce(Out<'call, 'call, BudgetError>) -> OResult<'call, T>,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, T> {
-        match errors.try_call(operation) {
+        match errors.slot.try_call(operation) {
             Ok(value) => Ok(value),
-            Err(caught) => Err(out.fail(BudgetDiagnostic::from_error(caught.take()))),
+            Err(caught) => Err(out.fail(BudgetDiagnostic::from_error(
+                caught.take(),
+                errors.translator,
+            ))),
         }
     }
 
     pub(super) fn schema_call<'slot, 'borrow, T>(
-        errors: &mut ErrSlot<SchemaAccessError>,
+        errors: &mut NormalizeSchemaErrors,
         operation: impl for<'call> FnOnce(Out<'call, 'call, SchemaAccessError>) -> OResult<'call, T>,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, T> {
-        match errors.try_call(operation) {
+        match errors.slot.try_call(operation) {
             Ok(value) => Ok(value),
-            Err(caught) => Err(out.fail(DiagnosticFactory::schema_access(caught.take()))),
+            Err(caught) => Err(out.fail(DiagnosticFactory::schema_access(
+                caught.take(),
+                errors.translator,
+            ))),
         }
     }
 
     pub(super) fn value_call<'slot, 'borrow, T>(
-        errors: &mut ErrSlot<ValueError>,
+        errors: &mut NormalizeValueErrors,
         operation: impl for<'call> FnOnce(Out<'call, 'call, ValueError>) -> OResult<'call, T>,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, T> {
-        match errors.try_call(operation) {
+        match errors.slot.try_call(operation) {
             Ok(value) => Ok(value),
-            Err(caught) => Err(out.fail(Self::container_error(caught.take()))),
+            Err(caught) => Err(out.fail(Self::container_error(caught.take(), errors.translator))),
         }
     }
 
@@ -183,64 +205,81 @@ impl NormalizeOps {
 
     pub(super) fn take_single<'slot, 'borrow>(
         values: &mut impl Iterator<Item = ConfigValue>,
+        translator: Translator,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, ConfigValue> {
         let Some(value) = values.next() else {
-            return Err(
-                out.fail(BudgetDiagnostic::from_error(BudgetError::invariant(
-                    &NORMALIZE_TAKE_SINGLE,
-                ))),
-            );
+            return Err(out.fail(BudgetDiagnostic::from_error(
+                BudgetError::invariant(&NORMALIZE_TAKE_SINGLE),
+                translator,
+            )));
         };
         if values.next().is_some() {
-            return Err(
-                out.fail(BudgetDiagnostic::from_error(BudgetError::invariant(
-                    &NORMALIZE_TAKE_SINGLE,
-                ))),
-            );
+            return Err(out.fail(BudgetDiagnostic::from_error(
+                BudgetError::invariant(&NORMALIZE_TAKE_SINGLE),
+                translator,
+            )));
         }
         Ok(value)
     }
 
-    pub(super) fn invariant_error() -> Diagnostic {
-        BudgetDiagnostic::from_error(BudgetError::invariant(&NORMALIZE_FINISH_INVARIANT))
+    pub(super) fn invariant_error(translator: Translator) -> Diagnostic {
+        BudgetDiagnostic::from_error(
+            BudgetError::invariant(&NORMALIZE_FINISH_INVARIANT),
+            translator,
+        )
     }
 
-    fn container_error(error: ValueError) -> Diagnostic {
+    fn container_error(error: ValueError, translator: Translator) -> Diagnostic {
         match error.kind() {
             ValueErrorKind::AllocationFailed => {
-                BudgetDiagnostic::from_error(BudgetError::Allocation)
+                BudgetDiagnostic::from_error(BudgetError::Allocation, translator)
             }
             ValueErrorKind::ResourceLimitExceeded => {
-                BudgetDiagnostic::from_error(BudgetError::Resource)
+                BudgetDiagnostic::from_error(BudgetError::Resource, translator)
             }
             ValueErrorKind::CapacityExceeded => {
-                BudgetDiagnostic::from_error(BudgetError::CapacityExceeded)
+                BudgetDiagnostic::from_error(BudgetError::CapacityExceeded, translator)
             }
             ValueErrorKind::InternalInvariantFailure => DiagnosticFactory::internal(
                 error.context().unwrap_or(NORMALIZE_VALUE_CONSTRUCTION),
                 None,
                 None,
                 None,
+                translator,
             ),
-            ValueErrorKind::EnvironmentReferenceRequired => DiagnosticFactory::make_diagnostic(
-                DiagnosticCode::CONFIG_VALUE_ERROR,
-                "environment source requires structured reference metadata",
-                None,
-                None,
-                None,
-            ),
-            ValueErrorKind::DuplicateFieldName | ValueErrorKind::DuplicateMapKey => {
-                DiagnosticFactory::make_diagnostic(
-                    DiagnosticCode::CONFIG_VALUE_ERROR,
-                    diagnostic_message!(
-                        "diagnostic.config.duplicate_object_field_or_map_key",
-                        "duplicate object field or map key"
-                    ),
-                    None,
-                    None,
-                    None,
-                )
+            ValueErrorKind::EnvironmentReferenceRequired => {
+                DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                    code: DiagnosticCode::CONFIG_VALUE_ERROR,
+                    message: t! { name: "diagnostic.config.environment_reference_metadata_required", locale: translator }.into(),
+                    primary: None,
+                    path: None,
+                    value_source: None,
+                    context: None,
+                    translator,
+                })
+            }
+            ValueErrorKind::DuplicateFieldName => {
+                DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                    code: DiagnosticCode::CONFIG_VALUE_ERROR,
+                    message: t! { name: "diagnostic.config.duplicate_object_field", locale: translator }.into(),
+                    primary: None,
+                    path: None,
+                    value_source: None,
+                    context: None,
+                    translator,
+                })
+            }
+            ValueErrorKind::DuplicateMapKey => {
+                DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                    code: DiagnosticCode::CONFIG_VALUE_ERROR,
+                    message: t! { name: "diagnostic.config.duplicate_map_key", locale: translator }.into(),
+                    primary: None,
+                    path: None,
+                    value_source: None,
+                    context: None,
+                    translator,
+                })
             }
         }
     }

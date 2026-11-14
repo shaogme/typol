@@ -1,13 +1,16 @@
 use crate::{SchemaCompileErrors, loader::LoadedFile};
+use alloc::borrow::Cow;
 use core::mem::size_of;
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, ChargedVec, Diagnostic, DiagnosticCode, ExcerptLimits, ExecutionBudget,
     LocatedSpan, SourceExcerptSet, SourceSpan, Span, SpanLocation,
 };
+use typol_i18n::{Translator, t};
 use typol_syntax::{
     AstAccessError, Declaration, FieldDeclList, SchemaAst, TopLevelItem, VariantPayloadKind,
 };
+use u18n::RenderError;
 
 pub(crate) struct SchemaExcerpts;
 
@@ -26,6 +29,7 @@ impl SchemaExcerpts {
         files: &[LoadedFile],
         limits: ExcerptLimits,
         budget: &ExecutionBudget,
+        translator: Translator,
     ) -> SchemaCompileErrors {
         let mut excerpts = SourceExcerptSet::new(limits, Some(budget));
         if !limits.enabled() {
@@ -76,7 +80,7 @@ impl SchemaExcerpts {
                     if diagnostic_storage_failed
                         || !Self::push_diagnostic_span(
                             &mut diagnostic_spans,
-                            Self::located_diagnostic(span, location),
+                            Self::located_diagnostic(span, location, translator),
                             &mut allocation_errors,
                         )
                     {
@@ -97,6 +101,7 @@ impl SchemaExcerpts {
         locations: &[(SourceSpan, SpanLocation)],
         limits: ExcerptLimits,
         budget: &ExecutionBudget,
+        translator: Translator,
     ) -> SourceExcerptSet {
         let mut excerpts = SourceExcerptSet::new(limits, Some(budget));
         if !limits.enabled() {
@@ -138,7 +143,7 @@ impl SchemaExcerpts {
                 if diagnostic_storage_failed
                     || !Self::push_diagnostic_span(
                         &mut diagnostic_spans,
-                        Self::located_diagnostic(*span, *location),
+                        Self::located_diagnostic(*span, *location, translator),
                         &mut allocation_errors,
                     )
                 {
@@ -153,8 +158,27 @@ impl SchemaExcerpts {
         excerpts
     }
 
-    fn located_diagnostic(span: SourceSpan, location: SpanLocation) -> Diagnostic {
-        let mut diagnostic = Diagnostic::emergency(DiagnosticCode::SCHEMA_SEMANTIC_ERROR);
+    fn located_diagnostic(
+        span: SourceSpan,
+        location: SpanLocation,
+        translator: Translator,
+    ) -> Diagnostic {
+        let message = t! {
+            name: "diagnostic.emergency.internal_error",
+            locale: translator,
+        };
+        let mut diagnostic = match message {
+            Ok(Cow::Borrowed(text)) => {
+                Diagnostic::emergency(DiagnosticCode::SCHEMA_SEMANTIC_ERROR, text)
+            }
+            Ok(_) => Diagnostic::translation_failure(
+                DiagnosticCode::SCHEMA_SEMANTIC_ERROR,
+                RenderError::InvalidCatalog,
+            ),
+            Err(error) => {
+                Diagnostic::translation_failure(DiagnosticCode::SCHEMA_SEMANTIC_ERROR, error)
+            }
+        };
         diagnostic.set_located_primary(Some(LocatedSpan::new(span, Some(location))));
         diagnostic
     }

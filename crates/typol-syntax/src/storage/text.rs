@@ -5,6 +5,7 @@ use core::{
 };
 use opeo::{OResult, Out};
 use typol_core::{ChargedString, ChargedVec, Diagnostic, ExecutionBudget, SourceSpan};
+use typol_i18n::Translator;
 
 #[derive(Clone, Copy)]
 pub(crate) enum TextRef {
@@ -21,17 +22,23 @@ impl Debug for TextRef {
 pub(crate) struct TextStorage {
     text: ChargedString,
     decoded: ChargedVec<ChargedString>,
+    translator: Translator,
 }
 
 impl TextStorage {
     pub(crate) fn new<'slot>(
         execution: &ExecutionBudget,
         span: SourceSpan,
+        translator: Translator,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Self> {
-        let text = SyntaxDiagnostic::new_string(execution, span, out.reborrow())?;
-        let decoded = SyntaxDiagnostic::new_vec(execution, span, out.reborrow())?;
-        Ok(Self { text, decoded })
+        let text = SyntaxDiagnostic::new_string(execution, span, translator, out.reborrow())?;
+        let decoded = SyntaxDiagnostic::new_vec(execution, span, translator, out.reborrow())?;
+        Ok(Self {
+            text,
+            decoded,
+            translator,
+        })
     }
 
     pub(crate) fn memory_bytes(&self) -> Option<usize> {
@@ -64,7 +71,9 @@ impl TextStorage {
     ) -> OResult<'slot, &'storage str> {
         match self.resolve(reference) {
             Ok(value) => Ok(value),
-            Err(error) => Err(out.reborrow().fail(SyntaxDiagnostic::ast_access(error))),
+            Err(error) => Err(out
+                .reborrow()
+                .fail(SyntaxDiagnostic::ast_access(error, self.translator))),
         }
     }
 
@@ -75,7 +84,7 @@ impl TextStorage {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, TextRef> {
         let start = self.text.len();
-        SyntaxDiagnostic::push_str(&mut self.text, value, span, out.reborrow())?;
+        SyntaxDiagnostic::push_str(&mut self.text, value, span, self.translator, out.reborrow())?;
         Ok(TextRef::Pooled {
             start,
             end: self.text.len(),
@@ -89,7 +98,13 @@ impl TextStorage {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, TextRef> {
         let index = self.decoded.len();
-        SyntaxDiagnostic::try_push(&mut self.decoded, value, span, out.reborrow())?;
+        SyntaxDiagnostic::try_push(
+            &mut self.decoded,
+            value,
+            span,
+            self.translator,
+            out.reborrow(),
+        )?;
         Ok(TextRef::Decoded(index))
     }
 

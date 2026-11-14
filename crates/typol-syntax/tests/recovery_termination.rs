@@ -10,7 +10,7 @@ use typol_syntax::{
     SchemaParseOptions, SchemaParser, SyntaxErrors,
     opeo::{OResult, Out},
 };
-use typol_test_support::TestSlot;
+use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
 
 struct TestErrors {
     budget: TestSlot<BudgetError>,
@@ -32,13 +32,19 @@ impl TestErrors {
     fn syntax<T>(
         &mut self,
         operation: impl for<'slot> FnOnce(Out<'slot, 'slot, SyntaxErrors>) -> OResult<'slot, T>,
-    ) -> Result<T, SyntaxErrors> {
-        self.syntax.access(operation)
+    ) -> TestOpeoOutcome<T, SyntaxErrors> {
+        self.syntax.run(operation)
     }
 }
 
 #[derive(Debug)]
 struct TestFailure;
+
+impl From<OpeoTestFailure> for TestFailure {
+    fn from(_: OpeoTestFailure) -> Self {
+        Self
+    }
+}
 
 macro_rules! test_assert {
     ($condition:expr $(, $($message:tt)*)?) => {{
@@ -90,7 +96,7 @@ fn recovery_child() -> TestResult {
                 input.push(' ');
             }
             input.push_str("} struct B { y: }");
-            if let Err(errors) = errors.syntax(|out| {
+            if let TestOpeoOutcome::Error(errors) = errors.syntax(|out| {
                 SchemaParser::parse_str(
                     SourceId::new(7),
                     &input,

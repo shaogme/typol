@@ -901,14 +901,14 @@ fn loaded_fixture<T: Target>(name: &str) -> T {
     ] {
         let mut safe = format!(
             "{errors:?}{errors}{}",
-            invoke(|out| {
-                errors.render(Translator::new(Language::English), RenderOptions::default(), out)
-            })
+            invoke(|out| errors.render(RenderOptions::default(), out))
         );
         for diagnostic in errors.diagnostics().iter() {
             safe.push_str(&format!(
                 "{diagnostic:?}{}{:?}{:?}",
-                diagnostic.message(),
+                diagnostic
+                    .message()
+                    .expect("diagnostic rendering should succeed for the selected language"),
                 diagnostic.path(),
                 diagnostic.labels()
             ));

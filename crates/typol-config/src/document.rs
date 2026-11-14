@@ -4,27 +4,6 @@ mod formatter;
 mod path;
 mod syntax;
 
-use core::{
-    fmt::{self, Debug, Formatter},
-    mem::{replace, swap},
-};
-use opeo::{ErrSlot, OResult, Out};
-use typol_core::{
-    BudgetError, ChargedString, ChargedVec, ConfigValue, Diagnostic, DiagnosticCode,
-    DiagnosticContext, ExecutionBudget, SliceSource, SourceCommitError, SourceExpectation,
-    SourceRevision, SourceWriter, TextLayout, Write, WriteError, diagnostic_context,
-};
-use typol_semantic::CompiledSchema;
-
-use self::edit::{DocumentEditEngine, EditContext, SourcePatch};
-use crate::{
-    ConfigParseErrors, ConfigParseOptions, ConfigParseRequest, ConfigParser, Environment,
-    ValidatedConfigValue, instance::LocationIndex,
-};
-use encoding::{ScalarEncoder, ValueEncodingContext};
-use path::{PathLookup, SourcePathIndex};
-use syntax::SourceSyntax;
-
 pub use crate::document::edit::{
     ConfigEdit, ConfigEditError, ConfigEditErrorKind, ConfigEditOptions,
 };
@@ -33,10 +12,36 @@ pub use formatter::{
 };
 pub use path::{ConfigPath, ConfigPathSegment, ConfigReplacement};
 
+use core::{
+    fmt::{self, Debug, Formatter},
+    mem::{replace, swap},
+};
+use opeo::{ErrSlot, OResult, Out};
+use typol_core::{
+    BudgetError, ChargedString, ChargedVec, ConfigValue, DiagnosticCode, DiagnosticContext,
+    ExecutionBudget, SliceSource, SourceCommitError, SourceExpectation, SourceRevision,
+    SourceWriter, TextLayout, Write, WriteError, diagnostic_context,
+};
+use typol_semantic::CompiledSchema;
+
+use self::edit::{DocumentEditEngine, EditContext, SourcePatch};
+use crate::{
+    ConfigParseErrors, ConfigParseOptions, ConfigParseRequest, ConfigParser, Environment,
+    ValidatedConfigValue, diagnostics::DiagnosticFactory, instance::LocationIndex,
+};
+use encoding::{ScalarEncoder, ValueEncodingContext};
+use path::{PathLookup, SourcePathIndex};
+use syntax::SourceSyntax;
+
 static EDIT_SOURCE_RANGE_INVALID: DiagnosticContext = diagnostic_context!(
     "typol-config",
     "config-document-edit",
     "source-range-invalid"
+);
+static DOCUMENT_SOURCE_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-config",
+    "document-source",
+    "retained-source-invalid-utf8",
 );
 
 /// A validated configuration value together with its exact retained source text.
@@ -126,15 +131,28 @@ impl<'schema> ConfigDocument<'schema> {
             source,
             budget,
         } = request;
+        let translator = options.translator();
         let display_name = ChargedString::copy(display_name, Some(budget), out.reborrow())?;
         let source = ChargedString::from_utf8_bytes(source).map_err(|(_bytes, _error)| {
             out.reborrow().fail(ConfigParseErrors::emergency(
-                Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR),
+                DiagnosticFactory::internal(
+                    DOCUMENT_SOURCE_INVARIANT,
+                    None,
+                    None,
+                    None,
+                    translator,
+                ),
                 schema.next_source_id(),
+                translator,
             ))
         })?;
-        let index =
-            SourcePathIndex::new(&locations, value.as_config_value(), budget, out.reborrow())?;
+        let index = SourcePathIndex::new(
+            &locations,
+            value.as_config_value(),
+            budget,
+            translator,
+            out.reborrow(),
+        )?;
         Ok(ConfigDocument {
             schema,
             options,

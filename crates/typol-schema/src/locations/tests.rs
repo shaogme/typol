@@ -10,6 +10,7 @@ use typol_core::{
     DiagnosticCode, ExcerptLimits, ExecutionBudget, ExecutionLimits, LineIndex, SliceSource,
     SourceId, SourceSpan, Span,
 };
+use typol_i18n::{Language, Translator};
 use typol_syntax::{
     AstAccessError, SchemaParseOptions, SchemaParser, SourcePositionIndex, SyntaxLimits,
 };
@@ -93,7 +94,15 @@ fn location_failures_preserve_ordinary_errors_and_append_internal_tail() -> Test
         let execution = execution(&mut operations)?;
         let fallback = span(&mut operations, 0, 3)?;
         let mut collector = operations
-            .diagnostic(|out| DiagnosticCollector::new(4, fallback, &execution, out))
+            .diagnostic(|out| {
+                DiagnosticCollector::new(
+                    4,
+                    fallback,
+                    &execution,
+                    Translator::new(Language::English),
+                    out,
+                )
+            })
             .into_test_value()?;
         collector.push(collector.make_semantic("type is invalid", invalid));
         let errors = SourceLocations::errors_for_sources(
@@ -128,15 +137,22 @@ fn exhausted_cleanup_never_scans_or_changes_first_reason() -> TestResult {
     let source = " ".repeat(100_000);
     let fallback = span(&mut operations, 0, source.len())?;
     let mut collector = operations
-        .diagnostic(|out| DiagnosticCollector::new(4, fallback, &execution, out))
+        .diagnostic(|out| {
+            DiagnosticCollector::new(
+                4,
+                fallback,
+                &execution,
+                Translator::new(Language::English),
+                out,
+            )
+        })
         .into_test_value()?;
     let invalid = span(&mut operations, 0, 1)?;
     collector.push(collector.make_semantic("type is invalid", invalid));
-    collector.abort(EmergencyDiagnostics::allocation(span(
-        &mut operations,
-        0,
-        source.len(),
-    )?));
+    collector.abort(EmergencyDiagnostics::allocation(
+        span(&mut operations, 0, source.len())?,
+        Translator::new(Language::English),
+    ));
     let before = execution.steps();
     let errors = SourceLocations::errors_for_sources(
         collector.into_diagnostics(),
@@ -166,7 +182,15 @@ fn public_compile_errors_keep_structured_ast_access_cause() -> TestResult {
     let execution = execution(&mut operations)?;
     let fallback = span(&mut operations, 0, 4)?;
     let mut collector = operations
-        .diagnostic(|out| DiagnosticCollector::new(4, fallback, &execution, out))
+        .diagnostic(|out| {
+            DiagnosticCollector::new(
+                4,
+                fallback,
+                &execution,
+                Translator::new(Language::English),
+                out,
+            )
+        })
         .into_test_value()?;
     let cause = AstAccessError::InvalidListRange {
         start: usize::MAX - 1,

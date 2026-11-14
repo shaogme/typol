@@ -1,4 +1,5 @@
 use crate::ast::AstAccessError;
+use alloc::borrow::Cow;
 use core::{
     fmt,
     slice::{Iter, from_ref},
@@ -6,9 +7,25 @@ use core::{
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext,
-    DiagnosticMessage, ExecutionBudget, FilledTerminalSlot, SourceId, SourceSpan, Span,
-    TerminalSlot, diagnostic_context,
+    DiagnosticFailure, DiagnosticLabelInput, DiagnosticMessage, ExecutionBudget,
+    FilledTerminalSlot, RelatedLocationRole, SourceId, SourceSpan, Span, TerminalSlot,
+    diagnostic_context,
 };
+use typol_i18n::{Translator, t};
+use u18n::RenderError;
+
+pub(crate) struct MessageBuild<'budget> {
+    pub(crate) code: DiagnosticCode,
+    pub(crate) span: SourceSpan,
+    pub(crate) budget: &'budget ExecutionBudget,
+    pub(crate) translator: Translator,
+}
+
+pub(crate) struct LabelMessage {
+    pub(crate) span: SourceSpan,
+    pub(crate) text: Result<Cow<'static, str>, RenderError>,
+    pub(crate) role: RelatedLocationRole,
+}
 
 pub(crate) static AST_STORAGE_RESOLVE_NODE_SPAN: DiagnosticContext =
     diagnostic_context!("typol-syntax", "ast-storage", "resolve-node-span");
@@ -164,6 +181,7 @@ pub(crate) struct DiagnosticSink {
     filled_terminal: Option<FilledTerminalSlot<Diagnostic>>,
     limit: usize,
     stopped: bool,
+    translator: Translator,
 }
 
 impl DiagnosticSink {
@@ -171,15 +189,18 @@ impl DiagnosticSink {
         limit: usize,
         budget: &ExecutionBudget,
         span: SourceSpan,
+        translator: Translator,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Self> {
         let limit = limit.max(1);
-        let mut diagnostics = SyntaxDiagnostic::budgeted(span, out.reborrow(), |out| {
-            ChargedVec::new(Some(budget), out)
+        let mut diagnostics =
+            SyntaxDiagnostic::budgeted(span, translator, out.reborrow(), |out| {
+                ChargedVec::new(Some(budget), out)
+            })?;
+        let terminal = SyntaxDiagnostic::budgeted(span, translator, out.reborrow(), |out| {
+            TerminalSlot::new(budget, out)
         })?;
-        let terminal =
-            SyntaxDiagnostic::budgeted(span, out.reborrow(), |out| TerminalSlot::new(budget, out))?;
-        SyntaxDiagnostic::budgeted(span, out.reborrow(), |out| {
+        SyntaxDiagnostic::budgeted(span, translator, out.reborrow(), |out| {
             diagnostics.try_reserve_exact(1, out)
         })?;
         Ok(Self {
@@ -188,6 +209,7 @@ impl DiagnosticSink {
             filled_terminal: None,
             limit,
             stopped: false,
+            translator,
         })
     }
 
@@ -213,6 +235,10 @@ impl DiagnosticSink {
         } else if self.diagnostics.len() >= self.limit - 1 {
             let terminal = SyntaxDiagnostic::emergency(
                 DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED,
+                t! {
+                    name: "diagnostic.emergency.diagnostic_limit_reached",
+                    locale: self.translator,
+                },
                 diagnostic.primary(),
             );
             self.store_terminal(terminal, out.reborrow())?;
@@ -220,7 +246,7 @@ impl DiagnosticSink {
             return Ok(());
         } else {
             let span = diagnostic.primary();
-            SyntaxDiagnostic::budgeted(span, out.reborrow(), |out| {
+            SyntaxDiagnostic::budgeted(span, self.translator, out.reborrow(), |out| {
                 self.diagnostics.try_push(diagnostic, out)
             })?;
         }
@@ -240,12 +266,14 @@ impl DiagnosticSink {
             return Err(out.reborrow().fail(SyntaxDiagnostic::internal(
                 diagnostic_context!("typol-syntax", "diagnostics", "terminal-slot-missing"),
                 diagnostic.primary(),
+                self.translator,
             )));
         };
         let Some(terminal) = slot.store(diagnostic) else {
             return Err(out.reborrow().fail(SyntaxDiagnostic::internal(
                 diagnostic_context!("typol-syntax", "diagnostics", "terminal-slot-full"),
                 None,
+                self.translator,
             )));
         };
         self.filled_terminal = Some(terminal);
@@ -271,9 +299,17 @@ pub(crate) struct SyntaxDiagnostic;
 impl SyntaxDiagnostic {
     pub(crate) fn emergency(
         code: DiagnosticCode,
+        message: Result<Cow<'static, str>, RenderError>,
         span: impl Into<Option<SourceSpan>>,
     ) -> Diagnostic {
-        let mut diagnostic = Diagnostic::emergency(code);
+        let mut diagnostic = match message {
+            Ok(Cow::Borrowed(message)) => Diagnostic::emergency(code, message),
+            Ok(Cow::Owned(_)) => Diagnostic::failure(
+                code,
+                DiagnosticFailure::Translation(RenderError::InvalidCatalog),
+            ),
+            Err(error) => Diagnostic::translation_failure(code, error),
+        };
         diagnostic.set_primary(span.into());
         diagnostic
     }
@@ -281,13 +317,21 @@ impl SyntaxDiagnostic {
     pub(crate) fn internal(
         context: DiagnosticContext,
         span: impl Into<Option<SourceSpan>>,
+        translator: Translator,
     ) -> Diagnostic {
-        let mut diagnostic = Self::emergency(DiagnosticCode::INTERNAL_ERROR, span);
+        let mut diagnostic = Self::emergency(
+            DiagnosticCode::INTERNAL_ERROR,
+            t! {
+                name: "diagnostic.emergency.internal_error",
+                locale: translator,
+            },
+            span,
+        );
         diagnostic.set_context(Some(context));
         diagnostic
     }
 
-    pub(crate) fn ast_access(error: AstAccessError) -> Diagnostic {
+    pub(crate) fn ast_access(error: AstAccessError, translator: Translator) -> Diagnostic {
         let context = match error {
             AstAccessError::InvalidNodeId { id } => AST_STORAGE_NODE_ACCESS.with_object_index(id),
             AstAccessError::InvalidListRange { start, end } => {
@@ -300,15 +344,16 @@ impl SyntaxDiagnostic {
                 AST_STORAGE_DECODED_TEXT_ACCESS.with_object_index(id)
             }
         };
-        Self::internal(context, None)
+        Self::internal(context, None, translator)
     }
 
     pub(crate) fn internal_object(
         context: DiagnosticContext,
         span: impl Into<Option<SourceSpan>>,
         object_id: usize,
+        translator: Translator,
     ) -> Diagnostic {
-        let mut diagnostic = Self::internal(context, span);
+        let mut diagnostic = Self::internal(context, span, translator);
         if let Ok(object_id) = u64::try_from(object_id) {
             let context = diagnostic
                 .context()
@@ -323,20 +368,25 @@ impl SyntaxDiagnostic {
         source_id: SourceId,
         source_len: usize,
         object_id: usize,
+        translator: Translator,
     ) -> Diagnostic {
         Self::internal_object(
             context,
             SourceSpan::new(source_id, Span::point(source_len)),
             object_id,
+            translator,
         )
     }
 
     pub(crate) fn budgeted<'slot, T>(
         span: impl Into<Option<SourceSpan>>,
+        translator: Translator,
         mut out: Out<'slot, '_, Diagnostic>,
         operation: impl for<'budget> FnOnce(Out<'budget, 'budget, BudgetError>) -> OResult<'budget, T>,
     ) -> OResult<'slot, T> {
-        Self::budgeted_with(out.reborrow(), operation, |error| Self::budget(error, span))
+        Self::budgeted_with(out.reborrow(), operation, |error| {
+            Self::budget(error, span, translator)
+        })
     }
 
     pub(crate) fn budgeted_with<'slot, T>(
@@ -354,44 +404,55 @@ impl SyntaxDiagnostic {
     pub(crate) fn new_vec<'slot, T>(
         budget: &ExecutionBudget,
         span: SourceSpan,
+        translator: Translator,
         out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ChargedVec<T>> {
-        Self::budgeted(span, out, |out| ChargedVec::new(Some(budget), out))
+        Self::budgeted(span, translator, out, |out| {
+            ChargedVec::new(Some(budget), out)
+        })
     }
 
     pub(crate) fn try_push<'slot, T>(
         values: &mut ChargedVec<T>,
         value: T,
         span: SourceSpan,
+        translator: Translator,
         out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ()> {
-        Self::budgeted(span, out, |out| values.try_push(value, out))
+        Self::budgeted(span, translator, out, |out| values.try_push(value, out))
     }
 
     pub(crate) fn try_reserve<'slot, T>(
         values: &mut ChargedVec<T>,
         additional: usize,
         span: SourceSpan,
+        translator: Translator,
         out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ()> {
-        Self::budgeted(span, out, |out| values.try_reserve(additional, out))
+        Self::budgeted(span, translator, out, |out| {
+            values.try_reserve(additional, out)
+        })
     }
 
     pub(crate) fn try_reserve_exact<'slot, T>(
         values: &mut ChargedVec<T>,
         additional: usize,
         span: SourceSpan,
+        translator: Translator,
         out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ()> {
-        Self::budgeted(span, out, |out| values.try_reserve_exact(additional, out))
+        Self::budgeted(span, translator, out, |out| {
+            values.try_reserve_exact(additional, out)
+        })
     }
 
     pub(crate) fn new_string<'slot>(
         budget: &ExecutionBudget,
         span: SourceSpan,
+        translator: Translator,
         out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ChargedString> {
-        Self::budgeted(span, out, |out| {
+        Self::budgeted(span, translator, out, |out| {
             ChargedString::with_capacity(0, Some(budget), out)
         })
     }
@@ -400,39 +461,93 @@ impl SyntaxDiagnostic {
         text: &mut ChargedString,
         value: &str,
         span: SourceSpan,
+        translator: Translator,
         out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ()> {
-        Self::budgeted(span, out, |out| text.try_push_str(value, out))
+        Self::budgeted(span, translator, out, |out| text.try_push_str(value, out))
     }
 
-    pub(crate) fn try_add_label<'slot>(
+    pub(crate) fn try_add_label_message<'slot>(
         diagnostic: &mut Diagnostic,
-        span: SourceSpan,
-        text: &str,
+        message: LabelMessage,
         budget: &ExecutionBudget,
+        translator: Translator,
         out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ()> {
-        Self::budgeted(span, out, |out| {
-            diagnostic.try_add_label(span, text, Some(budget), out)
+        let LabelMessage { span, text, role } = message;
+        let message = match text {
+            Ok(message) => message,
+            Err(error) => {
+                return Err(out.fail(Diagnostic::translation_failure(diagnostic.code(), error)));
+            }
+        };
+        Self::budgeted(span, translator, out, |out| {
+            diagnostic.try_add_label_with_text(
+                DiagnosticLabelInput {
+                    span,
+                    text: message.as_ref(),
+                    role,
+                },
+                Some(budget),
+                out,
+            )
         })
     }
 
-    pub(crate) fn make<'slot, 'message>(
-        code: DiagnosticCode,
-        message: impl Into<DiagnosticMessage<'message>>,
-        span: SourceSpan,
-        budget: &ExecutionBudget,
+    pub(crate) fn make<'slot>(
+        build: MessageBuild<'_>,
+        message: Result<Cow<'static, str>, RenderError>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Diagnostic> {
-        let mut diagnostic = Self::budgeted(span, out.reborrow(), |out| {
-            Diagnostic::try_new(code, message, Some(budget), out)
+        let MessageBuild {
+            code,
+            span,
+            budget,
+            translator,
+        } = build;
+        let message = match message {
+            Ok(message) => message,
+            Err(error) => return Err(out.fail(Diagnostic::translation_failure(code, error))),
+        };
+        let mut diagnostic = Self::budgeted(span, translator, out.reborrow(), |out| {
+            Diagnostic::try_new(
+                code,
+                DiagnosticMessage::custom(message.as_ref()),
+                Some(budget),
+                out,
+            )
         })?;
         diagnostic.set_primary(Some(span));
         Ok(diagnostic)
     }
 
-    pub(crate) fn budget(error: BudgetError, span: impl Into<Option<SourceSpan>>) -> Diagnostic {
-        let mut diagnostic = Self::emergency(error.diagnostic_code(), span);
+    pub(crate) fn budget(
+        error: BudgetError,
+        span: impl Into<Option<SourceSpan>>,
+        translator: Translator,
+    ) -> Diagnostic {
+        let message = match error {
+            BudgetError::Allocation => t! {
+                name: "diagnostic.emergency.allocation_failed",
+                locale: translator,
+            },
+            BudgetError::CapacityExceeded => t! {
+                name: "diagnostic.emergency.capacity_exceeded",
+                locale: translator,
+            },
+            BudgetError::InvariantViolation(_) => t! {
+                name: "diagnostic.emergency.internal_error",
+                locale: translator,
+            },
+            BudgetError::Resource
+            | BudgetError::RegexSteps
+            | BudgetError::RegexSearchSteps
+            | BudgetError::RegexWorkspace => t! {
+                name: "diagnostic.emergency.resource_limit_exceeded",
+                locale: translator,
+            },
+        };
+        let mut diagnostic = Self::emergency(error.diagnostic_code(), message, span);
         diagnostic.set_context(error.context());
         diagnostic
     }
@@ -443,6 +558,7 @@ mod tests {
     use typol_core::{
         BudgetError, DiagnosticContext, SourceId, SourceSpan, Span, diagnostic_context,
     };
+    use typol_i18n::{Language, Translator};
 
     use super::{DiagnosticCode, SyntaxDiagnostic};
 
@@ -452,8 +568,11 @@ mod tests {
     #[test]
     fn parser_budget_diagnostic_keeps_failure_context_and_source_span() {
         let span = SourceSpan::new(SourceId::new(8), Span::point(3));
-        let diagnostic =
-            SyntaxDiagnostic::budget(BudgetError::invariant(&PARSER_BUDGET_CONTEXT), span);
+        let diagnostic = SyntaxDiagnostic::budget(
+            BudgetError::invariant(&PARSER_BUDGET_CONTEXT),
+            span,
+            Translator::new(Language::English),
+        );
 
         assert_eq!(diagnostic.code(), DiagnosticCode::INTERNAL_ERROR);
         assert_eq!(diagnostic.primary(), Some(span));

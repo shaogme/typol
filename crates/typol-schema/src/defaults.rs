@@ -13,14 +13,14 @@ use crate::{
     symbols::{SymbolState, SymbolTable},
     types::ResolvedTypeGraph,
 };
-use typol_i18n::diagnostic_message;
+use typol_i18n::{Translator, t};
 use typol_semantic::{EvalError, EvalFailure, Numeric, SchemaDefaultValidation};
 use typol_syntax::{NumberKind, NumberLiteral};
 
 use opeo::{OResult, Out};
 use typol_core::{
-    ChargedVec, ConfigValue, Diagnostic, DiagnosticCode, DiagnosticMessage, FloatConversionError,
-    NumericLiteral, SourceSpan, ValueKind,
+    ChargedVec, ConfigValue, Diagnostic, DiagnosticCode, DiagnosticLabelInput, DiagnosticMessage,
+    FloatConversionError, NumericLiteral, RelatedLocationRole, SourceSpan, ValueKind,
 };
 use typol_model::BuiltinType;
 
@@ -119,10 +119,10 @@ impl DefaultLiterals {
         if DefaultLiterals::is_float(builtin) {
             if number.kind() != NumberKind::Float {
                 Self::invalid(
-                    diagnostic_message!(
-                        "diagnostic.schema.default_numeric_type_mismatch",
-                        "numeric default does not match the target type"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.default_numeric_type_mismatch",
+                        locale: diagnostics.translator(),
+                    },
                     number.span(),
                     diagnostics,
                     out.reborrow(),
@@ -134,14 +134,14 @@ impl DefaultLiterals {
                     Ok(value) => return Ok(Some(DefaultNumber::Float32(value))),
                     Err(error) => {
                         let message = match error {
-                            FloatConversionError::Invalid => diagnostic_message!(
-                                "diagnostic.schema.default_float_unrepresentable",
-                                "floating-point default cannot be represented"
-                            ),
-                            FloatConversionError::NonFinite => diagnostic_message!(
-                                "diagnostic.schema.default_f32_out_of_range",
-                                "floating-point default is out of f32 range"
-                            ),
+                            FloatConversionError::Invalid => t! {
+                                name: "diagnostic.schema.default_float_unrepresentable",
+                                locale: diagnostics.translator(),
+                            },
+                            FloatConversionError::NonFinite => t! {
+                                name: "diagnostic.schema.default_f32_out_of_range",
+                                locale: diagnostics.translator(),
+                            },
                         };
                         Self::invalid(message, number.span(), diagnostics, out.reborrow())?;
                         return Ok(None);
@@ -152,14 +152,14 @@ impl DefaultLiterals {
                 Ok(value) => return Ok(Some(DefaultNumber::Float64(value))),
                 Err(error) => {
                     let message = match error {
-                        FloatConversionError::Invalid => diagnostic_message!(
-                            "diagnostic.schema.default_float_unrepresentable",
-                            "floating-point default cannot be represented"
-                        ),
-                        FloatConversionError::NonFinite => diagnostic_message!(
-                            "diagnostic.schema.default_float_must_be_finite",
-                            "floating-point default must be finite"
-                        ),
+                        FloatConversionError::Invalid => t! {
+                            name: "diagnostic.schema.default_float_unrepresentable",
+                            locale: diagnostics.translator(),
+                        },
+                        FloatConversionError::NonFinite => t! {
+                            name: "diagnostic.schema.default_float_must_be_finite",
+                            locale: diagnostics.translator(),
+                        },
                     };
                     Self::invalid(message, number.span(), diagnostics, out.reborrow())?;
                     return Ok(None);
@@ -168,10 +168,10 @@ impl DefaultLiterals {
         }
         if number.kind() != NumberKind::Integer {
             Self::invalid(
-                diagnostic_message!(
-                    "diagnostic.schema.default_float_for_integer",
-                    "floating-point literal cannot be used with an integer type"
-                ),
+                t! {
+                    name: "diagnostic.schema.default_float_for_integer",
+                    locale: diagnostics.translator(),
+                },
                 number.span(),
                 diagnostics,
                 out.reborrow(),
@@ -180,10 +180,10 @@ impl DefaultLiterals {
         }
         let Some(magnitude) = DefaultLiterals::parse_integer(raw) else {
             Self::invalid(
-                diagnostic_message!(
-                    "diagnostic.schema.default_integer_unrepresentable",
-                    "integer literal is out of the representable range"
-                ),
+                t! {
+                    name: "diagnostic.schema.default_integer_unrepresentable",
+                    locale: diagnostics.translator(),
+                },
                 number.span(),
                 diagnostics,
                 out.reborrow(),
@@ -198,10 +198,10 @@ impl DefaultLiterals {
                 let limit = minimum.unsigned_abs();
                 if magnitude > limit {
                     Self::invalid(
-                        diagnostic_message!(
-                            "diagnostic.schema.default_integer_out_of_range",
-                            "integer literal is out of the target type's range"
-                        ),
+                        t! {
+                            name: "diagnostic.schema.default_integer_out_of_range",
+                            locale: diagnostics.translator(),
+                        },
                         number.span(),
                         diagnostics,
                         out.reborrow(),
@@ -213,10 +213,10 @@ impl DefaultLiterals {
                 } else {
                     let Ok(value) = i128::try_from(magnitude) else {
                         Self::invalid(
-                            diagnostic_message!(
-                                "diagnostic.schema.default_integer_out_of_range",
-                                "integer literal is out of the target type's range"
-                            ),
+                            t! {
+                                name: "diagnostic.schema.default_integer_out_of_range",
+                                locale: diagnostics.translator(),
+                            },
                             number.span(),
                             diagnostics,
                             out.reborrow(),
@@ -228,10 +228,10 @@ impl DefaultLiterals {
             } else {
                 let Ok(value) = i128::try_from(magnitude) else {
                     Self::invalid(
-                        diagnostic_message!(
-                            "diagnostic.schema.default_integer_out_of_range",
-                            "integer literal is out of the target type's range"
-                        ),
+                        t! {
+                            name: "diagnostic.schema.default_integer_out_of_range",
+                            locale: diagnostics.translator(),
+                        },
                         number.span(),
                         diagnostics,
                         out.reborrow(),
@@ -242,10 +242,10 @@ impl DefaultLiterals {
             };
             if value < minimum || value > maximum {
                 Self::invalid(
-                    diagnostic_message!(
-                        "diagnostic.schema.default_integer_out_of_range",
-                        "integer literal is out of the target type's range"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.default_integer_out_of_range",
+                        locale: diagnostics.translator(),
+                    },
                     number.span(),
                     diagnostics,
                     out.reborrow(),
@@ -256,10 +256,10 @@ impl DefaultLiterals {
         } else if DefaultLiterals::is_unsigned(builtin) {
             if number.is_negative() || magnitude > Numeric::unsigned_max(builtin).unwrap_or(0) {
                 Self::invalid(
-                    diagnostic_message!(
-                        "diagnostic.schema.default_integer_out_of_range",
-                        "integer literal is out of the target type's range"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.default_integer_out_of_range",
+                        locale: diagnostics.translator(),
+                    },
                     number.span(),
                     diagnostics,
                     out.reborrow(),
@@ -269,10 +269,10 @@ impl DefaultLiterals {
             Ok(Some(DefaultNumber::Unsigned(magnitude)))
         } else {
             Self::invalid(
-                diagnostic_message!(
-                    "diagnostic.schema.default_numeric_type_mismatch",
-                    "numeric default does not match the target type"
-                ),
+                t! {
+                    name: "diagnostic.schema.default_numeric_type_mismatch",
+                    locale: diagnostics.translator(),
+                },
                 number.span(),
                 diagnostics,
                 out.reborrow(),
@@ -281,8 +281,8 @@ impl DefaultLiterals {
         }
     }
 
-    fn invalid<'slot>(
-        message: DiagnosticMessage<'static>,
+    fn invalid<'slot, M: Into<DiagnosticMessage<'static>>>(
+        message: M,
         span: SourceSpan,
         diagnostics: &mut DiagnosticCollector,
         out: Out<'slot, '_, BuildFailure>,
@@ -360,39 +360,39 @@ pub(super) struct ConstraintLabelInput<'a> {
 }
 
 impl DefaultDiagnostic {
-    pub(crate) fn scalar_type_mismatch() -> DiagnosticMessage<'static> {
-        diagnostic_message!(
-            "diagnostic.schema.default_scalar_type_mismatch",
-            "scalar default does not match the target type"
-        )
+    pub(crate) fn scalar_type_mismatch(translator: Translator) -> DiagnosticMessage<'static> {
+        DiagnosticMessage::from(t! {
+            name: "diagnostic.schema.default_scalar_type_mismatch",
+            locale: translator,
+        })
     }
 
-    pub(crate) fn string_type_mismatch() -> DiagnosticMessage<'static> {
-        diagnostic_message!(
-            "diagnostic.schema.default_string_type_mismatch",
-            "string default does not match the target type"
-        )
+    pub(crate) fn string_type_mismatch(translator: Translator) -> DiagnosticMessage<'static> {
+        DiagnosticMessage::from(t! {
+            name: "diagnostic.schema.default_string_type_mismatch",
+            locale: translator,
+        })
     }
 
-    pub(crate) fn boolean_type_mismatch() -> DiagnosticMessage<'static> {
-        diagnostic_message!(
-            "diagnostic.schema.default_boolean_type_mismatch",
-            "boolean default does not match the target type"
-        )
+    pub(crate) fn boolean_type_mismatch(translator: Translator) -> DiagnosticMessage<'static> {
+        DiagnosticMessage::from(t! {
+            name: "diagnostic.schema.default_boolean_type_mismatch",
+            locale: translator,
+        })
     }
 
-    pub(crate) fn local_constraint_failed() -> DiagnosticMessage<'static> {
-        diagnostic_message!(
-            "diagnostic.schema.default_local_constraint_failed",
-            "schema default does not satisfy the local constraint"
-        )
+    pub(crate) fn local_constraint_failed(translator: Translator) -> DiagnosticMessage<'static> {
+        DiagnosticMessage::from(t! {
+            name: "diagnostic.schema.default_local_constraint_failed",
+            locale: translator,
+        })
     }
 
-    pub(crate) fn regex_constraint_failed() -> DiagnosticMessage<'static> {
-        diagnostic_message!(
-            "diagnostic.schema.default_regex_constraint_failed",
-            "schema default does not satisfy the regex constraint"
-        )
+    pub(crate) fn regex_constraint_failed(translator: Translator) -> DiagnosticMessage<'static> {
+        DiagnosticMessage::from(t! {
+            name: "diagnostic.schema.default_regex_constraint_failed",
+            locale: translator,
+        })
     }
 
     pub(crate) fn semantic<'slot>(
@@ -411,6 +411,10 @@ impl DefaultDiagnostic {
             )
         })?;
         diagnostic.set_primary(Some(span));
+        if diagnostic.message().is_err() {
+            sink.push(diagnostic);
+            return Err(out.fail(BuildFailure::empty()));
+        }
         Ok(diagnostic)
     }
 
@@ -418,15 +422,29 @@ impl DefaultDiagnostic {
         input: ConstraintLabelInput<'_>,
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, ()> {
+        let message = t! {
+            name: "diagnostic.label.constraint_defined_here",
+            locale: input.sink.translator(),
+        };
+        let message = match message {
+            Ok(message) => message,
+            Err(error) => {
+                let mut failure =
+                    Diagnostic::translation_failure(DiagnosticCode::SCHEMA_SEMANTIC_ERROR, error);
+                failure.set_primary(Some(input.constraint));
+                input.sink.push(failure);
+                return Err(out.fail(BuildFailure::empty()));
+            }
+        };
         input
             .context
             .budget_access(out.reborrow(), input.fallback, input.sink, |budget_out| {
                 input.diagnostic.try_add_label_with_text(
-                    input.constraint,
-                    diagnostic_message!(
-                        "diagnostic.label.constraint_defined_here",
-                        "constraint is defined here"
-                    ),
+                    DiagnosticLabelInput {
+                        span: input.constraint,
+                        text: message.as_ref(),
+                        role: RelatedLocationRole::ConstraintDefinition,
+                    },
                     Some(input.context.execution()),
                     budget_out,
                 )
@@ -441,19 +459,24 @@ impl DefaultDiagnostic {
         sink: &mut DiagnosticCollector,
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, Diagnostic> {
+        let translator = context.translator();
         let mut diagnostic =
             context.budget_access(out.reborrow(), primary, sink, |budget_out| {
                 Diagnostic::try_new(
                     DiagnosticCode::SCHEMA_SEMANTIC_ERROR,
-                    diagnostic_message!(
-                        "diagnostic.schema.default_all_constraint_failed",
-                        "schema default does not satisfy the @all constraint"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.default_all_constraint_failed",
+                        locale: translator,
+                    },
                     Some(context.execution()),
                     budget_out,
                 )
             })?;
         diagnostic.set_primary(Some(primary));
+        if diagnostic.message().is_err() {
+            sink.push(diagnostic);
+            return Err(out.fail(BuildFailure::empty()));
+        }
         Self::constraint_label(
             ConstraintLabelInput {
                 diagnostic: &mut diagnostic,
@@ -477,24 +500,29 @@ impl DefaultDiagnostic {
             return EmergencyDiagnostics::internal(
                 span,
                 EmergencyDiagnostics::schema_access_context(access),
+                diagnostics.translator(),
             );
         }
         if let Some(context) = error.context() {
-            return EmergencyDiagnostics::internal(span, context);
+            return EmergencyDiagnostics::internal(span, context, diagnostics.translator());
         }
         match error.kind() {
-            EvalFailure::Internal | EvalFailure::InternalAt(_) => schema_internal!(span),
-            EvalFailure::Allocation => EmergencyDiagnostics::allocation(span),
-            EvalFailure::Resource => EmergencyDiagnostics::resource(span),
-            EvalFailure::Capacity => EmergencyDiagnostics::capacity(span),
+            EvalFailure::Internal | EvalFailure::InternalAt(_) => {
+                schema_internal!(diagnostics.translator(), span)
+            }
+            EvalFailure::Allocation => {
+                EmergencyDiagnostics::allocation(span, diagnostics.translator())
+            }
+            EvalFailure::Resource => EmergencyDiagnostics::resource(span, diagnostics.translator()),
+            EvalFailure::Capacity => EmergencyDiagnostics::capacity(span, diagnostics.translator()),
             EvalFailure::Arithmetic => diagnostics.make_semantic(
-                diagnostic_message!(
-                    "diagnostic.schema.default_numeric_evaluation_failed",
-                    "schema default numeric evaluation failed"
-                ),
+                t! {
+                    name: "diagnostic.schema.default_numeric_evaluation_failed",
+                    locale: diagnostics.translator(),
+                },
                 span,
             ),
-            EvalFailure::SchemaAccess(_) => schema_internal!(span),
+            EvalFailure::SchemaAccess(_) => schema_internal!(diagnostics.translator(), span),
         }
     }
 }

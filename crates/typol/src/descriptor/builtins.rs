@@ -316,7 +316,9 @@ impl<T: Typol> Typol for Vec<T> {
             ContainerConversions::read_sequence::<T>(value.view(), context, out.reborrow())?
                 .into_unmetered_vec();
         let Some(bytes) = values.capacity().checked_mul(size_of::<T>()) else {
-            return Err(out.fail(ConversionContext::resource_error()));
+            return Err(out.fail(ConversionContext::resource_error(
+                context.session().translator(),
+            )));
         };
         context.target_bytes(bytes, out.reborrow())?;
         Ok(values)
@@ -330,7 +332,8 @@ impl<T: Typol, const N: usize> Typol for [T; N] {
         context: &mut DescribeContext<'_>,
         mut out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, TypeDescriptor> {
-        let length = DescribeContext::array_length(N, out.reborrow())?;
+        let length =
+            DescribeContext::array_length(N, context.session().translator(), out.reborrow())?;
         ContainerConversions::describe_container::<Self>(
             context,
             TypeShape::Array {

@@ -4,15 +4,16 @@ use crate::{
         DiagnosticFactory, ExecutionDiagnostic, RuleFailureLocation, RuleFailureMessage,
     },
     instance::InstanceWalk,
-    secret::SecretPolicy,
+    secret::{SecretPolicy, SecretTypeContext},
     validation::AssertionsRequest,
     value::ValueFactory,
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    ConfigValue, Diagnostic, DiagnosticContext, ValueError, ValueErrorKind, ValueKind,
-    ValuePayloadView, ValueView, diagnostic_context,
+    ConfigValue, Diagnostic, DiagnosticContext, DiagnosticMessage, ValueError, ValueErrorKind,
+    ValueKind, ValuePayloadView, ValueView, diagnostic_context,
 };
+use typol_i18n::Translator;
 use typol_semantic::{
     AssertionView, EvalError, ExpressionBindingInfo, ExpressionKind, SchemaAccessError,
     SchemaBindings as Bindings, SchemaEvaluator as Evaluator, SchemaValue as EvalValue, TypeKind,
@@ -42,6 +43,7 @@ struct AssertionEvaluation<'evaluator, 'schema, 'value> {
 
 fn schema_call<'slot, 'borrow, T>(
     errors: &mut ErrSlot<SchemaAccessError>,
+    translator: Translator,
     operation: impl for<'call> FnOnce(Out<'call, 'call, SchemaAccessError>) -> OResult<'call, T>,
     out: Out<'slot, 'borrow, Diagnostic>,
 ) -> OResult<'slot, T> {
@@ -52,6 +54,7 @@ fn schema_call<'slot, 'borrow, T>(
             None,
             None,
             None,
+            translator,
         ))),
     }
 }
@@ -217,18 +220,21 @@ impl AssertionValidator {
             let variant = node.variant();
             let kind = schema_call(
                 &mut resources.schema_access_errors,
+                resources.translator,
                 |access_out| info.kind(access_out),
                 out.reborrow(),
             )?;
             let assertions = match kind {
                 TypeKind::Struct { .. } => Some(schema_call(
                     &mut resources.schema_access_errors,
+                    resources.translator,
                     |access_out| info.assertions(access_out),
                     out.reborrow(),
                 )?),
                 TypeKind::Enum { .. } => match variant {
                     Some(variant) => Some(schema_call(
                         &mut resources.schema_access_errors,
+                        resources.translator,
                         |access_out| variant.assertions(access_out),
                         out.reborrow(),
                     )?),
@@ -242,11 +248,13 @@ impl AssertionValidator {
             let payload_host = if let Some(variant) = variant {
                 let constraints = schema_call(
                     &mut resources.schema_access_errors,
+                    resources.translator,
                     |access_out| variant.constraints(access_out),
                     out.reborrow(),
                 )?;
                 schema_call(
                     &mut resources.schema_access_errors,
+                    resources.translator,
                     |access_out| constraints.has_host(access_out),
                     out.reborrow(),
                 )?
@@ -256,6 +264,7 @@ impl AssertionValidator {
             for index in 0..assertions.len() {
                 let Some(assertion) = schema_call(
                     &mut resources.schema_access_errors,
+                    resources.translator,
                     |access_out| assertions.get(index, access_out),
                     out.reborrow(),
                 )?
@@ -288,6 +297,7 @@ impl AssertionValidator {
                 if let Some(variant) = variant {
                     if (schema_call(
                         &mut resources.schema_access_errors,
+                        resources.translator,
                         |access_out| variant.is_secret(access_out),
                         out.reborrow(),
                     ))? {
@@ -295,15 +305,19 @@ impl AssertionValidator {
                     } else {
                         let payload = schema_call(
                             &mut resources.schema_access_errors,
+                            resources.translator,
                             |access_out| variant.payload(access_out),
                             out.reborrow(),
                         )?;
                         if let VariantPayloadInfo::Single { ty } = payload {
                             secret |= SecretPolicy::secret_type(
                                 ty,
-                                Some(&resources.budget),
-                                &mut resources.schema_access_errors,
-                                &mut resources.budget_errors,
+                                SecretTypeContext {
+                                    budget: Some(&resources.budget),
+                                    schema_errors: &mut resources.schema_access_errors,
+                                    budget_errors: &mut resources.budget_errors,
+                                    translator: resources.translator,
+                                },
                                 out.reborrow(),
                             )?;
                         }
@@ -313,9 +327,9 @@ impl AssertionValidator {
                 if let Some(error) = ExecutionDiagnostic::failure(
                     result,
                     RuleFailureMessage {
-                        text: assertion.message(),
+                        message: DiagnosticMessage::custom(assertion.message()),
                         redacted: secret,
-                        key: None,
+                        translator: resources.translator,
                     },
                     RuleFailureLocation {
                         span: node.span(),

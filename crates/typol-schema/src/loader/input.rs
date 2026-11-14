@@ -61,6 +61,7 @@ impl Read<Diagnostic> for BoundedSource<'_> {
             return Err(out.reborrow().fail(EmergencyDiagnostics::internal(
                 SourceSpan::new(self.source_id, Span::point(offset)),
                 schema_context!("source-input", "source-id-mismatch"),
+                self.budget.translator(),
             )));
         }
         let source_remaining = self.source_limit.saturating_sub(self.actual_bytes);
@@ -72,6 +73,7 @@ impl Read<Diagnostic> for BoundedSource<'_> {
             return Err(out.reborrow().fail(EmergencyDiagnostics::internal(
                 SourceSpan::new(source_id, Span::point(offset)),
                 schema_context!("source-input", "read-buffer-range-invalid"),
+                self.budget.translator(),
             )));
         };
         let mut source_errors = ErrSlot::<SourceReadError>::new();
@@ -86,6 +88,7 @@ impl Read<Diagnostic> for BoundedSource<'_> {
                         self.capture.invalidate();
                         return Err(out.reborrow().fail(EmergencyDiagnostics::capacity(
                             SourceSpan::new(source_id, Span::point(offset)),
+                            self.budget.translator(),
                         )));
                     };
                     if consumed > allowance || !within_total {
@@ -95,12 +98,16 @@ impl Read<Diagnostic> for BoundedSource<'_> {
                                 source_id,
                                 Span::point(offset.saturating_add(allowance)),
                             ),
+                            self.budget.translator(),
                         )));
                     }
                 }
                 self.capture.invalidate();
                 return Err(out.reborrow().fail(SchemaSource::source_read_diagnostic(
-                    error, source_id, offset,
+                    error,
+                    source_id,
+                    offset,
+                    self.budget.translator(),
                 )));
             }
         };
@@ -109,32 +116,30 @@ impl Read<Diagnostic> for BoundedSource<'_> {
             return Err(out.reborrow().fail(EmergencyDiagnostics::internal(
                 SourceSpan::new(source_id, Span::point(offset)),
                 schema_context!("source-input", "read-count-exceeds-request"),
+                self.budget.translator(),
             )));
         }
         let Some(within_total) = self.record_bytes(count) else {
             self.capture.invalidate();
-            return Err(out
-                .reborrow()
-                .fail(EmergencyDiagnostics::capacity(SourceSpan::new(
-                    source_id,
-                    Span::point(offset),
-                ))));
+            return Err(out.reborrow().fail(EmergencyDiagnostics::capacity(
+                SourceSpan::new(source_id, Span::point(offset)),
+                self.budget.translator(),
+            )));
         };
         if count > allowance || !within_total {
             self.capture.invalidate();
             let limit_offset = offset.saturating_add(allowance);
-            return Err(out
-                .reborrow()
-                .fail(EmergencyDiagnostics::resource(SourceSpan::new(
-                    source_id,
-                    Span::point(limit_offset),
-                ))));
+            return Err(out.reborrow().fail(EmergencyDiagnostics::resource(
+                SourceSpan::new(source_id, Span::point(limit_offset)),
+                self.budget.translator(),
+            )));
         }
         let Some(bytes) = output.get(..count) else {
             self.capture.invalidate();
             return Err(out.reborrow().fail(EmergencyDiagnostics::internal(
                 SourceSpan::new(source_id, Span::point(offset)),
                 schema_context!("source-input", "read-output-range-invalid"),
+                self.budget.translator(),
             )));
         };
         self.capture.feed(bytes);

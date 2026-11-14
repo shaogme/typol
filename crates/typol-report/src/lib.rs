@@ -4,10 +4,11 @@ extern crate alloc;
 
 use core::fmt;
 use typol_core::{
-    Diagnostic, DiagnosticCode, DiagnosticMessageKey, ExcerptStatus, InstancePath, PathSegment,
-    SourceExcerptSet, SourceId, SourceSpan, SpanLocation, ValueSource,
+    Diagnostic, DiagnosticCode, DiagnosticContext as CoreDiagnosticContext, DiagnosticFailure,
+    DiagnosticFieldStatus, DiagnosticParameter, ExcerptStatus, InstancePath, PathSegment,
+    RelatedLocationRole, SourceExcerptSet, SourceId, SourceSpan, SpanLocation, ValueSource,
 };
-use typol_i18n::{Language, Translator, diagnostic_key, t};
+use typol_i18n::{Translator, t};
 
 /// Provides diagnostic reports with locations, names, and source snapshots already owned by the error.
 pub struct ReportContext<'a> {
@@ -36,6 +37,48 @@ pub struct DiagnosticReport<'a> {
     stage: Option<&'a str>,
     diagnostics: &'a [Diagnostic],
     context: ReportContext<'a>,
+    translator: Translator,
+}
+
+#[derive(Clone, Copy)]
+pub enum DiagnosticReportFieldName {
+    Path,
+    Primary,
+    ValueSource,
+}
+
+pub enum DiagnosticReportField<'a> {
+    Code(DiagnosticCode),
+    Reason {
+        text: Result<&'a str, DiagnosticFailure>,
+        parameters: &'a [DiagnosticParameter],
+        parameters_status: DiagnosticFieldStatus,
+    },
+    Kind(&'a str),
+    Stage(&'a str),
+    Path(&'a InstancePath),
+    Primary {
+        span: SourceSpan,
+        location_status: DiagnosticFieldStatus,
+    },
+    Related {
+        role: RelatedLocationRole,
+        span: SourceSpan,
+        text: &'a str,
+    },
+    RelatedStatus {
+        status: DiagnosticFieldStatus,
+        truncated: bool,
+    },
+    ValueSource(ValueSource),
+    Context {
+        status: DiagnosticFieldStatus,
+        value: Option<CoreDiagnosticContext>,
+    },
+    Status {
+        field: DiagnosticReportFieldName,
+        status: DiagnosticFieldStatus,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -43,25 +86,21 @@ enum ReportText {
     Path,
     Location,
     LocationUnavailable,
-    Rule,
+    RelatedLocation,
+    RelatedLocations,
+    RelatedLocationsUnavailable,
+    RelatedLocationsTruncated,
+    Kind,
+    DiagnosticStage,
+    FieldUnavailable,
+    Redacted,
     Source,
     ConfigLiteral,
     SchemaDefault,
     EnvironmentVariable,
     ExplicitFallback,
     RustValue,
-    DiagnosticMessageUnavailable,
     SourceExcerptUnavailable,
-}
-
-struct EscapingWriter<'writer, W: ?Sized> {
-    writer: &'writer mut W,
-}
-
-impl<W: fmt::Write + ?Sized> fmt::Write for EscapingWriter<'_, W> {
-    fn write_str(&mut self, text: &str) -> fmt::Result {
-        write_escaped(self.writer, text)
-    }
 }
 
 impl<'a> DiagnosticReport<'a> {
@@ -70,25 +109,78 @@ impl<'a> DiagnosticReport<'a> {
         stage: Option<&'a str>,
         diagnostics: &'a [Diagnostic],
         context: ReportContext<'a>,
+        translator: Translator,
     ) -> Self {
         Self {
             title,
             stage,
             diagnostics,
             context,
+            translator,
         }
+    }
+
+    /// Visits one diagnostic's fields in the canonical report order.
+    pub fn visit_diagnostic<E>(
+        diagnostic: &'a Diagnostic,
+        mut visit: impl FnMut(DiagnosticReportField<'a>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        visit(DiagnosticReportField::Code(diagnostic.code()))?;
+        visit(DiagnosticReportField::Reason {
+            text: diagnostic.message(),
+            parameters: diagnostic.parameters(),
+            parameters_status: diagnostic.parameters_status(),
+        })?;
+        visit(DiagnosticReportField::Kind(diagnostic.kind().id()))?;
+        visit(DiagnosticReportField::Stage(diagnostic.kind().stage().id()))?;
+        if let Some(path) = diagnostic.path() {
+            visit(DiagnosticReportField::Path(path))?;
+        } else if diagnostic.path_status() != DiagnosticFieldStatus::NotApplicable {
+            visit(DiagnosticReportField::Status {
+                field: DiagnosticReportFieldName::Path,
+                status: diagnostic.path_status(),
+            })?;
+        }
+        if let Some(span) = diagnostic.primary() {
+            visit(DiagnosticReportField::Primary {
+                span,
+                location_status: diagnostic.primary_location_status(),
+            })?;
+        } else if diagnostic.primary_status() != DiagnosticFieldStatus::NotApplicable {
+            visit(DiagnosticReportField::Status {
+                field: DiagnosticReportFieldName::Primary,
+                status: diagnostic.primary_status(),
+            })?;
+        }
+        for related in diagnostic.related_locations() {
+            visit(DiagnosticReportField::Related {
+                role: related.role(),
+                span: related.span(),
+                text: related.message(),
+            })?;
+        }
+        visit(DiagnosticReportField::RelatedStatus {
+            status: diagnostic.related_locations_status(),
+            truncated: diagnostic.related_locations_truncated(),
+        })?;
+        if let Some(source) = diagnostic.value_source() {
+            visit(DiagnosticReportField::ValueSource(source))?;
+        } else if diagnostic.value_source_status() != DiagnosticFieldStatus::NotApplicable {
+            visit(DiagnosticReportField::Status {
+                field: DiagnosticReportFieldName::ValueSource,
+                status: diagnostic.value_source_status(),
+            })?;
+        }
+        visit(DiagnosticReportField::Context {
+            status: diagnostic.context_status(),
+            value: diagnostic.context(),
+        })?;
+        Ok(())
     }
 
     /// Writes the report directly to the caller-provided writer without creating an owned intermediate buffer.
     pub fn write_to<W: fmt::Write + ?Sized>(&self, writer: &mut W) -> fmt::Result {
-        self.write_localized_to(writer, Translator::new(Language::English))
-    }
-
-    fn write_localized_to<W: fmt::Write + ?Sized>(
-        &self,
-        writer: &mut W,
-        translator: Translator,
-    ) -> fmt::Result {
+        let translator = self.translator;
         write_escaped(writer, self.title)?;
         writer.write_str(" (")?;
         if let Some(stage) = self.stage {
@@ -108,94 +200,6 @@ impl<'a> DiagnosticReport<'a> {
         }
         Ok(())
     }
-
-    pub fn message_key(diagnostic: &Diagnostic) -> Option<DiagnosticMessageKey> {
-        if let Some(key) = diagnostic.message_key() {
-            return Some(key);
-        }
-        if diagnostic.message().is_empty() {
-            return Self::emergency_message(diagnostic).map(|(key, _)| key);
-        }
-        None
-    }
-
-    fn message_text(diagnostic: &Diagnostic) -> Option<&str> {
-        if !diagnostic.message().is_empty() {
-            return Some(diagnostic.message());
-        }
-        Self::emergency_message(diagnostic).map(|(_, text)| text)
-    }
-
-    fn emergency_message(diagnostic: &Diagnostic) -> Option<(DiagnosticMessageKey, &'static str)> {
-        let failure_point = diagnostic.context().map(|context| context.failure_point());
-        match (diagnostic.code(), failure_point) {
-            (DiagnosticCode::RESOURCE_LIMIT_EXCEEDED, Some("conversion-depth-limit")) => Some((
-                diagnostic_key!("diagnostic.binding.conversion_depth_exceeded"),
-                "type depth exceeds the synchronous conversion limit",
-            )),
-            (DiagnosticCode::TYPE_BINDING_ERROR, Some("recursive-rust-type")) => Some((
-                diagnostic_key!("diagnostic.binding.recursive_rust_type"),
-                "recursive Rust types are unsupported",
-            )),
-            (DiagnosticCode::TYPE_BINDING_ERROR, Some("array-length-unrepresentable")) => Some((
-                diagnostic_key!("diagnostic.binding.array_length_unrepresentable"),
-                "fixed array length cannot be mapped to the schema",
-            )),
-            (DiagnosticCode::TYPE_BINDING_ERROR, Some("schema-type-mismatch")) => Some((
-                diagnostic_key!("diagnostic.binding.type_mismatch"),
-                "Rust type description is incompatible with the schema",
-            )),
-            (DiagnosticCode::RUST_CONVERSION_ERROR, _) => Some((
-                diagnostic_key!("diagnostic.conversion.failed"),
-                "Rust value conversion failed",
-            )),
-            (DiagnosticCode::CONFIG_ENCODING_ERROR, Some("secret-output-rejected")) => Some((
-                diagnostic_key!("diagnostic.encoding.secret_output_rejected"),
-                "secret values are not allowed in generated configuration output",
-            )),
-            (DiagnosticCode::CONFIG_ENCODING_ERROR, _) => Some((
-                diagnostic_key!("diagnostic.encoding.unrepresentable"),
-                "value cannot be expressed in the configuration grammar",
-            )),
-            (DiagnosticCode::SCHEMA_CONTEXT_MISMATCH, _) => Some((
-                diagnostic_key!("diagnostic.schema.root_context_mismatch"),
-                "root schema source is bound to a different compilation context",
-            )),
-            (DiagnosticCode::SCHEMA_SESSION_FINISHED, _) => Some((
-                diagnostic_key!("diagnostic.schema.session_finished"),
-                "schema compilation session has ended and cannot continue",
-            )),
-            (DiagnosticCode::CAPACITY_EXCEEDED, Some("error-payload-capacity-exceeded")) => Some((
-                diagnostic_key!("diagnostic.internal.error_payload_capacity_exceeded"),
-                "failed to store error payload: capacity exceeded",
-            )),
-            (DiagnosticCode::RESOURCE_LIMIT_EXCEEDED, _) => Some((
-                diagnostic_key!("diagnostic.emergency.resource_limit_exceeded"),
-                "resource limit exceeded",
-            )),
-            (DiagnosticCode::ALLOCATION_FAILED, _) => Some((
-                diagnostic_key!("diagnostic.emergency.allocation_failed"),
-                "memory allocation failed",
-            )),
-            (DiagnosticCode::CAPACITY_EXCEEDED, _) => Some((
-                diagnostic_key!("diagnostic.emergency.capacity_exceeded"),
-                "workspace capacity exceeded",
-            )),
-            (DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED, _) => Some((
-                diagnostic_key!("diagnostic.emergency.diagnostic_limit_reached"),
-                "diagnostic limit reached; subsequent errors were not collected",
-            )),
-            (DiagnosticCode::INTERNAL_ERROR, _) => Some((
-                diagnostic_key!("diagnostic.emergency.internal_error"),
-                "an internal error prevented the operation",
-            )),
-            (DiagnosticCode::SOURCE_INPUT_ERROR, _) => Some((
-                diagnostic_key!("diagnostic.emergency.source_input_error"),
-                "source input could not be read",
-            )),
-            _ => None,
-        }
-    }
 }
 
 fn write_diagnostic<W: fmt::Write + ?Sized>(
@@ -204,66 +208,127 @@ fn write_diagnostic<W: fmt::Write + ?Sized>(
     translator: Translator,
     writer: &mut W,
 ) -> fmt::Result {
-    write_code(writer, diagnostic.code())?;
-    writer.write_str(": ")?;
-    let message_key = DiagnosticReport::message_key(diagnostic);
-    let message = DiagnosticReport::message_text(diagnostic).unwrap_or("");
-    write_diagnostic_text(writer, message_key, message, translator)?;
-    if let Some(path) = diagnostic.path() {
-        writer.write_str("\n")?;
-        write_report_text(writer, ReportText::Path, translator)?;
-        writer.write_str(": ")?;
-        write_path(writer, path)?;
-    }
-    if let Some(primary) = diagnostic.primary() {
-        writer.write_str("\n")?;
-        write_report_text(writer, ReportText::Location, translator)?;
-        writer.write_str(": ")?;
-        write_location(writer, primary, context, translator)?;
-        write_excerpt(writer, primary, None, context, translator)?;
-    } else {
-        writer.write_str("\n")?;
-        write_report_text(writer, ReportText::Location, translator)?;
-        writer.write_str(": ")?;
-        write_report_text(writer, ReportText::LocationUnavailable, translator)?;
-    }
-    for label in diagnostic.labels() {
-        let span = label.span();
-        writer.write_str("\n")?;
-        write_report_text(writer, ReportText::Rule, translator)?;
-        writer.write_str(": ")?;
-        write_location(writer, span, context, translator)?;
-        writer.write_str(": ")?;
-        write_diagnostic_text(writer, label.key(), label.message(), translator)?;
-        write_excerpt(
-            writer,
-            span,
-            Some((label.key(), label.message())),
-            context,
-            translator,
-        )?;
-    }
-    if let Some(source) = diagnostic.value_source() {
-        writer.write_str("\n")?;
-        write_report_text(writer, ReportText::Source, translator)?;
-        writer.write_str(": ")?;
-        match source {
-            ValueSource::ConfigLiteral => {
-                write_report_text(writer, ReportText::ConfigLiteral, translator)?
-            }
-            ValueSource::SchemaDefault => {
-                write_report_text(writer, ReportText::SchemaDefault, translator)?
-            }
-            ValueSource::EnvironmentVariable => {
-                write_report_text(writer, ReportText::EnvironmentVariable, translator)?
-            }
-            ValueSource::ExplicitFallback => {
-                write_report_text(writer, ReportText::ExplicitFallback, translator)?
-            }
-            ValueSource::RustValue => write_report_text(writer, ReportText::RustValue, translator)?,
+    DiagnosticReport::visit_diagnostic(diagnostic, |field| {
+        write_report_field(field, context, translator, writer)
+    })
+}
+
+fn write_report_field<W: fmt::Write + ?Sized>(
+    field: DiagnosticReportField<'_>,
+    context: &ReportContext<'_>,
+    translator: Translator,
+    writer: &mut W,
+) -> fmt::Result {
+    match field {
+        DiagnosticReportField::Code(code) => {
+            write_code(writer, code)?;
+            writer.write_str(": ")
         }
+        DiagnosticReportField::Reason { text, .. } => {
+            let text = text.map_err(|_| fmt::Error)?;
+            write_escaped(writer, text)?;
+            writer.write_str("\n")
+        }
+        DiagnosticReportField::Kind(id) => {
+            write_report_text(writer, ReportText::Kind, translator)?;
+            writer.write_str(": ")?;
+            write_escaped(writer, id)?;
+            writer.write_str("\n")
+        }
+        DiagnosticReportField::Stage(stage) => {
+            write_report_text(writer, ReportText::DiagnosticStage, translator)?;
+            writer.write_str(": ")?;
+            write_escaped(writer, stage)
+        }
+        DiagnosticReportField::Path(path) => {
+            writer.write_str("\n")?;
+            write_report_text(writer, ReportText::Path, translator)?;
+            writer.write_str(": ")?;
+            write_path(writer, path)
+        }
+        DiagnosticReportField::Primary {
+            span,
+            location_status,
+        } => {
+            writer.write_str("\n")?;
+            write_report_text(writer, ReportText::Location, translator)?;
+            writer.write_str(": ")?;
+            if matches!(
+                location_status,
+                DiagnosticFieldStatus::Unavailable | DiagnosticFieldStatus::Redacted
+            ) {
+                write_field_status(writer, location_status, translator)?;
+            } else {
+                write_location(writer, span, context, translator)?;
+            }
+            write_excerpt(writer, span, None, context, translator)
+        }
+        DiagnosticReportField::Related { role, span, text } => {
+            writer.write_str("\n")?;
+            write_report_text(writer, ReportText::RelatedLocation, translator)?;
+            writer.write_str(" (")?;
+            write_related_role(writer, role, translator)?;
+            writer.write_str("): ")?;
+            write_location(writer, span, context, translator)?;
+            writer.write_str(": ")?;
+            write_escaped(writer, text)?;
+            write_excerpt(writer, span, Some(text), context, translator)
+        }
+        DiagnosticReportField::RelatedStatus { status, truncated } => {
+            let description = match (status, truncated) {
+                (DiagnosticFieldStatus::Unavailable, _) => {
+                    Some(ReportText::RelatedLocationsUnavailable)
+                }
+                (DiagnosticFieldStatus::Redacted, _) => Some(ReportText::Redacted),
+                (DiagnosticFieldStatus::Available, true) => {
+                    Some(ReportText::RelatedLocationsTruncated)
+                }
+                (DiagnosticFieldStatus::NotApplicable, _)
+                | (DiagnosticFieldStatus::Available, false) => None,
+            };
+            if let Some(description) = description {
+                writer.write_str("\n")?;
+                write_report_text(writer, ReportText::RelatedLocations, translator)?;
+                writer.write_str(": ")?;
+                write_report_text(writer, description, translator)?;
+            }
+            Ok(())
+        }
+        DiagnosticReportField::ValueSource(source) => {
+            writer.write_str("\n")?;
+            write_report_text(writer, ReportText::Source, translator)?;
+            writer.write_str(": ")?;
+            match source {
+                ValueSource::ConfigLiteral => {
+                    write_report_text(writer, ReportText::ConfigLiteral, translator)
+                }
+                ValueSource::SchemaDefault => {
+                    write_report_text(writer, ReportText::SchemaDefault, translator)
+                }
+                ValueSource::EnvironmentVariable => {
+                    write_report_text(writer, ReportText::EnvironmentVariable, translator)
+                }
+                ValueSource::ExplicitFallback => {
+                    write_report_text(writer, ReportText::ExplicitFallback, translator)
+                }
+                ValueSource::RustValue => {
+                    write_report_text(writer, ReportText::RustValue, translator)
+                }
+            }
+        }
+        DiagnosticReportField::Status { field, status } => {
+            writer.write_str("\n")?;
+            let label = match field {
+                DiagnosticReportFieldName::Path => ReportText::Path,
+                DiagnosticReportFieldName::Primary => ReportText::Location,
+                DiagnosticReportFieldName::ValueSource => ReportText::Source,
+            };
+            write_report_text(writer, label, translator)?;
+            writer.write_str(": ")?;
+            write_field_status(writer, status, translator)
+        }
+        DiagnosticReportField::Context { .. } => Ok(()),
     }
-    Ok(())
 }
 
 fn write_code<W: fmt::Write + ?Sized>(writer: &mut W, code: DiagnosticCode) -> fmt::Result {
@@ -275,54 +340,97 @@ fn write_report_text<W: fmt::Write + ?Sized>(
     text: ReportText,
     translator: Translator,
 ) -> fmt::Result {
-    if translator.language() == Language::English {
-        let english = match text {
-            ReportText::Path => "Path",
-            ReportText::Location => "Location",
-            ReportText::LocationUnavailable => "location unavailable",
-            ReportText::Rule => "Rule",
-            ReportText::Source => "Source",
-            ReportText::ConfigLiteral => "ConfigLiteral",
-            ReportText::SchemaDefault => "SchemaDefault",
-            ReportText::EnvironmentVariable => "EnvironmentVariable",
-            ReportText::ExplicitFallback => "ExplicitFallback",
-            ReportText::RustValue => "RustValue",
-            ReportText::DiagnosticMessageUnavailable => "diagnostic message unavailable",
-            ReportText::SourceExcerptUnavailable => "source excerpt unavailable",
-        };
-        writer.write_str(english)
-    } else {
-        let text = match text {
-            ReportText::Path => t!("report.path", locale = translator),
-            ReportText::Location => t!("report.location", locale = translator),
-            ReportText::LocationUnavailable => {
-                t!("report.location_unavailable", locale = translator)
-            }
-            ReportText::Rule => t!("report.rule", locale = translator),
-            ReportText::Source => t!("report.source", locale = translator),
-            ReportText::ConfigLiteral => {
-                t!("report.source.config_literal", locale = translator)
-            }
-            ReportText::SchemaDefault => {
-                t!("report.source.schema_default", locale = translator)
-            }
-            ReportText::EnvironmentVariable => {
-                t!("report.source.environment_variable", locale = translator)
-            }
-            ReportText::ExplicitFallback => {
-                t!("report.source.explicit_fallback", locale = translator)
-            }
-            ReportText::RustValue => t!("report.source.rust_value", locale = translator),
-            ReportText::DiagnosticMessageUnavailable => {
-                t!("report.diagnostic_message_unavailable", locale = translator)
-            }
-            ReportText::SourceExcerptUnavailable => {
-                t!("report.source_excerpt_unavailable", locale = translator)
-            }
+    let text = match text {
+        ReportText::Path => t! { name: "report.path", locale: translator },
+        ReportText::Location => t! { name: "report.location", locale: translator },
+        ReportText::LocationUnavailable => {
+            t! { name: "report.location_unavailable", locale: translator }
         }
-        .map_err(|_| fmt::Error)?;
-        writer.write_str(text)
+        ReportText::RelatedLocation => {
+            t! { name: "report.related_location", locale: translator }
+        }
+        ReportText::RelatedLocations => {
+            t! { name: "report.related_locations", locale: translator }
+        }
+        ReportText::RelatedLocationsUnavailable => {
+            t! { name: "report.related_locations_unavailable", locale: translator }
+        }
+        ReportText::RelatedLocationsTruncated => {
+            t! { name: "report.related_locations_truncated", locale: translator }
+        }
+        ReportText::Kind => t! { name: "report.kind", locale: translator },
+        ReportText::DiagnosticStage => {
+            t! { name: "report.diagnostic_stage", locale: translator }
+        }
+        ReportText::FieldUnavailable => {
+            t! { name: "report.field_unavailable", locale: translator }
+        }
+        ReportText::Redacted => t! { name: "report.redacted", locale: translator },
+        ReportText::Source => t! { name: "report.source", locale: translator },
+        ReportText::ConfigLiteral => {
+            t! { name: "report.source.config_literal", locale: translator }
+        }
+        ReportText::SchemaDefault => {
+            t! { name: "report.source.schema_default", locale: translator }
+        }
+        ReportText::EnvironmentVariable => {
+            t! { name: "report.source.environment_variable", locale: translator }
+        }
+        ReportText::ExplicitFallback => {
+            t! { name: "report.source.explicit_fallback", locale: translator }
+        }
+        ReportText::RustValue => {
+            t! { name: "report.source.rust_value", locale: translator }
+        }
+        ReportText::SourceExcerptUnavailable => {
+            t! { name: "report.source_excerpt_unavailable", locale: translator }
+        }
     }
+    .map_err(|_| fmt::Error)?;
+    writer.write_str(text.as_ref())
+}
+
+fn write_related_role<W: fmt::Write + ?Sized>(
+    writer: &mut W,
+    role: RelatedLocationRole,
+    translator: Translator,
+) -> fmt::Result {
+    let text = match role {
+        RelatedLocationRole::PreviousDeclaration => {
+            t! { name: "report.related_role.previous_declaration", locale: translator }
+        }
+        RelatedLocationRole::FirstDeclaration => t! {
+            name: "report.related_role.first_declaration",
+            locale: translator,
+        },
+        RelatedLocationRole::TypeOrFieldDefinition => {
+            t! { name: "report.related_role.type_or_field_definition", locale: translator }
+        }
+        RelatedLocationRole::ConstraintDefinition => {
+            t! { name: "report.related_role.constraint_definition", locale: translator }
+        }
+        RelatedLocationRole::AssociatedInput => t! {
+            name: "report.related_role.associated_input",
+            locale: translator,
+        },
+    }
+    .map_err(|_| fmt::Error)?;
+    writer.write_str(text.as_ref())
+}
+
+fn write_field_status<W: fmt::Write + ?Sized>(
+    writer: &mut W,
+    status: DiagnosticFieldStatus,
+    translator: Translator,
+) -> fmt::Result {
+    let text = match status {
+        DiagnosticFieldStatus::Unavailable | DiagnosticFieldStatus::Available => {
+            ReportText::FieldUnavailable
+        }
+        DiagnosticFieldStatus::Redacted => ReportText::Redacted,
+        DiagnosticFieldStatus::NotApplicable => return Ok(()),
+    };
+    write_report_text(writer, text, translator)
 }
 
 fn write_location<W: fmt::Write + ?Sized>(
@@ -353,7 +461,7 @@ fn write_location<W: fmt::Write + ?Sized>(
 fn write_excerpt<W: fmt::Write + ?Sized>(
     writer: &mut W,
     span: SourceSpan,
-    annotation: Option<(Option<DiagnosticMessageKey>, &str)>,
+    annotation: Option<&str>,
     context: &ReportContext<'_>,
     translator: Translator,
 ) -> fmt::Result {
@@ -383,9 +491,9 @@ fn write_excerpt<W: fmt::Write + ?Sized>(
                     .saturating_sub(visible_column(text, start))
                     .max(1),
             )?;
-            if let Some((key, annotation)) = annotation {
+            if let Some(annotation) = annotation {
                 writer.write_str(" ")?;
-                write_diagnostic_text(writer, key, annotation, translator)?;
+                write_escaped(writer, annotation)?;
             }
         }
     }
@@ -394,26 +502,6 @@ fn write_excerpt<W: fmt::Write + ?Sized>(
         write_report_text(writer, ReportText::SourceExcerptUnavailable, translator)?;
     }
     Ok(())
-}
-
-fn write_diagnostic_text<W: fmt::Write + ?Sized>(
-    writer: &mut W,
-    key: Option<DiagnosticMessageKey>,
-    original: &str,
-    translator: Translator,
-) -> fmt::Result {
-    match key {
-        Some(key) => {
-            let mut escaped = EscapingWriter { writer };
-            translator
-                .write_diagnostic(key, &mut escaped)
-                .map_err(|_| fmt::Error)
-        }
-        None if original.is_empty() => {
-            write_report_text(writer, ReportText::DiagnosticMessageUnavailable, translator)
-        }
-        None => write_escaped(writer, original),
-    }
 }
 
 fn write_path<W: fmt::Write + ?Sized>(writer: &mut W, path: &InstancePath) -> fmt::Result {
@@ -535,35 +623,30 @@ mod tests {
     use alloc::string::String;
     use core::slice;
     use typol_core::{
-        BudgetError, Diagnostic, DiagnosticCode, DiagnosticMessage, DiagnosticMessageKey,
-        SourceExcerptSet, SourceId, SourceSpan, opeo::ErrSlot,
+        Diagnostic, DiagnosticCode, DiagnosticFailure, SourceExcerptSet, SourceId, SourceSpan,
     };
+    use typol_i18n::{Language, Translator};
+    use u18n::RenderError;
 
     use super::{DiagnosticReport, ReportContext};
 
     #[test]
-    fn english_report_rejects_an_invalid_diagnostic_key() {
-        let mut errors = ErrSlot::<BudgetError>::new();
-        let result = errors.try_call(|out| {
-            Diagnostic::try_new(
-                DiagnosticCode::CONFIG_VALUE_ERROR,
-                DiagnosticMessage::localized(
-                    "English fallback",
-                    DiagnosticMessageKey::__from_index(u16::MAX),
-                ),
-                None,
-                out,
-            )
-        });
-        assert!(result.is_ok(), "diagnostic construction should succeed");
-        let Ok(diagnostic) = result else {
-            return;
-        };
+    fn report_propagates_a_frozen_translation_failure() {
+        let diagnostic = Diagnostic::failure(
+            DiagnosticCode::CONFIG_VALUE_ERROR,
+            DiagnosticFailure::Translation(RenderError::InvalidCatalog),
+        );
         let source_name = |_: SourceId| None;
         let span_location = |_: SourceSpan| None;
         let excerpts = SourceExcerptSet::unavailable();
         let context = ReportContext::new(&source_name, &span_location, &excerpts);
-        let report = DiagnosticReport::new("", None, slice::from_ref(&diagnostic), context);
+        let report = DiagnosticReport::new(
+            "",
+            None,
+            slice::from_ref(&diagnostic),
+            context,
+            Translator::new(Language::English),
+        );
         let mut output = String::new();
 
         assert!(report.write_to(&mut output).is_err());

@@ -13,6 +13,7 @@ use crate::{
 use core::cmp::Ordering;
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{ChargedVec, DiagnosticContext, diagnostic_context};
+use typol_i18n::Translator;
 use typol_semantic::FieldList;
 
 static FIELD_BINDING_INVARIANT: DiagnosticContext =
@@ -65,7 +66,7 @@ impl FieldMatcher {
         for (slot, descriptor) in members.iter().enumerate() {
             let DescriptorNode::Field { name, value } = context.get(*descriptor, out.reborrow())?
             else {
-                return Err(out.fail(internal_error()));
+                return Err(out.fail(internal_error(context.session().translator())));
             };
             context.session().budget_codec(
                 CodecStage::Binding,
@@ -157,11 +158,11 @@ impl FieldMatcher {
             let (rust_slot, provider) = sorted
                 .get(index)
                 .map(|entry| entry.1)
-                .ok_or_else(internal_error)
+                .ok_or_else(|| internal_error(context.session().translator()))
                 .store_err_into(out.reborrow())?;
             let matched_slot = matched
                 .get_mut(rust_slot)
-                .ok_or_else(internal_error)
+                .ok_or_else(|| internal_error(context.session().translator()))
                 .store_err_into(out.reborrow())?;
             *matched_slot = true;
             context.session().budget_codec(
@@ -177,7 +178,7 @@ impl FieldMatcher {
             let rust_name = sorted
                 .get(index)
                 .map(|entry| entry.0)
-                .ok_or_else(internal_error)
+                .ok_or_else(|| internal_error(context.session().translator()))
                 .store_err_into(out.reborrow())?;
             let child_path = path.extend(
                 context.session(),
@@ -208,7 +209,7 @@ impl FieldMatcher {
             let was_matched = matched
                 .get(*rust_slot)
                 .copied()
-                .ok_or_else(internal_error)
+                .ok_or_else(|| internal_error(context.session().translator()))
                 .store_err_into(out.reborrow())?;
             if !was_matched {
                 let mismatch_path = path.extend(
@@ -243,7 +244,7 @@ impl FieldMatcher {
             let middle = low + (high - low) / 2;
             let entry = sorted
                 .get(middle)
-                .ok_or_else(internal_error)
+                .ok_or_else(|| internal_error(context.session().translator()))
                 .store_err_into(out.reborrow())?;
             let ordering = context.session().budget_codec(
                 CodecStage::Binding,
@@ -274,11 +275,11 @@ impl FieldMatcher {
         for pair in sorted.windows(2) {
             let left = pair
                 .first()
-                .ok_or_else(internal_error)
+                .ok_or_else(|| internal_error(context.session().translator()))
                 .store_err_into(out.reborrow())?;
             let right = pair
                 .get(1)
-                .ok_or_else(internal_error)
+                .ok_or_else(|| internal_error(context.session().translator()))
                 .store_err_into(out.reborrow())?;
             let ordering = context.session().budget_codec(
                 CodecStage::Binding,
@@ -312,9 +313,10 @@ impl FieldMatcher {
     }
 }
 
-fn internal_error() -> CodecErrors {
+fn internal_error(translator: Translator) -> CodecErrors {
     CodecErrors::emergency(
         CodecStage::Binding,
         Failure::internal(FIELD_BINDING_INVARIANT),
+        translator,
     )
 }

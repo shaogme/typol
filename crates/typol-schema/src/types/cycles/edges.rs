@@ -79,7 +79,8 @@ impl<'a, 'src, 'd> TypeEdgeCollector<'a, 'src, 'd> {
             self.context
                 .consume(1, self.root_span, self.diagnostics, out.reborrow())?;
             let Some(type_use) = self.graph.type_use(id) else {
-                self.diagnostics.push(schema_internal!(span));
+                self.diagnostics
+                    .push(schema_internal!(self.diagnostics.translator(), span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             match type_use.kind() {
@@ -94,7 +95,8 @@ impl<'a, 'src, 'd> TypeEdgeCollector<'a, 'src, 'd> {
                 }
                 ResolvedTypeKind::User(target) => {
                     let Some(target_symbol) = self.symbols.type_symbol(target) else {
-                        self.diagnostics.push(schema_internal!(span));
+                        self.diagnostics
+                            .push(schema_internal!(self.diagnostics.translator(), span));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     if target_symbol.state() == SymbolState::Valid

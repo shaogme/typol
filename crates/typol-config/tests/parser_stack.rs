@@ -161,6 +161,135 @@ fn leaf_number(mut value: ValueView<'_>) -> TestResult<u128> {
     }
 }
 
+fn verify_deep_value(
+    input: &Input,
+    schema: &CompiledSchema,
+    config_limits: ConfigLimits,
+) -> TestResult<()> {
+    let source = input.source("{n:1}", "2");
+    let value = Support::parse(
+        schema,
+        config_request(
+            (&mut SliceSource::new(source.as_bytes()), "config"),
+            &config_limits,
+        ),
+        &mut NoHost,
+    )
+    .test_value()?;
+    test_eq!(leaf_number(value.root())?, 1)?;
+    drop(value);
+    Ok(())
+}
+
+fn verify_deep_errors(
+    input: &Input,
+    schema: &CompiledSchema,
+    depth: usize,
+    config_limits: ConfigLimits,
+) -> TestResult<()> {
+    for (leaf, code) in [
+        ("{n:999}", DiagnosticCode::CONFIG_VALUE_ERROR),
+        ("{n:0}", DiagnosticCode::CONFIG_VALIDATION_ERROR),
+    ] {
+        let source = input.source(leaf, if leaf == "{n:999}" { "999" } else { "2" });
+        let errors = Support::parse(
+            schema,
+            config_request(
+                (&mut SliceSource::new(source.as_bytes()), "config"),
+                &config_limits,
+            ),
+            &mut NoHost,
+        )
+        .test_error()?;
+        let first_error = TestCheck::item(errors.diagnostics(), 0)?;
+        test_eq!(first_error.code(), code)?;
+        if code == DiagnosticCode::CONFIG_VALUE_ERROR {
+            test_eq!(errors.diagnostics().len(), 2)?;
+            let second_error = TestCheck::item(errors.diagnostics(), 1)?;
+            test_eq!(second_error.code(), code)?;
+            test_eq!(
+                second_error
+                    .path()
+                    .test_value()?
+                    .segments()
+                    .first()
+                    .test_value()?
+                    .as_field(),
+                Some("tail")
+            )?;
+        } else {
+            test_eq!(errors.diagnostics().len(), 1)?;
+            let span = first_error.primary().test_value()?.span();
+            test_eq!(source.get(span.start()..span.end()).test_value()?, "{n:0}")?;
+            test_assert!(first_error.path().test_value()?.len() >= depth)?;
+        }
+    }
+
+    let limited = config_limits.with_max_nesting_depth(depth);
+    let source = input.source("{n:0}", "2");
+    let errors = Support::parse(
+        schema,
+        config_request(
+            (&mut SliceSource::new(source.as_bytes()), "config"),
+            &limited,
+        ),
+        &mut NoHost,
+    )
+    .test_error()?;
+    test_eq!(
+        errors.diagnostics().last().test_value()?.code(),
+        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+    )?;
+
+    let truncated = format!("{{value:{}{{n:1", input.prefix);
+    let errors = Support::parse(
+        schema,
+        config_request(
+            (&mut SliceSource::new(truncated.as_bytes()), "config"),
+            &config_limits,
+        ),
+        &mut NoHost,
+    )
+    .test_error()?;
+    test_eq!(
+        errors.diagnostics().last().test_value()?.code(),
+        DiagnosticCode::CONFIG_SYNTAX_ERROR
+    )?;
+    test_assert!(errors.diagnostics().iter().all(|error| {
+        error.message().unwrap_or("diagnostic rendering failed") != "required field is missing"
+    }))?;
+
+    let mismatched = format!("{{value:{}{{n:1]", input.prefix);
+    let errors = Support::parse(
+        schema,
+        config_request(
+            (&mut SliceSource::new(mismatched.as_bytes()), "config"),
+            &config_limits,
+        ),
+        &mut NoHost,
+    )
+    .test_error()?;
+    test_eq!(
+        errors.diagnostics().last().test_value()?.code(),
+        DiagnosticCode::CONFIG_SYNTAX_ERROR
+    )?;
+    Ok(())
+}
+
+fn run_layer_case(
+    layers: &[Layer],
+    depth: usize,
+    schema_limits: SchemaLimits,
+    config_limits: ConfigLimits,
+) -> TestResult<()> {
+    let input = Input::new(layers, depth)?;
+    let schema = compile(&input.schema, schema_limits)?;
+    verify_deep_value(&input, &schema, config_limits)?;
+    verify_deep_errors(&input, &schema, depth, config_limits)?;
+    drop(schema);
+    Ok(())
+}
+
 #[test]
 fn parser_stack_child() -> TestResult<()> {
     if env::var_os("TYPOL_PARSER_STACK_CHILD").is_none() {
@@ -190,107 +319,7 @@ fn parser_stack_child() -> TestResult<()> {
                     Layer::Object,
                 ],
             ] {
-                let input = Input::new(layers, depth)?;
-                let schema = compile(&input.schema, schema_limits)?;
-                let source = input.source("{n:1}", "2");
-                let value = Support::parse(
-                    &schema,
-                    config_request(
-                        (&mut SliceSource::new(source.as_bytes()), "config"),
-                        &config_limits,
-                    ),
-                    &mut NoHost,
-                )
-                .test_value()?;
-                test_eq!(leaf_number(value.root())?, 1)?;
-                drop(value);
-                for (leaf, code) in [
-                    ("{n:999}", DiagnosticCode::CONFIG_VALUE_ERROR),
-                    ("{n:0}", DiagnosticCode::CONFIG_VALIDATION_ERROR),
-                ] {
-                    let source = input.source(leaf, if leaf == "{n:999}" { "999" } else { "2" });
-                    let errors = Support::parse(
-                        &schema,
-                        config_request(
-                            (&mut SliceSource::new(source.as_bytes()), "config"),
-                            &config_limits,
-                        ),
-                        &mut NoHost,
-                    )
-                    .test_error()?;
-                    let first_error = TestCheck::item(errors.diagnostics(), 0)?;
-                    test_eq!(first_error.code(), code)?;
-                    if code == DiagnosticCode::CONFIG_VALUE_ERROR {
-                        test_eq!(errors.diagnostics().len(), 2)?;
-                        let second_error = TestCheck::item(errors.diagnostics(), 1)?;
-                        test_eq!(second_error.code(), code)?;
-                        test_eq!(
-                            second_error
-                                .path()
-                                .test_value()?
-                                .segments()
-                                .first()
-                                .test_value()?
-                                .as_field(),
-                            Some("tail")
-                        )?;
-                    } else {
-                        test_eq!(errors.diagnostics().len(), 1)?;
-                        let span = first_error.primary().test_value()?.span();
-                        test_eq!(source.get(span.start()..span.end()).test_value()?, "{n:0}")?;
-                        test_assert!(first_error.path().test_value()?.len() >= depth)?;
-                    }
-                }
-                let mut limited = config_limits;
-                limited = limited.with_max_nesting_depth(depth);
-                let errors = Support::parse(
-                    &schema,
-                    config_request(
-                        (&mut SliceSource::new(source.as_bytes()), "config"),
-                        &limited,
-                    ),
-                    &mut NoHost,
-                )
-                .test_error()?;
-                test_eq!(
-                    errors.diagnostics().last().test_value()?.code(),
-                    DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
-                )?;
-                let truncated = format!("{{value:{}{{n:1", input.prefix);
-                let errors = Support::parse(
-                    &schema,
-                    config_request(
-                        (&mut SliceSource::new(truncated.as_bytes()), "config"),
-                        &config_limits,
-                    ),
-                    &mut NoHost,
-                )
-                .test_error()?;
-                test_eq!(
-                    errors.diagnostics().last().test_value()?.code(),
-                    DiagnosticCode::CONFIG_SYNTAX_ERROR
-                )?;
-                test_assert!(
-                    errors
-                        .diagnostics()
-                        .iter()
-                        .all(|error| error.message() != "required field is missing")
-                )?;
-                let mismatched = format!("{{value:{}{{n:1]", input.prefix);
-                let errors = Support::parse(
-                    &schema,
-                    config_request(
-                        (&mut SliceSource::new(mismatched.as_bytes()), "config"),
-                        &config_limits,
-                    ),
-                    &mut NoHost,
-                )
-                .test_error()?;
-                test_eq!(
-                    errors.diagnostics().last().test_value()?.code(),
-                    DiagnosticCode::CONFIG_SYNTAX_ERROR
-                )?;
-                drop(schema);
+                run_layer_case(layers, depth, schema_limits, config_limits)?;
             }
             Ok(())
         })

@@ -11,7 +11,7 @@ use typol_syntax::{
     ExprKind, MethodArgumentKind, SchemaAst, SchemaParseOptions, SchemaParser, SyntaxErrors,
     SyntaxLimits, TypeExprKind,
 };
-use typol_test_support::TestSlot;
+use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
 
 struct TestErrors {
     budget: TestSlot<BudgetError>,
@@ -36,15 +36,21 @@ impl TestErrors {
         source: &str,
         limits: &SyntaxLimits,
         budget: &ExecutionBudget,
-    ) -> Result<SchemaAst, SyntaxErrors> {
+    ) -> TestOpeoOutcome<SchemaAst, SyntaxErrors> {
         let options = SchemaParseOptions::with_syntax(*limits);
         self.syntax
-            .access(|out| SchemaParser::parse_str(source_id, source, &options, budget, out))
+            .run(|out| SchemaParser::parse_str(source_id, source, &options, budget, out))
     }
 }
 
 #[derive(Debug)]
 struct TestFailure;
+
+impl From<OpeoTestFailure> for TestFailure {
+    fn from(_: OpeoTestFailure) -> Self {
+        Self
+    }
+}
 
 macro_rules! test_assert {
     ($condition:expr $(, $($message:tt)*)?) => {{
@@ -95,16 +101,6 @@ impl<T> TestValue<T> for Option<T> {
     }
 }
 
-trait TestError<T> {
-    fn test_error(self) -> TestResult<T>;
-}
-
-impl<T, E> TestError<E> for Result<T, E> {
-    fn test_error(self) -> TestResult<E> {
-        self.err().ok_or(TestFailure)
-    }
-}
-
 const SOURCE_ID: SourceId = SourceId::new(7);
 
 fn parse(
@@ -112,7 +108,7 @@ fn parse(
     source: &str,
     limits: &SyntaxLimits,
     execution: &ExecutionBudget,
-) -> Result<SchemaAst, SyntaxErrors> {
+) -> TestOpeoOutcome<SchemaAst, SyntaxErrors> {
     errors.parse(SOURCE_ID, source, limits, execution)
 }
 

@@ -9,6 +9,7 @@ use core::{cell::Cell, error::Error as StdError, fmt};
 use opeo::{Caught, ErrSlot, OResult, Out, ResultOutExt};
 use serde::{de::Error as DeError, ser::Error as SerError};
 use typol_core::{BudgetError, ConfigValue, DiagnosticContext, ValueError, diagnostic_context};
+use typol_i18n::Translator;
 use typol_policy::ValueLimits;
 use typol_semantic::{
     CopyError, CopyOptions, CopyRequest, SchemaAccessError, TypeKind, TypeView, ValueCopy,
@@ -49,8 +50,8 @@ impl Error {
         Self::failure(Failure::internal(context))
     }
 
-    pub(crate) fn into_errors(self) -> CodecErrors {
-        CodecErrors::emergency(CodecStage::Conversion, self.failure)
+    pub(crate) fn into_errors(self, translator: Translator) -> CodecErrors {
+        CodecErrors::emergency(CodecStage::Conversion, self.failure, translator)
     }
 }
 
@@ -451,9 +452,10 @@ impl Fault {
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
-    use super::Error;
+    use super::{Error, Translator};
     use serde::{de::Error as DeError, ser::Error as SerError};
     use typol_core::DiagnosticCode;
+    use typol_i18n::Language;
     use typol_test_support::{
         TestExpect, TestResult, test_verify as assert, test_verify_eq as assert_eq,
     };
@@ -462,7 +464,7 @@ mod tests {
     fn custom_serde_errors_keep_category_without_message_text() -> TestResult {
         let error = <Error as DeError>::custom("secret deserialization error");
         assert!(!format!("{error:?}{error}").contains("secret deserialization error"));
-        let errors = error.into_errors();
+        let errors = error.into_errors(Translator::new(Language::English));
         let diagnostic = errors
             .diagnostics()
             .first()
@@ -479,7 +481,7 @@ mod tests {
 
         let error = <Error as SerError>::custom("secret serialization error");
         assert!(!format!("{error:?}{error}").contains("secret serialization error"));
-        let errors = error.into_errors();
+        let errors = error.into_errors(Translator::new(Language::English));
         let context = errors
             .diagnostic_context(0)
             .test_expect("custom serialization rejections should preserve static context")?;
@@ -498,7 +500,7 @@ mod tests {
         ];
         for (error, expected) in categories.into_iter().zip(expected) {
             let context = error
-                .into_errors()
+                .into_errors(Translator::new(Language::English))
                 .diagnostic_context(0)
                 .test_expect("serde rejections should carry classification context")?;
             assert_eq!(context.failure_point(), expected);

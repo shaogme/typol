@@ -181,7 +181,7 @@ impl ValidatedValue<'_, '_> {
             out.reborrow(),
         )?;
         if !matches!(kind, TypeKind::Struct { .. }) {
-            return Err(out.fail(Encoder::invariant_error()));
+            return Err(out.fail(Encoder::invariant_error(self.session.translator())));
         }
         Encoder::run(
             entry,
@@ -253,6 +253,7 @@ impl SecretValueChecker {
                                     return Err(out.fail(CodecErrors::emergency(
                                         CodecStage::Encoding,
                                         Failure::internal(SECRET_VALUE_SHAPE),
+                                        session.translator(),
                                     )));
                                 }
                             },
@@ -278,6 +279,7 @@ impl SecretValueChecker {
                             return Err(out.fail(CodecErrors::emergency(
                                 CodecStage::Encoding,
                                 Failure::internal(SECRET_VALUE_SHAPE),
+                                session.translator(),
                             )));
                         };
                         Self::push(
@@ -312,6 +314,7 @@ impl SecretValueChecker {
                         return Err(out.fail(CodecErrors::emergency(
                             CodecStage::Encoding,
                             Failure::internal(SECRET_VALUE_SHAPE),
+                            session.translator(),
                         )));
                     };
                     if session.schema_codec(
@@ -349,6 +352,7 @@ impl SecretValueChecker {
                             return Err(out.fail(CodecErrors::emergency(
                                 CodecStage::Encoding,
                                 Failure::internal(SECRET_VALUE_SHAPE),
+                                session.translator(),
                             )));
                         }
                     }
@@ -363,6 +367,7 @@ impl SecretValueChecker {
                     return Err(out.fail(CodecErrors::emergency(
                         CodecStage::Encoding,
                         Failure::internal(SECRET_VALUE_SHAPE),
+                        session.translator(),
                     )));
                 }
             }
@@ -382,6 +387,7 @@ impl SecretValueChecker {
                 return Err(out.fail(CodecErrors::emergency(
                     CodecStage::Encoding,
                     Failure::internal(SECRET_VALUE_SHAPE),
+                    session.translator(),
                 )));
             };
             let field = session.budget_codec(
@@ -393,6 +399,7 @@ impl SecretValueChecker {
                 return Err(out.fail(CodecErrors::emergency(
                     CodecStage::Encoding,
                     Failure::internal(SECRET_VALUE_SHAPE),
+                    session.translator(),
                 )));
             };
             if session.schema_codec(

@@ -86,6 +86,7 @@ impl<const N: usize> Typol for Wide<N> {
         context: &mut DescribeContext<'_>,
         mut out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, TypeDescriptor> {
+        let translator = context.session().translator();
         let mut members = context.session().budget_codec(
             CodecStage::Binding,
             |budget_out| context.session().workspace(budget_out),
@@ -105,6 +106,7 @@ impl<const N: usize> Typol for Wide<N> {
                     return Err(out.fail(CodecErrors::emergency(
                         CodecStage::Binding,
                         Failure::internal(PROFILE_INTERNAL_CONTEXT),
+                        translator,
                     )));
                 };
                 *byte = b'0' + digit;
@@ -114,6 +116,7 @@ impl<const N: usize> Typol for Wide<N> {
                 return Err(out.fail(CodecErrors::emergency(
                     CodecStage::Binding,
                     Failure::internal(PROFILE_INTERNAL_CONTEXT),
+                    translator,
                 )));
             }
             let field_name = match from_utf8(&name) {
@@ -122,6 +125,7 @@ impl<const N: usize> Typol for Wide<N> {
                     return Err(out.fail(CodecErrors::emergency(
                         CodecStage::Binding,
                         Failure::internal(PROFILE_INTERNAL_CONTEXT),
+                        translator,
                     )));
                 }
             };
@@ -158,12 +162,14 @@ impl<const N: usize> Typol for Wide<N> {
         mut out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, ValueId> {
         context.start::<Self>(out.reborrow())?;
+        let translator = context.session().translator();
         context.structure(
             |slot, child, child_out| match self.values.get(slot) {
                 Some(value) => child.encode_here(value, child_out),
                 None => Err(child_out.fail(CodecErrors::emergency(
                     CodecStage::Conversion,
                     Failure::internal(PROFILE_INTERNAL_CONTEXT),
+                    translator,
                 ))),
             },
             out.reborrow(),

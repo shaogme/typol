@@ -216,11 +216,11 @@ impl<'a> ModuleTree<'a> {
             .consume::<BuildFailure>(1, out.reborrow())?;
         let Some(root_file) = loaded.files().first() else {
             let span = SourceSpan::new(SourceId::new(0), Span::empty());
-            diagnostics.push(schema_internal!(span));
+            diagnostics.push(schema_internal!(diagnostics.translator(), span));
             return Err(out.fail(BuildFailure::empty()));
         };
         let Some(root_ast) = root_file.ast() else {
-            diagnostics.abort(schema_internal!(empty));
+            diagnostics.abort(schema_internal!(diagnostics.translator(), empty));
             return Err(out.fail(BuildFailure::empty()));
         };
         let root_span = root_ast.span();
@@ -297,7 +297,8 @@ impl<'a> TreeBuilder<'a, '_> {
             match frame.items {
                 FrameItems::File(file) => {
                     let Some(ast) = file.ast() else {
-                        self.diagnostics.abort(schema_internal!(span));
+                        self.diagnostics
+                            .abort(schema_internal!(self.diagnostics.translator(), span));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     let Some(item) = self.ast_access(out.reborrow(), |ast_out| {
@@ -313,21 +314,33 @@ impl<'a> TreeBuilder<'a, '_> {
                     if let Some(extern_mod) = item.extern_mod() {
                         self.consume(extern_mod.span(), out.reborrow())?;
                         let Some(edge) = file.import_targets().get(frame.next_import_index) else {
-                            self.diagnostics.push(schema_internal!(extern_mod.span()));
+                            self.diagnostics.push(schema_internal!(
+                                self.diagnostics.translator(),
+                                extern_mod.span()
+                            ));
                             return Err(out.fail(BuildFailure::empty()));
                         };
                         let (target, is_resolved) = match *edge {
                             ImportEdge::Pending => {
-                                self.diagnostics.push(schema_internal!(extern_mod.span()));
+                                self.diagnostics.push(schema_internal!(
+                                    self.diagnostics.translator(),
+                                    extern_mod.span()
+                                ));
                                 return Err(out.fail(BuildFailure::empty()));
                             }
                             ImportEdge::Resolved { target } => {
                                 let Some(file) = loaded.files().get(target) else {
-                                    self.diagnostics.push(schema_internal!(extern_mod.span()));
+                                    self.diagnostics.push(schema_internal!(
+                                        self.diagnostics.translator(),
+                                        extern_mod.span()
+                                    ));
                                     return Err(out.fail(BuildFailure::empty()));
                                 };
                                 if file.parsed_ast().is_none() {
-                                    self.diagnostics.push(schema_internal!(extern_mod.span()));
+                                    self.diagnostics.push(schema_internal!(
+                                        self.diagnostics.translator(),
+                                        extern_mod.span()
+                                    ));
                                     return Err(out.fail(BuildFailure::empty()));
                                 }
                                 (Some(file), true)
@@ -337,8 +350,10 @@ impl<'a> TreeBuilder<'a, '_> {
                                     Some(index) => match loaded.files().get(index) {
                                         Some(file) => Some(file),
                                         None => {
-                                            self.diagnostics
-                                                .push(schema_internal!(extern_mod.span()));
+                                            self.diagnostics.push(schema_internal!(
+                                                self.diagnostics.translator(),
+                                                extern_mod.span()
+                                            ));
                                             return Err(out.fail(BuildFailure::empty()));
                                         }
                                     },
@@ -382,7 +397,10 @@ impl<'a> TreeBuilder<'a, '_> {
                             continue;
                         }
                         let Some(target) = target else {
-                            self.diagnostics.push(schema_internal!(extern_mod.span()));
+                            self.diagnostics.push(schema_internal!(
+                                self.diagnostics.translator(),
+                                extern_mod.span()
+                            ));
                             return Err(out.fail(BuildFailure::empty()));
                         };
                         self.frames.try_push(
@@ -472,8 +490,10 @@ impl<'a> TreeBuilder<'a, '_> {
         for (new_index, declaration) in self.declarations.iter_mut().enumerate() {
             context.execution().consume(2, out.reborrow())?;
             let Some(mapped) = remap.get_mut(declaration.id().index()) else {
-                self.diagnostics
-                    .abort(schema_internal!(declaration.name_span()));
+                self.diagnostics.abort(schema_internal!(
+                    self.diagnostics.translator(),
+                    declaration.name_span()
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             };
             *mapped = new_index;
@@ -485,7 +505,8 @@ impl<'a> TreeBuilder<'a, '_> {
                 context.execution().consume(2, out.reborrow())?;
                 if let ModuleMember::Type(old_id) = member {
                     let Some(index) = remap.get(old_id.index()).copied() else {
-                        self.diagnostics.abort(schema_internal!(span));
+                        self.diagnostics
+                            .abort(schema_internal!(self.diagnostics.translator(), span));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     *old_id = TypeDeclId(index);
@@ -495,7 +516,8 @@ impl<'a> TreeBuilder<'a, '_> {
         for entry in self.root_entries.iter_mut() {
             context.execution().consume(2, out.reborrow())?;
             let Some(index) = remap.get(entry.index()).copied() else {
-                self.diagnostics.abort(schema_internal!(span));
+                self.diagnostics
+                    .abort(schema_internal!(self.diagnostics.translator(), span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             *entry = TypeDeclId(index);
@@ -684,7 +706,10 @@ impl<'a> TreeBuilder<'a, '_> {
         {
             Some(next) => Ok(next),
             None => {
-                self.diagnostics.abort(EmergencyDiagnostics::resource(span));
+                self.diagnostics.abort(EmergencyDiagnostics::resource(
+                    span,
+                    self.diagnostics.translator(),
+                ));
                 Err(out.fail(BuildFailure::empty()))
             }
         }

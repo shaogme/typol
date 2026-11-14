@@ -3,6 +3,7 @@ use crate::{
     test_support::TestOperation,
 };
 use typol_core::{DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId, SourceSpan, Span};
+use typol_i18n::{Language, Translator};
 use typol_syntax::AstAccessError;
 use typol_test_support::*;
 
@@ -21,7 +22,15 @@ fn stable_order_uses_both_endpoints_and_terminal_stays_last() -> TestResult {
         .into_test_value()?;
     let fallback = span(&mut operations, 0, 0)?;
     let mut collector = operations
-        .diagnostic(|out| DiagnosticCollector::new(10, fallback, &execution, out))
+        .diagnostic(|out| {
+            DiagnosticCollector::new(
+                10,
+                fallback,
+                &execution,
+                Translator::new(Language::English),
+                out,
+            )
+        })
         .into_test_value()?;
     for (message, location) in [
         ("first at the same position", span(&mut operations, 3, 5)?),
@@ -32,16 +41,22 @@ fn stable_order_uses_both_endpoints_and_terminal_stays_last() -> TestResult {
     ] {
         collector.push(collector.make_semantic(message, location));
     }
-    collector.abort(EmergencyDiagnostics::resource(span(&mut operations, 0, 0)?));
+    collector.abort(EmergencyDiagnostics::resource(
+        span(&mut operations, 0, 0)?,
+        Translator::new(Language::English),
+    ));
+    let subsequent = collector.make_semantic("subsequent", span(&mut operations, 0, 0)?);
     let before = execution.steps();
-    collector.push(collector.make_semantic("subsequent", span(&mut operations, 0, 0)?));
+    collector.push(subsequent);
     let errors = collector.into_diagnostics();
     test_verify_eq!(execution.steps(), before);
     test_verify_eq!(
         errors
             .iter()
             .take(5)
-            .map(|diagnostic| diagnostic.message())
+            .map(|diagnostic| diagnostic
+                .message()
+                .unwrap_or("diagnostic rendering failed"))
             .collect::<alloc::vec::Vec<_>>(),
         [
             "earliest",
@@ -55,7 +70,14 @@ fn stable_order_uses_both_endpoints_and_terminal_stays_last() -> TestResult {
         errors.last().into_test_value()?.code(),
         DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
     );
-    test_verify!(errors.last().into_test_value()?.message().is_empty());
+    test_verify!(
+        !errors
+            .last()
+            .into_test_value()?
+            .message()
+            .test_value()?
+            .is_empty()
+    );
 
     Ok(())
 }
@@ -68,7 +90,15 @@ fn build_failure_keeps_the_full_ast_access_cause() -> TestResult {
         .into_test_value()?;
     let fallback = span(&mut operations, 0, 1)?;
     let mut collector = operations
-        .diagnostic(|out| DiagnosticCollector::new(4, fallback, &execution, out))
+        .diagnostic(|out| {
+            DiagnosticCollector::new(
+                4,
+                fallback,
+                &execution,
+                Translator::new(Language::English),
+                out,
+            )
+        })
         .into_test_value()?;
     let cause = AstAccessError::InvalidTextRange {
         start: usize::MAX - 1,

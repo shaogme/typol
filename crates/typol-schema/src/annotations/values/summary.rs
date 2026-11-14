@@ -4,7 +4,7 @@ use crate::{
     diagnostics::DiagnosticCollector,
 };
 use typol_core::{DiagnosticMessage, SourceSpan};
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 
 pub(super) struct BoundValue<T> {
     pub(super) value: T,
@@ -50,20 +50,22 @@ impl ConstraintSummary {
                 self.numeric.include(
                     (*min, *max),
                     constraint.span(),
-                    diagnostic_message!(
-                        "diagnostic.schema.combined_numeric_constraints_unsatisfiable",
-                        "combined numeric constraints have no satisfiable range"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.combined_numeric_constraints_unsatisfiable",
+                        locale: diagnostics.translator(),
+                    }
+                    .into(),
                     diagnostics,
                 );
             }
             ConstraintData::LengthBounds { min, max } => self.length.include(
                 (Some(*min), Some(*max)),
                 constraint.span(),
-                diagnostic_message!(
-                    "diagnostic.schema.combined_length_constraints_unsatisfiable",
-                    "combined @length constraints have no satisfiable range"
-                ),
+                t! {
+                    name: "diagnostic.schema.combined_length_constraints_unsatisfiable",
+                    locale: diagnostics.translator(),
+                }
+                .into(),
                 diagnostics,
             ),
             ConstraintData::SizeBounds { min, max } => {
@@ -71,20 +73,22 @@ impl ConstraintSummary {
                 self.size.include(
                     (*min, *max),
                     constraint.span(),
-                    diagnostic_message!(
-                        "diagnostic.schema.combined_size_constraints_unsatisfiable",
-                        "combined @size constraints have no satisfiable range"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.combined_size_constraints_unsatisfiable",
+                        locale: diagnostics.translator(),
+                    }
+                    .into(),
                     diagnostics,
                 );
             }
             ConstraintData::SumBounds { min, max } => self.sum.include(
                 (*min, *max),
                 constraint.span(),
-                diagnostic_message!(
-                    "diagnostic.schema.combined_sum_constraints_unsatisfiable",
-                    "combined @sum constraints have no satisfiable range"
-                ),
+                t! {
+                    name: "diagnostic.schema.combined_sum_constraints_unsatisfiable",
+                    locale: diagnostics.translator(),
+                }
+                .into(),
                 diagnostics,
             ),
             _ => {}

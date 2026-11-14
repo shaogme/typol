@@ -1,12 +1,17 @@
 mod structure;
 
+pub(super) use structure::StructureFrame;
+
 use crate::{
     context::CompletionState,
-    diagnostics::{BudgetDiagnostic, DiagnosticFactory},
+    diagnostics::{BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticFactory},
     instance::Member,
     parser::{
-        context::{ParserContext, ParserControl},
-        literals::{ContextDiagnosticRequest, LiteralParser, ParsedValue, Syntax},
+        context::{ParserContext, ParserControl, ValueCallContext},
+        literals::{
+            ContextDiagnosticRequest, ExpectedSymbol, ExpectedValueSymbol,
+            FixedArrayLengthMismatchRequest, LiteralDiagnostic, LiteralParser, ParsedValue, Syntax,
+        },
         map_index::{EntryId, MapIndex},
         recovery::{ParseFailure, Recovery},
     },
@@ -17,11 +22,9 @@ use typol_core::{
     BudgetError, ChargedString, ChargedVec, ConfigValue, Diagnostic, DiagnosticCode,
     DiagnosticContext, LocatedSpan, ValueError, ValueErrorKind, ValueSource, diagnostic_context,
 };
-use typol_i18n::{diagnostic_key, diagnostic_message};
+use typol_i18n::{Translator, t};
 use typol_semantic::{FieldView, TypeKind, TypeView};
 use typol_syntax::{Symbol, TokenKind};
-
-pub(super) use structure::StructureFrame;
 
 pub(super) struct StructureSpans {
     pub(super) initial: LocatedSpan,
@@ -81,8 +84,19 @@ impl<'schema> CollectionFrame<'schema> {
             TypeKind::Array { element, length } => {
                 Syntax::expect_value_symbol(
                     context,
-                    Symbol::LeftBracket,
-                    "expected an array here",
+                    ExpectedValueSymbol {
+                        expected: Symbol::LeftBracket,
+                        syntax_message: t! {
+                            name: "diagnostic.config.expected_array",
+                            locale: context.session.translator(),
+                        }
+                        .into(),
+                        value_message: t! {
+                            name: "diagnostic.config.expected_array",
+                            locale: context.session.translator(),
+                        }
+                        .into(),
+                    },
                     out.reborrow(),
                 )?;
                 CollectionKind::Array {
@@ -95,17 +109,36 @@ impl<'schema> CollectionFrame<'schema> {
             TypeKind::Map { value } => {
                 Syntax::expect_value_symbol(
                     context,
-                    Symbol::LeftBrace,
-                    "expected a map object here",
+                    ExpectedValueSymbol {
+                        expected: Symbol::LeftBrace,
+                        syntax_message: t! {
+                            name: "diagnostic.config.expected_map",
+                            locale: context.session.translator(),
+                        }
+                        .into(),
+                        value_message: t! {
+                            name: "diagnostic.config.expected_map",
+                            locale: context.session.translator(),
+                        }
+                        .into(),
+                    },
                     out.reborrow(),
                 )?;
                 CollectionKind::Map {
                     value,
-                    seen: MapIndex::new_budgeted(&context.budget, out.reborrow())?,
+                    seen: MapIndex::new_budgeted(
+                        &context.budget,
+                        context.session.translator(),
+                        out.reborrow(),
+                    )?,
                     key: None,
                 }
             }
-            _ => return Err(out.fail(internal_field(initial_span).into())),
+            _ => {
+                return Err(
+                    out.fail(internal_field(initial_span, context.session.translator()).into())
+                );
+            }
         };
         Ok(Self {
             kind,
@@ -189,8 +222,11 @@ impl<'schema> CollectionFrame<'schema> {
                         ContextDiagnosticRequest {
                             context,
                             code,
-                            message: "expected a string key or closing brace here in the map object",
-                            key: Some(diagnostic_key!("diagnostic.syntax.braced_literal_keys")),
+                            message: t! {
+                                name: "diagnostic.config.map_key_expected",
+                                locale: context.session.translator(),
+                            }
+                            .into(),
                             span,
                             value_source: None,
                         },
@@ -199,7 +235,7 @@ impl<'schema> CollectionFrame<'schema> {
                     return Err(out.fail(diagnostic.into()));
                 }
                 let Some(decoded) = token.decoded_string() else {
-                    return Err(out.fail(internal_field(span).into()));
+                    return Err(out.fail(internal_field(span, context.session.translator()).into()));
                 };
                 budget.construct_text(decoded.len(), text_limit, out.reborrow())?;
                 let owned = ChargedString::copy(decoded, Some(&budget), out.reborrow())?;
@@ -221,10 +257,11 @@ impl<'schema> CollectionFrame<'schema> {
                         ContextDiagnosticRequest {
                             context,
                             code: DiagnosticCode::CONFIG_VALUE_ERROR,
-                            message: "map contains a duplicate key",
-                            key: Some(diagnostic_key!(
-                                "diagnostic.config.duplicate_object_field_or_map_key"
-                            )),
+                            message: t! {
+                                name: "diagnostic.config.duplicate_map_key",
+                                locale: context.session.translator(),
+                            }
+                            .into(),
                             span,
                             value_source: None,
                         },
@@ -235,9 +272,15 @@ impl<'schema> CollectionFrame<'schema> {
                 context.cursor.bump(out.reborrow())?;
                 Syntax::expect_symbol(
                     context,
-                    Symbol::Colon,
-                    DiagnosticCode::CONFIG_SYNTAX_ERROR,
-                    "expected a colon after the map key",
+                    ExpectedSymbol {
+                        expected: Symbol::Colon,
+                        code: DiagnosticCode::CONFIG_SYNTAX_ERROR,
+                        message: t! {
+                            name: "diagnostic.config.expected_map_key_colon",
+                            locale: context.session.translator(),
+                        }
+                        .into(),
+                    },
                     out.reborrow(),
                 )?;
                 *key = Some(index);
@@ -271,7 +314,10 @@ impl<'schema> CollectionFrame<'schema> {
                 }
                 CollectionKind::Map { seen, key, .. } => {
                     let Some(index) = key.take() else {
-                        return Err(item_out.fail(invalid_parser_state(Some(self.initial_span))));
+                        return Err(item_out.fail(invalid_parser_state(
+                            Some(self.initial_span),
+                            context.session.translator(),
+                        )));
                     };
                     ParserControl::budget_call(
                         &mut context.session.validation().budget_errors,
@@ -280,24 +326,25 @@ impl<'schema> CollectionFrame<'schema> {
                     )?;
                 }
             }
-            let message = if self.close() == Symbol::RightBracket {
-                "expected a comma or closing bracket after the array element"
-            } else {
-                "expected a comma or closing brace after the map entry"
-            };
-            item_boundary(context, self.close(), message, item_out.reborrow())
+            item_boundary(context, self.close(), item_out.reborrow())
         });
         context.path.pop();
         if let CollectionKind::Array { index, .. } = &mut self.kind {
             let Some(next_index) = index.checked_add(1) else {
                 return Err(out.fail(
-                    DiagnosticFactory::make_diagnostic(
-                        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                        "array element count exceeded the limit",
-                        Some(self.initial_span),
-                        None,
-                        None,
-                    )
+                    DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                        code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                        message: t! {
+                            name: "diagnostic.config.array_element_limit",
+                            locale: context.session.translator(),
+                        }
+                        .into(),
+                        primary: Some(self.initial_span),
+                        path: None,
+                        value_source: None,
+                        context: None,
+                        translator: context.session.translator(),
+                    })
                     .into(),
                 ));
             };
@@ -323,21 +370,27 @@ impl<'schema> CollectionFrame<'schema> {
         let value_source = context.value_source;
         let budget = &context.budget;
         if self.failed {
-            return Err(out.fail(ParseFailure::Reported));
+            return Err(out.fail(ParseFailure::reported()));
         }
         let value = match self.kind {
             CollectionKind::Array { values, length, .. } => {
-                if length.is_some_and(|length| values.len() as u128 != u128::from(length)) {
-                    let diagnostic = context_diagnostic(
-                        ContextDiagnosticRequest {
-                            context,
-                            code: DiagnosticCode::CONFIG_VALUE_ERROR,
-                            message: "fixed-size array element count does not match the schema declaration",
-                            key: Some(diagnostic_key!(
-                                "diagnostic.config.fixed_array_length_mismatch"
-                            )),
-                            span: close_span,
-                            value_source: Some(context.value_source),
+                if let Some(expected_length) = length
+                    && values.len() as u128 != u128::from(expected_length)
+                {
+                    let diagnostic = ParserControl::diagnostic_call(
+                        &context.diagnostic_errors,
+                        |diagnostic_out| {
+                            LiteralDiagnostic::fixed_array_length_mismatch(
+                                FixedArrayLengthMismatchRequest {
+                                    context,
+                                    code: DiagnosticCode::CONFIG_VALUE_ERROR,
+                                    expected: u64::from(expected_length),
+                                    actual: values.len(),
+                                    span: close_span,
+                                    value_source: Some(context.value_source),
+                                },
+                                diagnostic_out,
+                            )
                         },
                         out.reborrow(),
                     )?;
@@ -348,8 +401,11 @@ impl<'schema> CollectionFrame<'schema> {
                     move |value_out| {
                         ValueFactory::array_owned(values, value_source, Some(budget), value_out)
                     },
-                    close_span,
-                    value_source,
+                    ValueCallContext {
+                        span: close_span,
+                        source: value_source,
+                        translator: context.session.translator(),
+                    },
                     out.reborrow(),
                 )?
             }
@@ -360,8 +416,11 @@ impl<'schema> CollectionFrame<'schema> {
                     move |value_out| {
                         ValueFactory::map_owned(entries, value_source, Some(budget), value_out)
                     },
-                    close_span,
-                    value_source,
+                    ValueCallContext {
+                        span: close_span,
+                        source: value_source,
+                        translator: context.session.translator(),
+                    },
                     out.reborrow(),
                 )?
             }
@@ -372,7 +431,12 @@ impl<'schema> CollectionFrame<'schema> {
             span: ParserControl::diagnostic_call(
                 &context.diagnostic_errors,
                 |diagnostic_out| {
-                    DiagnosticFactory::span_through(self.initial_span, close_span, diagnostic_out)
+                    DiagnosticFactory::span_through(
+                        self.initial_span,
+                        close_span,
+                        context.session.translator(),
+                        diagnostic_out,
+                    )
                 },
                 out.reborrow(),
             )?,
@@ -383,7 +447,6 @@ impl<'schema> CollectionFrame<'schema> {
 fn item_boundary<'slot>(
     context: &mut ParserContext<'_, '_, '_>,
     close: Symbol,
-    message: &str,
     mut out: Out<'slot, '_, ParseFailure>,
 ) -> OResult<'slot, ()> {
     let (kind, span) = {
@@ -401,8 +464,11 @@ fn item_boundary<'slot>(
         ContextDiagnosticRequest {
             context,
             code: DiagnosticCode::CONFIG_SYNTAX_ERROR,
-            message,
-            key: Some(diagnostic_key!("diagnostic.syntax.expected_punctuation")),
+            message: t! {
+                name: "diagnostic.syntax.expected_punctuation",
+                locale: context.session.translator(),
+            }
+            .into(),
             span,
             value_source: None,
         },
@@ -419,64 +485,108 @@ fn check_name<'slot, 'borrow>(
 ) -> OResult<'slot, ()> {
     if name.len() > context.limits.max_string_bytes() {
         return Err(out.fail(
-            DiagnosticFactory::make_diagnostic(
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                "name or map key exceeded the string byte limit",
-                Some(span),
-                None,
-                None,
-            )
+            DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                message: t! {
+                    name: "diagnostic.config.name_byte_limit",
+                    locale: context.session.translator(),
+                }
+                .into(),
+                primary: Some(span),
+                path: None,
+                value_source: None,
+                context: None,
+                translator: context.session.translator(),
+            })
             .into(),
         ));
     }
     Ok(())
 }
 
-fn internal_field(span: LocatedSpan) -> Diagnostic {
-    DiagnosticFactory::internal(PARSER_CONTAINER_METADATA, Some(span), None, None)
+fn internal_field(span: LocatedSpan, translator: Translator) -> Diagnostic {
+    DiagnosticFactory::internal(
+        PARSER_CONTAINER_METADATA,
+        Some(span),
+        None,
+        None,
+        translator,
+    )
 }
 
-fn container_error(error: ValueError, span: LocatedSpan, source: ValueSource) -> Diagnostic {
+fn container_error(
+    error: ValueError,
+    span: LocatedSpan,
+    source: ValueSource,
+    translator: Translator,
+) -> Diagnostic {
     match error.kind() {
         ValueErrorKind::ResourceLimitExceeded => {
-            BudgetDiagnostic::from_error(BudgetError::Resource)
+            BudgetDiagnostic::from_error(BudgetError::Resource, translator)
         }
         ValueErrorKind::AllocationFailed => {
-            DiagnosticFactory::allocation_diagnostic(Some(span), None, Some(source))
+            DiagnosticFactory::allocation_diagnostic(Some(span), None, Some(source), translator)
         }
         ValueErrorKind::CapacityExceeded => {
-            BudgetDiagnostic::from_error(BudgetError::CapacityExceeded)
+            BudgetDiagnostic::from_error(BudgetError::CapacityExceeded, translator)
         }
         ValueErrorKind::InternalInvariantFailure => DiagnosticFactory::internal(
             error.context().unwrap_or(PARSER_CONTAINER_VALUE_INVARIANT),
             Some(span),
             None,
             Some(source),
+            translator,
         ),
-        ValueErrorKind::EnvironmentReferenceRequired => DiagnosticFactory::make_diagnostic(
-            DiagnosticCode::CONFIG_VALUE_ERROR,
-            "environment source requires structured reference metadata",
-            Some(span),
-            None,
-            Some(source),
-        ),
-        ValueErrorKind::DuplicateFieldName | ValueErrorKind::DuplicateMapKey => {
-            DiagnosticFactory::internal(
-                error
-                    .duplicate_indices()
-                    .map_or(PARSER_CONTAINER_VALUE_INVARIANT, |(index, _)| {
-                        PARSER_CONTAINER_VALUE_INVARIANT.with_object_id(index as u64)
-                    }),
-                Some(span),
-                None,
-                Some(source),
-            )
+        ValueErrorKind::EnvironmentReferenceRequired => {
+            DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                code: DiagnosticCode::CONFIG_VALUE_ERROR,
+                message: t! {
+                    name: "diagnostic.config.environment_reference_metadata_required",
+                    locale: translator,
+                }
+                .into(),
+                primary: Some(span),
+                path: None,
+                value_source: Some(source),
+                context: None,
+                translator,
+            })
+        }
+        ValueErrorKind::DuplicateFieldName => {
+            DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                code: DiagnosticCode::CONFIG_VALUE_ERROR,
+                message: t! {
+                    name: "diagnostic.config.duplicate_object_field",
+                    locale: translator,
+                }
+                .into(),
+                primary: Some(span),
+                path: None,
+                value_source: Some(source),
+                context: None,
+                translator,
+            })
+        }
+        ValueErrorKind::DuplicateMapKey => {
+            DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                code: DiagnosticCode::CONFIG_VALUE_ERROR,
+                message: t! {
+                    name: "diagnostic.config.duplicate_map_key",
+                    locale: translator,
+                }
+                .into(),
+                primary: Some(span),
+                path: None,
+                value_source: Some(source),
+                context: None,
+                translator,
+            })
         }
     }
 }
 
-fn invalid_parser_state(span: Option<LocatedSpan>) -> ParseFailure {
-    DiagnosticFactory::internal(PARSER_CONTAINER_STATE, span, None, None).into()
+fn invalid_parser_state(span: Option<LocatedSpan>, translator: Translator) -> ParseFailure {
+    DiagnosticFactory::internal(PARSER_CONTAINER_STATE, span, None, None, translator).into()
 }
 
 fn current_span(context: &ParserContext<'_, '_, '_>) -> Option<LocatedSpan> {
@@ -515,13 +625,19 @@ fn context_diagnostic<'slot, 'borrow>(
 fn value_call<'slot, 'borrow, T>(
     errors: &mut ErrSlot<ValueError>,
     operation: impl for<'call> FnOnce(Out<'call, 'call, ValueError>) -> OResult<'call, T>,
-    span: LocatedSpan,
-    source: ValueSource,
+    context: ValueCallContext,
     out: Out<'slot, 'borrow, ParseFailure>,
 ) -> OResult<'slot, T> {
+    let ValueCallContext {
+        span,
+        source,
+        translator,
+    } = context;
     match errors.try_call(operation) {
         Ok(value) => Ok(value),
-        Err(caught) => Err(out.fail(container_error(caught.take(), span, source).into())),
+        Err(caught) => {
+            Err(out.fail(container_error(caught.take(), span, source, translator).into()))
+        }
     }
 }
 
@@ -545,10 +661,9 @@ impl ContainerSupport {
     pub(super) fn item_boundary<'slot, 'borrow>(
         context: &mut ParserContext<'_, '_, '_>,
         close: Symbol,
-        message: &str,
         out: Out<'slot, 'borrow, ParseFailure>,
     ) -> OResult<'slot, ()> {
-        item_boundary(context, close, message, out)
+        item_boundary(context, close, out)
     }
 
     pub(super) fn context_diagnostic<'slot, 'borrow>(
@@ -561,15 +676,17 @@ impl ContainerSupport {
     pub(super) fn value_call<'slot, 'borrow, T>(
         errors: &mut ErrSlot<ValueError>,
         operation: impl for<'call> FnOnce(Out<'call, 'call, ValueError>) -> OResult<'call, T>,
-        span: LocatedSpan,
-        source: ValueSource,
+        context: ValueCallContext,
         out: Out<'slot, 'borrow, ParseFailure>,
     ) -> OResult<'slot, T> {
-        value_call(errors, operation, span, source, out)
+        value_call(errors, operation, context, out)
     }
 
-    pub(super) fn invalid_parser_state(span: Option<LocatedSpan>) -> ParseFailure {
-        invalid_parser_state(span)
+    pub(super) fn invalid_parser_state(
+        span: Option<LocatedSpan>,
+        translator: Translator,
+    ) -> ParseFailure {
+        invalid_parser_state(span, translator)
     }
 
     pub(super) fn current_span(context: &ParserContext<'_, '_, '_>) -> Option<LocatedSpan> {
@@ -591,13 +708,19 @@ impl ContainerSupport {
     ) -> OResult<'slot, ()> {
         if name.len() > context.limits.max_string_bytes() {
             return Err(out.fail(
-                DiagnosticFactory::make_diagnostic(
-                    DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                    "field name exceeded the string byte limit",
-                    Some(span),
-                    None,
-                    None,
-                )
+                DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                    code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                    message: t! {
+                        name: "diagnostic.config.field_name_byte_limit",
+                        locale: context.session.translator(),
+                    }
+                    .into(),
+                    primary: Some(span),
+                    path: None,
+                    value_source: None,
+                    context: None,
+                    translator: context.session.translator(),
+                })
                 .into(),
             ));
         }
@@ -627,14 +750,19 @@ impl ContainerSupport {
             out.reborrow(),
         )?;
         Ok(DiagnosticFactory::make_diagnostic(
-            DiagnosticCode::CONFIG_VALUE_ERROR,
-            diagnostic_message!(
-                "diagnostic.config.required_field_missing",
-                "required field is missing"
-            ),
-            Some(close_span),
-            Some(path),
-            None,
+            DetailedDiagnosticRequest {
+                code: DiagnosticCode::CONFIG_VALUE_ERROR,
+                message: t! {
+                    name: "diagnostic.config.required_field_missing",
+                    locale: context.session.translator(),
+                }
+                .into(),
+                primary: Some(close_span),
+                path: Some(path),
+                value_source: None,
+                context: None,
+                translator: context.session.translator(),
+            },
         ))
     }
 }

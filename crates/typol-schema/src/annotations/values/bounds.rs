@@ -7,7 +7,7 @@ use crate::{
 };
 use opeo::{OResult, Out};
 use typol_core::DiagnosticMessage;
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 use typol_syntax::{BuiltinType, NamedArgument, NamedBounds, NumberLiteral, SizeArguments};
 
 use super::summary::{BoundKind, BoundValue};
@@ -30,13 +30,13 @@ impl AnnotationBounds {
                 let min = AnnotationValues::parse_nonnegative_u64(min, context, out.reborrow())?;
                 let Some(min) = min else {
                     return Err(out.fail(AnnotationError::Invalid(
-                        diagnostic_message!("diagnostic.schema.annotation_size_bounds_invalid", "collection bounds must be non-negative decimal integers within the u64 range"),
+                        t! { name: "diagnostic.schema.annotation_size_bounds_invalid", locale: context.translator() }.into(),
                     )));
                 };
                 let max = AnnotationValues::parse_nonnegative_u64(max, context, out.reborrow())?;
                 let Some(max) = max else {
                     return Err(out.fail(AnnotationError::Invalid(
-                        diagnostic_message!("diagnostic.schema.annotation_size_bounds_invalid", "collection bounds must be non-negative decimal integers within the u64 range"),
+                        t! { name: "diagnostic.schema.annotation_size_bounds_invalid", locale: context.translator() }.into(),
                     )));
                 };
                 (Some(min), Some(max))
@@ -51,23 +51,27 @@ impl AnnotationBounds {
                 )? {
                     Some(value) => Ok(value),
                     None => Err(parse_out.fail(AnnotationError::Invalid(
-                        diagnostic_message!("diagnostic.schema.annotation_size_bounds_invalid", "collection bounds must be non-negative decimal integers within the u64 range"),
+                        t! { name: "diagnostic.schema.annotation_size_bounds_invalid", locale: context.translator() }.into(),
                     ))),
                 }
                 },
-                diagnostic_message!(
-                    "diagnostic.schema.annotation_size_bound_repeated",
-                    "collection bound cannot be specified more than once"
-                ),
+                t! {
+                    name: "diagnostic.schema.annotation_size_bound_repeated",
+                    locale: context.translator(),
+                }
+                .into(),
                 context,
                 out.reborrow(),
             )?,
         };
         if matches!((min, max), (Some(min), Some(max)) if min > max) {
-            return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                "diagnostic.schema.annotation_size_bounds_reversed",
-                "collection minimum cannot exceed the maximum"
-            ))));
+            return Err(out.fail(AnnotationError::Invalid(
+                t! {
+                    name: "diagnostic.schema.annotation_size_bounds_reversed",
+                    locale: context.translator(),
+                }
+                .into(),
+            )));
         }
         Ok((min, max))
     }
@@ -87,15 +91,19 @@ impl AnnotationBounds {
                 parse_out.reborrow(),
             )? {
                 Some(value) => Ok(value),
-                None => Err(parse_out.fail(AnnotationError::Invalid(diagnostic_message!(
-                    "diagnostic.schema.annotation_sum_bounds_incompatible",
-                    "@sum bounds are incompatible with the array element type"
-                )))),
+                None => Err(parse_out.fail(AnnotationError::Invalid(
+                    t! {
+                        name: "diagnostic.schema.annotation_sum_bounds_incompatible",
+                        locale: context.translator(),
+                    }
+                    .into(),
+                ))),
             },
-            diagnostic_message!(
-                "diagnostic.schema.annotation_sum_bound_repeated",
-                "@sum bound cannot be specified more than once"
-            ),
+            t! {
+                name: "diagnostic.schema.annotation_sum_bound_repeated",
+                locale: context.translator(),
+            }
+            .into(),
             context,
             out.reborrow(),
         )
@@ -130,10 +138,13 @@ impl AnnotationBounds {
                 if is_max.is_eq() {
                     BoundKind::Max
                 } else {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.syntax.boundary_argument",
-                        "bound name must be min or max"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.syntax.boundary_argument",
+                            locale: context.translator(),
+                        }
+                        .into(),
+                    )));
                 }
             };
             match kind {

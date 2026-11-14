@@ -1,26 +1,27 @@
+mod imports;
 mod input;
 mod support;
 
 use core::cell::RefCell;
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticMessage, ExecutionBudget, Read, SourceCapture,
-    SourceId, SourceReadError, SourceSpan,
+    BudgetError, ChargedVec, Diagnostic, DiagnosticLabelInput, DiagnosticMessage, ExecutionBudget,
+    Read, SourceCapture, SourceId, SourceReadError, SourceSpan,
 };
-use typol_i18n::diagnostic_message;
 use typol_syntax::{
     AstAccessError, SchemaAst, SchemaParseOptions, SchemaParseOutput, SchemaParser,
     SourcePositionIndex, SyntaxErrors,
 };
 
 use crate::{
-    ResolverError, SchemaCompileContext, SchemaLimits, SchemaResolveRequest, SchemaResolver,
+    ResolverError, SchemaCompileContext, SchemaCompileOptions, SchemaLimits, SchemaResolver,
     SchemaSource, SourceLoadedRequest, SourceObserver, SourceObserverError,
     diagnostics::{BudgetDiagnostics, DiagnosticCollector, EmergencyDiagnostics},
     session::{CompileBudget, ObjectState, SourceCatalog},
 };
+use imports::ImportLoader;
 use input::BoundedSource;
-use support::{ExternFailure, ImportRequest, LoaderSupport};
+use support::LoaderSupport;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum VisitState {
@@ -46,6 +47,22 @@ pub(crate) struct LoadedFile {
     visit: VisitState,
     state: ObjectState,
     import_targets: ChargedVec<ImportEdge>,
+}
+
+pub(crate) struct SourceLoadRequest<
+    'source,
+    'resolver,
+    'budget,
+    'diagnostics,
+    'observer,
+    R: ?Sized,
+    S: Read<SourceReadError>,
+> {
+    pub(crate) root: SchemaSource<'source, S>,
+    pub(crate) resolver: &'resolver mut R,
+    pub(crate) budget: &'budget mut CompileBudget,
+    pub(crate) diagnostics: &'diagnostics mut DiagnosticCollector,
+    pub(crate) observer: Option<&'observer mut dyn SourceObserver>,
 }
 
 impl LoadedFile {
@@ -83,24 +100,55 @@ impl LoadedFile {
     pub(crate) fn import_targets(&self) -> &[ImportEdge] {
         &self.import_targets
     }
+
+    pub(crate) fn identity(&self) -> &[u8] {
+        self.identity.as_slice()
+    }
+
+    pub(crate) fn identity_len(&self) -> usize {
+        self.identity.len()
+    }
+
+    pub(crate) fn is_loading(&self) -> bool {
+        self.visit == VisitState::Loading
+    }
+
+    pub(crate) fn mark_loaded(&mut self) {
+        self.visit = VisitState::Loaded;
+    }
+
+    pub(crate) fn push_pending_import(
+        &mut self,
+        errors: &mut ErrSlot<BudgetError>,
+    ) -> Result<(), BudgetError> {
+        errors
+            .try_call(|out| self.import_targets.try_reserve(1, out))
+            .map_err(|caught| caught.take())?;
+        errors
+            .try_call(|out| self.import_targets.try_push(ImportEdge::Pending, out))
+            .map_err(|caught| caught.take())
+    }
+
+    pub(crate) fn set_last_import_edge(&mut self, edge: ImportEdge) -> bool {
+        let Some(last_edge) = self.import_targets.last_mut() else {
+            return false;
+        };
+        *last_edge = edge;
+        true
+    }
 }
 
-struct Frame {
-    file_index: usize,
-    next_item_index: usize,
-}
-
-struct LoadContext<'a, 'observer> {
-    limits: &'a SchemaLimits,
-    execution: &'a ExecutionBudget,
-    session: SchemaCompileContext,
-    diagnostics: &'a mut DiagnosticCollector,
-    observer: Option<&'observer mut dyn SourceObserver>,
-    budget_errors: ErrSlot<BudgetError>,
-    ast_errors: ErrSlot<AstAccessError>,
-    syntax_errors: ErrSlot<SyntaxErrors>,
-    resolver_errors: ErrSlot<ResolverError>,
-    observer_errors: ErrSlot<SourceObserverError>,
+pub(super) struct LoadContext<'a, 'observer> {
+    pub(super) limits: &'a SchemaLimits,
+    pub(super) execution: &'a ExecutionBudget,
+    pub(super) session: SchemaCompileContext,
+    pub(super) diagnostics: &'a mut DiagnosticCollector,
+    pub(super) observer: Option<&'observer mut dyn SourceObserver>,
+    pub(super) budget_errors: ErrSlot<BudgetError>,
+    pub(super) ast_errors: ErrSlot<AstAccessError>,
+    pub(super) syntax_errors: ErrSlot<SyntaxErrors>,
+    pub(super) resolver_errors: ErrSlot<ResolverError>,
+    pub(super) observer_errors: ErrSlot<SourceObserverError>,
 }
 
 struct LoadedSourceInput<'src> {
@@ -115,13 +163,6 @@ struct SourceParseOutcome {
     reached_eof: bool,
 }
 
-fn budget_call<T>(
-    errors: &mut ErrSlot<BudgetError>,
-    operation: impl for<'slot> FnOnce(Out<'slot, 'slot, BudgetError>) -> OResult<'slot, T>,
-) -> Result<T, BudgetError> {
-    errors.try_call(operation).map_err(|caught| caught.take())
-}
-
 fn copy_diagnostic(
     diagnostic: &Diagnostic,
     execution: &ExecutionBudget,
@@ -129,29 +170,24 @@ fn copy_diagnostic(
 ) -> Result<Diagnostic, BudgetError> {
     errors
         .try_call(|mut out| {
-            let mut copied = match diagnostic.message_key() {
-                Some(key) => Diagnostic::try_new(
+            let mut copied = match diagnostic.message() {
+                Ok(message) => Diagnostic::try_new(
                     diagnostic.code(),
-                    DiagnosticMessage::localized(diagnostic.message(), key),
+                    DiagnosticMessage::custom(message),
                     Some(execution),
                     out.reborrow(),
                 )?,
-                None => Diagnostic::try_new(
-                    diagnostic.code(),
-                    diagnostic.message(),
-                    Some(execution),
-                    out.reborrow(),
-                )?,
+                Err(error) => Diagnostic::failure(diagnostic.code(), error),
             };
             copied.set_located_primary(diagnostic.located_primary());
             copied.set_context(diagnostic.context());
             copied.set_value_source(diagnostic.value_source());
             for label in diagnostic.labels() {
                 copied.try_add_label_with_text(
-                    label.located_span(),
-                    match label.key() {
-                        Some(key) => DiagnosticMessage::localized(label.message(), key),
-                        None => DiagnosticMessage::custom(label.message()),
+                    DiagnosticLabelInput {
+                        span: label.located_span(),
+                        text: label.message(),
+                        role: label.role(),
                     },
                     Some(execution),
                     out.reborrow(),
@@ -162,49 +198,59 @@ fn copy_diagnostic(
         .map_err(|caught| caught.take())
 }
 
-fn resolver_call<'src, R: SchemaResolver + ?Sized>(
-    errors: &mut ErrSlot<ResolverError>,
-    resolver: &'src mut R,
-    request: SchemaResolveRequest<'_>,
-) -> Result<SchemaSource<'src>, ResolverError> {
-    errors
-        .try_call(|out| resolver.resolve(request, out))
-        .map_err(|caught| caught.take())
-}
-
 pub(crate) struct SourceLoader;
 
 impl SourceLoader {
-    pub(crate) fn load<R: SchemaResolver + ?Sized, S: Read<SourceReadError>>(
-        root: SchemaSource<'_, S>,
-        resolver: &mut R,
-        budget: &mut CompileBudget,
-        diagnostics: &mut DiagnosticCollector,
-        observer: Option<&mut dyn SourceObserver>,
-    ) -> Result<SourceCatalog, Diagnostic> {
+    pub(crate) fn load<'slot, E, R: SchemaResolver + ?Sized, S: Read<SourceReadError>>(
+        request: SourceLoadRequest<'_, '_, '_, '_, '_, R, S>,
+        mut out: Out<'slot, '_, E>,
+        map_error: impl Fn(Diagnostic) -> E,
+    ) -> OResult<'slot, SourceCatalog> {
+        let SourceLoadRequest {
+            root,
+            resolver,
+            budget,
+            diagnostics,
+            observer,
+        } = request;
         let limits = *budget.limits();
         let limits = &limits;
         let root_span = LoaderSupport::source_span(SourceId::new(0), 0);
         let mut budget_errors = ErrSlot::<BudgetError>::new();
         let execution = match budget_errors.try_call(|out| budget.execution().try_clone(out)) {
             Ok(execution) => execution,
-            Err(caught) => return Err(BudgetDiagnostics::make(caught.take(), root_span)),
+            Err(caught) => {
+                return Err(out.reborrow().fail(map_error(BudgetDiagnostics::make(
+                    caught.take(),
+                    root_span,
+                    diagnostics.translator(),
+                ))));
+            }
         };
         let mut loaded = match budget_errors.try_call(|out| SourceCatalog::new(&execution, out)) {
             Ok(loaded) => loaded,
-            Err(caught) => return Err(BudgetDiagnostics::make(caught.take(), root_span)),
+            Err(caught) => {
+                return Err(out.reborrow().fail(map_error(BudgetDiagnostics::make(
+                    caught.take(),
+                    root_span,
+                    diagnostics.translator(),
+                ))));
+            }
         };
+        let session_options = SchemaCompileOptions::new(*limits)
+            .with_regex(*budget.regex_options())
+            .with_translator(diagnostics.translator());
         let session = match budget_errors.try_call(|out| {
-            SchemaCompileContext::new(
-                *limits,
-                *budget.regex_options(),
-                &execution,
-                budget.regex_execution(),
-                out,
-            )
+            SchemaCompileContext::new(session_options, &execution, budget.regex_execution(), out)
         }) {
             Ok(session) => session,
-            Err(caught) => return Err(BudgetDiagnostics::make(caught.take(), root_span)),
+            Err(caught) => {
+                return Err(out.reborrow().fail(map_error(BudgetDiagnostics::make(
+                    caught.take(),
+                    root_span,
+                    diagnostics.translator(),
+                ))));
+            }
         };
         let mut context = LoadContext {
             limits,
@@ -220,328 +266,27 @@ impl SourceLoader {
         };
         let diagnostics = &mut context.diagnostics;
         if !budget.register_source() {
-            diagnostics.push(EmergencyDiagnostics::resource(root_span));
+            diagnostics.push(EmergencyDiagnostics::resource(
+                root_span,
+                diagnostics.translator(),
+            ));
             return Ok(loaded);
         }
-        if !append_source(loaded.files_mut(), root, root_span, budget, &mut context) {
+        if !Self::append(loaded.files_mut(), root, root_span, budget, &mut context) {
             return Ok(loaded);
         }
-        load_imports(&mut loaded, resolver, budget, &mut context, root_span);
+        ImportLoader::load(&mut loaded, resolver, budget, &mut context, root_span);
         Ok(loaded)
     }
-}
 
-fn load_imports<R: SchemaResolver + ?Sized>(
-    loaded: &mut SourceCatalog,
-    resolver: &mut R,
-    budget: &mut CompileBudget,
-    context: &mut LoadContext<'_, '_>,
-    root_span: SourceSpan,
-) {
-    let execution = context.execution;
-    let diagnostics = &mut context.diagnostics;
-    let mut stack = match budget_call(&mut context.budget_errors, |out| {
-        ChargedVec::new(Some(execution), out)
-    }) {
-        Ok(stack) => stack,
-        Err(error) => {
-            diagnostics.push(BudgetDiagnostics::make(error, root_span));
-            return;
-        }
-    };
-    if let Err(error) = budget_call(&mut context.budget_errors, |out| stack.try_reserve(1, out)) {
-        diagnostics.push(BudgetDiagnostics::make(error, root_span));
-        return;
-    }
-    if let Err(error) = budget_call(&mut context.budget_errors, |out| {
-        stack.try_push(
-            Frame {
-                file_index: 0,
-                next_item_index: 0,
-            },
-            out,
-        )
-    }) {
-        diagnostics.push(BudgetDiagnostics::make(error, root_span));
-        return;
-    }
-    while !stack.is_empty() && !context.diagnostics.is_stopped() {
-        let diagnostics = &mut context.diagnostics;
-        if let Err(error) = budget_call(&mut context.budget_errors, |out| execution.consume(1, out))
-        {
-            diagnostics.abort(BudgetDiagnostics::make(error, root_span));
-            break;
-        }
-        let Some(frame) = stack.last() else {
-            diagnostics.abort(schema_internal!(root_span));
-            break;
-        };
-        let file_index = frame.file_index;
-        let Some(file) = loaded.files().get(file_index) else {
-            diagnostics.abort(schema_internal!(root_span));
-            break;
-        };
-        let file_span = LoaderSupport::source_span(file.source_id(), file.source_len());
-        let Some(ast) = file.parsed_ast() else {
-            diagnostics.abort(schema_internal!(file_span));
-            break;
-        };
-        let next = match LoaderSupport::next_extern(
-            ast,
-            frame.next_item_index,
-            execution,
-            &mut context.ast_errors,
-            &mut context.budget_errors,
-        ) {
-            Ok(next) => next,
-            Err(ExternFailure::Budget(error)) => {
-                diagnostics.push(BudgetDiagnostics::make(error, file_span));
-                break;
-            }
-            Err(ExternFailure::AstAccess(error)) => {
-                let context = EmergencyDiagnostics::ast_access_context(error);
-                diagnostics.abort(EmergencyDiagnostics::internal(file_span, context));
-                break;
-            }
-        };
-        let Some(ImportRequest {
-            item_index,
-            span: import_span,
-        }) = next
-        else {
-            let Some(file) = loaded.files_mut().get_mut(file_index) else {
-                diagnostics.abort(schema_internal!(file_span));
-                break;
-            };
-            file.visit = VisitState::Loaded;
-            stack.pop();
-            continue;
-        };
-        let Some(frame) = stack.last_mut() else {
-            diagnostics.abort(schema_internal!(import_span));
-            break;
-        };
-        let Some(next_item_index) = item_index.checked_add(1) else {
-            diagnostics.push(EmergencyDiagnostics::capacity(import_span));
-            break;
-        };
-        frame.next_item_index = next_item_index;
-        // Depth and file count are checked before calling the host; no further reads occur after either limit fails.
-        let Some(byte_limit) = budget.request_limit(stack.len()) else {
-            diagnostics.push(EmergencyDiagnostics::resource(import_span));
-            break;
-        };
-        let Some(file) = loaded.files_mut().get_mut(file_index) else {
-            diagnostics.abort(schema_internal!(import_span));
-            break;
-        };
-        let targets = &mut file.import_targets;
-        if let Err(error) = budget_call(&mut context.budget_errors, |out| {
-            targets.try_reserve(1, out)
-        }) {
-            diagnostics.push(BudgetDiagnostics::make(error, import_span));
-            break;
-        }
-        if let Err(error) = budget_call(&mut context.budget_errors, |out| {
-            targets.try_push(ImportEdge::Pending, out)
-        }) {
-            diagnostics.push(BudgetDiagnostics::make(error, import_span));
-            break;
-        }
-        let name = match loaded
-            .files()
-            .get(file_index)
-            .and_then(LoadedFile::parsed_ast)
-        {
-            Some(ast) => match LoaderSupport::extern_name(ast, item_index, &mut context.ast_errors)
-            {
-                Ok(name) => name,
-                Err(error) => {
-                    let context = EmergencyDiagnostics::ast_access_context(error);
-                    diagnostics.abort(EmergencyDiagnostics::internal(import_span, context));
-                    break;
-                }
-            },
-            None => None,
-        };
-        let Some(name) = name else {
-            diagnostics.abort(EmergencyDiagnostics::internal(
-                import_span,
-                schema_context!("source-loader", "extern-declaration-missing")
-                    .with_object_id(item_index as u64),
-            ));
-            break;
-        };
-        let Some(from_identity) = loaded
-            .files()
-            .get(file_index)
-            .map(|file| file.identity.as_slice())
-        else {
-            diagnostics.abort(EmergencyDiagnostics::internal(
-                import_span,
-                schema_context!("source-loader", "current-source-identity-missing")
-                    .with_object_id(file_index as u64),
-            ));
-            break;
-        };
-        let request = SchemaResolveRequest {
-            from_identity,
-            module_name: name,
-            source_byte_limit: byte_limit,
-            context: &context.session,
-        };
-        let resolved = resolver_call(&mut context.resolver_errors, resolver, request);
-        let source = match resolved {
-            Ok(source) => source,
-            Err(error) => {
-                if !set_last_edge(
-                    loaded.files_mut(),
-                    file_index,
-                    ImportEdge::Failed { source: None },
-                    import_span,
-                    diagnostics,
-                ) {
-                    break;
-                }
-                if error == ResolverError::ContextMismatch {
-                    diagnostics.abort(LoaderSupport::resolver_diagnostic(
-                        error,
-                        import_span,
-                        diagnostics,
-                    ));
-                    break;
-                }
-                diagnostics.push(LoaderSupport::resolver_diagnostic(
-                    error,
-                    import_span,
-                    diagnostics,
-                ));
-                continue;
-            }
-        };
-        if !source.matches_context(&context.session) {
-            if !set_last_edge(
-                loaded.files_mut(),
-                file_index,
-                ImportEdge::Failed { source: None },
-                import_span,
-                diagnostics,
-            ) {
-                break;
-            }
-            diagnostics.abort(LoaderSupport::resolver_diagnostic(
-                ResolverError::ContextMismatch,
-                import_span,
-                diagnostics,
-            ));
-            break;
-        }
-        let mut existing = None;
-        for (index, file) in loaded.files().iter().enumerate() {
-            if let Err(error) =
-                budget_call(&mut context.budget_errors, |out| execution.consume(1, out))
-            {
-                diagnostics.abort(BudgetDiagnostics::make(error, import_span));
-                return;
-            }
-            if file.identity.len() != source.identity().len() {
-                continue;
-            }
-            if let Err(error) = budget_call(&mut context.budget_errors, |out| {
-                execution.consume(file.identity.len(), out)
-            }) {
-                diagnostics.abort(BudgetDiagnostics::make(error, import_span));
-                return;
-            }
-            if file.identity.as_slice() == source.identity() {
-                existing = Some(index);
-                break;
-            }
-        }
-        if let Some(existing) = existing {
-            if !set_last_edge(
-                loaded.files_mut(),
-                file_index,
-                ImportEdge::Failed { source: None },
-                import_span,
-                diagnostics,
-            ) {
-                break;
-            }
-            let Some(existing_file) = loaded.files().get(existing) else {
-                diagnostics.abort(schema_internal!(import_span));
-                break;
-            };
-            diagnostics.push(diagnostics.make_semantic(
-                if existing_file.visit == VisitState::Loading {
-                    diagnostic_message!(
-                        "diagnostic.schema.import_cycle",
-                        "schema import cycle detected"
-                    )
-                } else {
-                    diagnostic_message!(
-                        "diagnostic.schema.repeated_source_import",
-                        "the same schema source identity was imported more than once"
-                    )
-                },
-                import_span,
-            ));
-            continue;
-        }
-        let child_index = loaded.files().len();
-        if !budget.register_source() {
-            if !set_last_edge(
-                loaded.files_mut(),
-                file_index,
-                ImportEdge::Failed { source: None },
-                import_span,
-                diagnostics,
-            ) {
-                break;
-            }
-            diagnostics.push(EmergencyDiagnostics::resource(import_span));
-            break;
-        }
-        let valid = append_source(loaded.files_mut(), source, import_span, budget, context);
-        let diagnostics = &mut context.diagnostics;
-        let source_index = (loaded.files().len() > child_index).then_some(child_index);
-        let edge_state = match (valid, source_index) {
-            (true, Some(target)) => ImportEdge::Resolved { target },
-            (true, None) => {
-                diagnostics.abort(schema_internal!(import_span));
-                break;
-            }
-            (false, source) => ImportEdge::Failed { source },
-        };
-        if !set_last_edge(
-            loaded.files_mut(),
-            file_index,
-            edge_state,
-            import_span,
-            diagnostics,
-        ) {
-            break;
-        }
-        if !valid {
-            continue;
-        }
-        if let Err(error) = budget_call(&mut context.budget_errors, |out| stack.try_reserve(1, out))
-        {
-            diagnostics.push(BudgetDiagnostics::make(error, import_span));
-            break;
-        }
-        if let Err(error) = budget_call(&mut context.budget_errors, |out| {
-            stack.try_push(
-                Frame {
-                    file_index: child_index,
-                    next_item_index: 0,
-                },
-                out,
-            )
-        }) {
-            diagnostics.push(BudgetDiagnostics::make(error, import_span));
-            break;
-        }
+    pub(super) fn append<S: Read<SourceReadError>>(
+        files: &mut ChargedVec<LoadedFile>,
+        source: SchemaSource<'_, S>,
+        span: SourceSpan,
+        budget: &mut CompileBudget,
+        context: &mut LoadContext<'_, '_>,
+    ) -> bool {
+        append_source(files, source, span, budget, context)
     }
 }
 
@@ -553,9 +298,10 @@ fn append_source<S: Read<SourceReadError>>(
     context: &mut LoadContext<'_, '_>,
 ) -> bool {
     let Ok(id) = u32::try_from(files.len()) else {
-        context
-            .diagnostics
-            .push(EmergencyDiagnostics::resource(span));
+        context.diagnostics.push(EmergencyDiagnostics::resource(
+            span,
+            context.diagnostics.translator(),
+        ));
         return false;
     };
     let source_id = SourceId::new(id);
@@ -583,7 +329,7 @@ fn register_source(
     context: &mut LoadContext<'_, '_>,
 ) -> bool {
     let execution = context.execution;
-    let identity = budget_call(&mut context.budget_errors, |mut out| {
+    let identity = LoaderSupport::budget_call(&mut context.budget_errors, |mut out| {
         let mut identity = ChargedVec::new(Some(execution), out.reborrow())?;
         identity.try_reserve_exact(source_identity.len(), out.reborrow())?;
         identity.extend_from_slice(source_identity, out.reborrow())?;
@@ -592,26 +338,34 @@ fn register_source(
     let identity = match identity {
         Ok(identity) => identity,
         Err(error) => {
-            context
-                .diagnostics
-                .push(BudgetDiagnostics::make(error, span));
+            context.diagnostics.push(BudgetDiagnostics::make(
+                error,
+                span,
+                context.diagnostics.translator(),
+            ));
             return false;
         }
     };
-    if let Err(error) = budget_call(&mut context.budget_errors, |out| files.try_reserve(1, out)) {
-        context
-            .diagnostics
-            .push(BudgetDiagnostics::make(error, span));
+    if let Err(error) =
+        LoaderSupport::budget_call(&mut context.budget_errors, |out| files.try_reserve(1, out))
+    {
+        context.diagnostics.push(BudgetDiagnostics::make(
+            error,
+            span,
+            context.diagnostics.translator(),
+        ));
         return false;
     }
-    let import_targets = match budget_call(&mut context.budget_errors, |out| {
+    let import_targets = match LoaderSupport::budget_call(&mut context.budget_errors, |out| {
         ChargedVec::new(Some(execution), out)
     }) {
         Ok(import_targets) => import_targets,
         Err(error) => {
-            context
-                .diagnostics
-                .push(BudgetDiagnostics::make(error, span));
+            context.diagnostics.push(BudgetDiagnostics::make(
+                error,
+                span,
+                context.diagnostics.translator(),
+            ));
             return false;
         }
     };
@@ -620,7 +374,7 @@ fn register_source(
         LoaderSupport::source_excerpt_limits(context.limits),
         Some(execution),
     ));
-    if let Err(error) = budget_call(&mut context.budget_errors, |out| {
+    if let Err(error) = LoaderSupport::budget_call(&mut context.budget_errors, |out| {
         files.try_push(
             LoadedFile {
                 identity,
@@ -636,14 +390,18 @@ fn register_source(
             out,
         )
     }) {
-        context
-            .diagnostics
-            .push(BudgetDiagnostics::make(error, span));
+        context.diagnostics.push(BudgetDiagnostics::make(
+            error,
+            span,
+            context.diagnostics.translator(),
+        ));
         return false;
     }
     if let Some(observer) = &mut context.observer {
         let Some(file) = files.last() else {
-            context.diagnostics.abort(schema_internal!(span));
+            context
+                .diagnostics
+                .abort(schema_internal!(context.diagnostics.translator(), span));
             return false;
         };
         let request = SourceLoadedRequest {
@@ -657,7 +415,9 @@ fn register_source(
         if let Err(caught) = observed {
             let error = caught.take();
             let Some(file) = files.last_mut() else {
-                context.diagnostics.abort(schema_internal!(span));
+                context
+                    .diagnostics
+                    .abort(schema_internal!(context.diagnostics.translator(), span));
                 return false;
             };
             file.state = ObjectState::Invalid;
@@ -685,7 +445,8 @@ fn parse_source(
     let span = input.span;
     let mut parser_limits = *context.limits.syntax();
     parser_limits.set_max_diagnostics(context.diagnostics.remaining());
-    let parser_options = SchemaParseOptions::new(parser_limits, context.limits.stream_limits());
+    let parser_options = SchemaParseOptions::new(parser_limits, context.limits.stream_limits())
+        .with_translator(context.session.translator());
     let Some(outcome) = read_source(files, budget, context, input, &parser_options) else {
         return false;
     };
@@ -705,7 +466,9 @@ fn read_source(
         span,
     } = input;
     let Some(file) = files.last_mut() else {
-        context.diagnostics.abort(schema_internal!(span));
+        context
+            .diagnostics
+            .abort(schema_internal!(context.diagnostics.translator(), span));
         return None;
     };
     let mut bounded = BoundedSource::new(
@@ -752,7 +515,9 @@ fn finish_source(
             let (ast, positions) = parsed.into_parts();
             if !reached_eof || positions.source_len() != source_len {
                 let Some(file) = files.last_mut() else {
-                    context.diagnostics.abort(schema_internal!(span));
+                    context
+                        .diagnostics
+                        .abort(schema_internal!(context.diagnostics.translator(), span));
                     return false;
                 };
                 file.capture.get_mut().invalidate();
@@ -761,11 +526,14 @@ fn finish_source(
                 context.diagnostics.abort(EmergencyDiagnostics::internal(
                     LoaderSupport::source_span(source_id, source_len),
                     schema_context!("source-input", "successful-parse-without-eof"),
+                    context.diagnostics.translator(),
                 ));
                 return false;
             }
             let Some(file) = files.last_mut() else {
-                context.diagnostics.abort(schema_internal!(span));
+                context
+                    .diagnostics
+                    .abort(schema_internal!(context.diagnostics.translator(), span));
                 return false;
             };
             file.ast = Some(ast);
@@ -777,7 +545,9 @@ fn finish_source(
         }
         Err(errors) => {
             let Some(file) = files.last_mut() else {
-                context.diagnostics.abort(schema_internal!(span));
+                context
+                    .diagnostics
+                    .abort(schema_internal!(context.diagnostics.translator(), span));
                 return false;
             };
             file.source_len = source_len;
@@ -792,6 +562,7 @@ fn finish_source(
                         context.diagnostics.push(BudgetDiagnostics::make(
                             error,
                             source_diagnostic.primary().unwrap_or(span),
+                            context.diagnostics.translator(),
                         ));
                         return false;
                     }
@@ -800,22 +571,4 @@ fn finish_source(
             false
         }
     }
-}
-
-fn set_last_edge(
-    files: &mut ChargedVec<LoadedFile>,
-    file_index: usize,
-    edge_state: ImportEdge,
-    span: SourceSpan,
-    diagnostics: &mut DiagnosticCollector,
-) -> bool {
-    let Some(edge) = files
-        .get_mut(file_index)
-        .and_then(|file| file.import_targets.last_mut())
-    else {
-        diagnostics.abort(schema_internal!(span));
-        return false;
-    };
-    *edge = edge_state;
-    true
 }

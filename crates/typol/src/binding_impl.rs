@@ -4,9 +4,10 @@ mod matcher;
 #[cfg(all(test, feature = "std"))]
 mod tests;
 
-use alloc::string::String;
-use errors::BindingPath;
 pub use errors::{BindingErrors, BindingMismatch, BindingMismatchKind, BindingShape};
+
+#[cfg(all(test, feature = "std"))]
+pub(crate) use tests::{BindingTestSupport, Root as BindingTestRoot};
 
 use crate::{
     binding_impl::matcher::{Matcher, MatcherBuffers, Pending, Task},
@@ -18,19 +19,19 @@ use crate::{
     options::{BindOptions, ConversionLimits, WriteOptions},
     session::SessionBudget,
 };
+use alloc::string::String;
 use core::{any::TypeId, cmp::Ordering, marker::PhantomData, ops::Deref};
+use errors::BindingPath;
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 use typol_config::{ConfigParseRequest, Environment};
 use typol_core::{ChargedVec, DiagnosticContext, ExecutionBudget, Read, Write, diagnostic_context};
+use typol_i18n::Translator;
 use typol_semantic::{CompiledSchema, FieldView, TypeView, VariantView};
 
 #[cfg(feature = "serde")]
 use crate::serde::Serde;
 #[cfg(feature = "serde")]
 use serde::{Serialize, de::DeserializeOwned};
-
-#[cfg(all(test, feature = "std"))]
-pub(crate) use tests::{BindingTestSupport, Root as BindingTestRoot};
 
 static BINDING_INVARIANT: DiagnosticContext =
     diagnostic_context!("typol", "binding", "binding-plan-invariant");
@@ -84,10 +85,10 @@ impl<'schema> FieldBindings<'schema> {
             )?;
             let slot = rust_slots
                 .get_mut(binding.rust_slot)
-                .ok_or_else(internal_error)
+                .ok_or_else(|| internal_error(session.translator()))
                 .store_err_into(out.reborrow())?;
             if *slot != usize::MAX {
-                return Err(out.fail(internal_error()));
+                return Err(out.fail(internal_error(session.translator())));
             }
             *slot = schema_slot;
         }
@@ -114,7 +115,13 @@ impl<'schema> FieldBindings<'schema> {
             .get(slot)
             .and_then(|slot| self.fields.get(*slot))
             .map(|binding| binding.field)
-            .ok_or_else(|| CodecErrors::emergency(CodecStage::Conversion, Failure::Conversion))
+            .ok_or_else(|| {
+                CodecErrors::emergency(
+                    CodecStage::Conversion,
+                    Failure::Conversion,
+                    session.translator(),
+                )
+            })
             .store_err_into(out.reborrow())?;
         Ok(field)
     }
@@ -169,7 +176,7 @@ impl<'schema> BindingPlan<'schema> {
             let binding = self
                 .types
                 .get(middle)
-                .ok_or_else(internal_error)
+                .ok_or_else(|| internal_error(session.translator()))
                 .store_err_into(out.reborrow())?;
             match binding
                 .identity
@@ -184,6 +191,7 @@ impl<'schema> BindingPlan<'schema> {
         Err(out.fail(CodecErrors::emergency(
             CodecStage::Conversion,
             Failure::internal(BINDING_PLAN_ENTRY_MISSING),
+            session.translator(),
         )))
     }
 }
@@ -243,6 +251,7 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
     ) -> OResult<'slot, Self> {
         let session = SessionBudget::codec_from_budget(
             CodecStage::Binding,
+            options.translator(),
             |budget_out| SessionBudget::binding(options, budget_out),
             out.reborrow(),
         )?;
@@ -368,6 +377,7 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
         let codec_options = options;
         let mut session = SessionBudget::codec_from_budget(
             CodecStage::Conversion,
+            codec_options.validation().translator(),
             |budget_out| SessionBudget::codec(codec_options, budget_out),
             out.reborrow(),
         )?;
@@ -399,6 +409,7 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
     ) -> OResult<'slot, T> {
         let session = SessionBudget::codec_from_budget(
             CodecStage::Parsing,
+            request.options().translator(),
             |budget_out| SessionBudget::parsing(*request.options(), budget_out),
             out.reborrow(),
         )?;
@@ -431,6 +442,7 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
         } = request;
         let session = SessionBudget::codec_from_budget(
             CodecStage::Parsing,
+            request.options().translator(),
             |budget_out| SessionBudget::parsing_with_budget(*request.options(), budget, budget_out),
             out.reborrow(),
         )?;
@@ -468,6 +480,7 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
         } = request;
         let session = SessionBudget::codec_from_budget(
             CodecStage::Parsing,
+            request.options().translator(),
             |budget_out| SessionBudget::parsing_with_budget(*request.options(), budget, budget_out),
             out.reborrow(),
         )?;
@@ -534,6 +547,7 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
         let codec_options = options;
         let mut session = SessionBudget::codec_from_budget(
             CodecStage::Conversion,
+            codec_options.validation().translator(),
             |budget_out| SessionBudget::codec(codec_options, budget_out),
             out.reborrow(),
         )?;
@@ -571,6 +585,7 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
     {
         let session = SessionBudget::codec_from_budget(
             CodecStage::Parsing,
+            request.options().translator(),
             |budget_out| SessionBudget::parsing(*request.options(), budget_out),
             out.reborrow(),
         )?;
@@ -606,6 +621,10 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
     }
 }
 
-fn internal_error() -> CodecErrors {
-    CodecErrors::emergency(CodecStage::Binding, Failure::internal(BINDING_INVARIANT))
+fn internal_error(translator: Translator) -> CodecErrors {
+    CodecErrors::emergency(
+        CodecStage::Binding,
+        Failure::internal(BINDING_INVARIANT),
+        translator,
+    )
 }

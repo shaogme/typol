@@ -2,12 +2,13 @@ use typol_core::{
     AllocationError, BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits,
     LineIndex, LocationError, SliceSource, SourceId,
 };
+use typol_i18n::{Language, Translator};
 use typol_syntax::{
     InputConfig, InputLimits, Keyword, LexEvent, StreamLimits, Symbol, SyntaxLimits, TokenCursor,
     TokenKind,
     opeo::{OResult, Out},
 };
-use typol_test_support::TestSlot;
+use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
 
 struct TestErrors {
     budget: TestSlot<BudgetError>,
@@ -29,13 +30,19 @@ impl TestErrors {
     fn diagnostic<T>(
         &mut self,
         operation: impl for<'slot> FnOnce(Out<'slot, 'slot, Diagnostic>) -> OResult<'slot, T>,
-    ) -> Result<T, Diagnostic> {
-        self.diagnostic.access(operation)
+    ) -> TestOpeoOutcome<T, Diagnostic> {
+        self.diagnostic.run(operation)
     }
 }
 
 #[derive(Debug)]
 struct TestFailure;
+
+impl From<OpeoTestFailure> for TestFailure {
+    fn from(_: OpeoTestFailure) -> Self {
+        Self
+    }
+}
 
 macro_rules! test_assert {
     ($condition:expr $(, $($message:tt)*)?) => {{
@@ -103,6 +110,7 @@ fn keywords_identifiers_and_longest_match_symbols_are_classified() -> TestResult
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -210,6 +218,7 @@ fn decimal_hexadecimal_and_float_tokens_preserve_their_spelling() -> TestResult 
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -262,6 +271,7 @@ fn malformed_numbers_report_errors_and_allow_scanning_to_resume() -> TestResult 
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -339,6 +349,7 @@ fn strings_decode_supported_escapes_and_reject_invalid_forms() -> TestResult {
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -363,6 +374,7 @@ fn strings_decode_supported_escapes_and_reject_invalid_forms() -> TestResult {
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -403,6 +415,7 @@ fn strings_decode_supported_escapes_and_reject_invalid_forms() -> TestResult {
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -455,6 +468,7 @@ fn block_strings_dedent_normalize_lines_decode_escapes_and_preserve_spans() -> T
                         stream: StreamLimits::default(),
                         budget: &execution,
                     },
+                    Translator::new(Language::English),
                     out,
                 )
             })
@@ -484,6 +498,7 @@ fn block_strings_dedent_normalize_lines_decode_escapes_and_preserve_spans() -> T
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -529,6 +544,7 @@ fn malformed_block_strings_report_lexical_errors() -> TestResult {
                         stream: StreamLimits::default(),
                         budget: &execution,
                     },
+                    Translator::new(Language::English),
                     out,
                 )
             })
@@ -582,6 +598,7 @@ fn block_string_decode_errors_point_at_offending_source_text() -> TestResult {
                         stream: StreamLimits::default(),
                         budget: &execution,
                     },
+                    Translator::new(Language::English),
                     out,
                 )
             })
@@ -632,6 +649,7 @@ fn comments_and_config_tokens_use_the_shared_lexical_rules() -> TestResult {
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -675,6 +693,7 @@ fn malformed_comments_and_non_ascii_whitespace_have_precise_spans() -> TestResul
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -704,6 +723,7 @@ fn malformed_comments_and_non_ascii_whitespace_have_precise_spans() -> TestResul
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -734,6 +754,7 @@ fn malformed_comments_and_non_ascii_whitespace_have_precise_spans() -> TestResul
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -776,6 +797,7 @@ fn malformed_comments_and_non_ascii_whitespace_have_precise_spans() -> TestResul
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -810,6 +832,7 @@ fn crlf_and_multibyte_error_locations_use_byte_spans_and_scalar_columns() -> Tes
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -881,6 +904,7 @@ fn decoded_string_limit_counts_decoded_utf8_bytes() -> TestResult {
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -906,6 +930,7 @@ fn decoded_string_limit_counts_decoded_utf8_bytes() -> TestResult {
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -945,6 +970,7 @@ fn block_string_limits_count_source_token_and_decoded_output_separately() -> Tes
                             stream,
                             budget: &execution,
                         },
+                        Translator::new(Language::English),
                         out,
                     )
                 })

@@ -216,13 +216,19 @@ impl<'b, 'c> ExpressionMethods<'b, 'c> {
                 if u32::try_from(id).is_err() {
                     self.context
                         .diagnostics
-                        .push(EmergencyDiagnostics::resource(argument.span()));
+                        .push(EmergencyDiagnostics::resource(
+                            argument.span(),
+                            self.context.diagnostics.translator(),
+                        ));
                     return Err(out.fail(BuildFailure::empty()));
                 }
                 let Some(next_local) = self.context.next_local.checked_add(1) else {
                     self.context
                         .diagnostics
-                        .push(EmergencyDiagnostics::resource(argument.span()));
+                        .push(EmergencyDiagnostics::resource(
+                            argument.span(),
+                            self.context.diagnostics.translator(),
+                        ));
                     return Err(out.fail(BuildFailure::empty()));
                 };
                 *self.context.next_local = next_local;

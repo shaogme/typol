@@ -1,10 +1,5 @@
 mod nodes;
 
-use super::{
-    ids::{Id, ListId},
-    text::TextRef,
-};
-use crate::token::{NumberKind, VariantRestrictionMode};
 pub(crate) use nodes::{
     Annotation, ArrayDefault, ArrayLength, Assertion, BraceEntry, BracedDefault, DefaultValue,
     EnumDecl, EnumDefault, EnumDefaultPayload, Expr, ExternModDecl, FieldDecl, FieldParams,
@@ -12,6 +7,12 @@ pub(crate) use nodes::{
     SingleVariantPayload, StructDecl, StructDeclParams, StructureVariantPayload, TypeAliasDecl,
     TypeAliasDeclParams, TypeExpr, TypePath, VariantDecl, VariantDeclParams, VariantPayload,
 };
+
+use super::{
+    ids::{Id, ListId},
+    text::TextRef,
+};
+use crate::token::{NumberKind, VariantRestrictionMode};
 use typol_core::SourceSpan;
 use typol_model::{BinaryOperator, BuiltinType, UnaryOperator};
 

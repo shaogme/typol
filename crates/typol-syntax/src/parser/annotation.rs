@@ -13,7 +13,7 @@ use crate::{
 };
 use opeo::{OResult, Out};
 use typol_core::{BudgetError, ChargedVec, Diagnostic, ExecutionBudget};
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 
 pub(crate) struct AnnotationParser;
 
@@ -27,7 +27,7 @@ impl AnnotationParser {
         while ParserControl::peek(parser, out.reborrow())?.kind == TokenKind::Symbol(Symbol::At) {
             let annotation = AnnotationParser::parse_annotation(parser, out.reborrow())?;
             let span = parser.ast.span(annotation, out.reborrow())?;
-            ParserControl::try_push(&mut annotations, annotation, span, out.reborrow())?;
+            ParserControl::try_push(parser, &mut annotations, annotation, span, out.reborrow())?;
         }
         Ok(annotations)
     }
@@ -45,10 +45,10 @@ impl AnnotationParser {
             return ParserControl::syntax_failure(
                 parser,
                 name_span,
-                diagnostic_message!(
-                    "diagnostic.syntax.unknown_annotation",
-                    "unknown Schema annotation"
-                ),
+                t! {
+                    name: "diagnostic.syntax.unknown_annotation",
+                    locale: parser.translator,
+                },
                 out.reborrow(),
             );
         };
@@ -99,10 +99,10 @@ impl AnnotationParser {
             return ParserControl::syntax_failure(
                 parser,
                 mode_span,
-                diagnostic_message!(
-                    "diagnostic.syntax.variants_mode",
-                    "@variants mode must be allow or deny"
-                ),
+                t! {
+                    name: "diagnostic.syntax.variants_mode",
+                    locale: parser.translator,
+                },
                 out.reborrow(),
             );
         };
@@ -116,17 +116,17 @@ impl AnnotationParser {
             return ParserControl::syntax_failure(
                 parser,
                 span,
-                diagnostic_message!(
-                    "diagnostic.syntax.variants_list_nonempty",
-                    "@variants requires at least one string literal"
-                ),
+                t! {
+                    name: "diagnostic.syntax.variants_list_nonempty",
+                    locale: parser.translator,
+                },
                 out.reborrow(),
             );
         }
         loop {
             let name = ParserControl::take_string(parser, out.reborrow())?;
             let span = parser.ast.span(name, out.reborrow())?;
-            ParserControl::try_push(&mut names, name, span, out.reborrow())?;
+            ParserControl::try_push(parser, &mut names, name, span, out.reborrow())?;
             if ParserControl::eat_symbol(parser, Symbol::Comma, out.reborrow())?.is_none() {
                 break;
             }
@@ -149,12 +149,7 @@ impl AnnotationParser {
     ) -> OResult<'slot, AnnotationData> {
         let by = if ParserControl::eat_symbol(parser, Symbol::LeftParen, out.reborrow())?.is_some()
         {
-            let argument = AnnotationParser::parse_named_string(
-                parser,
-                "by",
-                "@unique argument must be by",
-                out.reborrow(),
-            )?;
+            let argument = AnnotationParser::parse_named_string(parser, "by", out.reborrow())?;
             ParserControl::expect_symbol(parser, Symbol::RightParen, out.reborrow())?;
             Some(argument)
         } else {
@@ -216,10 +211,10 @@ impl AnnotationParser {
             return ParserControl::syntax_failure(
                 parser,
                 span,
-                diagnostic_message!(
-                    "diagnostic.syntax.cidr_v4_only_argument",
-                    "@cidr argument must be v4_only"
-                ),
+                t! {
+                    name: "diagnostic.syntax.cidr_v4_only_argument",
+                    locale: parser.translator,
+                },
                 out.reborrow(),
             );
         }
@@ -292,13 +287,20 @@ impl AnnotationParser {
     fn parse_named_string<'slot>(
         parser: &mut ParserState<'_>,
         expected: &str,
-        message: &'static str,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, NamedArgument<Id<StringLiteral>>> {
         let name = ParserControl::take_name(parser, out.reborrow())?;
         if !ParserControl::name_is(parser, name, expected, out.reborrow())? {
             let span = parser.ast.span(name, out.reborrow())?;
-            return ParserControl::syntax_failure(parser, span, message, out.reborrow());
+            return ParserControl::syntax_failure(
+                parser,
+                span,
+                t! {
+                    name: "diagnostic.syntax.unique_argument",
+                    locale: parser.translator,
+                },
+                out.reborrow(),
+            );
         }
         ParserControl::expect_symbol(parser, Symbol::Equal, out.reborrow())?;
         let value = ParserControl::take_string(parser, out.reborrow())?;
@@ -343,10 +345,10 @@ impl AnnotationParser {
             return ParserControl::syntax_failure(
                 parser,
                 span,
-                diagnostic_message!(
-                    "diagnostic.syntax.boundary_argument",
-                    "boundary argument must be min or max"
-                ),
+                t! {
+                    name: "diagnostic.syntax.boundary_argument",
+                    locale: parser.translator,
+                },
                 out.reborrow(),
             );
         }
@@ -377,10 +379,10 @@ impl AnnotationParser {
                 return ParserControl::syntax_failure(
                     parser,
                     info.span,
-                    diagnostic_message!(
-                        "diagnostic.syntax.expected_boolean_literal",
-                        "expected a boolean literal here"
-                    ),
+                    t! {
+                        name: "diagnostic.syntax.expected_boolean_literal",
+                        locale: parser.translator,
+                    },
                     out.reborrow(),
                 );
             }

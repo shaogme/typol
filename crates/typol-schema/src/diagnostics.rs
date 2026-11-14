@@ -1,15 +1,18 @@
 #[cfg(test)]
 mod tests;
 
+use alloc::borrow::Cow;
 use core::{cell::RefCell, cmp::Ordering, iter::Chain, ops::Deref, option::IntoIter, slice};
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage,
-    ExecutionBudget, SourceSpan, diagnostic_context,
+    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticLabelInput,
+    DiagnosticMessage, ExecutionBudget, RelatedLocationRole, SourceSpan, diagnostic_context,
 };
+use typol_i18n::{Translator, t};
 use typol_semantic::SchemaAccessError;
 use typol_syntax::AstAccessError;
+use u18n::RenderError;
 
 #[cfg(test)]
 use alloc::vec::Vec;
@@ -33,10 +36,11 @@ macro_rules! schema_context {
 }
 
 macro_rules! schema_internal {
-    ($span:expr $(,)?) => {{
+    ($translator:expr, $span:expr $(,)?) => {{
         $crate::diagnostics::EmergencyDiagnostics::internal(
             $span,
             schema_context!(module_path!(), "internal-invariant"),
+            $translator,
         )
     }};
 }
@@ -119,11 +123,6 @@ static SCHEMA_ACCESS_OTHER: DiagnosticContext =
 
 pub(crate) type BuildResult<T> = Result<T, BuildFailure>;
 
-enum CollectorState {
-    Running,
-    Stopped(Diagnostic),
-}
-
 #[derive(Clone, Copy)]
 enum InsertOperation {
     Read,
@@ -141,6 +140,7 @@ enum InsertFailure {
 pub(crate) struct ErrorDiagnostics {
     diagnostics: ChargedVec<Diagnostic>,
     terminal: Option<Diagnostic>,
+    translator: Translator,
 }
 
 /// A borrowed list view over ordinary diagnostics and an optional terminal diagnostic.
@@ -212,9 +212,16 @@ impl<'a> DiagnosticList<'a> {
 pub(crate) struct DiagnosticCollector {
     diagnostics: ChargedVec<Diagnostic>,
     limit: usize,
-    state: CollectorState,
+    state: Option<Diagnostic>,
     fallback_span: SourceSpan,
+    translator: Translator,
     operation_errors: RefCell<ErrSlot<InsertFailure>>,
+}
+
+pub(crate) struct DuplicateLabel<'message> {
+    pub(crate) span: SourceSpan,
+    pub(crate) role: RelatedLocationRole,
+    pub(crate) message: DiagnosticMessage<'message>,
 }
 
 impl DiagnosticCollector {
@@ -222,6 +229,7 @@ impl DiagnosticCollector {
         limit: usize,
         fallback_span: SourceSpan,
         execution: &ExecutionBudget,
+        translator: Translator,
         mut out: Out<'slot, '_, E>,
     ) -> OResult<'slot, Self>
     where
@@ -233,10 +241,15 @@ impl DiagnosticCollector {
         Ok(Self {
             diagnostics,
             limit: limit.max(1),
-            state: CollectorState::Running,
+            state: None,
             fallback_span,
+            translator,
             operation_errors: RefCell::new(ErrSlot::new()),
         })
+    }
+
+    pub(crate) const fn translator(&self) -> Translator {
+        self.translator
     }
 
     pub(crate) fn new_vec<'slot, T>(
@@ -256,10 +269,16 @@ impl DiagnosticCollector {
             Err(failure) => {
                 match failure {
                     InsertFailure::Budget(error) => {
-                        self.abort(BudgetDiagnostics::make(error, self.fallback_span));
+                        self.abort(BudgetDiagnostics::make(
+                            error,
+                            self.fallback_span,
+                            self.translator,
+                        ));
                     }
                     failure @ InsertFailure::Internal { .. } => {
-                        self.abort(failure.internal_diagnostic(self.fallback_span));
+                        self.abort(
+                            failure.internal_diagnostic(self.fallback_span, self.translator),
+                        );
                     }
                 }
                 Err(out.fail(BuildFailure::empty()))
@@ -268,8 +287,8 @@ impl DiagnosticCollector {
     }
 
     pub(crate) fn abort(&mut self, diagnostic: Diagnostic) {
-        if matches!(self.state, CollectorState::Running) {
-            self.state = CollectorState::Stopped(diagnostic);
+        if self.state.is_none() {
+            self.state = Some(diagnostic);
         }
     }
 
@@ -282,7 +301,7 @@ impl DiagnosticCollector {
         match value {
             Some(value) => Ok(value),
             None => {
-                self.abort(schema_internal!(span));
+                self.abort(schema_internal!(self.translator, span));
                 Err(out.fail(BuildFailure::empty()))
             }
         }
@@ -290,9 +309,16 @@ impl DiagnosticCollector {
 
     pub(crate) fn report_failure(&mut self, failure: BuildFailure) {
         if let Some(error) = failure.budget {
-            self.abort(BudgetDiagnostics::make(error, self.fallback_span));
+            self.abort(BudgetDiagnostics::make(
+                error,
+                self.fallback_span,
+                self.translator,
+            ));
         } else if let Some(context) = failure.context() {
-            self.abort(EmergencyDiagnostics::internal_without_span(context));
+            self.abort(EmergencyDiagnostics::internal_without_span(
+                context,
+                self.translator,
+            ));
         }
     }
 
@@ -310,8 +336,28 @@ impl DiagnosticCollector {
         message: impl Into<DiagnosticMessage<'message>>,
         span: Option<SourceSpan>,
     ) -> Diagnostic {
-        if let CollectorState::Stopped(terminal) = &self.state {
-            let mut diagnostic = EmergencyDiagnostics::make(terminal.code(), span);
+        if let Some(terminal) = &self.state {
+            let diagnostic = match terminal.message() {
+                Ok(message) => {
+                    let mut errors = ErrSlot::<BudgetError>::new();
+                    match errors.try_call(|out| {
+                        Diagnostic::try_new(
+                            terminal.code(),
+                            DiagnosticMessage::custom(message),
+                            self.diagnostics.budget(),
+                            out,
+                        )
+                    }) {
+                        Ok(diagnostic) => diagnostic,
+                        Err(caught) => {
+                            BudgetDiagnostics::make_optional(caught.take(), span, self.translator)
+                        }
+                    }
+                }
+                Err(error) => Diagnostic::failure(terminal.code(), error),
+            };
+            let mut diagnostic = diagnostic;
+            diagnostic.set_primary(span);
             diagnostic.set_context(terminal.context());
             return diagnostic;
         }
@@ -324,7 +370,7 @@ impl DiagnosticCollector {
             Ok(diagnostic)
         }) {
             Ok(diagnostic) => diagnostic,
-            Err(caught) => BudgetDiagnostics::make_optional(caught.take(), span),
+            Err(caught) => BudgetDiagnostics::make_optional(caught.take(), span, self.translator),
         }
     }
 
@@ -332,23 +378,36 @@ impl DiagnosticCollector {
         &self,
         message: impl Into<DiagnosticMessage<'message>>,
         span: SourceSpan,
-        earlier_span: SourceSpan,
-        earlier_message: impl Into<DiagnosticMessage<'message>>,
+        earlier: DuplicateLabel<'message>,
     ) -> Diagnostic {
         let mut diagnostic = self.make_semantic(message, span);
         if diagnostic.code() != DiagnosticCode::SCHEMA_SEMANTIC_ERROR {
             return diagnostic;
         }
+        let DuplicateLabel {
+            span: earlier_span,
+            role: earlier_role,
+            message: earlier_message,
+        } = earlier;
+        if let Some(error) = earlier_message.failure() {
+            let mut failure =
+                Diagnostic::translation_failure(DiagnosticCode::SCHEMA_SEMANTIC_ERROR, error);
+            failure.set_primary(Some(span));
+            return failure;
+        }
         let mut label_errors = ErrSlot::<BudgetError>::new();
         if let Err(caught) = label_errors.try_call(|out| {
             diagnostic.try_add_label_with_text(
-                earlier_span,
-                earlier_message.into(),
+                DiagnosticLabelInput {
+                    span: earlier_span,
+                    text: earlier_message.text(),
+                    role: earlier_role,
+                },
                 self.diagnostics.budget(),
                 out,
             )
         }) {
-            return BudgetDiagnostics::make(caught.take(), span);
+            return BudgetDiagnostics::make(caught.take(), span, self.translator);
         }
         diagnostic
     }
@@ -363,15 +422,15 @@ impl DiagnosticCollector {
                 | DiagnosticCode::ALLOCATION_FAILED
                 | DiagnosticCode::INTERNAL_ERROR
                 | DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED
-        );
+        ) || diagnostic.message().is_err();
         if fatal {
             self.abort(diagnostic);
             return;
         }
         if self.diagnostics.len() >= self.limit - 1 {
-            self.abort(EmergencyDiagnostics::make(
-                DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED,
+            self.abort(EmergencyDiagnostics::limit_reached(
                 diagnostic.primary(),
+                self.translator,
             ));
             return;
         }
@@ -392,7 +451,11 @@ impl DiagnosticCollector {
         }) {
             Ok(execution) => execution,
             Err(caught) => {
-                self.abort(BudgetDiagnostics::make_optional(caught.take(), span));
+                self.abort(BudgetDiagnostics::make_optional(
+                    caught.take(),
+                    span,
+                    self.translator,
+                ));
                 return;
             }
         };
@@ -436,10 +499,16 @@ impl DiagnosticCollector {
         match failure {
             None => {}
             Some(InsertFailure::Budget(error)) => {
-                self.abort(BudgetDiagnostics::make_optional(error, span));
+                self.abort(BudgetDiagnostics::make_optional(
+                    error,
+                    span,
+                    self.translator,
+                ));
             }
             Some(error @ InsertFailure::Internal { .. }) => {
-                self.abort(error.internal_diagnostic(span.unwrap_or(self.fallback_span)));
+                self.abort(
+                    error.internal_diagnostic(span.unwrap_or(self.fallback_span), self.translator),
+                );
             }
         }
     }
@@ -459,7 +528,7 @@ impl DiagnosticCollector {
     }
 
     pub(crate) const fn is_stopped(&self) -> bool {
-        matches!(self.state, CollectorState::Stopped(_))
+        self.state.is_some()
     }
 
     pub(crate) fn has_diagnostics(&self) -> bool {
@@ -467,11 +536,8 @@ impl DiagnosticCollector {
     }
 
     pub(crate) fn into_diagnostics(self) -> ErrorDiagnostics {
-        let terminal = match self.state {
-            CollectorState::Running => None,
-            CollectorState::Stopped(terminal) => Some(terminal),
-        };
-        ErrorDiagnostics::new(self.diagnostics, terminal)
+        let terminal = self.state;
+        ErrorDiagnostics::new(self.diagnostics, terminal, self.translator)
     }
 }
 
@@ -487,16 +553,16 @@ static INSERT_SHIFT_FAILURE: DiagnosticContext = diagnostic_context!(
 );
 
 impl InsertFailure {
-    fn internal_diagnostic(&self, span: SourceSpan) -> Diagnostic {
+    fn internal_diagnostic(&self, span: SourceSpan, translator: Translator) -> Diagnostic {
         let Self::Internal { index, operation } = self else {
-            return schema_internal!(span);
+            return schema_internal!(translator, span);
         };
         let context = match operation {
             InsertOperation::Read => INSERT_READ_FAILURE,
             InsertOperation::Shift => INSERT_SHIFT_FAILURE,
         }
         .with_object_id(*index as u64);
-        EmergencyDiagnostics::internal(span, context)
+        EmergencyDiagnostics::internal(span, context, translator)
     }
 }
 
@@ -509,12 +575,38 @@ impl From<BudgetError> for InsertFailure {
 pub(crate) struct BudgetDiagnostics;
 
 impl BudgetDiagnostics {
-    pub(crate) fn make(error: BudgetError, span: SourceSpan) -> Diagnostic {
-        Self::make_optional(error, Some(span))
+    pub(crate) fn make(error: BudgetError, span: SourceSpan, translator: Translator) -> Diagnostic {
+        Self::make_optional(error, Some(span), translator)
     }
 
-    pub(crate) fn make_optional(error: BudgetError, span: Option<SourceSpan>) -> Diagnostic {
-        let mut diagnostic = EmergencyDiagnostics::make(error.diagnostic_code(), span);
+    pub(crate) fn make_optional(
+        error: BudgetError,
+        span: Option<SourceSpan>,
+        translator: Translator,
+    ) -> Diagnostic {
+        let message = match error {
+            BudgetError::Allocation => t! {
+                name: "diagnostic.emergency.allocation_failed",
+                locale: translator,
+            },
+            BudgetError::CapacityExceeded => t! {
+                name: "diagnostic.emergency.capacity_exceeded",
+                locale: translator,
+            },
+            BudgetError::InvariantViolation(_) => t! {
+                name: "diagnostic.emergency.internal_error",
+                locale: translator,
+            },
+            BudgetError::Resource
+            | BudgetError::RegexSteps
+            | BudgetError::RegexSearchSteps
+            | BudgetError::RegexWorkspace => t! {
+                name: "diagnostic.emergency.resource_limit_exceeded",
+                locale: translator,
+            },
+        };
+        let mut diagnostic =
+            EmergencyDiagnostics::translated(error.diagnostic_code(), message, span);
         diagnostic.set_context(error.context());
         diagnostic
     }
@@ -555,36 +647,94 @@ impl EmergencyDiagnostics {
         context.with_object_id(error.index() as u64)
     }
 
-    pub(crate) fn make(code: DiagnosticCode, span: Option<SourceSpan>) -> Diagnostic {
-        let mut diagnostic = Diagnostic::emergency(code);
+    pub(crate) fn translated(
+        code: DiagnosticCode,
+        message: Result<Cow<'static, str>, RenderError>,
+        span: Option<SourceSpan>,
+    ) -> Diagnostic {
+        let mut diagnostic = match message {
+            Ok(Cow::Borrowed(message)) => Diagnostic::emergency(code, message),
+            Ok(Cow::Owned(_)) => Diagnostic::translation_failure(code, RenderError::InvalidCatalog),
+            Err(error) => Diagnostic::translation_failure(code, error),
+        };
         diagnostic.set_primary(span);
         diagnostic
     }
 
-    pub(crate) fn resource(span: SourceSpan) -> Diagnostic {
-        Self::make(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED, Some(span))
+    pub(crate) fn resource(span: SourceSpan, translator: Translator) -> Diagnostic {
+        Self::translated(
+            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+            t! {
+                name: "diagnostic.emergency.resource_limit_exceeded",
+                locale: translator,
+            },
+            Some(span),
+        )
     }
 
-    pub(crate) fn allocation(span: SourceSpan) -> Diagnostic {
-        Self::make(DiagnosticCode::ALLOCATION_FAILED, Some(span))
+    pub(crate) fn allocation(span: SourceSpan, translator: Translator) -> Diagnostic {
+        Self::translated(
+            DiagnosticCode::ALLOCATION_FAILED,
+            t! {
+                name: "diagnostic.emergency.allocation_failed",
+                locale: translator,
+            },
+            Some(span),
+        )
     }
 
-    pub(crate) fn internal(span: SourceSpan, context: DiagnosticContext) -> Diagnostic {
-        Self::internal_at(Some(span), context)
+    pub(crate) fn internal(
+        span: SourceSpan,
+        context: DiagnosticContext,
+        translator: Translator,
+    ) -> Diagnostic {
+        Self::internal_at(Some(span), context, translator)
     }
 
-    pub(crate) fn internal_without_span(context: DiagnosticContext) -> Diagnostic {
-        Self::internal_at(None, context)
+    pub(crate) fn internal_without_span(
+        context: DiagnosticContext,
+        translator: Translator,
+    ) -> Diagnostic {
+        Self::internal_at(None, context, translator)
     }
 
-    fn internal_at(span: Option<SourceSpan>, context: DiagnosticContext) -> Diagnostic {
-        let mut diagnostic = Self::make(DiagnosticCode::INTERNAL_ERROR, span);
+    fn internal_at(
+        span: Option<SourceSpan>,
+        context: DiagnosticContext,
+        translator: Translator,
+    ) -> Diagnostic {
+        let mut diagnostic = Self::translated(
+            DiagnosticCode::INTERNAL_ERROR,
+            t! {
+                name: "diagnostic.emergency.internal_error",
+                locale: translator,
+            },
+            span,
+        );
         diagnostic.set_context(Some(context));
         diagnostic
     }
 
-    pub(crate) fn capacity(span: SourceSpan) -> Diagnostic {
-        Self::make(DiagnosticCode::CAPACITY_EXCEEDED, Some(span))
+    pub(crate) fn capacity(span: SourceSpan, translator: Translator) -> Diagnostic {
+        Self::translated(
+            DiagnosticCode::CAPACITY_EXCEEDED,
+            t! {
+                name: "diagnostic.emergency.capacity_exceeded",
+                locale: translator,
+            },
+            Some(span),
+        )
+    }
+
+    pub(crate) fn limit_reached(span: Option<SourceSpan>, translator: Translator) -> Diagnostic {
+        Self::translated(
+            DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED,
+            t! {
+                name: "diagnostic.emergency.diagnostic_limit_reached",
+                locale: translator,
+            },
+            span,
+        )
     }
 }
 
@@ -603,10 +753,15 @@ fn compare_diagnostics(left: &Diagnostic, right: &Diagnostic) -> Ordering {
 }
 
 impl ErrorDiagnostics {
-    fn new(diagnostics: ChargedVec<Diagnostic>, terminal: Option<Diagnostic>) -> Self {
+    fn new(
+        diagnostics: ChargedVec<Diagnostic>,
+        terminal: Option<Diagnostic>,
+        translator: Translator,
+    ) -> Self {
         Self {
             diagnostics,
             terminal,
+            translator,
         }
     }
 
@@ -640,6 +795,10 @@ impl ErrorDiagnostics {
         if self.terminal.is_none() {
             self.terminal = Some(diagnostic);
         }
+    }
+
+    pub(crate) const fn translator(&self) -> Translator {
+        self.translator
     }
 }
 

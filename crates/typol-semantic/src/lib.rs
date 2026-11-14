@@ -17,8 +17,6 @@ mod builder;
 #[cfg(feature = "compiler")]
 mod validation;
 
-use expressions::{StoredBindingInfo, StoredExpressionArgument, StoredExpressionKind};
-
 pub use opeo;
 
 pub use {
@@ -57,3 +55,5 @@ pub use typol_core::{RegexExecutionBudget, SpanLocation};
 pub use builder::{
     BuildError, Builder, RefinementInput, SchemaDefaultValidation, SchemaFreezeInput, SourceLookup,
 };
+
+use expressions::{StoredBindingInfo, StoredExpressionArgument, StoredExpressionKind};

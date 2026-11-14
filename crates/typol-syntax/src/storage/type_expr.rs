@@ -4,6 +4,7 @@ use crate::{
 };
 use opeo::{OResult, Out};
 use typol_core::{ChargedVec, Diagnostic, DiagnosticCode, SourceSpan};
+use typol_i18n::t;
 use typol_model::BuiltinType;
 
 pub(crate) struct TypeBuilder;
@@ -106,7 +107,11 @@ impl TypeBuilder {
     ) -> OResult<'slot, Id<TypePath>> {
         if segments.is_empty() {
             return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
-                DiagnosticCode::SCHEMA_SYNTAX_ERROR,
+                DiagnosticCode::INTERNAL_ERROR,
+                t! {
+                    name: "diagnostic.emergency.internal_error",
+                    locale: storage.translator(),
+                },
                 span,
             )));
         }

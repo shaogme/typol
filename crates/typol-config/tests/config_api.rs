@@ -308,7 +308,9 @@ fn optional_environment_reference_stays_shared_after_external_validation() -> Te
     })
     .map_err(TestFailure::from_debug)?;
     let value = TestOpeo::call(|out| builder.finish(root, out)).map_err(TestFailure::from_debug)?;
-    let options = ConfigValidationRequest::new(ConfigValidationOptions::default());
+    let options = ConfigValidationRequest::new(
+        ConfigValidationOptions::default().with_translator(Translator::new(Language::Chinese)),
+    );
     let validated =
         TestOpeo::value(|out| ConfigValueProcessor::new(&schema).validate(value, options, out))?;
     let optional = field(validated.as_config_value(), "value")?;
@@ -327,7 +329,9 @@ fn normalization_shape_errors_keep_their_localized_or_redacted_message() -> Test
         "password",
         ValueFactory::string("private-value")?,
     )])?;
-    let options = ConfigValidationRequest::new(ConfigValidationOptions::default());
+    let options = ConfigValidationRequest::new(
+        ConfigValidationOptions::default().with_translator(Translator::new(Language::Chinese)),
+    );
     let mut errors = TestSlot::<ConfigValueErrors>::default();
     let errors = errors
         .access(|out| ConfigValueProcessor::new(&schema).normalize(value, options, out))
@@ -337,14 +341,8 @@ fn normalization_shape_errors_keep_their_localized_or_redacted_message() -> Test
         .first()
         .test_value()
         .map_err(|_| TestFailure::new("normalization should return a diagnostic"))?;
-    let key = diagnostic
-        .message_key()
-        .ok_or_else(|| TestFailure::new("hidden normalization diagnostics need a message key"))?;
-    let message = Translator::new(Language::Chinese)
-        .translate_diagnostic(key)
-        .map_err(|_| TestFailure::new("hidden normalization message should translate"))?;
-    test_eq!(message, "值已隐藏")?;
-    test_assert!(!diagnostic.message().contains("private-value"))?;
+    test_eq!(diagnostic.message().test_value()?, "值已隐藏")?;
+    test_assert!(!diagnostic.message().test_value()?.contains("private-value"))?;
     Ok(())
 }
 
@@ -410,7 +408,7 @@ fn errors_keep_safe_paths_and_both_source_locations_after_inputs_drop() -> TestR
     test_eq!(errors.config_source_name(), Some("invalid.tconf"))?;
     test_eq!(errors.config_source_id(), schema.next_source_id())?;
     let diagnostic = &TestCheck::item(errors.diagnostics(), 0)?;
-    test_eq!(diagnostic.message(), "value is hidden")?;
+    test_eq!(diagnostic.message().test_value()?, "value is hidden")?;
     test_eq!(diagnostic.path().test_value()?.len(), 1)?;
     let location = errors
         .span_location(diagnostic.primary().test_value()?)

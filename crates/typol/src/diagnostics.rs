@@ -1,6 +1,11 @@
 mod conversion;
 mod failure;
 
+pub use conversion::ConversionErrorKind;
+pub use failure::{BINDING_MISMATCH_CONTEXT, CodecStage, Failure};
+
+pub(crate) use conversion::{ConversionDiagnosticInput, ConversionPath, ConversionPathSegment};
+
 use crate::{
     binding_impl::{BindingErrors, BindingMismatch, BindingShape},
     session::SessionBudget,
@@ -12,16 +17,14 @@ use typol_config::{
 };
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext,
-    SourceExcerptSet, SourceId, SourceSpan, ValueError,
+    DiagnosticFailure, SourceExcerptSet, SourceId, SourceSpan,
 };
 
+use typol_i18n::{Translator, t};
 use typol_report::{DiagnosticReport, ReportContext};
-use typol_semantic::{CompiledSchema, SchemaAccessError, SpanLocation};
+use typol_semantic::{CompiledSchema, SpanLocation};
 
 use conversion::ConversionDiagnostic;
-pub use conversion::ConversionErrorKind;
-pub(crate) use conversion::{ConversionDiagnosticInput, ConversionPath, ConversionPathSegment};
-pub use failure::{BINDING_MISMATCH_CONTEXT, CodecStage, Failure};
 
 #[cfg(all(test, feature = "std"))]
 use typol_core::{ExecutionBudget, diagnostic_context};
@@ -116,18 +119,21 @@ enum ErrorStorage {
 
 pub struct CodecErrors {
     storage: ErrorStorage,
+    translator: Option<Translator>,
 }
 
 impl CodecErrors {
-    pub(crate) fn parsing(errors: ConfigParseErrors) -> Self {
+    pub(crate) fn parsing(errors: ConfigParseErrors, translator: Translator) -> Self {
         Self {
             storage: ErrorStorage::Parsing(errors),
+            translator: Some(translator),
         }
     }
 
-    pub(crate) fn validation(errors: ConfigValueErrors) -> Self {
+    pub(crate) fn validation(errors: ConfigValueErrors, translator: Translator) -> Self {
         Self {
             storage: ErrorStorage::Validation(errors),
+            translator: Some(translator),
         }
     }
 
@@ -205,12 +211,11 @@ impl CodecErrors {
         self.diagnostics().get(index)?.context()
     }
 
-    pub(crate) fn emergency(stage: CodecStage, failure: Failure) -> Self {
+    pub(crate) fn emergency(stage: CodecStage, failure: Failure, translator: Translator) -> Self {
+        let diagnostic = failure.emergency_diagnostic(translator);
         Self {
-            storage: ErrorStorage::Emergency {
-                stage,
-                diagnostic: failure.emergency_diagnostic(),
-            },
+            storage: ErrorStorage::Emergency { stage, diagnostic },
+            translator: Some(translator),
         }
     }
 
@@ -223,19 +228,29 @@ impl CodecErrors {
         let mut error = ConversionDiagnostic::new(input, session, out.reborrow())?;
         let mut redaction_errors = ErrSlot::new();
         match redaction_errors.try_call(|redact_out| {
-            ConfigDiagnosticRedactor::new(schema)
+            ConfigDiagnosticRedactor::new(schema, session.translator())
                 .redact_conversion(error.diagnostic_mut(), redact_out)
         }) {
             Ok(()) => Ok(Self {
                 storage: ErrorStorage::Conversion(error),
+                translator: Some(session.translator()),
             }),
-            Err(caught) => Ok(Self::safe_diagnostic(CodecStage::Conversion, caught.take())),
+            Err(caught) => Ok(Self::safe_diagnostic(
+                CodecStage::Conversion,
+                caught.take(),
+                Some(session.translator()),
+            )),
         }
     }
 
-    pub(crate) fn safe_diagnostic(stage: CodecStage, diagnostic: Diagnostic) -> Self {
+    pub(crate) fn safe_diagnostic(
+        stage: CodecStage,
+        diagnostic: Diagnostic,
+        translator: Option<Translator>,
+    ) -> Self {
         Self {
             storage: ErrorStorage::Emergency { stage, diagnostic },
+            translator,
         }
     }
 
@@ -259,7 +274,13 @@ impl CodecErrors {
             )?;
         }
         if errors.is_truncated() && diagnostic_limit.max(1) > 1 {
-            let diagnostic = Diagnostic::emergency(DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED);
+            let diagnostic = Diagnostic::translated_emergency(
+                DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED,
+                t! {
+                    name: "diagnostic.emergency.diagnostic_limit_reached",
+                    locale: session.translator(),
+                },
+            );
             session.budget_codec(
                 CodecStage::Binding,
                 |budget_out| diagnostics.try_push(diagnostic, budget_out),
@@ -271,6 +292,7 @@ impl CodecErrors {
                 errors,
                 diagnostics,
             },
+            translator: Some(session.translator()),
         })
     }
 
@@ -394,18 +416,28 @@ impl fmt::Display for CodecErrors {
                 .flatten()
         };
         let span_location = |span| self.span_location(span);
+        let translator = self.translator.ok_or(fmt::Error)?;
+        let title = t! {
+            name: "report.title.operation_failed",
+            locale: translator,
+        }
+        .map_err(|_| fmt::Error)?;
         let stage = match self.stage() {
-            CodecStage::Binding => "type binding",
-            CodecStage::Parsing => "parsing",
-            CodecStage::Conversion => "conversion",
-            CodecStage::Validation => "validation",
-            CodecStage::Encoding => "encoding",
-        };
+            CodecStage::Binding => t! { name: "report.stage.type_binding", locale: translator },
+            CodecStage::Parsing => t! { name: "report.stage.schema_parsing", locale: translator },
+            CodecStage::Conversion => t! { name: "report.stage.decoding", locale: translator },
+            CodecStage::Validation => {
+                t! { name: "report.stage.configuration_reading", locale: translator }
+            }
+            CodecStage::Encoding => t! { name: "report.stage.encoding", locale: translator },
+        }
+        .map_err(|_| fmt::Error)?;
         DiagnosticReport::new(
-            "codec operation failed",
-            Some(stage),
+            title.as_ref(),
+            Some(stage.as_ref()),
             self.diagnostics(),
             ReportContext::new(&source_name, &span_location, self.excerpts()),
+            translator,
         )
         .write_to(formatter)
     }
@@ -414,6 +446,7 @@ impl fmt::Display for CodecErrors {
 #[cfg(all(test, feature = "std"))]
 pub(crate) struct ErrorBuffer {
     stage: CodecStage,
+    translator: Translator,
     budget: ExecutionBudget,
     diagnostics: ChargedVec<Diagnostic>,
     terminal: Option<Diagnostic>,
@@ -433,6 +466,7 @@ impl ErrorBuffer {
         let budget = session.execution();
         Ok(Self {
             stage,
+            translator: session.translator(),
             budget: budget.try_clone(out.reborrow())?,
             diagnostics: ChargedVec::new(Some(budget), out.reborrow())?,
             terminal: None,
@@ -447,7 +481,10 @@ impl ErrorBuffer {
             return false;
         }
         if failure.terminal() {
-            self.terminal = Some(failure.emergency_diagnostic());
+            self.terminal = Some(Diagnostic::translated_emergency(
+                failure.code(),
+                t! { name: "diagnostic.emergency.internal_error", locale: self.translator },
+            ));
             return false;
         }
         let budget = &self.budget;
@@ -455,13 +492,18 @@ impl ErrorBuffer {
         let result = self.budget_errors.try_call(|mut out| {
             budget.consume(1, out.reborrow())?;
             if self.diagnostics.len() >= self.limit - 1 && !failure.terminal() {
-                self.terminal = Some(Diagnostic::emergency(
+                self.terminal = Some(Diagnostic::translated_emergency(
                     DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED,
+                    t! {
+                        name: "diagnostic.emergency.diagnostic_limit_reached",
+                        locale: self.translator,
+                    },
                 ));
                 return Ok(());
             }
             self.diagnostics.try_reserve(2, out.reborrow())?;
-            let diagnostic = failure.diagnostic(budget, max_text_bytes, out.reborrow())?;
+            let diagnostic =
+                failure.diagnostic(budget, max_text_bytes, self.translator, out.reborrow())?;
             if failure.terminal() {
                 self.terminal = Some(diagnostic);
             } else {
@@ -470,7 +512,10 @@ impl ErrorBuffer {
             Ok(())
         });
         if let Err(caught) = result {
-            self.terminal = Some(Failure::from(caught.take()).emergency_diagnostic());
+            self.terminal = Some(Diagnostic::translated_emergency(
+                Failure::from(caught.take()).code(),
+                t! { name: "diagnostic.emergency.internal_error", locale: self.translator },
+            ));
         }
         self.terminal.is_none()
     }
@@ -481,7 +526,7 @@ impl ErrorBuffer {
             .as_ref()
             .is_some_and(|error| error.code() == DiagnosticCode::ALLOCATION_FAILED)
         {
-            return CodecErrors::emergency(self.stage, Failure::Allocation);
+            return CodecErrors::emergency(self.stage, Failure::Allocation, self.translator);
         }
         let count = self.diagnostics.len() + 1;
         let budget = &self.budget;
@@ -489,16 +534,23 @@ impl ErrorBuffer {
             .budget_errors
             .try_call(|out| budget.consume(count, out))
         {
-            return CodecErrors::emergency(self.stage, caught.take().into());
+            return CodecErrors::emergency(self.stage, caught.take().into(), self.translator);
         }
         if self.diagnostics.is_empty() {
             return CodecErrors {
                 storage: ErrorStorage::Emergency {
                     stage: self.stage,
                     diagnostic: self.terminal.unwrap_or_else(|| {
-                        Failure::internal(ERROR_BUFFER_CONTEXT).emergency_diagnostic()
+                        let diagnostic = Diagnostic::translated_emergency(
+                            DiagnosticCode::INTERNAL_ERROR,
+                            t! { name: "diagnostic.emergency.internal_error", locale: self.translator },
+                        );
+                        let mut diagnostic = diagnostic;
+                        diagnostic.set_context(Some(ERROR_BUFFER_CONTEXT));
+                        diagnostic
                     }),
                 },
+                translator: Some(self.translator),
             };
         }
         if let Some(terminal) = self.terminal.take() {
@@ -507,7 +559,7 @@ impl ErrorBuffer {
                 .budget_errors
                 .try_call(|out| self.diagnostics.try_push(terminal, out))
             {
-                return CodecErrors::emergency(self.stage, caught.take().into());
+                return CodecErrors::emergency(self.stage, caught.take().into(), self.translator);
             }
         }
         CodecErrors {
@@ -515,6 +567,7 @@ impl ErrorBuffer {
                 stage: self.stage,
                 diagnostics: self.diagnostics,
             },
+            translator: Some(self.translator),
         }
     }
 }
@@ -535,25 +588,24 @@ impl Error for CodecErrors {
 
 impl From<BudgetError> for CodecErrors {
     fn from(error: BudgetError) -> Self {
-        Self::emergency(CodecStage::Binding, error.into())
+        Self {
+            storage: ErrorStorage::Emergency {
+                stage: CodecStage::Binding,
+                diagnostic: error.into(),
+            },
+            translator: None,
+        }
     }
 }
 
 impl From<Failure> for CodecErrors {
-    fn from(error: Failure) -> Self {
-        Self::emergency(CodecStage::Encoding, error)
-    }
-}
-
-impl From<SchemaAccessError> for CodecErrors {
-    fn from(error: SchemaAccessError) -> Self {
-        Self::emergency(CodecStage::Binding, Failure::schema_access(error))
-    }
-}
-
-impl From<ValueError> for CodecErrors {
-    fn from(error: ValueError) -> Self {
-        Self::emergency(CodecStage::Conversion, Failure::value_error(error))
+    fn from(failure: Failure) -> Self {
+        let mut diagnostic = Diagnostic::failure(
+            failure.code(),
+            DiagnosticFailure::EmergencyMessageUnavailable(failure.code()),
+        );
+        diagnostic.set_context(failure.context());
+        Self::safe_diagnostic(CodecStage::Encoding, diagnostic, None)
     }
 }
 
@@ -562,6 +614,7 @@ mod tests {
     use super::{CodecErrors, CodecStage, Failure};
     use crate::test_support::{TestOpeo, TestValues};
     use typol_core::{BudgetError, DiagnosticCode, DiagnosticContext, diagnostic_context};
+    use typol_i18n::{Language, Translator};
     use typol_test_support::{TestExpect, TestResult, test_verify_eq as assert_eq};
 
     static FAILURE_CONTEXT: DiagnosticContext =
@@ -569,10 +622,14 @@ mod tests {
     static BUDGET_CONTEXT: DiagnosticContext =
         diagnostic_context!("typol-core", "budget", "test-budget-invariant");
 
+    fn emergency(stage: CodecStage, failure: Failure) -> CodecErrors {
+        let translator = Translator::new(Language::English);
+        CodecErrors::emergency(stage, failure, translator)
+    }
+
     #[test]
     fn emergency_internal_error_exposes_its_static_failure_point() -> TestResult {
-        let errors =
-            CodecErrors::emergency(CodecStage::Encoding, Failure::internal(FAILURE_CONTEXT));
+        let errors = emergency(CodecStage::Encoding, Failure::internal(FAILURE_CONTEXT));
         let diagnostic = errors
             .diagnostics()
             .first()
@@ -592,7 +649,7 @@ mod tests {
 
     #[test]
     fn budget_invariant_context_survives_codec_conversion() -> TestResult {
-        let errors = CodecErrors::emergency(
+        let errors = emergency(
             CodecStage::Binding,
             BudgetError::invariant(&BUDGET_CONTEXT).into(),
         );
@@ -624,7 +681,7 @@ mod tests {
                 out,
             )
         })?;
-        let errors = CodecErrors::emergency(CodecStage::Conversion, error.into());
+        let errors = emergency(CodecStage::Conversion, error.into());
         let context = errors
             .diagnostic_context(0)
             .test_expect("duplicate-key conversion errors should preserve context")?;

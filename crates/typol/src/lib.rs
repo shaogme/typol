@@ -143,19 +143,11 @@ mod test_support;
 #[cfg(all(test, feature = "std"))]
 mod tests;
 
-#[cfg(all(test, feature = "std"))]
-pub(crate) use self::{
-    binding_impl::{BindingTestRoot, BindingTestSupport},
-    tests::TestAssertions,
-};
-
-#[cfg(all(test, feature = "std", feature = "serde"))]
-pub(crate) use self::tests::AllocationScope;
-
 pub use conversion::{
     EnvironmentFallback, EnvironmentScalar, EnvironmentSourcedValue, OrderedMap, Sourced,
 };
 pub use error::{TypolError, TypolStage};
+pub use typol_i18n::{Language, Translator};
 pub use loading::{
     BoundRead, BoundSchema, LoadedSchema, SchemaLoader, SourceNames, TrustedBoundSchema,
 };
@@ -195,6 +187,15 @@ pub use typol_std::{ProcessEnvironment, ProcessEnvironmentLimits};
 pub use config_ir::{
     ConfigIr, ConfigIrError, ConfigIrErrorKind, ConfigIrOptions, ConfigValueErrors,
 };
+
+#[cfg(all(test, feature = "std"))]
+pub(crate) use self::{
+    binding_impl::{BindingTestRoot, BindingTestSupport},
+    tests::TestAssertions,
+};
+
+#[cfg(all(test, feature = "std", feature = "serde"))]
+pub(crate) use self::tests::AllocationScope;
 
 pub mod io {
     pub use typol_core::{FmtWriteSink, Read, ReadRequest, SliceSource, Write, WriteError};

@@ -19,7 +19,9 @@ use self::{
 };
 use crate::{
     ConfigLimits,
-    diagnostics::{BudgetDiagnostic, ConfigParseErrors, DiagnosticFactory},
+    diagnostics::{
+        BudgetDiagnostic, ConfigParseErrors, DetailedDiagnosticRequest, DiagnosticFactory,
+    },
     instance::LocationIndex,
     parser::context::ParserControl,
     session::ConfigSession,
@@ -29,7 +31,7 @@ use typol_core::{
     BudgetError, ChargedString, ConfigValue, Diagnostic, DiagnosticCode, DiagnosticContext, Read,
     SourceId, diagnostic_context,
 };
-use typol_i18n::diagnostic_key;
+use typol_i18n::{Translator, t};
 use typol_semantic::{CompiledSchema, TypeKind, TypeView};
 use typol_syntax::TokenKind;
 
@@ -65,6 +67,7 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
         session: ConfigSession<'limits>,
         out: Out<'slot, 'borrow, ConfigParseErrors>,
     ) -> OResult<'slot, Self> {
+        let translator = session.translator();
         let mut initialization_errors = ErrSlot::new();
         match initialization_errors
             .try_call(|out| Self::initialize(schema, source, limits, session, out))
@@ -73,6 +76,7 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
             Err(caught) => Err(out.fail(ConfigParseErrors::emergency(
                 caught.take(),
                 schema.next_source_id(),
+                translator,
             ))),
         }
     }
@@ -84,13 +88,22 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
         mut session: ConfigSession<'limits>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Self> {
+        let translator = session.translator();
         let Some(source_id) = schema.next_source_id() else {
             return Err(out.fail(DiagnosticFactory::make_diagnostic(
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                "configuration source identifier exceeds the representable range",
-                None,
-                None,
-                None,
+                DetailedDiagnosticRequest {
+                    code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                    message: t! {
+                        name: "diagnostic.config.source_id_unrepresentable",
+                        locale: translator,
+                    }
+                    .into(),
+                    primary: None,
+                    path: None,
+                    value_source: None,
+                    context: None,
+                    translator,
+                },
             )));
         };
         let root_type = schema.entry();
@@ -107,6 +120,7 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
                     None,
                     None,
                     None,
+                    translator,
                 )));
             }
         };
@@ -116,6 +130,7 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
                 None,
                 None,
                 None,
+                translator,
             )));
         }
 
@@ -145,22 +160,29 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
     ) -> OResult<'slot, ()> {
         if name.len() > self.context.config_limits.max_display_name_bytes() {
             return Err(out.fail(ConfigParseErrors::emergency(
-                BudgetDiagnostic::from_error(BudgetError::Resource),
+                BudgetDiagnostic::from_error(
+                    BudgetError::Resource,
+                    self.context.session.translator(),
+                ),
                 Some(self.context.source_id),
+                self.context.session.translator(),
             )));
         }
         let source_id = self.context.source_id;
         let mut budget_errors = ErrSlot::<BudgetError>::new();
-        let budget =
-            match budget_errors.try_call(|budget_out| self.context.budget.try_clone(budget_out)) {
-                Ok(budget) => budget,
-                Err(caught) => {
-                    return Err(out.fail(ConfigParseErrors::emergency(
-                        BudgetDiagnostic::from_error(caught.take()),
-                        Some(source_id),
-                    )));
-                }
-            };
+        let budget = match budget_errors
+            .try_call(|budget_out| self.context.budget.try_clone(budget_out))
+        {
+            Ok(budget) => budget,
+            Err(caught) => {
+                return Err(out.fail(ConfigParseErrors::emergency(
+                    BudgetDiagnostic::from_error(caught.take(), self.context.session.translator()),
+                    Some(source_id),
+                    self.context.session.translator(),
+                )));
+            }
+        };
+        let translator = self.context.session.translator();
         let copy = match self
             .context
             .session
@@ -171,8 +193,9 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
             Ok(copy) => copy,
             Err(caught) => {
                 return Err(out.fail(ConfigParseErrors::emergency(
-                    BudgetDiagnostic::from_error(caught.take()),
+                    BudgetDiagnostic::from_error(caught.take(), translator),
                     Some(source_id),
+                    translator,
                 )));
             }
         };
@@ -219,12 +242,20 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
     pub(super) fn parse_slot<'slot, 'borrow>(
         parser: Option<Self>,
         source_id: SourceId,
+        translator: Translator,
         out: Out<'slot, 'borrow, ConfigParseErrors>,
     ) -> OResult<'slot, ConfigValue> {
         let Some(parser) = parser else {
             return Err(out.fail(ConfigParseErrors::emergency(
-                DiagnosticFactory::internal(PARSER_SETUP_RESULT_MISSING, None, None, None),
+                DiagnosticFactory::internal(
+                    PARSER_SETUP_RESULT_MISSING,
+                    None,
+                    None,
+                    None,
+                    translator,
+                ),
                 Some(source_id),
+                translator,
             )));
         };
         parser.parse(out)
@@ -233,12 +264,20 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
     pub(super) fn parse_slot_with_locations<'slot, 'borrow>(
         parser: Option<Self>,
         source_id: SourceId,
+        translator: Translator,
         out: Out<'slot, 'borrow, ConfigParseErrors>,
     ) -> OResult<'slot, (ConfigValue, LocationIndex<'schema>)> {
         let Some(parser) = parser else {
             return Err(out.fail(ConfigParseErrors::emergency(
-                DiagnosticFactory::internal(PARSER_SETUP_RESULT_MISSING, None, None, None),
+                DiagnosticFactory::internal(
+                    PARSER_SETUP_RESULT_MISSING,
+                    None,
+                    None,
+                    None,
+                    translator,
+                ),
                 Some(source_id),
+                translator,
             )));
         };
         parser.parse_with_locations(out)
@@ -267,8 +306,11 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
                         ContextDiagnosticRequest {
                             context: &self.context,
                             code: DiagnosticCode::CONFIG_SYNTAX_ERROR,
-                            message: "unexpected trailing content after the root object",
-                            key: Some(diagnostic_key!("diagnostic.config.trailing_content")),
+                            message: t! {
+                                name: "diagnostic.config.trailing_content",
+                                locale: self.context.session.translator(),
+                            }
+                            .into(),
                             span,
                             value_source: None,
                         },

@@ -224,10 +224,11 @@ impl TypolTrait for NodeForge {
         context.start::<Self>(out.reborrow())?;
         let _discarded = context.unsigned(1, out.reborrow())?;
         let value = context.unsigned(self.value.into(), out.reborrow())?;
+        let translator = context.translator();
         context.structure(
             |slot, _, child_out| match slot {
                 0 => Ok(value),
-                _ => ConversionContext::reject(child_out),
+                _ => ConversionContext::reject(translator, child_out),
             },
             out.reborrow(),
         )

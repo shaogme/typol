@@ -1,30 +1,43 @@
-use std::{error::Error, fmt};
+mod host_error;
+mod source_excerpt;
+
+use std::{borrow::Cow, error::Error, fmt};
 
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    Diagnostic, DiagnosticMessageKey, DiagnosticTranslationError, ExcerptStatus, SourceSpan,
-    ValueSource,
+    Diagnostic, DiagnosticFailure, DiagnosticFieldStatus, RelatedLocationRole, ValueSource,
 };
 use typol_i18n::{Translator, t};
-use typol_report::DiagnosticReport as StructuredDiagnosticReport;
+use typol_report::{
+    DiagnosticReport as StructuredDiagnosticReport, DiagnosticReportField,
+    DiagnosticReportFieldName,
+};
+use u18n::RenderError;
+
+use self::{
+    host_error::HostErrorRenderer,
+    source_excerpt::{SourceExcerptAnnotation, SourceExcerptRenderer, SourceExcerptRequest},
+};
 
 use super::{
     DiagnosticContext, DisplayError, DisplayFailurePoint, RenderOptions,
-    renderer::{FormatOutput, RenderBuffer},
+    renderer::{FormatOutput, FormatterOutput, RenderBuffer},
 };
-use crate::{HostError, HostErrorKind, HostOperation};
+use crate::HostError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticRenderError {
     Display(DisplayError),
-    Translation(DiagnosticTranslationError),
+    Diagnostic(DiagnosticFailure),
+    Translation(RenderError),
 }
 
 impl fmt::Display for DiagnosticRenderError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Display(error) => fmt::Display::fmt(error, formatter),
-            Self::Translation(_) => formatter.write_str("translation failed"),
+            Self::Diagnostic(error) => fmt::Display::fmt(error, formatter),
+            Self::Translation(error) => fmt::Display::fmt(error, formatter),
         }
     }
 }
@@ -33,7 +46,8 @@ impl Error for DiagnosticRenderError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Display(error) => Some(error),
-            Self::Translation(_) => None,
+            Self::Diagnostic(error) => Some(error),
+            Self::Translation(error) => Some(error),
         }
     }
 }
@@ -71,9 +85,9 @@ where
     pub translator: Translator,
 }
 
-struct MessageTranslator {
+pub(super) struct MessageTranslator {
     translator: Translator,
-    failure: Option<DiagnosticTranslationError>,
+    failure: Option<DiagnosticRenderError>,
 }
 
 impl MessageTranslator {
@@ -84,22 +98,44 @@ impl MessageTranslator {
         }
     }
 
-    fn write_diagnostic_text<'slot>(
+    pub(super) const fn translator(&self) -> Translator {
+        self.translator
+    }
+
+    pub(super) fn write_translated<'slot>(
         &mut self,
-        key: Option<DiagnosticMessageKey>,
-        original: &str,
+        text: Result<Cow<'static, str>, RenderError>,
         output: &mut impl FormatOutput,
         mut out: Out<'slot, '_, DisplayError>,
     ) -> OResult<'slot, ()> {
-        match key {
-            Some(key) => write_translated(
-                self.translator.translate_diagnostic(key),
-                self,
-                output,
-                out.reborrow(),
-            ),
-            None => output.escape(original, false, out.reborrow()),
-        }
+        let text = match text {
+            Ok(text) => text,
+            Err(error) => {
+                self.failure = Some(DiagnosticRenderError::Translation(error));
+                return Err(out.fail(DisplayError::internal(
+                    DisplayFailurePoint::TranslationFailure,
+                )));
+            }
+        };
+        output.escape(text.as_ref(), false, out.reborrow())
+    }
+
+    fn write_diagnostic<'slot>(
+        &mut self,
+        text: Result<&str, DiagnosticFailure>,
+        output: &mut impl FormatOutput,
+        mut out: Out<'slot, '_, DisplayError>,
+    ) -> OResult<'slot, ()> {
+        let text = match text {
+            Ok(text) => text,
+            Err(error) => {
+                self.failure = Some(DiagnosticRenderError::Diagnostic(error));
+                return Err(out.fail(DisplayError::internal(
+                    DisplayFailurePoint::TranslationFailure,
+                )));
+            }
+        };
+        output.escape(text, false, out.reborrow())
     }
 }
 
@@ -110,18 +146,6 @@ struct ReportTitleRequest {
 }
 
 #[derive(Clone, Copy)]
-struct SourceExcerptAnnotation<'a> {
-    key: Option<DiagnosticMessageKey>,
-    text: &'a str,
-}
-
-struct SourceExcerptRequest<'a, 'context> {
-    span: SourceSpan,
-    annotation: Option<SourceExcerptAnnotation<'a>>,
-    context: &'a DiagnosticContext<'context>,
-    localizer: &'a mut MessageTranslator,
-}
-
 pub struct DiagnosticRenderer;
 
 impl DiagnosticRenderer {
@@ -145,7 +169,7 @@ impl DiagnosticRenderer {
         out: Out<'slot, '_, DiagnosticRenderError>,
     ) -> OResult<'slot, String> {
         Self::render_with(options, translator, |output, localizer, out| {
-            write_host_error_localized(error, output, localizer, out)
+            HostErrorRenderer::write_localized(error, output, localizer, out)
         })
         .map_err(|error| out.fail(error))
     }
@@ -184,6 +208,56 @@ impl DiagnosticRenderer {
         .map_err(|error| out.fail(error))
     }
 
+    pub fn write_report<'context, 'diagnostic, 'slot, I, W>(
+        report: DiagnosticReport<'context, 'diagnostic, I>,
+        writer: &mut W,
+        out: Out<'slot, '_, DiagnosticRenderError>,
+    ) -> OResult<'slot, ()>
+    where
+        I: Iterator<Item = &'diagnostic Diagnostic>,
+        W: fmt::Write + ?Sized,
+    {
+        Self::write_with(
+            report.options,
+            report.translator,
+            writer,
+            |output, localizer, mut out| {
+                write_report_title_localized(
+                    ReportTitleRequest {
+                        title: report.title,
+                        stage: report.stage,
+                        diagnostic_count: report.diagnostic_count,
+                    },
+                    output,
+                    localizer,
+                    out.reborrow(),
+                )?;
+                output.append("\n\n", out.reborrow())?;
+                write_diagnostics_localized(
+                    report.diagnostics,
+                    report.context,
+                    output,
+                    localizer,
+                    out,
+                )
+            },
+        )
+        .map_err(|error| out.fail(error))
+    }
+
+    pub fn write_host<'slot, W: fmt::Write + ?Sized>(
+        error: &HostError,
+        options: RenderOptions,
+        translator: Translator,
+        writer: &mut W,
+        out: Out<'slot, '_, DiagnosticRenderError>,
+    ) -> OResult<'slot, ()> {
+        Self::write_with(options, translator, writer, |output, localizer, out| {
+            HostErrorRenderer::write_localized(error, output, localizer, out)
+        })
+        .map_err(|error| out.fail(error))
+    }
+
     fn render_with(
         options: RenderOptions,
         translator: Translator,
@@ -202,7 +276,31 @@ impl DiagnosticRenderer {
         }) {
             Ok(rendered) => Ok(rendered),
             Err(caught) => match translations.failure {
-                Some(error) => Err(DiagnosticRenderError::Translation(error)),
+                Some(error) => Err(error),
+                None => Err(DiagnosticRenderError::Display(caught.take())),
+            },
+        }
+    }
+
+    fn write_with<W: fmt::Write + ?Sized>(
+        options: RenderOptions,
+        translator: Translator,
+        writer: &mut W,
+        write: impl for<'slot, 'borrow> FnOnce(
+            &mut FormatterOutput<'_, W>,
+            &mut MessageTranslator,
+            Out<'slot, 'borrow, DisplayError>,
+        ) -> OResult<'slot, ()>,
+    ) -> Result<(), DiagnosticRenderError> {
+        let mut display_errors = ErrSlot::<DisplayError>::new();
+        let mut translations = MessageTranslator::new(translator);
+        match display_errors.try_call(|mut out| {
+            let mut output = FormatterOutput::new(writer, options, out.reborrow())?;
+            write(&mut output, &mut translations, out.reborrow())
+        }) {
+            Ok(()) => Ok(()),
+            Err(caught) => match translations.failure {
+                Some(error) => Err(error),
                 None => Err(DiagnosticRenderError::Display(caught.take())),
             },
         }
@@ -210,7 +308,7 @@ impl DiagnosticRenderer {
 }
 
 fn write_translated<'slot>(
-    text: Result<&'static str, DiagnosticTranslationError>,
+    text: Result<Cow<'static, str>, RenderError>,
     localizer: &mut MessageTranslator,
     output: &mut impl FormatOutput,
     mut out: Out<'slot, '_, DisplayError>,
@@ -218,13 +316,13 @@ fn write_translated<'slot>(
     let text = match text {
         Ok(text) => text,
         Err(error) => {
-            localizer.failure = Some(error);
+            localizer.failure = Some(DiagnosticRenderError::Translation(error));
             return Err(out.fail(DisplayError::internal(
                 DisplayFailurePoint::TranslationFailure,
             )));
         }
     };
-    output.escape(text, false, out.reborrow())
+    output.escape(text.as_ref(), false, out.reborrow())
 }
 
 fn write_report_title_localized<'slot>(
@@ -235,69 +333,54 @@ fn write_report_title_localized<'slot>(
 ) -> OResult<'slot, ()> {
     let text = match request.title {
         DiagnosticReportTitle::OperationFailed => {
-            t!(
-                "report.title.operation_failed",
-                locale = localizer.translator
-            )
+            t! { name: "report.title.operation_failed", locale: localizer.translator }
         }
-        DiagnosticReportTitle::SchemaCompilationFailed => t!(
-            "report.title.schema_compilation_failed",
-            locale = localizer.translator
-        ),
+        DiagnosticReportTitle::SchemaCompilationFailed => {
+            t! { name: "report.title.schema_compilation_failed", locale: localizer.translator }
+        }
         DiagnosticReportTitle::PayloadStorageFailed => {
-            t!(
-                "report.title.payload_storage_failed",
-                locale = localizer.translator
-            )
+            t! { name: "report.title.payload_storage_failed", locale: localizer.translator }
         }
-    }
-    .map_err(|_| DiagnosticTranslationError);
+    };
     write_translated(text, localizer, output, out.reborrow())?;
     output.append(" (", out.reborrow())?;
     if let Some(stage) = request.stage {
         let text = match stage {
             DiagnosticReportStage::SchemaRead => {
-                t!("report.stage.schema_read", locale = localizer.translator)
+                t! { name: "report.stage.schema_read", locale: localizer.translator }
             }
             DiagnosticReportStage::SchemaParsing => {
-                t!("report.stage.schema_parsing", locale = localizer.translator)
+                t! { name: "report.stage.schema_parsing", locale: localizer.translator }
             }
             DiagnosticReportStage::SchemaCompilation => {
-                t!(
-                    "report.stage.schema_compilation",
-                    locale = localizer.translator
-                )
+                t! { name: "report.stage.schema_compilation", locale: localizer.translator }
             }
-            DiagnosticReportStage::SourceNameRegistration => t!(
-                "report.stage.source_name_registration",
-                locale = localizer.translator
-            ),
+            DiagnosticReportStage::SourceNameRegistration => {
+                t! { name: "report.stage.source_name_registration", locale: localizer.translator }
+            }
             DiagnosticReportStage::TypeBinding => {
-                t!("report.stage.type_binding", locale = localizer.translator)
+                t! { name: "report.stage.type_binding", locale: localizer.translator }
             }
-            DiagnosticReportStage::ConfigurationReading => t!(
-                "report.stage.configuration_reading",
-                locale = localizer.translator
-            ),
+            DiagnosticReportStage::ConfigurationReading => {
+                t! { name: "report.stage.configuration_reading", locale: localizer.translator }
+            }
             DiagnosticReportStage::Decoding => {
-                t!("report.stage.decoding", locale = localizer.translator)
+                t! { name: "report.stage.decoding", locale: localizer.translator }
             }
             DiagnosticReportStage::Encoding => {
-                t!("report.stage.encoding", locale = localizer.translator)
+                t! { name: "report.stage.encoding", locale: localizer.translator }
             }
-        }
-        .map_err(|_| DiagnosticTranslationError);
+        };
         write_translated(text, localizer, output, out.reborrow())?;
         output.append(", ", out.reborrow())?;
     }
     output.number(request.diagnostic_count, out.reborrow())?;
     output.append(" ", out.reborrow())?;
     let text = if request.diagnostic_count == 1 {
-        t!("report.diagnostic", locale = localizer.translator)
+        t! { name: "report.diagnostic", locale: localizer.translator }
     } else {
-        t!("report.diagnostics", locale = localizer.translator)
-    }
-    .map_err(|_| DiagnosticTranslationError);
+        t! { name: "report.diagnostics", locale: localizer.translator }
+    };
     write_translated(text, localizer, output, out.reborrow())?;
     output.append(")", out.reborrow())
 }
@@ -314,382 +397,222 @@ fn write_diagnostics_localized<'diagnostic, 'slot>(
         if index != 0 {
             output.append("\n\n", out.reborrow())?;
         }
-        output.append(diagnostic.code().name(), out.reborrow())?;
-        output.append(" (", out.reborrow())?;
-        output.number(diagnostic.code().get() as usize, out.reborrow())?;
-        output.append("): ", out.reborrow())?;
-        let diagnostic_key = StructuredDiagnosticReport::message_key(diagnostic);
-        if diagnostic.message().is_empty() && diagnostic_key.is_none() {
-            let text = t!(
-                "report.diagnostic_message_unavailable",
-                locale = localizer.translator
-            )
-            .map_err(|_| DiagnosticTranslationError);
-            write_translated(text, localizer, output, out.reborrow())?;
-        } else {
-            localizer.write_diagnostic_text(
-                diagnostic_key,
-                diagnostic.message(),
-                output,
-                out.reborrow(),
-            )?;
-        }
-        if let Some(path) = diagnostic.path() {
-            output.append("\n", out.reborrow())?;
-            let text = t!("report.path", locale = localizer.translator)
-                .map_err(|_| DiagnosticTranslationError);
-            write_translated(text, localizer, output, out.reborrow())?;
-            output.append(": ", out.reborrow())?;
-            output.path(path, out.reborrow())?;
-        }
-        if let Some(primary) = diagnostic.primary() {
-            output.append("\n", out.reborrow())?;
-            let text = t!("report.location", locale = localizer.translator)
-                .map_err(|_| DiagnosticTranslationError);
-            write_translated(text, localizer, output, out.reborrow())?;
-            output.append(": ", out.reborrow())?;
-            write_location_localized(primary, &context, output, localizer, out.reborrow())?;
-            write_source_excerpt_localized(
-                SourceExcerptRequest {
-                    span: primary,
-                    annotation: None,
-                    context: &context,
-                    localizer,
-                },
-                output,
-                out.reborrow(),
-            )?;
-        }
-        for label in diagnostic.labels() {
-            output.step(1, out.reborrow())?;
-            output.append("\n", out.reborrow())?;
-            let text = t!("report.rule", locale = localizer.translator)
-                .map_err(|_| DiagnosticTranslationError);
-            write_translated(text, localizer, output, out.reborrow())?;
-            output.append(": ", out.reborrow())?;
-            write_location_localized(label.span(), &context, output, localizer, out.reborrow())?;
-            output.append(": ", out.reborrow())?;
-            localizer.write_diagnostic_text(
-                label.key(),
-                label.message(),
-                output,
-                out.reborrow(),
-            )?;
-            write_source_excerpt_localized(
-                SourceExcerptRequest {
-                    span: label.span(),
-                    annotation: Some(SourceExcerptAnnotation {
-                        key: label.key(),
-                        text: label.message(),
-                    }),
-                    context: &context,
-                    localizer,
-                },
-                output,
-                out.reborrow(),
-            )?;
-        }
-        if let Some(source) = diagnostic.value_source() {
-            output.append("\n", out.reborrow())?;
-            let text = t!("report.source", locale = localizer.translator)
-                .map_err(|_| DiagnosticTranslationError);
-            write_translated(text, localizer, output, out.reborrow())?;
-            output.append(": ", out.reborrow())?;
-            let text = match source {
-                ValueSource::ConfigLiteral => {
-                    t!(
-                        "report.source.config_literal",
-                        locale = localizer.translator
-                    )
-                }
-                ValueSource::SchemaDefault => {
-                    t!(
-                        "report.source.schema_default",
-                        locale = localizer.translator
-                    )
-                }
-                ValueSource::EnvironmentVariable => t!(
-                    "report.source.environment_variable",
-                    locale = localizer.translator
-                ),
-                ValueSource::ExplicitFallback => t!(
-                    "report.source.explicit_fallback",
-                    locale = localizer.translator
-                ),
-                ValueSource::RustValue => {
-                    t!("report.source.rust_value", locale = localizer.translator)
-                }
-            }
-            .map_err(|_| DiagnosticTranslationError);
-            write_translated(text, localizer, output, out.reborrow())?;
-        }
+        StructuredDiagnosticReport::visit_diagnostic(diagnostic, |field| {
+            write_report_field_localized(field, &context, output, localizer, out.reborrow())
+        })?;
     }
     Ok(())
 }
 
-fn write_location_localized<'slot>(
-    span: SourceSpan,
+fn write_report_field_localized<'slot>(
+    field: DiagnosticReportField<'_>,
     context: &DiagnosticContext<'_>,
     output: &mut impl FormatOutput,
     localizer: &mut MessageTranslator,
     mut out: Out<'slot, '_, DisplayError>,
 ) -> OResult<'slot, ()> {
-    let Some(location) = (context.span_location)(span) else {
-        let text = t!("report.location_unavailable", locale = localizer.translator)
-            .map_err(|_| DiagnosticTranslationError);
-        return write_translated(text, localizer, output, out.reborrow());
-    };
-    if let Some(source_name) = (context.source_name)(span.source_id()) {
-        output.escape(source_name, false, out.reborrow())?;
-    } else {
-        output.append("source#", out.reborrow())?;
-        output.number(span.source_id().get() as usize, out.reborrow())?;
-    }
-    output.append(":", out.reborrow())?;
-    output.number(location.start.line(), out.reborrow())?;
-    output.append(":", out.reborrow())?;
-    output.number(location.start.column(), out.reborrow())?;
-    output.append("-", out.reborrow())?;
-    output.number(location.end.line(), out.reborrow())?;
-    output.append(":", out.reborrow())?;
-    output.number(location.end.column(), out.reborrow())
-}
-
-fn write_source_excerpt_localized<'slot>(
-    request: SourceExcerptRequest<'_, '_>,
-    output: &mut impl FormatOutput,
-    mut out: Out<'slot, '_, DisplayError>,
-) -> OResult<'slot, ()> {
-    let SourceExcerptRequest {
-        span,
-        annotation,
-        context,
-        localizer,
-    } = request;
-    let Some(location) = (context.span_location)(span) else {
-        output.append("\n  = ", out.reborrow())?;
-        let text = t!(
-            "report.source_excerpt_unavailable",
-            locale = localizer.translator
-        )
-        .map_err(|_| DiagnosticTranslationError);
-        write_translated(text, localizer, output, out.reborrow())?;
-        return Ok(());
-    };
-    let excerpts = context.excerpts;
-    let mut found = false;
-    for record in excerpts.records().iter().filter(|record| {
-        record.source_id() == span.source_id()
-            && record.line() >= location.start.line()
-            && record.line() <= location.end.line()
-    }) {
-        found = true;
-        let text = record.text();
-        output.append("\n  | ", out.reborrow())?;
-        output.number(record.line(), out.reborrow())?;
-        output.append(" | ", out.reborrow())?;
-        write_source_line(text, output, out.reborrow())?;
-        if let Some((start, end)) = excerpts.columns(span, record.line()) {
-            output.append("\n  |   ", out.reborrow())?;
-            write_repeat(
-                output,
-                ' ',
-                visible_column(text, start).saturating_sub(1),
-                out.reborrow(),
-            )?;
-            write_repeat(
-                output,
-                '^',
-                visible_column(text, end)
-                    .saturating_sub(visible_column(text, start))
-                    .max(1),
-                out.reborrow(),
-            )?;
-            if let Some(annotation) = annotation {
-                output.append(" ", out.reborrow())?;
-                localizer.write_diagnostic_text(
-                    annotation.key,
-                    annotation.text,
+    match field {
+        DiagnosticReportField::Code(code) => {
+            output.append(code.name(), out.reborrow())?;
+            output.append(" (", out.reborrow())?;
+            output.number(code.get() as usize, out.reborrow())?;
+            output.append("): ", out.reborrow())
+        }
+        DiagnosticReportField::Reason { text, .. } => {
+            localizer.write_diagnostic(text, output, out.reborrow())?;
+            output.append("\n", out.reborrow())
+        }
+        DiagnosticReportField::Kind(id) => {
+            let label = t! { name: "report.kind", locale: localizer.translator };
+            write_translated(label, localizer, output, out.reborrow())?;
+            output.append(": ", out.reborrow())?;
+            output.escape(id, false, out.reborrow())?;
+            output.append("\n", out.reborrow())
+        }
+        DiagnosticReportField::Stage(stage) => {
+            let label = t! { name: "report.diagnostic_stage", locale: localizer.translator };
+            write_translated(label, localizer, output, out.reborrow())?;
+            output.append(": ", out.reborrow())?;
+            output.escape(stage, false, out.reborrow())
+        }
+        DiagnosticReportField::Path(path) => {
+            output.append("\n", out.reborrow())?;
+            let label = t! { name: "report.path", locale: localizer.translator };
+            write_translated(label, localizer, output, out.reborrow())?;
+            output.append(": ", out.reborrow())?;
+            output.path(path, out.reborrow())
+        }
+        DiagnosticReportField::Primary {
+            span,
+            location_status,
+        } => {
+            output.append("\n", out.reborrow())?;
+            let label = t! { name: "report.location", locale: localizer.translator };
+            write_translated(label, localizer, output, out.reborrow())?;
+            output.append(": ", out.reborrow())?;
+            if matches!(
+                location_status,
+                DiagnosticFieldStatus::Unavailable | DiagnosticFieldStatus::Redacted
+            ) {
+                write_field_status_localized(location_status, output, localizer, out.reborrow())?;
+            } else {
+                SourceExcerptRenderer::write_location(
+                    span,
+                    context,
                     output,
+                    localizer,
                     out.reborrow(),
                 )?;
             }
+            SourceExcerptRenderer::write_source_excerpt(
+                SourceExcerptRequest {
+                    span,
+                    annotation: None,
+                    context,
+                    localizer,
+                },
+                output,
+                out.reborrow(),
+            )
         }
-    }
-    if !found || excerpts.span_status(span) == ExcerptStatus::Unavailable {
-        output.append("\n  = ", out.reborrow())?;
-        let text = t!(
-            "report.source_excerpt_unavailable",
-            locale = localizer.translator
-        )
-        .map_err(|_| DiagnosticTranslationError);
-        write_translated(text, localizer, output, out.reborrow())?;
-    }
-    Ok(())
-}
-
-fn write_source_line<'slot>(
-    text: &str,
-    output: &mut impl FormatOutput,
-    mut out: Out<'slot, '_, DisplayError>,
-) -> OResult<'slot, ()> {
-    for character in text.chars() {
-        output.step(character.len_utf8(), out.reborrow())?;
-        match character {
-            '\t' => output.append("\\t", out.reborrow())?,
-            '\0'..='\u{1f}'
-            | '\u{7f}'..='\u{9f}'
-            | '\u{2028}'..='\u{202e}'
-            | '\u{2066}'..='\u{2069}' => {
-                for escaped in character.escape_unicode() {
-                    let mut encoded = [0; 4];
-                    output.append(escaped.encode_utf8(&mut encoded), out.reborrow())?;
+        DiagnosticReportField::Related { role, span, text } => {
+            output.step(1, out.reborrow())?;
+            output.append("\n", out.reborrow())?;
+            let label = t! { name: "report.related_location", locale: localizer.translator };
+            write_translated(label, localizer, output, out.reborrow())?;
+            output.append(" (", out.reborrow())?;
+            write_related_role_localized(role, output, localizer, out.reborrow())?;
+            output.append("): ", out.reborrow())?;
+            SourceExcerptRenderer::write_location(
+                span,
+                context,
+                output,
+                localizer,
+                out.reborrow(),
+            )?;
+            output.append(": ", out.reborrow())?;
+            output.escape(text, false, out.reborrow())?;
+            SourceExcerptRenderer::write_source_excerpt(
+                SourceExcerptRequest {
+                    span,
+                    annotation: Some(SourceExcerptAnnotation { text }),
+                    context,
+                    localizer,
+                },
+                output,
+                out.reborrow(),
+            )
+        }
+        DiagnosticReportField::RelatedStatus { status, truncated } => {
+            let description = match (status, truncated) {
+                (DiagnosticFieldStatus::Unavailable, _) => Some(t! {
+                    name: "report.related_locations_unavailable",
+                    locale: localizer.translator
+                }),
+                (DiagnosticFieldStatus::Redacted, _) => {
+                    Some(t! { name: "report.redacted", locale: localizer.translator })
                 }
+                (DiagnosticFieldStatus::Available, true) => Some(t! {
+                    name: "report.related_locations_truncated",
+                    locale: localizer.translator
+                }),
+                (DiagnosticFieldStatus::NotApplicable, _)
+                | (DiagnosticFieldStatus::Available, false) => None,
+            };
+            if let Some(description) = description {
+                output.append("\n", out.reborrow())?;
+                let label = t! { name: "report.related_locations", locale: localizer.translator };
+                localizer.write_translated(label, output, out.reborrow())?;
+                output.append(": ", out.reborrow())?;
+                localizer.write_translated(description, output, out.reborrow())?;
             }
-            _ => {
-                let mut encoded = [0; 4];
-                output.append(character.encode_utf8(&mut encoded), out.reborrow())?;
-            }
+            Ok(())
         }
+        DiagnosticReportField::ValueSource(source) => {
+            output.append("\n", out.reborrow())?;
+            let label = t! { name: "report.source", locale: localizer.translator };
+            write_translated(label, localizer, output, out.reborrow())?;
+            output.append(": ", out.reborrow())?;
+            let value = match source {
+                ValueSource::ConfigLiteral => {
+                    t! { name: "report.source.config_literal", locale: localizer.translator }
+                }
+                ValueSource::SchemaDefault => {
+                    t! { name: "report.source.schema_default", locale: localizer.translator }
+                }
+                ValueSource::EnvironmentVariable => {
+                    t! { name: "report.source.environment_variable", locale: localizer.translator }
+                }
+                ValueSource::ExplicitFallback => {
+                    t! { name: "report.source.explicit_fallback", locale: localizer.translator }
+                }
+                ValueSource::RustValue => {
+                    t! { name: "report.source.rust_value", locale: localizer.translator }
+                }
+            };
+            write_translated(value, localizer, output, out.reborrow())
+        }
+        DiagnosticReportField::Status { field, status } => {
+            output.append("\n", out.reborrow())?;
+            let label = match field {
+                DiagnosticReportFieldName::Path => {
+                    t! { name: "report.path", locale: localizer.translator }
+                }
+                DiagnosticReportFieldName::Primary => {
+                    t! { name: "report.location", locale: localizer.translator }
+                }
+                DiagnosticReportFieldName::ValueSource => {
+                    t! { name: "report.source", locale: localizer.translator }
+                }
+            };
+            write_translated(label, localizer, output, out.reborrow())?;
+            output.append(": ", out.reborrow())?;
+            write_field_status_localized(status, output, localizer, out.reborrow())
+        }
+        DiagnosticReportField::Context { .. } => Ok(()),
     }
-    Ok(())
 }
 
-fn visible_column(text: &str, column: usize) -> usize {
-    text.chars()
-        .take(column.saturating_sub(1))
-        .map(|character| match character {
-            '\t' => 2,
-            '\0'..='\u{1f}'
-            | '\u{7f}'..='\u{9f}'
-            | '\u{2028}'..='\u{202e}'
-            | '\u{2066}'..='\u{2069}' => character.escape_unicode().count(),
-            _ => 1,
-        })
-        .sum::<usize>()
-        .saturating_add(1)
-}
-
-fn write_repeat<'slot>(
-    output: &mut impl FormatOutput,
-    character: char,
-    count: usize,
-    mut out: Out<'slot, '_, DisplayError>,
-) -> OResult<'slot, ()> {
-    let mut encoded = [0; 4];
-    let character = character.encode_utf8(&mut encoded);
-    for _ in 0..count {
-        output.append(character, out.reborrow())?;
-    }
-    Ok(())
-}
-
-fn write_host_error_localized<'slot>(
-    error: &HostError,
+fn write_related_role_localized<'slot>(
+    role: RelatedLocationRole,
     output: &mut impl FormatOutput,
     localizer: &mut MessageTranslator,
     mut out: Out<'slot, '_, DisplayError>,
 ) -> OResult<'slot, ()> {
-    let text = t!("report.host_operation", locale = localizer.translator)
-        .map_err(|_| DiagnosticTranslationError);
-    write_translated(text, localizer, output, out.reborrow())?;
-    output.append(" ", out.reborrow())?;
-    let text = match error.operation() {
-        HostOperation::SchemaRead => {
-            t!(
-                "report.host_operation.schema_read",
-                locale = localizer.translator
-            )
+    let text = match role {
+        RelatedLocationRole::PreviousDeclaration => {
+            t! { name: "report.related_role.previous_declaration", locale: localizer.translator }
         }
-        HostOperation::ConfigRead => {
-            t!(
-                "report.host_operation.config_read",
-                locale = localizer.translator
-            )
+        RelatedLocationRole::FirstDeclaration => {
+            t! { name: "report.related_role.first_declaration", locale: localizer.translator }
         }
-        HostOperation::SourceNames => {
-            t!(
-                "report.host_operation.source_names",
-                locale = localizer.translator
-            )
+        RelatedLocationRole::TypeOrFieldDefinition => {
+            t! { name: "report.related_role.type_or_field_definition", locale: localizer.translator }
         }
-    }
-    .map_err(|_| DiagnosticTranslationError);
-    write_translated(text, localizer, output, out.reborrow())?;
-    output.append(" ", out.reborrow())?;
-    let text =
-        t!("report.failed", locale = localizer.translator).map_err(|_| DiagnosticTranslationError);
-    write_translated(text, localizer, output, out.reborrow())?;
-    output.append(" (", out.reborrow())?;
-    output.append(error.context().failure_point(), out.reborrow())?;
-    if let Some(source_id) = error.source_id() {
-        output.append(", ", out.reborrow())?;
-        let text = t!("report.source_id", locale = localizer.translator)
-            .map_err(|_| DiagnosticTranslationError);
-        write_translated(text, localizer, output, out.reborrow())?;
-        output.append(" ", out.reborrow())?;
-        output.number(source_id.get() as usize, out.reborrow())?;
-    }
-    if let Some(offset) = error.offset() {
-        output.append(", ", out.reborrow())?;
-        let text = t!("report.offset", locale = localizer.translator)
-            .map_err(|_| DiagnosticTranslationError);
-        write_translated(text, localizer, output, out.reborrow())?;
-        output.append(" ", out.reborrow())?;
-        output.number(offset, out.reborrow())?;
-    }
-    output.append("): ", out.reborrow())?;
-    let text = match error.kind() {
-        HostErrorKind::NotFound => {
-            t!("report.host_kind.not_found", locale = localizer.translator)
+        RelatedLocationRole::ConstraintDefinition => {
+            t! { name: "report.related_role.constraint_definition", locale: localizer.translator }
         }
-        HostErrorKind::PermissionDenied => {
-            t!(
-                "report.host_kind.permission_denied",
-                locale = localizer.translator
-            )
+        RelatedLocationRole::AssociatedInput => {
+            t! { name: "report.related_role.associated_input", locale: localizer.translator }
         }
-        HostErrorKind::NotRegularFile => {
-            t!(
-                "report.host_kind.not_regular_file",
-                locale = localizer.translator
-            )
+    };
+    write_translated(text, localizer, output, out.reborrow())
+}
+
+fn write_field_status_localized<'slot>(
+    status: DiagnosticFieldStatus,
+    output: &mut impl FormatOutput,
+    localizer: &mut MessageTranslator,
+    mut out: Out<'slot, '_, DisplayError>,
+) -> OResult<'slot, ()> {
+    let text = match status {
+        DiagnosticFieldStatus::Unavailable | DiagnosticFieldStatus::Available => {
+            t! { name: "report.field_unavailable", locale: localizer.translator }
         }
-        HostErrorKind::InvalidRequest => {
-            t!(
-                "report.host_kind.invalid_request",
-                locale = localizer.translator
-            )
+        DiagnosticFieldStatus::Redacted => {
+            t! { name: "report.redacted", locale: localizer.translator }
         }
-        HostErrorKind::ReadFailure => {
-            t!(
-                "report.host_kind.read_failure",
-                locale = localizer.translator
-            )
-        }
-        HostErrorKind::ResourceLimitExceeded => t!(
-            "report.host_kind.resource_limit_exceeded",
-            locale = localizer.translator
-        ),
-        HostErrorKind::AllocationFailed => {
-            t!(
-                "report.host_kind.allocation_failed",
-                locale = localizer.translator
-            )
-        }
-        HostErrorKind::CapacityExceeded => {
-            t!(
-                "report.host_kind.capacity_exceeded",
-                locale = localizer.translator
-            )
-        }
-        HostErrorKind::InternalError => {
-            t!(
-                "report.host_kind.internal_error",
-                locale = localizer.translator
-            )
-        }
-    }
-    .map_err(|_| DiagnosticTranslationError);
+        DiagnosticFieldStatus::NotApplicable => return Ok(()),
+    };
     write_translated(text, localizer, output, out.reborrow())
 }

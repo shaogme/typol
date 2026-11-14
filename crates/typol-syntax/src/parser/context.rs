@@ -1,26 +1,32 @@
 mod state;
 
-use crate::{
-    InputConfig, Keyword, LexEvent, Symbol, SyntaxLimits, Token, TokenCursor, TokenKind,
-    error::{DiagnosticSink, SyntaxDiagnostic},
-    storage::{Id, Name, NumberKind, NumberLiteral, NumberLiteralParams, Storage, StringLiteral},
-};
-use opeo::{OResult, Out, ResultOutExt};
-use typol_core::{
-    ChargedBox, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage,
-    SourceSpan, Span,
-};
-use typol_i18n::{diagnostic_key, diagnostic_message};
-
 pub(crate) use state::{DelimiterFrame, ParserState, SyntaxBudget, TokenInfo};
 
+use crate::{
+    InputConfig, Keyword, LexEvent, Symbol, SyntaxLimits, Token, TokenCursor, TokenKind,
+    error::{DiagnosticSink, LabelMessage, MessageBuild, SyntaxDiagnostic},
+    storage::{
+        Id, Name, NumberKind, NumberLiteral, NumberLiteralParams, Storage, StorageOptions,
+        StringLiteral,
+    },
+};
+use alloc::borrow::Cow;
+use opeo::{OResult, Out, ResultOutExt};
+use typol_core::{
+    ChargedBox, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, RelatedLocationRole,
+    SourceSpan, Span,
+};
+use typol_i18n::{Translator, t};
+use u18n::RenderError;
+
 macro_rules! parser_internal_error {
-    ($failure_point:literal, $span:expr $(,)?) => {{
+    ($parser:ident, $failure_point:literal, $span:expr $(,)?) => {{
         use typol_core::diagnostic_context;
 
         $crate::parser::context::ParserControl::internal_error(
             diagnostic_context!("typol-syntax", "parser", $failure_point),
             $span,
+            $parser.translator,
         )
     }};
 }
@@ -31,6 +37,7 @@ impl ParserControl {
     pub(crate) fn create<'slot, 'src, 'config>(
         config: InputConfig<'src, 'config>,
         limits: &SyntaxLimits,
+        translator: Translator,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ParserState<'src>> {
         let InputConfig {
@@ -49,21 +56,33 @@ impl ParserControl {
                 stream,
                 budget: execution,
             },
+            translator,
             out.reborrow(),
         )?;
         let diagnostics = DiagnosticSink::new(
             limits.max_diagnostics(),
             execution,
             SourceSpan::new(source_id, Span::empty()),
+            translator,
             out.reborrow(),
         )?;
 
         let cursor_span = SourceSpan::new(source_id, Span::empty());
-        let ast = Storage::new(source_id, source_limit, limits, execution, out.reborrow())?;
+        let ast = Storage::new(
+            StorageOptions {
+                source_id,
+                source_limit,
+                limits,
+                execution,
+                translator,
+            },
+            out.reborrow(),
+        )?;
         let ast = ChargedBox::new(ast, Some(execution), out.reborrow())?;
-        let delimiters = SyntaxDiagnostic::new_vec(execution, cursor_span, out.reborrow())?;
+        let delimiters =
+            SyntaxDiagnostic::new_vec(execution, cursor_span, translator, out.reborrow())?;
         let execution = execution.try_clone_with(out.reborrow(), |error| {
-            SyntaxDiagnostic::budget(error, cursor_span)
+            SyntaxDiagnostic::budget(error, cursor_span, translator)
         })?;
         Ok(ParserState {
             cursor,
@@ -75,10 +94,11 @@ impl ParserControl {
             delimiters,
             trusted: true,
             prefix_frames: 0,
-            budget: SyntaxBudget::new(limits.max_nesting_depth()),
+            budget: SyntaxBudget::new(limits.max_nesting_depth(), translator),
             last_end: 0,
             stopped: false,
             execution,
+            translator,
         })
     }
 
@@ -87,7 +107,7 @@ impl ParserControl {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, TokenInfo> {
         parser.execution.consume_with(1, out.reborrow(), |error| {
-            SyntaxDiagnostic::budget(error, ParserControl::eof_span(parser))
+            SyntaxDiagnostic::budget(error, ParserControl::eof_span(parser), parser.translator)
         })?;
         match parser.cursor.peek(out.reborrow())? {
             LexEvent::Token(token) => Ok(TokenInfo {
@@ -102,25 +122,30 @@ impl ParserControl {
                 ParserControl::confirm_eof(parser, info.span, out.reborrow())?;
                 Ok(info)
             }
-            LexEvent::Error(_) | LexEvent::Fatal(_) => match parser.cursor.bump(out.reborrow())? {
-                LexEvent::Error(diagnostic) | LexEvent::Fatal(diagnostic) => {
-                    Err(out.reborrow().fail(diagnostic))
-                }
-                _ => Err(out.reborrow().fail(parser_internal_error!(
-                    "error-event-disappeared-during-bump",
-                    ParserControl::eof_span(parser),
-                ))),
-            },
+            LexEvent::Error(_) | LexEvent::Fatal(_) => {
+                ParserControl::consume_error_event(parser, out.reborrow())
+            }
             LexEvent::Halted(span) => {
                 let span = *span;
-                let diagnostic = ParserControl::resource_error(
-                    parser,
-                    span,
-                    "lexical scanning has halted",
-                    out.reborrow(),
-                )?;
+                let diagnostic = ParserControl::resource_error(parser, span);
                 Err(out.reborrow().fail(diagnostic))
             }
+        }
+    }
+
+    fn consume_error_event<'slot>(
+        parser: &mut ParserState<'_>,
+        mut out: Out<'slot, '_, Diagnostic>,
+    ) -> OResult<'slot, TokenInfo> {
+        match parser.cursor.bump(out.reborrow())? {
+            LexEvent::Error(diagnostic) | LexEvent::Fatal(diagnostic) => {
+                Err(out.reborrow().fail(diagnostic))
+            }
+            _ => Err(out.reborrow().fail(parser_internal_error!(
+                parser,
+                "error-event-disappeared-during-bump",
+                ParserControl::eof_span(parser),
+            ))),
         }
     }
 
@@ -151,6 +176,7 @@ impl ParserControl {
             LexEvent::Token(token) | LexEvent::Eof(token) => Ok(token),
             LexEvent::Error(_) | LexEvent::Fatal(_) | LexEvent::Halted(_) => {
                 Err(out.reborrow().fail(parser_internal_error!(
+                    parser,
                     "next-token-event-not-token",
                     fallback
                 )))
@@ -169,6 +195,7 @@ impl ParserControl {
                     parser.budget.enter(info.span, out.reborrow())?;
                     let Some(close) = closing_symbol(symbol) else {
                         return Err(out.reborrow().fail(parser_internal_error!(
+                            parser,
                             "opening-symbol-has-no-closing-symbol",
                             info.span,
                         )));
@@ -180,6 +207,7 @@ impl ParserControl {
                             open_span: info.span,
                         },
                         info.span,
+                        parser.translator,
                         out.reborrow(),
                     )?;
                 }
@@ -191,6 +219,7 @@ impl ParserControl {
                 {
                     if parser.delimiters.pop().is_none() {
                         return Err(out.reborrow().fail(parser_internal_error!(
+                            parser,
                             "closing-delimiter-stack-underflow",
                             info.span,
                         )));
@@ -203,6 +232,7 @@ impl ParserControl {
                         LexEvent::Token(_) => {}
                         _ => {
                             return Err(out.reborrow().fail(parser_internal_error!(
+                                parser,
                                 "unexpected-event-while-consuming-close",
                                 info.span,
                             )));
@@ -212,19 +242,26 @@ impl ParserControl {
                     let mut diagnostic = ParserControl::syntax_error(
                         parser,
                         info.span,
-                        diagnostic_message!(
-                            "diagnostic.syntax.mismatched_closing_delimiter",
-                            "closing delimiter does not match the current syntax context"
-                        ),
+                        t! {
+                            name: "diagnostic.syntax.mismatched_closing_delimiter",
+                            locale: parser.translator,
+                        },
                         out.reborrow(),
                     )?;
                     if diagnostic.code() != DiagnosticCode::ALLOCATION_FAILED {
                         if let Some(frame) = parser.delimiters.last() {
-                            SyntaxDiagnostic::try_add_label(
+                            SyntaxDiagnostic::try_add_label_message(
                                 &mut diagnostic,
-                                frame.open_span,
-                                "",
+                                LabelMessage {
+                                    span: frame.open_span,
+                                    text: t! {
+                                        name: "diagnostic.label.associated_input",
+                                        locale: parser.translator,
+                                    },
+                                    role: RelatedLocationRole::AssociatedInput,
+                                },
                                 &parser.execution,
+                                parser.translator,
                                 out.reborrow(),
                             )?;
                         }
@@ -239,6 +276,7 @@ impl ParserControl {
             LexEvent::Token(_) | LexEvent::Eof(_) => {}
             _ => {
                 return Err(out.reborrow().fail(parser_internal_error!(
+                    parser,
                     "unexpected-event-while-consuming-token",
                     info.span,
                 )));
@@ -273,10 +311,10 @@ impl ParserControl {
                 ParserControl::syntax_failure(
                     parser,
                     actual.span,
-                    diagnostic_message!(
-                        "diagnostic.syntax.expected_punctuation",
-                        "expected punctuation here"
-                    ),
+                    t! {
+                        name: "diagnostic.syntax.expected_punctuation",
+                        locale: parser.translator,
+                    },
                     out.reborrow(),
                 )
             }
@@ -308,10 +346,10 @@ impl ParserControl {
                 ParserControl::syntax_failure(
                     parser,
                     actual.span,
-                    diagnostic_message!(
-                        "diagnostic.syntax.expected_reserved_word",
-                        "expected a reserved word here"
-                    ),
+                    t! {
+                        name: "diagnostic.syntax.expected_reserved_word",
+                        locale: parser.translator,
+                    },
                     out.reborrow(),
                 )
             }
@@ -327,20 +365,23 @@ impl ParserControl {
             return ParserControl::syntax_failure(
                 parser,
                 info.span,
-                diagnostic_message!(
-                    "diagnostic.syntax.expected_identifier",
-                    "expected an identifier here"
-                ),
+                t! {
+                    name: "diagnostic.syntax.expected_identifier",
+                    locale: parser.translator,
+                },
                 out.reborrow(),
             );
         }
         let text = match parser.cursor.peek(out.reborrow())? {
             LexEvent::Token(token) => token
                 .text()
-                .ok_or_else(|| parser_internal_error!("identifier-token-text-missing", info.span))
+                .ok_or_else(|| {
+                    parser_internal_error!(parser, "identifier-token-text-missing", info.span)
+                })
                 .store_err_into(out.reborrow())?,
             _ => {
                 return Err(out.reborrow().fail(parser_internal_error!(
+                    parser,
                     "identifier-event-not-token",
                     info.span,
                 )));
@@ -360,10 +401,10 @@ impl ParserControl {
             return ParserControl::syntax_failure(
                 parser,
                 info.span,
-                diagnostic_message!(
-                    "diagnostic.syntax.expected_string_literal",
-                    "expected a string literal here"
-                ),
+                t! {
+                    name: "diagnostic.syntax.expected_string_literal",
+                    locale: parser.translator,
+                },
                 out.reborrow(),
             );
         }
@@ -371,14 +412,16 @@ impl ParserControl {
         let token = match parser.cursor.bump(out.reborrow())? {
             LexEvent::Token(token) => token,
             _ => {
-                return Err(out
-                    .reborrow()
-                    .fail(parser_internal_error!("string-event-not-token", info.span,)));
+                return Err(out.reborrow().fail(parser_internal_error!(
+                    parser,
+                    "string-event-not-token",
+                    info.span,
+                )));
             }
         };
         let text = token
             .into_decoded_string()
-            .ok_or_else(|| parser_internal_error!("decoded-string-missing", info.span))
+            .ok_or_else(|| parser_internal_error!(parser, "decoded-string-missing", info.span))
             .store_err_into(out.reborrow())?;
         parser
             .ast
@@ -418,6 +461,7 @@ impl ParserControl {
                         LexEvent::Token(token) | LexEvent::Eof(token) => token,
                         _ => {
                             return Err(out.reborrow().fail(parser_internal_error!(
+                                parser,
                                 "number-event-not-token",
                                 info.span,
                             )));
@@ -425,6 +469,7 @@ impl ParserControl {
                     };
                     let Some(raw) = token.text() else {
                         return Err(out.reborrow().fail(parser_internal_error!(
+                            parser,
                             "number-token-text-missing",
                             info.span,
                         )));
@@ -433,7 +478,7 @@ impl ParserControl {
                         parser
                             .execution
                             .consume_with(raw.len(), out.reborrow(), |error| {
-                                SyntaxDiagnostic::budget(error, info.span)
+                                SyntaxDiagnostic::budget(error, info.span, parser.translator)
                             })?;
                     }
                     if decimal_only && !raw.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -459,18 +504,17 @@ impl ParserControl {
                 return ParserControl::syntax_failure(
                     parser,
                     span,
-                    DiagnosticMessage::localized(
-                        if minus.is_some() {
-                            "expected a decimal number literal after the minus sign"
-                        } else {
-                            "expected a number literal here"
-                        },
-                        if minus.is_some() {
-                            diagnostic_key!("diagnostic.syntax.expected_decimal_after_minus")
-                        } else {
-                            diagnostic_key!("diagnostic.syntax.expected_number")
-                        },
-                    ),
+                    if minus.is_some() {
+                        t! {
+                            name: "diagnostic.syntax.expected_decimal_after_minus",
+                            locale: parser.translator,
+                        }
+                    } else {
+                        t! {
+                            name: "diagnostic.syntax.expected_number",
+                            locale: parser.translator,
+                        }
+                    },
                     out.reborrow(),
                 );
             }
@@ -508,6 +552,7 @@ impl ParserControl {
             || start.span().start() > end.span().end()
         {
             return Err(out.reborrow().fail(parser_internal_error!(
+                parser,
                 "combined-source-span-order-invalid",
                 start,
             )));
@@ -516,58 +561,64 @@ impl ParserControl {
             start.span().start(),
             end.span().end(),
             out.reborrow(),
-            |_| parser_internal_error!("combined-source-span-reversed", start),
+            |_| parser_internal_error!(parser, "combined-source-span-reversed", start),
         )?;
         Ok(SourceSpan::new(parser.source_id, range))
     }
 
-    pub(crate) fn internal_error(context: DiagnosticContext, span: SourceSpan) -> Diagnostic {
-        SyntaxDiagnostic::internal(context, span)
+    pub(crate) fn internal_error(
+        context: DiagnosticContext,
+        span: SourceSpan,
+        translator: Translator,
+    ) -> Diagnostic {
+        SyntaxDiagnostic::internal(context, span, translator)
     }
 
-    pub(crate) fn syntax_error<'slot, 'message>(
+    pub(crate) fn syntax_error<'slot>(
         parser: &ParserState<'_>,
         span: SourceSpan,
-        message: impl Into<DiagnosticMessage<'message>>,
+        message: Result<Cow<'static, str>, RenderError>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Diagnostic> {
         SyntaxDiagnostic::make(
-            DiagnosticCode::SCHEMA_SYNTAX_ERROR,
+            MessageBuild {
+                code: DiagnosticCode::SCHEMA_SYNTAX_ERROR,
+                span,
+                budget: &parser.execution,
+                translator: parser.translator,
+            },
             message,
-            span,
-            &parser.execution,
             out.reborrow(),
         )
     }
 
-    pub(crate) fn syntax_failure<'slot, 'message, T>(
+    pub(crate) fn syntax_failure<'slot, T>(
         parser: &ParserState<'_>,
         span: SourceSpan,
-        message: impl Into<DiagnosticMessage<'message>>,
+        message: Result<Cow<'static, str>, RenderError>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, T> {
         let diagnostic = SyntaxDiagnostic::make(
-            DiagnosticCode::SCHEMA_SYNTAX_ERROR,
+            MessageBuild {
+                code: DiagnosticCode::SCHEMA_SYNTAX_ERROR,
+                span,
+                budget: &parser.execution,
+                translator: parser.translator,
+            },
             message,
-            span,
-            &parser.execution,
             out.reborrow(),
         )?;
         Err(out.reborrow().fail(diagnostic))
     }
 
-    pub(crate) fn resource_error<'slot>(
-        parser: &ParserState<'_>,
-        span: SourceSpan,
-        message: &'static str,
-        mut out: Out<'slot, '_, Diagnostic>,
-    ) -> OResult<'slot, Diagnostic> {
-        SyntaxDiagnostic::make(
+    pub(crate) fn resource_error(parser: &ParserState<'_>, span: SourceSpan) -> Diagnostic {
+        SyntaxDiagnostic::emergency(
             DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-            message,
+            t! {
+                name: "diagnostic.emergency.resource_limit_exceeded",
+                locale: parser.translator,
+            },
             span,
-            &parser.execution,
-            out.reborrow(),
         )
     }
 
@@ -587,6 +638,10 @@ impl ParserControl {
     pub(crate) fn stopped_error(parser: &ParserState<'_>) -> Diagnostic {
         SyntaxDiagnostic::emergency(
             DiagnosticCode::SCHEMA_SYNTAX_ERROR,
+            t! {
+                name: "diagnostic.emergency.syntax_error",
+                locale: parser.translator,
+            },
             ParserControl::eof_span(parser),
         )
     }
@@ -607,6 +662,7 @@ impl ParserControl {
             || offset > parser.source_limit
         {
             return Err(out.reborrow().fail(parser_internal_error!(
+                parser,
                 "eof-position-outside-source-limit",
                 span,
             )));
@@ -615,9 +671,11 @@ impl ParserControl {
             .actual_source_len
             .is_some_and(|actual| actual != offset)
         {
-            return Err(out
-                .reborrow()
-                .fail(parser_internal_error!("eof-position-changed", span,)));
+            return Err(out.reborrow().fail(parser_internal_error!(
+                parser,
+                "eof-position-changed",
+                span,
+            )));
         }
         parser.ast.confirm_eof(offset);
         parser.actual_source_len = Some(offset);
@@ -634,9 +692,11 @@ impl ParserControl {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ()> {
         let Some(next) = parser.prefix_frames.checked_add(1) else {
-            return Err(out
-                .reborrow()
-                .fail(parser_internal_error!("prefix-frame-depth-overflow", span)));
+            return Err(out.reborrow().fail(parser_internal_error!(
+                parser,
+                "prefix-frame-depth-overflow",
+                span
+            )));
         };
         parser.budget.enter(span, out.reborrow())?;
         parser.prefix_frames = next;
@@ -649,9 +709,11 @@ impl ParserControl {
     ) -> OResult<'slot, ()> {
         let span = ParserControl::eof_span(parser);
         let Some(frames) = parser.prefix_frames.checked_sub(1) else {
-            return Err(out
-                .reborrow()
-                .fail(parser_internal_error!("prefix-frame-depth-underflow", span)));
+            return Err(out.reborrow().fail(parser_internal_error!(
+                parser,
+                "prefix-frame-depth-underflow",
+                span
+            )));
         };
         parser.prefix_frames = frames;
         parser.budget.leave(1, span, out.reborrow())
@@ -665,6 +727,7 @@ impl ParserControl {
         let span = ParserControl::eof_span(parser);
         let Some(released) = parser.prefix_frames.checked_sub(saved) else {
             return Err(out.reborrow().fail(parser_internal_error!(
+                parser,
                 "prefix-frame-restore-underflow",
                 span
             )));
@@ -699,12 +762,13 @@ impl ParserControl {
     }
 
     pub(crate) fn try_push<'slot, T>(
+        parser: &ParserState<'_>,
         values: &mut ChargedVec<T>,
         value: T,
         span: SourceSpan,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ()> {
-        SyntaxDiagnostic::try_push(values, value, span, out.reborrow())
+        SyntaxDiagnostic::try_push(values, value, span, parser.translator, out.reborrow())
     }
 
     pub(crate) fn new_vec<'slot, T>(
@@ -712,7 +776,7 @@ impl ParserControl {
         span: SourceSpan,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ChargedVec<T>> {
-        SyntaxDiagnostic::new_vec(&parser.execution, span, out.reborrow())
+        SyntaxDiagnostic::new_vec(&parser.execution, span, parser.translator, out.reborrow())
     }
 }
 
@@ -720,41 +784,29 @@ impl ParserControl {
 mod tests {
     use opeo::{ErrSlot, OResult, Out};
     use typol_core::{Diagnostic, DiagnosticCode, SourceId, SourceSpan, Span};
+    use typol_i18n::{Language, Translator};
+    use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome};
 
     use super::SyntaxBudget;
 
     #[derive(Debug)]
     struct TestFailure;
 
+    impl From<OpeoTestFailure> for TestFailure {
+        fn from(_: OpeoTestFailure) -> Self {
+            Self
+        }
+    }
+
     type TestResult<T = ()> = Result<T, TestFailure>;
 
     fn call<T>(
         slot: &mut ErrSlot<Diagnostic>,
         operation: impl for<'slot> FnOnce(Out<'slot, 'slot, Diagnostic>) -> OResult<'slot, T>,
-    ) -> Result<T, Diagnostic> {
+    ) -> TestOpeoOutcome<T, Diagnostic> {
         match slot.try_call(operation) {
-            Ok(value) => Ok(value),
-            Err(caught) => Err(caught.take()),
-        }
-    }
-
-    trait TestValue<T> {
-        fn test_value(self) -> TestResult<T>;
-    }
-
-    impl<T, E> TestValue<T> for Result<T, E> {
-        fn test_value(self) -> TestResult<T> {
-            self.map_err(|_| TestFailure)
-        }
-    }
-
-    trait TestError<T> {
-        fn test_error(self) -> TestResult<T>;
-    }
-
-    impl<T, E> TestError<E> for Result<T, E> {
-        fn test_error(self) -> TestResult<E> {
-            self.err().ok_or(TestFailure)
+            Ok(value) => TestOpeoOutcome::Value(value),
+            Err(caught) => TestOpeoOutcome::Error(caught.take()),
         }
     }
 
@@ -772,7 +824,7 @@ mod tests {
     fn syntax_frame_budget_fails_before_growth_and_detects_underflow() -> TestResult {
         let span = SourceSpan::new(SourceId::new(7), Span::empty());
         let mut errors = ErrSlot::<Diagnostic>::new();
-        let mut budget = SyntaxBudget::new(1);
+        let mut budget = SyntaxBudget::new(1, Translator::new(Language::English));
         call(&mut errors, |out| budget.enter(span, out)).test_value()?;
         test_assert_eq!(
             call(&mut errors, |out| budget.enter(span, out))

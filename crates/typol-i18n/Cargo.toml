@@ -15,7 +15,6 @@ default = ["std"]
 std = []
 
 [dependencies]
-typol-core.workspace = true
 u18n.workspace = true
 
 [build-dependencies]

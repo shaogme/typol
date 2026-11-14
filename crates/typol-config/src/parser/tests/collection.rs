@@ -269,7 +269,7 @@ fn full_tree_assertions_visit_every_instance_default_and_active_payload() -> Tes
     let messages: Vec<_> = errors
         .diagnostics()
         .iter()
-        .map(|error| error.message())
+        .map(|error| error.message().unwrap_or("diagnostic rendering failed"))
         .collect();
     let mut sorted_messages = messages;
     sorted_messages.sort_unstable();
@@ -311,7 +311,7 @@ fn full_tree_assertions_visit_every_instance_default_and_active_payload() -> Tes
         let messages: Vec<_> = errors
             .diagnostics()
             .iter()
-            .map(|error| error.message())
+            .map(|error| error.message().unwrap_or("diagnostic rendering failed"))
             .collect();
         let mut sorted_messages = messages;
         sorted_messages.sort_unstable();
@@ -439,7 +439,7 @@ fn inherited_all_rules_and_arithmetic_failures_execute_once_per_item() -> TestRe
     let messages: Vec<_> = errors
         .diagnostics()
         .iter()
-        .map(|error| error.message())
+        .map(|error| error.message().unwrap_or("diagnostic rendering failed"))
         .collect();
     test_eq!(messages, ["alias", "outer"])?;
     let starts: Vec<_> = errors

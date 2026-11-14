@@ -8,14 +8,19 @@ use typol_i18n::Translator;
 
 fn main() -> ExitCode {
     match Arguments::parse(env::args_os().skip(1)) {
-        Ok(parsed) => match Commands::run(parsed.command(), Translator::new(parsed.language())) {
+        Ok(parsed) => match Commands::run(
+            parsed.command(),
+            Translator::new(parsed.language()),
+            parsed.output_format(),
+            parsed.detailed_diagnostics(),
+        ) {
             Ok(status) => status,
             Err(_) => ExitCode::from(3),
         },
         Err(error) => {
             let translator = Translator::new(error.language());
             match error.message() {
-                Ok(message) => match Commands::usage_error(message, translator) {
+                Ok(message) => match Commands::usage_error(message.as_ref(), translator) {
                     Ok(status) => status,
                     Err(_) => ExitCode::from(3),
                 },

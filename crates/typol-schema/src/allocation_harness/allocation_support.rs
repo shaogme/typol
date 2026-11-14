@@ -95,13 +95,18 @@ impl CompileRunErrors {
         if compile_errors.error.is_some() {
             return Err(CompileRunFailure(&compile_errors.error));
         }
+        let translator = options.translator();
         let compiler = match TestOpeo::call(|out| SchemaCompiler::new(options, out)) {
             Ok(compiler) => compiler,
             Err(error) => return Err(compile_errors.store(error)),
         };
         let context = match TestOpeo::call(|out| compiler.context(out)) {
             Ok(context) => context,
-            Err(error) => return Err(compile_errors.store(error.into())),
+            Err(error) => {
+                return Err(
+                    compile_errors.store(SchemaCompileErrors::budget_failure(error, translator))
+                );
+            }
         };
         let result = TestOpeo::call(|out| compiler.compile(source, resolver, observer, out));
         Ok(CompileRun { result, context })

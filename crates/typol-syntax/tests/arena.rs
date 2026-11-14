@@ -5,10 +5,16 @@ use typol_syntax::{
     SyntaxLimits, TypeExprKind,
 };
 
-use typol_test_support::TestSlot;
+use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
 
 #[derive(Debug)]
 struct TestFailure;
+
+impl From<OpeoTestFailure> for TestFailure {
+    fn from(_: OpeoTestFailure) -> Self {
+        Self
+    }
+}
 
 macro_rules! test_assert {
     ($condition:expr $(, $($message:tt)*)?) => {{
@@ -67,9 +73,9 @@ fn parse_with_slot(
     source: &str,
     limits: &SyntaxLimits,
     execution: &ExecutionBudget,
-) -> Result<SchemaAst, SyntaxErrors> {
+) -> TestOpeoOutcome<SchemaAst, SyntaxErrors> {
     let options = SchemaParseOptions::with_syntax(*limits);
-    slot.access(|out| SchemaParser::parse_str(SOURCE_ID, source, &options, execution, out))
+    slot.run(|out| SchemaParser::parse_str(SOURCE_ID, source, &options, execution, out))
 }
 
 #[test]

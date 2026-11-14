@@ -17,8 +17,6 @@ mod storage;
 mod value;
 mod workspace;
 
-use core::{error::Error, fmt};
-
 pub use opeo;
 
 pub use budget::{
@@ -26,8 +24,11 @@ pub use budget::{
     TerminalSlot,
 };
 pub use diagnostic::{
-    Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticContextDescriptor, DiagnosticLabel,
-    DiagnosticMessage, DiagnosticMessageKey, DiagnosticTranslationError,
+    Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticContextDescriptor, DiagnosticFailure,
+    DiagnosticFieldStatus, DiagnosticKind, DiagnosticLabel, DiagnosticLabelInput,
+    DiagnosticMessage, DiagnosticObjectIdentifier, DiagnosticParameter, DiagnosticParameterValue,
+    DiagnosticParameters, DiagnosticStage, MAX_DIAGNOSTIC_PARAMETER_NAME_BYTES,
+    MAX_DIAGNOSTIC_PARAMETERS, MAX_RELATED_LOCATIONS, RelatedLocation, RelatedLocationRole,
 };
 pub use excerpt_capture::{SecretRange, SourceCapture};
 pub use excerpt_limits::ExcerptLimits;
@@ -50,6 +51,8 @@ pub use value::{
     ValueId, ValueKind, ValuePayload, ValuePayloadView, ValueScalar, ValueSource, ValueView,
 };
 pub use workspace::WorkspaceVec as ChargedVec;
+
+use core::{error::Error, fmt};
 
 /// Selects compact or multi-line configuration text layout.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

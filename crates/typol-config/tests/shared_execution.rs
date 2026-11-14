@@ -591,7 +591,9 @@ fn defaults_skip_assertions_and_runtime_uses_the_real_root() -> TestResult<()> {
     .test_error()?;
     test_eq!(errors.diagnostics().len(), 1)?;
     test_eq!(
-        TestCheck::item(errors.diagnostics(), 0)?.message(),
+        TestCheck::item(errors.diagnostics(), 0)?
+            .message()
+            .test_value()?,
         "child rule"
     )?;
 
@@ -614,7 +616,7 @@ fn shared_all_keeps_phase_specific_messages_and_element_locations() -> TestResul
         .test_error()?;
         test_eq!(errors.diagnostics().len(), 2)?;
         for d in errors.diagnostics() {
-            test_assert!(!d.message().contains("PRIVATE"))?;
+            test_assert!(!d.message().test_value()?.contains("PRIVATE"))?;
             test_eq!(d.labels().len(), 1)?;
             let span = d.primary().test_value()?.span();
             test_eq!(source.get(span.start()..span.end()).test_value()?, "0")?;
@@ -641,7 +643,7 @@ fn shared_all_keeps_phase_specific_messages_and_element_locations() -> TestResul
         test_eq!(errors.diagnostics().len(), 2)?;
         for d in errors.diagnostics() {
             test_eq!(
-                d.message(),
+                d.message().test_value()?,
                 if secret.is_empty() {
                     "PRIVATE"
                 } else {
@@ -671,13 +673,13 @@ fn recovered_schema_uses_exact_host_text_in_independent_defaults() -> TestResult
         )
         .test_error()?;
         test_eq!(errors.diagnostics().len(), expected_count)?;
-        test_assert!(
-            errors
-                .diagnostics()
-                .iter()
-                .all(|d| d.code() == DiagnosticCode::SCHEMA_SEMANTIC_ERROR
-                    && !d.message().contains("PRIVATE"))
-        )?;
+        test_assert!(errors.diagnostics().iter().all(|d| {
+            d.code() == DiagnosticCode::SCHEMA_SEMANTIC_ERROR
+                && !d
+                    .message()
+                    .unwrap_or("diagnostic rendering failed")
+                    .contains("PRIVATE")
+        }))?;
     }
 
     Ok(())

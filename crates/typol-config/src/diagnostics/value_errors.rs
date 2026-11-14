@@ -1,9 +1,8 @@
 use crate::diagnostics::ConfigParseErrors;
 use alloc::vec::Vec;
 use core::{error::Error, fmt};
-use typol_core::{
-    BudgetError, ChargedString, Diagnostic, SourceExcerptSet, SourceId, SourceSpan, SpanLocation,
-};
+use typol_core::{ChargedString, Diagnostic, SourceExcerptSet, SourceId, SourceSpan, SpanLocation};
+use typol_i18n::t;
 use typol_report::{DiagnosticReport, ReportContext};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,12 +75,6 @@ impl From<ConfigParseErrors> for ConfigValueErrors {
     }
 }
 
-impl From<BudgetError> for ConfigValueErrors {
-    fn from(error: BudgetError) -> Self {
-        Self::from_errors(ConfigParseErrors::from(error))
-    }
-}
-
 impl fmt::Debug for ConfigValueErrors {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -100,11 +93,23 @@ impl fmt::Display for ConfigValueErrors {
                 .flatten()
         };
         let span_location = |span| self.span_location(span);
+        let translator = self.errors.translator().ok_or(fmt::Error)?;
+        let title = t! {
+            name: "report.title.operation_failed",
+            locale: translator,
+        }
+        .map_err(|_| fmt::Error)?;
+        let stage = t! {
+            name: "report.stage.configuration_reading",
+            locale: translator,
+        }
+        .map_err(|_| fmt::Error)?;
         DiagnosticReport::new(
-            "configuration validation failed",
-            Some("validation"),
+            title.as_ref(),
+            Some(stage.as_ref()),
             self.diagnostics(),
             ReportContext::new(&source_name, &span_location, self.excerpts()),
+            translator,
         )
         .write_to(formatter)?;
         if self.is_truncated() {

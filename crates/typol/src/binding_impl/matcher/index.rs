@@ -5,6 +5,7 @@ use crate::{
 use core::{any::TypeId, cmp::Ordering};
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{ChargedVec, DiagnosticContext, diagnostic_context};
+use typol_i18n::Translator;
 use typol_semantic::TypeView;
 
 static INDEX_INVARIANT: DiagnosticContext =
@@ -23,6 +24,7 @@ struct IndexNode<'schema> {
 pub(super) struct BindingIndex<'schema> {
     nodes: ChargedVec<IndexNode<'schema>>,
     root: Option<usize>,
+    translator: Translator,
 }
 
 impl<'schema> BindingIndex<'schema> {
@@ -35,7 +37,11 @@ impl<'schema> BindingIndex<'schema> {
             |budget_out| session.workspace(budget_out),
             out.reborrow(),
         )?;
-        Ok(Self { nodes, root: None })
+        Ok(Self {
+            nodes,
+            root: None,
+            translator: session.translator(),
+        })
     }
 
     pub(super) fn contains<'slot>(
@@ -55,7 +61,7 @@ impl<'schema> BindingIndex<'schema> {
             let node = self
                 .nodes
                 .get(index)
-                .ok_or_else(index_invariant)
+                .ok_or_else(|| index_invariant(self.translator))
                 .store_err_into(out.reborrow())?;
             match identity.cmp(&node.identity).then_with(|| ty.cmp(&node.ty)) {
                 Ordering::Less => current = node.left,
@@ -85,7 +91,7 @@ impl<'schema> BindingIndex<'schema> {
             let node = self
                 .nodes
                 .get(index)
-                .ok_or_else(index_invariant)
+                .ok_or_else(|| index_invariant(self.translator))
                 .store_err_into(out.reborrow())?;
             side = identity.cmp(&node.identity).then_with(|| ty.cmp(&node.ty));
             match side {
@@ -119,12 +125,12 @@ impl<'schema> BindingIndex<'schema> {
                 let parent_node = self
                     .nodes
                     .get_mut(parent)
-                    .ok_or_else(index_invariant)
+                    .ok_or_else(|| index_invariant(self.translator))
                     .store_err_into(out.reborrow())?;
                 match side {
                     Ordering::Less => parent_node.left = Some(index),
                     Ordering::Greater => parent_node.right = Some(index),
-                    Ordering::Equal => return Err(out.fail(index_invariant())),
+                    Ordering::Equal => return Err(out.fail(index_invariant(self.translator))),
                 }
             }
             None => self.root = Some(index),
@@ -150,7 +156,7 @@ impl<'schema> BindingIndex<'schema> {
             let subtree_root = if balance > 0 {
                 let (left, _) = self.children(index, out.reborrow())?;
                 let left = left
-                    .ok_or_else(index_invariant)
+                    .ok_or_else(|| index_invariant(self.translator))
                     .store_err_into(out.reborrow())?;
                 if self.balance(left, out.reborrow())? < 0 {
                     self.rotate_left(left, out.reborrow())?;
@@ -159,7 +165,7 @@ impl<'schema> BindingIndex<'schema> {
             } else if balance < 0 {
                 let (_, right) = self.children(index, out.reborrow())?;
                 let right = right
-                    .ok_or_else(index_invariant)
+                    .ok_or_else(|| index_invariant(self.translator))
                     .store_err_into(out.reborrow())?;
                 if self.balance(right, out.reborrow())? > 0 {
                     self.rotate_right(right, out.reborrow())?;
@@ -180,7 +186,7 @@ impl<'schema> BindingIndex<'schema> {
     ) -> OResult<'slot, usize> {
         let (_, right) = self.children(pivot, out.reborrow())?;
         let right = right
-            .ok_or_else(index_invariant)
+            .ok_or_else(|| index_invariant(self.translator))
             .store_err_into(out.reborrow())?;
         let (middle, _) = self.children(right, out.reborrow())?;
         let parent = self.parent(pivot, out.reborrow())?;
@@ -204,7 +210,7 @@ impl<'schema> BindingIndex<'schema> {
     ) -> OResult<'slot, usize> {
         let (left, _) = self.children(pivot, out.reborrow())?;
         let left = left
-            .ok_or_else(index_invariant)
+            .ok_or_else(|| index_invariant(self.translator))
             .store_err_into(out.reborrow())?;
         let (_, middle) = self.children(left, out.reborrow())?;
         let parent = self.parent(pivot, out.reborrow())?;
@@ -233,14 +239,14 @@ impl<'schema> BindingIndex<'schema> {
                 let node = self
                     .nodes
                     .get_mut(parent)
-                    .ok_or_else(index_invariant)
+                    .ok_or_else(|| index_invariant(self.translator))
                     .store_err_into(out.reborrow())?;
                 if node.left == Some(old) {
                     node.left = Some(new);
                 } else if node.right == Some(old) {
                     node.right = Some(new);
                 } else {
-                    return Err(out.fail(index_invariant()));
+                    return Err(out.fail(index_invariant(self.translator)));
                 }
             }
             None => self.root = Some(new),
@@ -258,12 +264,12 @@ impl<'schema> BindingIndex<'schema> {
             .height(left, out.reborrow())?
             .max(self.height(right, out.reborrow())?)
             .checked_add(1)
-            .ok_or_else(index_invariant)
+            .ok_or_else(|| index_invariant(self.translator))
             .store_err_into(out.reborrow())?;
         let node = self
             .nodes
             .get_mut(index)
-            .ok_or_else(index_invariant)
+            .ok_or_else(|| index_invariant(self.translator))
             .store_err_into(out.reborrow())?;
         node.height = height;
         Ok(())
@@ -294,7 +300,7 @@ impl<'schema> BindingIndex<'schema> {
         let node = self
             .nodes
             .get(index)
-            .ok_or_else(index_invariant)
+            .ok_or_else(|| index_invariant(self.translator))
             .store_err_into(out.reborrow())?;
         Ok((node.left, node.right))
     }
@@ -307,7 +313,7 @@ impl<'schema> BindingIndex<'schema> {
         self.nodes
             .get(index)
             .map(|node| node.parent)
-            .ok_or_else(index_invariant)
+            .ok_or_else(|| index_invariant(self.translator))
             .store_err_into(out.reborrow())
     }
 
@@ -320,7 +326,7 @@ impl<'schema> BindingIndex<'schema> {
             self.nodes
                 .get(index)
                 .map(|node| node.height)
-                .ok_or_else(index_invariant)
+                .ok_or_else(|| index_invariant(self.translator))
                 .store_err_into(out.reborrow())
         })
     }
@@ -334,7 +340,7 @@ impl<'schema> BindingIndex<'schema> {
         let node = self
             .nodes
             .get_mut(index)
-            .ok_or_else(index_invariant)
+            .ok_or_else(|| index_invariant(self.translator))
             .store_err_into(out.reborrow())?;
         node.parent = parent;
         Ok(())
@@ -349,7 +355,7 @@ impl<'schema> BindingIndex<'schema> {
         let node = self
             .nodes
             .get_mut(index)
-            .ok_or_else(index_invariant)
+            .ok_or_else(|| index_invariant(self.translator))
             .store_err_into(out.reborrow())?;
         node.left = left;
         Ok(())
@@ -364,15 +370,19 @@ impl<'schema> BindingIndex<'schema> {
         let node = self
             .nodes
             .get_mut(index)
-            .ok_or_else(index_invariant)
+            .ok_or_else(|| index_invariant(self.translator))
             .store_err_into(out.reborrow())?;
         node.right = right;
         Ok(())
     }
 }
 
-fn index_invariant() -> CodecErrors {
-    CodecErrors::emergency(CodecStage::Binding, Failure::internal(INDEX_INVARIANT))
+fn index_invariant(translator: Translator) -> CodecErrors {
+    CodecErrors::emergency(
+        CodecStage::Binding,
+        Failure::internal(INDEX_INVARIANT),
+        translator,
+    )
 }
 
 #[cfg(all(test, feature = "std"))]

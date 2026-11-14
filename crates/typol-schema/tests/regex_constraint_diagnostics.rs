@@ -17,8 +17,8 @@ fn maps_invalid_pattern_to_redacted_schema_diagnostic() -> TestResult {
     let first = diagnostic.diagnostics().first().test_value()?;
     test_verify_eq!(first.code(), DiagnosticCode::REGEX_SYNTAX_ERROR);
     test_verify!(first.primary().is_some());
-    test_verify!(!first.message().contains("secret"));
-    test_verify!(!first.message().contains("["));
+    test_verify!(!first.message().test_value()?.contains("secret"));
+    test_verify!(!first.message().test_value()?.contains("["));
     let context = first.context().test_value()?;
     test_verify_eq!(context.subsystem(), "typol-schema");
     test_verify_eq!(context.stage(), "regex-pattern");

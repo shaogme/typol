@@ -17,7 +17,7 @@ use typol_config::{ConfigParseOptions, ConfigParseRequest, EmptyEnvironment};
 use typol_core::{ConfigValue, DiagnosticCode, InstancePath, PathSegment, SliceSource, ValueId};
 use typol_model::BuiltinType;
 use typol_test_support::{
-    TestExpect, TestResult, test_verify as assert, test_verify_eq as assert_eq,
+    TestExpect, TestExtract, TestResult, test_verify as assert, test_verify_eq as assert_eq,
 };
 
 struct RejectingScalar;
@@ -95,7 +95,7 @@ fn assert_secret_path_is_redacted(
         .first()
         .test_expect("conversion errors should have redacted diagnostics")?;
     assert_eq!(errors.stage(), CodecStage::Conversion);
-    assert_eq!(diagnostic.message(), "value is hidden");
+    assert_eq!(diagnostic.message().test_value()?, "value is hidden");
     assert_eq!(path_of(errors)?.len(), 1);
     assert_eq!(
         path_of(errors)?
@@ -130,8 +130,9 @@ fn nested_shape_mismatch_reports_field_and_array_index() -> TestResult {
         Some(ConversionErrorKind::ValueShapeMismatch)
     );
     assert_eq!(diagnostic.code(), DiagnosticCode::RUST_CONVERSION_ERROR);
-    assert!(diagnostic.message().contains("expected: u8"));
-    assert!(diagnostic.message().contains("actual: signed integer"));
+    let message = diagnostic.message().test_value()?;
+    assert!(message.contains("expected: u8"));
+    assert!(message.contains("actual: signed integer"));
     assert_eq!(path_of(&errors)?.len(), 2);
     assert_eq!(
         path_of(&errors)?
@@ -169,8 +170,9 @@ fn enum_payload_mismatch_reports_the_schema_variant() -> TestResult {
         errors.conversion_error_kind(),
         Some(ConversionErrorKind::EnumPayloadMismatch)
     );
-    assert!(diagnostic.message().contains("single-value payload"));
-    assert!(diagnostic.message().contains("unit payload"));
+    let message = diagnostic.message().test_value()?;
+    assert!(message.contains("single-value payload"));
+    assert!(message.contains("unit payload"));
     assert_eq!(path_of(&errors)?.len(), 2);
     assert_eq!(
         path_of(&errors)?
@@ -215,7 +217,12 @@ fn missing_field_and_map_value_errors_do_not_echo_input_names_or_keys() -> TestR
             .and_then(PathSegment::as_field),
         Some("a")
     );
-    assert!(!diagnostic.message().contains("sensitive-input-name"));
+    assert!(
+        !diagnostic
+            .message()
+            .test_value()?
+            .contains("sensitive-input-name")
+    );
 
     let map_schema = BindingTestSupport::compile("entry struct Root { value: map<string, u8> }")?;
     let map_binding =
@@ -246,8 +253,9 @@ fn missing_field_and_map_value_errors_do_not_echo_input_names_or_keys() -> TestR
         Some(ConversionErrorKind::ValueShapeMismatch)
     );
     assert_eq!(path_of(&map_errors)?.len(), 1);
-    assert!(!map_diagnostic.message().contains("api-secret-key"));
-    assert!(!map_diagnostic.message().contains("raw-secret-value"));
+    let message = map_diagnostic.message().test_value()?;
+    assert!(!message.contains("api-secret-key"));
+    assert!(!message.contains("raw-secret-value"));
     assert!(!map_errors.to_string().contains("api-secret-key"));
     assert!(!map_errors.to_string().contains("raw-secret-value"));
     Ok(())

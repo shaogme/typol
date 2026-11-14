@@ -1,3 +1,4 @@
+use serde_json::{Value, from_slice};
 use std::{
     env::temp_dir,
     error::Error,
@@ -29,6 +30,14 @@ fn example_argument(name: &str) -> OsString {
 
 fn run_cli(arguments: Vec<OsString>) -> io::Result<Output> {
     Command::new(CLI_PATH).args(arguments).output()
+}
+
+fn first_json_diagnostic(value: &Value) -> io::Result<&Value> {
+    value
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .and_then(|diagnostics| diagnostics.first())
+        .ok_or_else(|| io::Error::other("JSON output does not contain a diagnostic"))
 }
 
 fn run_cli_with_variable(arguments: Vec<OsString>, name: &str, value: &str) -> io::Result<Output> {
@@ -169,6 +178,144 @@ fn schema_and_config_checks_succeed_without_stdout() -> Result<(), Box<dyn Error
         config.stdout.is_empty(),
         "config check must not write to stdout",
     )?;
+    Ok(())
+}
+
+#[test]
+fn json_diagnostics_have_stable_ids_statuses_and_optional_context() -> Result<(), Box<dyn Error>> {
+    let path = temp_dir().join(format!("typol-json-schema-{}.tschem", id()));
+    fs::write(&path, "entry struct Root { value: }")?;
+
+    let standard = run_cli(vec![
+        argument("--format=json"),
+        argument("schema"),
+        argument("check"),
+        path.clone().into_os_string(),
+    ])?;
+    ensure_equal(
+        standard.status.code(),
+        Some(1),
+        "JSON syntax failure exit code",
+    )?;
+    ensure(
+        standard.stdout.is_empty(),
+        "JSON diagnostics must use stderr",
+    )?;
+    let standard: Value = from_slice(&standard.stderr)?;
+    ensure_equal(
+        standard.get("schema_version").and_then(Value::as_u64),
+        Some(1),
+        "JSON schema version",
+    )?;
+    ensure_equal(
+        standard.get("detail_level").and_then(Value::as_str),
+        Some("standard"),
+        "standard JSON detail level",
+    )?;
+    ensure_equal(
+        standard.get("operation_stage").and_then(Value::as_str),
+        Some("schema_compilation"),
+        "schema operation stage",
+    )?;
+    let diagnostic = first_json_diagnostic(&standard)?;
+    ensure_equal(
+        diagnostic.get("kind").and_then(Value::as_str),
+        Some("SCHEMA_SYNTAX_ERROR"),
+        "stable diagnostic kind",
+    )?;
+    ensure_equal(
+        diagnostic.get("stage").and_then(Value::as_str),
+        Some("parsing"),
+        "diagnostic stage",
+    )?;
+    ensure(
+        diagnostic
+            .get("reason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| !reason.is_empty()),
+        "JSON diagnostic reason must be nonempty",
+    )?;
+    ensure_equal(
+        diagnostic
+            .get("primary")
+            .and_then(|primary| primary.get("status"))
+            .and_then(Value::as_str),
+        Some("available"),
+        "primary location status",
+    )?;
+    ensure_equal(
+        diagnostic
+            .get("path")
+            .and_then(|path| path.get("status"))
+            .and_then(Value::as_str),
+        Some("not_applicable"),
+        "path status",
+    )?;
+    ensure(
+        diagnostic.get("context").is_none(),
+        "standard JSON must omit internal diagnostic context",
+    )?;
+
+    let detailed = run_cli(vec![
+        argument("--format=json"),
+        argument("--diagnostic-detail"),
+        argument("--language=zh-CN"),
+        argument("schema"),
+        argument("check"),
+        path.clone().into_os_string(),
+    ])?;
+    ensure_equal(
+        detailed.status.code(),
+        Some(1),
+        "detailed JSON failure exit code",
+    )?;
+    let detailed: Value = from_slice(&detailed.stderr)?;
+    let detailed_diagnostic = first_json_diagnostic(&detailed)?;
+    ensure_equal(
+        detailed.get("detail_level").and_then(Value::as_str),
+        Some("detailed"),
+        "detailed JSON detail level",
+    )?;
+    ensure(
+        detailed_diagnostic.get("context").is_some(),
+        "detailed JSON must include the context field",
+    )?;
+    ensure_equal(
+        detailed_diagnostic.get("reason").and_then(Value::as_str),
+        Some("此处应为类型表达式"),
+        "localized JSON diagnostic reason",
+    )?;
+
+    let fallback = run_cli(vec![
+        argument("--format=json"),
+        argument("--language=zh-CN"),
+        argument("schema"),
+        argument("check"),
+        example_argument("cli_demo-invalid.tconf"),
+    ])?;
+    let fallback_text = String::from_utf8_lossy(&fallback.stderr);
+    let fallback: Value = from_slice(&fallback.stderr)?;
+    let fallback_diagnostic = first_json_diagnostic(&fallback)?;
+    ensure_equal(
+        fallback_diagnostic.get("kind").and_then(Value::as_str),
+        Some("SCHEMA_SYNTAX_ERROR"),
+        "machine diagnostic kind",
+    )?;
+    ensure_equal(
+        fallback_diagnostic.get("stage").and_then(Value::as_str),
+        Some("parsing"),
+        "machine diagnostic stage",
+    )?;
+    ensure_equal(
+        fallback_diagnostic.get("reason").and_then(Value::as_str),
+        Some("此处应为 Schema 声明"),
+        "localized stored diagnostic reason",
+    )?;
+    ensure(
+        !fallback_text.contains("short-secret"),
+        "JSON fallback must not expose arbitrary diagnostic text",
+    )?;
+    fs::remove_file(path)?;
     Ok(())
 }
 
@@ -391,6 +538,49 @@ fn schema_format_is_parse_only_idempotent_and_check_mode_is_read_only() -> Resul
         "repeated schema fmt option exit code",
     )?;
     fs::remove_file(schema_path)?;
+    Ok(())
+}
+
+#[test]
+fn json_operation_failures_use_a_stable_kind_and_safe_reason() -> Result<(), Box<dyn Error>> {
+    let path = temp_dir().join(format!("typol-json-format-{}.tschem", id()));
+    fs::write(&path, "entry struct Root{value:string}")?;
+    let output = run_cli(vec![
+        argument("--format=json"),
+        argument("schema"),
+        argument("fmt"),
+        argument("--check"),
+        path.clone().into_os_string(),
+    ])?;
+    fs::remove_file(path)?;
+
+    ensure_equal(
+        output.status.code(),
+        Some(1),
+        "format check failure exit code",
+    )?;
+    ensure(output.stdout.is_empty(), "JSON failure must use stderr")?;
+    let report: Value = from_slice(&output.stderr)?;
+    let error = report
+        .get("error")
+        .ok_or_else(|| io::Error::other("JSON output does not contain an operation error"))?;
+    ensure_equal(
+        error.get("kind").and_then(Value::as_str),
+        Some("operation_failed"),
+        "stable CLI failure kind",
+    )?;
+    ensure_equal(
+        error.get("stage").and_then(Value::as_str),
+        Some("host_io"),
+        "CLI failure stage",
+    )?;
+    ensure(
+        error
+            .get("reason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| !reason.is_empty()),
+        "operation failure reason must be nonempty",
+    )?;
     Ok(())
 }
 

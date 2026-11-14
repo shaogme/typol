@@ -4,12 +4,14 @@ use crate::{
 };
 use opeo::{OResult, Out};
 use typol_core::{ConfigValue, InstancePath, LocatedSpan, ValueSource};
+use typol_i18n::Translator;
 use typol_semantic::{
     CompiledSchema, ConstraintList, FieldView, SchemaAccessError, TypeView, VariantView,
 };
 
 /// Borrows the current value location; validators use the handle to read constraints, secret markers, and expression IR.
 pub(crate) struct AssignmentContext<'a> {
+    pub(crate) translator: Translator,
     pub(crate) schema: &'a CompiledSchema,
     /// A prevalidated fallback has no concrete instance node; its location is recorded only after adoption.
     pub(crate) node: Option<NodeId>,

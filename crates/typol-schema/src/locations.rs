@@ -7,6 +7,7 @@ use typol_core::{
     BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, ExcerptLimits,
     ExecutionBudget, SourceId, SourceSpan, Span, SpanLocation, diagnostic_context,
 };
+use typol_i18n::Translator;
 use typol_syntax::SourcePositionIndex;
 
 use crate::{
@@ -53,8 +54,9 @@ impl SourceLocations {
         execution: &ExecutionBudget,
         limits: ExcerptLimits,
     ) -> SchemaCompileErrors {
+        let translator = diagnostics.translator();
         let errors = Self::errors_without_locations(diagnostics, files, execution);
-        SchemaExcerpts::errors(errors, files, limits, execution)
+        SchemaExcerpts::errors(errors, files, limits, execution, translator)
     }
 
     fn errors_without_locations(
@@ -69,7 +71,7 @@ impl SourceLocations {
         let (code, context) = match diagnostics.last() {
             Some(diagnostic) => (diagnostic.code(), diagnostic.context()),
             None => {
-                diagnostics.append_terminal(schema_internal!(fallback));
+                diagnostics.append_terminal(schema_internal!(diagnostics.translator(), fallback));
                 (DiagnosticCode::INTERNAL_ERROR, None)
             }
         };
@@ -113,7 +115,7 @@ impl SourceLocations {
                         LocationStatus::Unavailable(failure),
                     );
                 }
-                let diagnostic = Self::diagnostic(error, fallback);
+                let diagnostic = Self::diagnostic(error, fallback, diagnostics.translator());
                 let reason = match diagnostic.code() {
                     DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
                     | DiagnosticCode::ALLOCATION_FAILED
@@ -190,9 +192,13 @@ impl SourceLocations {
         Ok(locations)
     }
 
-    pub(crate) fn diagnostic(error: LocationError, fallback: SourceSpan) -> Diagnostic {
+    pub(crate) fn diagnostic(
+        error: LocationError,
+        fallback: SourceSpan,
+        translator: Translator,
+    ) -> Diagnostic {
         match error {
-            LocationError::Budget(error) => BudgetDiagnostics::make(error, fallback),
+            LocationError::Budget(error) => BudgetDiagnostics::make(error, fallback, translator),
             LocationError::Invalid {
                 span,
                 failure,
@@ -203,7 +209,7 @@ impl SourceLocations {
                 } else {
                     LOCATION_FAILURE_CLASS_MISMATCH.with_object_id(span.source_id().get() as u64)
                 };
-                EmergencyDiagnostics::internal(span, context)
+                EmergencyDiagnostics::internal(span, context, translator)
             }
         }
     }

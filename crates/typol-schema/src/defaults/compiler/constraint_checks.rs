@@ -9,7 +9,7 @@ use crate::{
 use core::cell::RefCell;
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{ConfigValue, SourceSpan, ValueKind};
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 use typol_semantic::{EvalError, StoredRuleView, ValueRules, VariantId, VariantRestrictionMode};
 
 pub(super) struct VariantRestrictionCheck<'a, 'source> {
@@ -67,7 +67,10 @@ impl DefaultScalarConstraint {
             ConstraintData::Email => StoredRuleView::Email,
             ConstraintData::Cidr { v4_only } => StoredRuleView::Cidr { v4_only },
             _ => {
-                input.diagnostics.push(schema_internal!(input.value_span));
+                input.diagnostics.push(schema_internal!(
+                    input.diagnostics.translator(),
+                    input.value_span
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             }
         };
@@ -90,7 +93,10 @@ impl DefaultScalarConstraint {
                 return Err(out.fail(BuildFailure::empty()));
             }
         }) else {
-            input.diagnostics.push(schema_internal!(input.value_span));
+            input.diagnostics.push(schema_internal!(
+                input.diagnostics.translator(),
+                input.value_span
+            ));
             return Err(out.fail(BuildFailure::empty()));
         };
         Ok(matched)
@@ -124,7 +130,9 @@ impl DefaultVariantRestriction {
                         kind => kind,
                     };
                     let Some(ResolvedTypeKind::User(enum_symbol)) = resolved else {
-                        input.diagnostics.push(schema_internal!(input.span));
+                        input
+                            .diagnostics
+                            .push(schema_internal!(input.diagnostics.translator(), input.span));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     let selected = match input.symbols.lookup_variant::<BuildFailure>(
@@ -134,7 +142,9 @@ impl DefaultVariantRestriction {
                     )? {
                         LookupResult::Found(selected) => selected,
                         LookupResult::Missing | LookupResult::Ambiguous => {
-                            input.diagnostics.push(schema_internal!(input.span));
+                            input
+                                .diagnostics
+                                .push(schema_internal!(input.diagnostics.translator(), input.span));
                             return Err(out.fail(BuildFailure::empty()));
                         }
                     };
@@ -154,7 +164,9 @@ impl DefaultVariantRestriction {
                     });
                 }
                 _ => {
-                    input.diagnostics.push(schema_internal!(input.span));
+                    input
+                        .diagnostics
+                        .push(schema_internal!(input.diagnostics.translator(), input.span));
                     return Err(out.fail(BuildFailure::empty()));
                 }
             }
@@ -166,10 +178,11 @@ impl DefaultVariantRestriction {
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, ()> {
         let mut diagnostic = DefaultDiagnostic::semantic(
-            diagnostic_message!(
-                "diagnostic.schema.annotation_variants_value_rejected",
-                "schema default selects an enum variant rejected by @variants"
-            ),
+            t! {
+                name: "diagnostic.schema.annotation_variants_value_rejected",
+                locale: input.diagnostics.translator(),
+            }
+            .into(),
             input.value_span,
             input.context,
             input.diagnostics,

@@ -3,7 +3,7 @@ use crate::{
     context::{
         AssignmentContext, EnvironmentSpans, EnvironmentValue, FallbackValue, SemanticStatus,
     },
-    diagnostics::DiagnosticBuffer,
+    diagnostics::{BudgetDiagnostic, DiagnosticBuffer},
     environment::{
         Environment, EnvironmentCache, EnvironmentResolveRequest, EnvironmentResolver,
         EnvironmentTextError,
@@ -17,8 +17,10 @@ use core::cell::RefCell;
 
 use typol_core::{
     BudgetError, ChargedVec, ConfigValue, Diagnostic, ExecutionBudget, Read, RegexExecutionBudget,
-    SecretRange, SourceCapture, SourceId, SourceReadError, SourceSpan, SpanLocation,
+    SecretRange, SourceCapture, SourceId, SourceReadError, SourceReadErrorKind, SourceSpan, Span,
+    SpanLocation,
 };
+use typol_i18n::{Translator, t};
 use typol_policy::{RegexLimits, ValueLimits};
 use typol_semantic::{
     CompiledSchema, EnvironmentAuthorization, EvalError, RegexExecutionError, RegexExecutor,
@@ -26,10 +28,8 @@ use typol_semantic::{
 };
 use typol_syntax::StreamLimits;
 
-#[cfg(test)]
-use crate::diagnostics::BudgetDiagnostic;
-
 pub(crate) struct ValidationResources<'a> {
+    pub(crate) translator: Translator,
     pub(crate) scratch: RegexExecutor,
     pub(crate) value_limits: &'a ValueLimits,
     pub(crate) regex_limits: &'a RegexLimits,
@@ -54,6 +54,7 @@ pub(crate) struct SessionResources<'a> {
 
 pub(crate) struct ConfigSession<'a> {
     stream: StreamLimits,
+    translator: Translator,
     resources: SessionResources<'a>,
     capture: Option<&'a RefCell<Option<SourceCapture>>>,
 }
@@ -135,7 +136,10 @@ impl<'a> ConfigSession<'a> {
         {
             Ok(budget) => budget,
             Err(caught) => {
-                return Err(out.fail(BudgetDiagnostic::from_error(caught.take())));
+                return Err(out.fail(BudgetDiagnostic::from_error(
+                    caught.take(),
+                    options.translator(),
+                )));
             }
         };
         Self::with_budget(environment, options, &budget, out.reborrow())
@@ -165,16 +169,23 @@ impl<'a> ConfigSession<'a> {
             Ok(budget) => budget,
             Err(caught) => return Err(out.fail(E::from(caught.take()))),
         };
-        let cache = EnvironmentCache::new(budget, *options.config(), out.reborrow())?;
+        let cache = EnvironmentCache::new(
+            budget,
+            *options.config(),
+            options.translator(),
+            out.reborrow(),
+        )?;
         let validation_budget = budget.try_clone(out.reborrow())?;
         let session_budget = budget.try_clone(out.reborrow())?;
         Ok(Self {
             stream: options.stream(),
+            translator: options.translator(),
             capture: None,
             resources: SessionResources {
                 environment,
                 cache,
                 validation: ValidationResources {
+                    translator: options.translator(),
                     scratch: RegexExecutor::new(),
                     value_limits,
                     regex_limits,
@@ -196,6 +207,10 @@ impl<'a> ConfigSession<'a> {
 
     pub(crate) fn stream(&self) -> StreamLimits {
         self.stream
+    }
+
+    pub(crate) const fn translator(&self) -> Translator {
+        self.translator
     }
 
     pub(crate) fn validation(&mut self) -> &mut ValidationResources<'a> {
@@ -285,6 +300,7 @@ impl<'a> ConfigSession<'a> {
 
 pub(crate) struct TrackingInput<'input, R: Read + ?Sized = dyn Read> {
     source: &'input mut R,
+    translator: Translator,
     failed: bool,
     fetched: usize,
     limit: usize,
@@ -295,9 +311,10 @@ pub(crate) struct TrackingInput<'input, R: Read + ?Sized = dyn Read> {
 }
 
 impl<'input, R: Read + ?Sized> TrackingInput<'input, R> {
-    pub(crate) fn new(source: &'input mut R, limit: usize) -> Self {
+    pub(crate) fn new(source: &'input mut R, limit: usize, translator: Translator) -> Self {
         Self {
             source,
+            translator,
             failed: false,
             fetched: 0,
             limit,
@@ -331,6 +348,43 @@ impl<'input, R: Read + ?Sized> TrackingInput<'input, R> {
     }
 }
 
+fn source_read_diagnostic(error: SourceReadError, translator: Translator) -> Diagnostic {
+    let code = error.diagnostic_code();
+    let mut diagnostic = Diagnostic::translated_emergency(
+        code,
+        match error.kind() {
+            SourceReadErrorKind::ResourceLimitExceeded => t! {
+                name: "diagnostic.emergency.resource_limit_exceeded",
+                locale: translator,
+            },
+            SourceReadErrorKind::AllocationFailed => t! {
+                name: "diagnostic.emergency.allocation_failed",
+                locale: translator,
+            },
+            SourceReadErrorKind::CapacityExceeded => t! {
+                name: "diagnostic.emergency.capacity_exceeded",
+                locale: translator,
+            },
+            SourceReadErrorKind::HostFailure => t! {
+                name: "diagnostic.emergency.source_input_error",
+                locale: translator,
+            },
+            SourceReadErrorKind::InternalInvariantFailure => t! {
+                name: "diagnostic.emergency.internal_error",
+                locale: translator,
+            },
+        },
+    );
+    diagnostic.set_context(error.context());
+    diagnostic.set_located_primary(
+        error
+            .source_id()
+            .zip(error.offset())
+            .map(|(source_id, offset)| SourceSpan::new(source_id, Span::point(offset)).into()),
+    );
+    diagnostic
+}
+
 impl<R: Read + ?Sized> Read<Diagnostic> for TrackingInput<'_, R> {
     fn read<'slot, 'borrow>(
         &mut self,
@@ -346,7 +400,7 @@ impl<R: Read + ?Sized> Read<Diagnostic> for TrackingInput<'_, R> {
             Ok(count) => count,
             Err(caught) => {
                 self.failed = true;
-                return Err(out.fail(Diagnostic::from(caught.take())));
+                return Err(out.fail(source_read_diagnostic(caught.take(), self.translator)));
             }
         };
         self.failed |= count > output.len();
@@ -359,7 +413,9 @@ impl<R: Read + ?Sized> Read<Diagnostic> for TrackingInput<'_, R> {
                         .try_call(|budget_out| retained.extend_from_slice(bytes, budget_out))
                     {
                         self.failed = true;
-                        return Err(out.fail(Diagnostic::from(caught.take())));
+                        return Err(
+                            out.fail(BudgetDiagnostic::from_error(caught.take(), self.translator))
+                        );
                     }
                 }
             }

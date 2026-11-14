@@ -4,10 +4,16 @@ use typol_syntax::{
     SizeArguments, SyntaxErrors, SyntaxLimits, VariantRestrictionMode,
 };
 
-use typol_test_support::TestSlot;
+use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
 
 #[derive(Debug)]
 struct TestFailure;
+
+impl From<OpeoTestFailure> for TestFailure {
+    fn from(_: OpeoTestFailure) -> Self {
+        Self
+    }
+}
 
 macro_rules! test_assert {
     ($condition:expr $(, $($message:tt)*)?) => {{
@@ -51,16 +57,6 @@ impl<T> TestValue<T> for Option<T> {
     }
 }
 
-trait TestError<T> {
-    fn test_error(self) -> TestResult<T>;
-}
-
-impl<T, E> TestError<E> for Result<T, E> {
-    fn test_error(self) -> TestResult<E> {
-        self.err().ok_or(TestFailure)
-    }
-}
-
 const SOURCE_ID: SourceId = SourceId::new(7);
 
 macro_rules! annotation_data {
@@ -86,9 +82,9 @@ fn parse_with_slot(
     source: &str,
     limits: &SyntaxLimits,
     execution: &ExecutionBudget,
-) -> Result<SchemaAst, SyntaxErrors> {
+) -> TestOpeoOutcome<SchemaAst, SyntaxErrors> {
     let options = SchemaParseOptions::with_syntax(*limits);
-    slot.access(|out| SchemaParser::parse_str(SOURCE_ID, source, &options, execution, out))
+    slot.run(|out| SchemaParser::parse_str(SOURCE_ID, source, &options, execution, out))
 }
 
 #[test]

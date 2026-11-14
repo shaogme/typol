@@ -278,7 +278,7 @@ fn regex_mismatch_and_resource_exhaustion_are_distinct_and_budgeted() -> TestRes
     let errors = parse(&schema, source).test_error()?;
     test_eq!(ParserTestSupport::codes(&errors), [12, 12])?;
     for error in errors.diagnostics() {
-        test_assert!(!error.message().contains("PRIVATE-TEXT"))?;
+        test_assert!(!error.message().test_value()?.contains("PRIVATE-TEXT"))?;
         test_eq!(error.value_source(), Some(ValueSource::ConfigLiteral))?;
         test_eq!(error.labels().len(), 1)?;
     }

@@ -1,15 +1,17 @@
 use crate::{
     InputLimits, StreamLimits,
-    error::SyntaxDiagnostic,
+    error::{MessageBuild, SyntaxDiagnostic},
     input::Input,
     token::{Token, TokenKind},
 };
+use alloc::borrow::Cow;
 use opeo::{OResult, Out};
 use typol_core::{
-    ChargedString, Diagnostic, DiagnosticCode, DiagnosticMessage, ExecutionBudget, LocatedSpan,
-    SourceLocation, SourceSpan, Span, SpanLocation, diagnostic_context,
+    ChargedString, Diagnostic, DiagnosticCode, ExecutionBudget, LocatedSpan, SourceLocation,
+    SourceSpan, Span, SpanLocation, diagnostic_context,
 };
-use typol_i18n::diagnostic_message;
+use typol_i18n::{Translator, t};
+use u18n::RenderError;
 
 struct BlockStringSourcePosition<'source> {
     body_start: LocatedSpan,
@@ -28,6 +30,7 @@ pub(crate) struct BlockStringContext<'borrow, 'input> {
     pub(crate) limits: InputLimits,
     pub(crate) stream: StreamLimits,
     pub(crate) budget: &'borrow ExecutionBudget,
+    pub(crate) translator: Translator,
 }
 
 pub(crate) struct BlockStringDecoder;
@@ -57,10 +60,10 @@ impl BlockStringDecoder {
                 let diagnostic = Self::diagnostic(
                     &context,
                     mark,
-                    diagnostic_message!(
-                        "diagnostic.syntax.invalid_line_ending",
-                        "a bare CR is not a valid line ending"
-                    ),
+                    t! {
+                        name: "diagnostic.syntax.invalid_line_ending",
+                        locale: context.translator,
+                    },
                     out.reborrow(),
                 )?;
                 return Err(out.reborrow().fail(diagnostic));
@@ -69,10 +72,10 @@ impl BlockStringDecoder {
                 let diagnostic = Self::diagnostic(
                     &context,
                     start,
-                    diagnostic_message!(
-                        "diagnostic.syntax.block_string_requires_newline",
-                        "a block string opening delimiter must be followed by a line ending"
-                    ),
+                    t! {
+                        name: "diagnostic.syntax.block_string_requires_newline",
+                        locale: context.translator,
+                    },
                     out.reborrow(),
                 )?;
                 return Err(out.reborrow().fail(diagnostic));
@@ -99,10 +102,10 @@ impl BlockStringDecoder {
                         let diagnostic = Self::diagnostic(
                             &context,
                             start,
-                            diagnostic_message!(
-                                "diagnostic.syntax.unterminated_string",
-                                "string literal is unterminated"
-                            ),
+                            t! {
+                                name: "diagnostic.syntax.unterminated_string",
+                                locale: context.translator,
+                            },
                             out.reborrow(),
                         )?;
                         Err(out.reborrow().fail(diagnostic))
@@ -144,10 +147,10 @@ impl BlockStringDecoder {
                 issue = Some(Self::diagnostic(
                     &context,
                     mark,
-                    diagnostic_message!(
-                        "diagnostic.syntax.invalid_line_ending",
-                        "a bare CR is not a valid line ending"
-                    ),
+                    t! {
+                        name: "diagnostic.syntax.invalid_line_ending",
+                        locale: context.translator,
+                    },
                     out.reborrow(),
                 )?);
             }
@@ -271,10 +274,10 @@ impl BlockStringDecoder {
                                                     character.len_utf8() + escaped.len_utf8()
                                                 }),
                                         },
-                                        diagnostic_message!(
-                                            "diagnostic.syntax.unsupported_escape_sequence",
-                                            "string contains an unsupported escape sequence"
-                                        ),
+                                        t! {
+                                            name: "diagnostic.syntax.unsupported_escape_sequence",
+                                            locale: context.translator,
+                                        },
                                         out.reborrow(),
                                     )?);
                                 }
@@ -290,10 +293,10 @@ impl BlockStringDecoder {
                                             offset,
                                             length: character.len_utf8(),
                                         },
-                                        diagnostic_message!(
-                                            "diagnostic.syntax.incomplete_escape_sequence",
-                                            "string escape sequence is incomplete"
-                                        ),
+                                        t! {
+                                            name: "diagnostic.syntax.incomplete_escape_sequence",
+                                            locale: context.translator,
+                                        },
                                         out.reborrow(),
                                     )?);
                                 }
@@ -319,10 +322,10 @@ impl BlockStringDecoder {
                                     offset,
                                     length: character.len_utf8(),
                                 },
-                                diagnostic_message!(
-                                    "diagnostic.syntax.unescaped_control_character",
-                                    "string contains an unescaped control character"
-                                ),
+                                t! {
+                                    name: "diagnostic.syntax.unescaped_control_character",
+                                    locale: context.translator,
+                                },
                                 out.reborrow(),
                             )?);
                         }
@@ -369,11 +372,7 @@ impl BlockStringDecoder {
             .checked_add(character.len_utf8())
             .is_none_or(|next| next > context.stream.max_token_bytes())
         {
-            return Err(out.reborrow().fail(
-                context
-                    .input
-                    .failure(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED),
-            ));
+            return Err(out.reborrow().fail(context.input.resource_failure()));
         }
         context.input.advance(out.reborrow())
     }
@@ -391,11 +390,7 @@ impl BlockStringDecoder {
                 .checked_add(character.len_utf8())
                 .is_none_or(|next| next > context.limits.max_string_bytes())
         {
-            return Err(out.reborrow().fail(
-                context
-                    .input
-                    .failure(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED),
-            ));
+            return Err(out.reborrow().fail(context.input.resource_failure()));
         }
         SyntaxDiagnostic::budgeted_with(
             out,
@@ -407,7 +402,7 @@ impl BlockStringDecoder {
     fn diagnostic<'slot>(
         context: &BlockStringContext<'_, '_>,
         start: LocatedSpan,
-        message: DiagnosticMessage<'static>,
+        message: Result<Cow<'static, str>, RenderError>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Diagnostic> {
         let span = context.input.span_from(start, out.reborrow())?;
@@ -417,7 +412,7 @@ impl BlockStringDecoder {
     fn diagnostic_for_raw<'slot>(
         context: &BlockStringContext<'_, '_>,
         position: BlockStringSourcePosition<'_>,
-        message: DiagnosticMessage<'static>,
+        message: Result<Cow<'static, str>, RenderError>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Diagnostic> {
         let span = Self::source_span(context, position, out.reborrow())?;
@@ -445,11 +440,7 @@ impl BlockStringDecoder {
                 ))));
         };
         let Some(end) = offset.checked_add(length) else {
-            return Err(out.reborrow().fail(
-                context
-                    .input
-                    .failure(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED),
-            ));
+            return Err(out.reborrow().fail(context.input.resource_failure()));
         };
         let Some(issue) = raw.get(offset..end) else {
             return Err(out
@@ -498,18 +489,10 @@ impl BlockStringDecoder {
         }
         let end_location = Self::location(context, location.line, location.column, out.reborrow())?;
         let Some(start_offset) = body_start.span().start().checked_add(offset) else {
-            return Err(out.reborrow().fail(
-                context
-                    .input
-                    .failure(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED),
-            ));
+            return Err(out.reborrow().fail(context.input.resource_failure()));
         };
         let Some(end_offset) = start_offset.checked_add(length) else {
-            return Err(out.reborrow().fail(
-                context
-                    .input
-                    .failure(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED),
-            ));
+            return Err(out.reborrow().fail(context.input.resource_failure()));
         };
         let start = LocatedSpan::new(
             SourceSpan::new(body_start.source_id(), Span::point(start_offset)),
@@ -546,21 +529,13 @@ impl BlockStringDecoder {
     ) -> OResult<'slot, ()> {
         if character == '\n' {
             let Some(next_line) = location.line.checked_add(1) else {
-                return Err(out.reborrow().fail(
-                    context
-                        .input
-                        .failure(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED),
-                ));
+                return Err(out.reborrow().fail(context.input.resource_failure()));
             };
             location.line = next_line;
             location.column = 1;
         } else if character != '\r' || next != Some('\n') {
             let Some(next_column) = location.column.checked_add(1) else {
-                return Err(out.reborrow().fail(
-                    context
-                        .input
-                        .failure(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED),
-                ));
+                return Err(out.reborrow().fail(context.input.resource_failure()));
             };
             location.column = next_column;
         }
@@ -587,20 +562,18 @@ impl BlockStringDecoder {
     fn diagnostic_at<'slot>(
         context: &BlockStringContext<'_, '_>,
         span: LocatedSpan,
-        message: DiagnosticMessage<'static>,
+        message: Result<Cow<'static, str>, RenderError>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Diagnostic> {
-        let mut diagnostic = SyntaxDiagnostic::budgeted_with(
-            out.reborrow(),
-            |out| {
-                Diagnostic::try_new(
-                    DiagnosticCode::LEXICAL_ERROR,
-                    message,
-                    Some(context.budget),
-                    out,
-                )
+        let mut diagnostic = SyntaxDiagnostic::make(
+            MessageBuild {
+                code: DiagnosticCode::LEXICAL_ERROR,
+                span: span.source_span(),
+                budget: context.budget,
+                translator: context.translator,
             },
-            |error| context.input.budget_error(error),
+            message,
+            out.reborrow(),
         )?;
         diagnostic.set_located_primary(Some(span));
         Ok(diagnostic)

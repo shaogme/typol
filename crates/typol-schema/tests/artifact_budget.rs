@@ -203,11 +203,12 @@ fn semantic_error_survives_later_location_exhaustion() -> TestResult {
         LocationStatus::Unavailable(LocationFailure::ResourceLimitExceeded)
     );
     test_verify!(
-        errors
+        !errors
             .diagnostics()
             .get(1)
             .test_value()?
             .message()
+            .test_value()?
             .is_empty()
     );
     test_verify!(errors.diagnostics().iter().all(|error| {

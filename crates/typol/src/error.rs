@@ -1,21 +1,21 @@
+#[cfg(feature = "std")]
+pub(crate) use crate::loading_errors::{ErrorNames, ErrorSlot};
+
 use crate::diagnostics::CodecErrors;
 use core::{error::Error, fmt};
 use typol_config::ConfigParseErrors;
-use typol_core::BudgetError;
+use typol_core::{
+    BudgetError, Diagnostic, DiagnosticContext, DiagnosticFieldStatus, ExcerptStatus, SourceId,
+    SourceSpan,
+};
 use typol_schema::SchemaCompileErrors;
 
-#[cfg(feature = "std")]
-pub(crate) use crate::loading_errors::{ErrorNames, ErrorSlot};
 #[cfg(feature = "std")]
 use crate::loading_errors::{StdTypolError, TypolDiagnosticList};
 #[cfg(feature = "std")]
 use alloc::string::String;
 #[cfg(feature = "std")]
 use opeo::{OResult, Out};
-#[cfg(not(feature = "std"))]
-use typol_config::ConfigFailureStage;
-#[cfg(feature = "std")]
-use typol_core::{DiagnosticContext, SourceId, SourceSpan};
 #[cfg(feature = "std")]
 use typol_i18n::Translator;
 #[cfg(feature = "std")]
@@ -24,6 +24,11 @@ use typol_semantic::SpanLocation;
 use typol_std::{
     DiagnosticRenderError, FileSchemaCompileErrors, HostError, HostErrorKind, RenderOptions,
 };
+
+#[cfg(not(feature = "std"))]
+use core::fmt::Display;
+#[cfg(not(feature = "std"))]
+use typol_config::ConfigFailureStage;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TypolStage {
@@ -95,20 +100,23 @@ impl From<StdTypolError> for TypolError {
 
 #[cfg(feature = "std")]
 impl TypolError {
-    pub(crate) fn file(errors: FileSchemaCompileErrors) -> Self {
-        StdTypolError::file(errors).into()
+    pub(crate) fn file(errors: FileSchemaCompileErrors, translator: Translator) -> Self {
+        StdTypolError::file(errors, translator).into()
     }
 
-    pub(crate) fn schema_budget(error: BudgetError) -> Self {
-        StdTypolError::schema_budget(error).into()
+    pub(crate) fn schema_budget(error: BudgetError, translator: Translator) -> Self {
+        StdTypolError::schema_budget(error, translator).into()
     }
 
-    pub(crate) fn schema_initialization(errors: SchemaCompileErrors) -> Self {
-        StdTypolError::schema_initialization(errors).into()
+    pub(crate) fn schema_initialization(
+        errors: SchemaCompileErrors,
+        translator: Translator,
+    ) -> Self {
+        StdTypolError::schema_initialization(errors, translator).into()
     }
 
-    pub(crate) fn host(error: HostError, stage: TypolStage) -> Self {
-        StdTypolError::host(error, stage).into()
+    pub(crate) fn host(error: HostError, stage: TypolStage, translator: Translator) -> Self {
+        StdTypolError::host(error, stage, translator).into()
     }
 
     pub(crate) fn binding(errors: CodecErrors, names: ErrorNames, slot: ErrorSlot) -> Self {
@@ -143,8 +151,24 @@ impl TypolError {
         self.inner.diagnostics()
     }
 
+    pub fn diagnostic_count(&self) -> usize {
+        self.inner.diagnostics().len()
+    }
+
+    pub fn diagnostic(&self, index: usize) -> Option<&Diagnostic> {
+        self.inner.diagnostics().get(index)
+    }
+
     pub fn diagnostic_context(&self, index: usize) -> Option<DiagnosticContext> {
         self.inner.diagnostic_context(index)
+    }
+
+    pub fn source_name_status(&self, source_id: SourceId) -> DiagnosticFieldStatus {
+        self.inner.source_name_status(source_id)
+    }
+
+    pub fn excerpt_status(&self, span: SourceSpan) -> ExcerptStatus {
+        self.inner.excerpt_status(span)
     }
 
     pub fn span_location(&self, span: SourceSpan) -> Option<SpanLocation> {
@@ -161,11 +185,10 @@ impl TypolError {
 
     pub fn render<'slot>(
         &self,
-        translator: Translator,
         options: RenderOptions,
         out: Out<'slot, '_, DiagnosticRenderError>,
     ) -> OResult<'slot, String> {
-        self.inner.render(translator, options, out)
+        self.inner.render(options, out)
     }
 }
 
@@ -238,6 +261,59 @@ impl TypolError {
             _ => None,
         }
     }
+
+    pub fn diagnostic_count(&self) -> usize {
+        match &self.failure {
+            Failure::Budget(_) => 0,
+            Failure::Schema(errors) => errors.diagnostics().len(),
+            Failure::Config(errors) => errors.diagnostics().len(),
+            Failure::Codec(errors) => errors.diagnostics().len(),
+        }
+    }
+
+    pub fn diagnostic(&self, index: usize) -> Option<&Diagnostic> {
+        match &self.failure {
+            Failure::Budget(_) => None,
+            Failure::Schema(errors) => errors.diagnostics().get(index),
+            Failure::Config(errors) => errors.diagnostics().get(index),
+            Failure::Codec(errors) => errors.diagnostics().get(index),
+        }
+    }
+
+    pub fn diagnostic_context(&self, index: usize) -> Option<DiagnosticContext> {
+        self.diagnostic(index)?.context()
+    }
+
+    pub fn source_name_status(&self, source_id: SourceId) -> DiagnosticFieldStatus {
+        if (0..self.diagnostic_count()).any(|index| {
+            self.diagnostic(index)
+                .is_some_and(|diagnostic| diagnostic_references_source(diagnostic, source_id))
+        }) {
+            DiagnosticFieldStatus::Unavailable
+        } else {
+            DiagnosticFieldStatus::NotApplicable
+        }
+    }
+
+    pub fn excerpt_status(&self, span: SourceSpan) -> ExcerptStatus {
+        match &self.failure {
+            Failure::Budget(_) => ExcerptStatus::Unavailable,
+            Failure::Schema(errors) => errors.excerpts().span_status(span),
+            Failure::Config(errors) => errors.excerpts().span_status(span),
+            Failure::Codec(errors) => errors.excerpts().span_status(span),
+        }
+    }
+}
+
+#[cfg(not(feature = "std"))]
+fn diagnostic_references_source(diagnostic: &Diagnostic, source_id: SourceId) -> bool {
+    diagnostic
+        .primary()
+        .is_some_and(|span| span.source_id() == source_id)
+        || diagnostic
+            .related_locations()
+            .iter()
+            .any(|location| location.span().source_id() == source_id)
 }
 
 #[cfg(feature = "std")]
@@ -274,7 +350,14 @@ impl fmt::Display for TypolError {
                 TypolStage::Binding => "type binding failed",
                 TypolStage::Decoding => "configuration decoding failed",
                 TypolStage::Encoding => "configuration encoding failed",
-            })
+            })?;
+            formatter.write_str(": ")?;
+            match &self.failure {
+                Failure::Budget(error) => Display::fmt(error, formatter),
+                Failure::Schema(error) => Display::fmt(error, formatter),
+                Failure::Config(error) => Display::fmt(error, formatter),
+                Failure::Codec(error) => Display::fmt(error, formatter),
+            }
         }
     }
 }

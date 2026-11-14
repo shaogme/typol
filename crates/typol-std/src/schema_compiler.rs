@@ -3,9 +3,10 @@ use std::{error::Error, fmt, path::Path, slice::from_ref};
 use opeo::{ErrSlot, OResult, Out};
 
 use typol_core::{
-    BudgetError, Diagnostic, DiagnosticCode, DiagnosticContext, FilledTerminalSlot, TerminalSlot,
-    diagnostic_context,
+    BudgetError, ChargedBox, Diagnostic, DiagnosticCode, DiagnosticContext, FilledTerminalSlot,
+    TerminalSlot, diagnostic_context,
 };
+use typol_i18n::{Translator, t};
 use typol_report::{DiagnosticReport, ReportContext};
 use typol_schema::{
     DiagnosticList, SchemaCompileBudgetDomain, SchemaCompileContext, SchemaCompileErrors,
@@ -41,6 +42,11 @@ impl FileSchemaCompileOptions {
             files,
             names,
         }
+    }
+
+    pub const fn with_translator(mut self, translator: Translator) -> Self {
+        self.schema = self.schema.with_translator(translator);
+        self
     }
 }
 
@@ -79,7 +85,7 @@ pub enum FileSchemaCompileFailure<'a> {
 
 enum StoredFileFailure {
     Root(HostError),
-    Compilation(SchemaCompileErrors),
+    Compilation(ChargedBox<SchemaCompileErrors>),
 }
 
 struct FileErrorPayload {
@@ -87,6 +93,15 @@ struct FileErrorPayload {
     names: SourceNames,
     host_failure: Option<HostError>,
     usage: SchemaCompileUsage,
+}
+
+struct RetainedFileFailure<'context> {
+    slot: TerminalSlot<FileErrorPayload>,
+    failure: StoredFileFailure,
+    names: SourceNames,
+    host_failure: Option<HostError>,
+    context: &'context SchemaCompileContext,
+    translator: Translator,
 }
 
 enum FileErrorStorage {
@@ -103,18 +118,24 @@ enum FileErrorStorage {
 
 pub struct FileSchemaCompileErrors {
     storage: FileErrorStorage,
+    translator: Translator,
 }
 
 impl FileSchemaCompileErrors {
-    fn initialization(error: SchemaCompileErrors) -> Self {
+    fn initialization(error: SchemaCompileErrors, translator: Translator) -> Self {
         let usage = Self::initialization_usage(&error, 0);
-        Self::initialization_with_usage(error, usage)
+        Self::initialization_with_usage(error, usage, translator)
     }
 
-    fn initialization_with_usage(errors: SchemaCompileErrors, usage: SchemaCompileUsage) -> Self {
+    fn initialization_with_usage(
+        errors: SchemaCompileErrors,
+        usage: SchemaCompileUsage,
+        translator: Translator,
+    ) -> Self {
         let usage = Self::usage_with_failure(&errors, usage);
         Self {
             storage: FileErrorStorage::Initialization { errors, usage },
+            translator,
         }
     }
 
@@ -173,13 +194,15 @@ impl FileSchemaCompileErrors {
             )
     }
 
-    fn retained(
-        slot: TerminalSlot<FileErrorPayload>,
-        failure: StoredFileFailure,
-        names: SourceNames,
-        host_failure: Option<HostError>,
-        context: &SchemaCompileContext,
-    ) -> Self {
+    fn retained(request: RetainedFileFailure<'_>) -> Self {
+        let RetainedFileFailure {
+            slot,
+            failure,
+            names,
+            host_failure,
+            context,
+            translator,
+        } = request;
         let usage = context.usage();
         let Some(slot) = slot.store(FileErrorPayload {
             failure,
@@ -188,11 +211,13 @@ impl FileSchemaCompileErrors {
             usage,
         }) else {
             return Self::initialization_with_usage(
-                SchemaCompileErrors::budget_failure(BudgetError::CapacityExceeded),
+                SchemaCompileErrors::budget_failure(BudgetError::CapacityExceeded, translator),
                 usage,
+                translator,
             );
         };
-        let fallback = SchemaCompileErrors::budget_failure(BudgetError::CapacityExceeded);
+        let fallback =
+            SchemaCompileErrors::budget_failure(BudgetError::CapacityExceeded, translator);
         let fallback_usage = Self::usage_with_failure(&fallback, usage);
         Self {
             storage: FileErrorStorage::Retained {
@@ -200,6 +225,7 @@ impl FileSchemaCompileErrors {
                 fallback,
                 fallback_usage,
             },
+            translator,
         }
     }
 
@@ -275,13 +301,17 @@ impl FileSchemaCompiler {
         options: FileSchemaCompileOptions,
         out: Out<'slot, 'borrow, FileSchemaCompileErrors>,
     ) -> OResult<'slot, FileSchemaCompilation> {
+        let translator = options.schema.translator();
         let mut schema_errors = ErrSlot::<SchemaCompileErrors>::new();
         let compiler = match schema_errors
             .try_call(|schema_out| SchemaCompiler::new(options.schema, schema_out))
         {
             Ok(compiler) => compiler,
             Err(caught) => {
-                return Err(out.fail(FileSchemaCompileErrors::initialization(caught.take())));
+                return Err(out.fail(FileSchemaCompileErrors::initialization(
+                    caught.take(),
+                    translator,
+                )));
             }
         };
 
@@ -290,7 +320,8 @@ impl FileSchemaCompiler {
             Ok(context) => context,
             Err(caught) => {
                 return Err(out.fail(FileSchemaCompileErrors::initialization(
-                    SchemaCompileErrors::budget_failure(caught.take()),
+                    SchemaCompileErrors::budget_failure(caught.take(), translator),
+                    translator,
                 )));
             }
         };
@@ -300,8 +331,9 @@ impl FileSchemaCompiler {
             Ok(slot) => slot,
             Err(caught) => {
                 return Err(out.fail(FileSchemaCompileErrors::initialization_with_usage(
-                    SchemaCompileErrors::budget_failure(caught.take()),
+                    SchemaCompileErrors::budget_failure(caught.take(), translator),
                     context.usage(),
+                    translator,
                 )));
             }
         };
@@ -311,8 +343,9 @@ impl FileSchemaCompiler {
             Ok(resolver) => resolver,
             Err(caught) => {
                 return Err(out.fail(FileSchemaCompileErrors::initialization_with_usage(
-                    SchemaCompileErrors::budget_failure(caught.take()),
+                    SchemaCompileErrors::budget_failure(caught.take(), translator),
                     context.usage(),
+                    translator,
                 )));
             }
         };
@@ -322,8 +355,9 @@ impl FileSchemaCompiler {
             Ok(names) => names,
             Err(caught) => {
                 return Err(out.fail(FileSchemaCompileErrors::initialization_with_usage(
-                    SchemaCompileErrors::budget_failure(caught.take()),
+                    SchemaCompileErrors::budget_failure(caught.take(), translator),
                     context.usage(),
+                    translator,
                 )));
             }
         };
@@ -347,13 +381,16 @@ impl FileSchemaCompiler {
                 }
                 drop(resolver);
                 drop(compiler);
-                return Err(out.fail(FileSchemaCompileErrors::retained(
-                    slot,
-                    StoredFileFailure::Root(error),
-                    names,
-                    Some(error),
-                    &context,
-                )));
+                return Err(
+                    out.fail(FileSchemaCompileErrors::retained(RetainedFileFailure {
+                        slot,
+                        failure: StoredFileFailure::Root(error),
+                        names,
+                        host_failure: Some(error),
+                        context: &context,
+                        translator,
+                    })),
+                );
             }
         };
 
@@ -374,13 +411,27 @@ impl FileSchemaCompiler {
                     usage: context.usage(),
                 })
             }
-            Err(caught) => Err(out.fail(FileSchemaCompileErrors::retained(
-                slot,
-                StoredFileFailure::Compilation(caught.take()),
-                names,
-                host_failure,
-                &context,
-            ))),
+            Err(caught) => Err(
+                match budget_errors.try_call(|budget_out| {
+                    ChargedBox::new(caught.take(), Some(context.execution()), budget_out)
+                }) {
+                    Ok(errors) => {
+                        out.fail(FileSchemaCompileErrors::retained(RetainedFileFailure {
+                            slot,
+                            failure: StoredFileFailure::Compilation(errors),
+                            names,
+                            host_failure,
+                            context: &context,
+                            translator,
+                        }))
+                    }
+                    Err(caught) => out.fail(FileSchemaCompileErrors::initialization_with_usage(
+                        SchemaCompileErrors::budget_failure(caught.take(), translator),
+                        context.usage(),
+                        translator,
+                    )),
+                },
+            ),
         }
     }
 }
@@ -432,14 +483,21 @@ impl fmt::Display for FileSchemaCompileErrors {
                 let span_location = |span| errors.span_location(span);
                 let diagnostics = errors.diagnostics();
                 let diagnostic_count = diagnostics.len();
+                let title = t! {
+                    name: "report.title.schema_compilation_failed",
+                    locale: self.translator
+                }
+                .map_err(|_| fmt::Error)?;
                 let diagnostic_label = if diagnostic_count == 1 {
-                    "diagnostic"
+                    t! { name: "report.diagnostic", locale: self.translator }
                 } else {
-                    "diagnostics"
+                    t! { name: "report.diagnostics", locale: self.translator }
                 };
                 write!(
                     formatter,
-                    "Schema compilation failed ({diagnostic_count} {diagnostic_label})"
+                    "{} ({diagnostic_count} {})",
+                    title,
+                    diagnostic_label.map_err(|_| fmt::Error)?
                 )?;
                 for (index, diagnostic) in diagnostics.iter().enumerate() {
                     if index > 0 {
@@ -451,7 +509,7 @@ impl fmt::Display for FileSchemaCompileErrors {
                         writer: formatter,
                         started: false,
                     };
-                    DiagnosticReport::new("", None, from_ref(diagnostic), context)
+                    DiagnosticReport::new("", None, from_ref(diagnostic), context, self.translator)
                         .write_to(&mut body)?;
                 }
                 Ok(())

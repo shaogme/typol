@@ -4,13 +4,14 @@ mod model;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use builder::TypeGraphBuilder as TypeGraphCompiler;
+pub(crate) use model::{ResolvedTypeGraph, ResolvedTypeKind, TypeShapeId, TypeUseId};
+
 use crate::{
     module_tree::{ModuleId, ModuleTree},
     session::ObjectState,
     symbols::{LookupResult, NamespaceTarget, SymbolState, SymbolTable, TypeSymbolId},
 };
-pub(crate) use builder::TypeGraphBuilder as TypeGraphCompiler;
-pub(crate) use model::{ResolvedTypeGraph, ResolvedTypeKind, TypeShapeId, TypeUseId};
 use opeo::{OResult, Out};
 use typol_core::BudgetError;
 use typol_syntax::{AstAccessError, TypePath};

@@ -1,6 +1,6 @@
 use crate::{
     context::AssignmentContext,
-    diagnostics::DiagnosticFactory,
+    diagnostics::{DetailedDiagnosticRequest, DiagnosticFactory},
     validation::Validator,
     value::ValueFactory,
     value_validation::{TreeContext, TreeTarget, support::TreeSupport},
@@ -11,6 +11,7 @@ use typol_core::{
     Diagnostic, DiagnosticCode, EnvironmentReference, ValueError, ValueKind, ValueScalar,
     ValueSource, ValueView,
 };
+use typol_i18n::t;
 use typol_model::BuiltinType;
 use typol_semantic::TypeKind;
 
@@ -41,13 +42,15 @@ impl EnvironmentReferenceValidator {
                 EnvironmentValidation::Reported
             });
         }
-        let diagnostic = DiagnosticFactory::make_diagnostic(
-            DiagnosticCode::CONFIG_VALUE_ERROR,
-            "environment source reference is invalid for this Schema field",
-            target.span,
-            None,
-            Some(ValueSource::EnvironmentVariable),
-        );
+        let diagnostic = DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+            code: DiagnosticCode::CONFIG_VALUE_ERROR,
+            message: t! { name: "diagnostic.environment.source_reference_invalid", locale: context.resources.translator }.into(),
+            primary: target.span,
+            path: None,
+            value_source: Some(ValueSource::EnvironmentVariable),
+            context: None,
+            translator: context.resources.translator,
+        });
         if context.diagnostics.push(diagnostic) {
             Ok(EnvironmentValidation::Reported)
         } else {
@@ -79,6 +82,7 @@ impl EnvironmentReferenceValidator {
         }
         let kind = TreeSupport::schema_call(
             &mut context.resources.schema_access_errors,
+            context.resources.translator,
             |schema_out| target.expected.kind(schema_out),
             out.reborrow(),
         )?;
@@ -86,6 +90,7 @@ impl EnvironmentReferenceValidator {
             TypeKind::Builtin(builtin) => (builtin, false),
             TypeKind::Option { inner } => match TreeSupport::schema_call(
                 &mut context.resources.schema_access_errors,
+                context.resources.translator,
                 |schema_out| inner.kind(schema_out),
                 out.reborrow(),
             )? {
@@ -99,6 +104,7 @@ impl EnvironmentReferenceValidator {
         };
         let authorization = TreeSupport::schema_call(
             &mut context.resources.schema_access_errors,
+            context.resources.translator,
             |schema_out| field.environment(schema_out),
             out.reborrow(),
         )?;
@@ -108,6 +114,7 @@ impl EnvironmentReferenceValidator {
         let authorized_name = authorization.name();
         let equal = TreeSupport::budget_call(
             &mut context.resources.budget_errors,
+            context.resources.translator,
             |budget_out| {
                 context
                     .resources
@@ -137,6 +144,7 @@ impl EnvironmentReferenceValidator {
     ) -> OResult<'slot, bool> {
         let names_match = TreeSupport::budget_call(
             &mut context.resources.budget_errors,
+            context.resources.translator,
             |budget_out| {
                 context
                     .resources
@@ -166,6 +174,7 @@ impl EnvironmentReferenceValidator {
             (Some(ValueScalar::String(left)), Some(ValueScalar::String(right))) => {
                 Ok(TreeSupport::budget_call(
                     &mut context.resources.budget_errors,
+                    context.resources.translator,
                     |budget_out| {
                         context
                             .resources
@@ -192,6 +201,7 @@ impl EnvironmentReferenceValidator {
         for (index, byte) in name.bytes().enumerate() {
             TreeSupport::budget_call(
                 &mut context.resources.budget_errors,
+                context.resources.translator,
                 |budget_out| context.resources.budget.consume(1, budget_out),
                 out.reborrow(),
             )?;
@@ -237,6 +247,7 @@ impl EnvironmentReferenceValidator {
         if matches {
             TreeSupport::budget_call(
                 &mut context.resources.budget_errors,
+                context.resources.translator,
                 |budget_out| context.resources.budget.consume(1, budget_out),
                 out.reborrow(),
             )?;
@@ -299,6 +310,7 @@ impl EnvironmentReferenceValidator {
                     caught.take(),
                     target.span,
                     Some(ValueSource::ExplicitFallback),
+                    context.resources.translator,
                 )));
             }
         };
@@ -318,6 +330,7 @@ impl EnvironmentReferenceValidator {
                         caught.take(),
                         target.span,
                         Some(ValueSource::ExplicitFallback),
+                        context.resources.translator,
                     )));
                 }
             }
@@ -325,6 +338,7 @@ impl EnvironmentReferenceValidator {
             scalar
         };
         let metadata = AssignmentContext {
+            translator: context.resources.translator,
             schema: context.schema,
             node: None,
             locations: context.locations,

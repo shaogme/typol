@@ -1,12 +1,12 @@
 locale en;
 
 message cli.help = "Usage:
-  typol [--language en|zh-CN] --help
-  typol [--language en|zh-CN] schema check <schema.tschem>
-  typol [--language en|zh-CN] schema fmt [--check] <schema.tschem>
-  typol [--language en|zh-CN] config check --schema <schema.tschem> [--environment inherit|empty] <config.tconf>
-  typol [--language en|zh-CN] config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] [--reject-secrets] <config.tconf>
-  typol [--language en|zh-CN] config fmt --schema <schema.tschem> [--environment inherit|empty] [--check] <config.tconf>
+  typol [--language en|zh-CN] [--format text|json] [--diagnostic-detail] --help
+  typol [global options] schema check <schema.tschem>
+  typol [global options] schema fmt [--check] <schema.tschem>
+  typol [global options] config check --schema <schema.tschem> [--environment inherit|empty] <config.tconf>
+  typol [global options] config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] [--reject-secrets] <config.tconf>
+  typol [global options] config fmt --schema <schema.tschem> [--environment inherit|empty] [--check] <config.tconf>
 
 Commands:
   schema check       Compile and check a schema and its imports
@@ -17,6 +17,8 @@ Commands:
 
 Options:
   --language         Select English or Simplified Chinese (default: detected)
+  --format           text (default) or versioned JSON diagnostics
+  --diagnostic-detail Include internal diagnostic context in JSON output
   --environment      inherit (default) reads process environment; empty ignores it
   --pretty           Output IR with indentation
   --reject-secrets   Fail before writing IR if any value is marked secret
@@ -24,7 +26,7 @@ Options:
   --check            Check schema fmt without writing the file
   -h, --help         Show this help
 
-Use --language before the command. Set TYPOL_LANG to select a language when the option is omitted.\n";
+Put global options before the command. --diagnostic-detail requires --format=json. Set TYPOL_LANG to select a language when --language is omitted.\n";
 message cli.error_prefix = "Command line error: ";
 message cli.diagnostic_prefix = "Typol diagnostic details:\n";
 message cli.write_stdout_error = "Unable to write to standard output.";
@@ -63,13 +65,26 @@ message cli.config_path_missing = "Missing config file path.";
 message cli.config_path_extra = "Only one config file path may be specified.";
 message cli.language_missing = "--language is missing a value.";
 message cli.language_invalid = "--language must be en or zh-CN.";
+message cli.format_missing = "--format is missing a value.";
+message cli.format_invalid = "--format must be text or json.";
+message cli.diagnostic_detail_repeated = "--diagnostic-detail may only be specified once.";
+message cli.diagnostic_detail_requires_json = "--diagnostic-detail requires --format=json.";
 message report.path = "Path";
 message report.location = "Location";
 message report.location_unavailable = "location unavailable";
 message report.unknown_source = "unknown source";
 message report.rule = "Rule";
+message report.related_location = "Related location";
+message report.related_role.previous_declaration = "previous declaration";
+message report.related_role.first_declaration = "first declaration";
+message report.related_role.type_or_field_definition = "type or field definition";
+message report.related_role.constraint_definition = "constraint definition";
+message report.related_role.associated_input = "associated input";
+message report.kind = "Kind";
+message report.diagnostic_stage = "Diagnostic stage";
+message report.field_unavailable = "unavailable";
+message report.redacted = "redacted";
 message report.source = "Source";
-message report.diagnostic_message_unavailable = "diagnostic message unavailable";
 message report.source_excerpt_unavailable = "source excerpt unavailable";
 message report.diagnostic = "diagnostic";
 message report.diagnostics = "diagnostics";
@@ -162,12 +177,14 @@ message diagnostic.validation.variants_restriction_failed = "the selected enum v
 message diagnostic.validation.duplicate_array_elements = "array contains duplicate elements";
 message diagnostic.validation.collection_boundary_failed = "collection does not satisfy its boundary constraint";
 message diagnostic.config.required_field_missing = "required field is missing";
-message diagnostic.config.duplicate_object_field_or_map_key = "duplicate object field or map key";
+message diagnostic.config.duplicate_object_field = "duplicate object field";
+message diagnostic.config.duplicate_map_key = "duplicate map key";
+message diagnostic.config.environment_reference_metadata_required = "environment source requires structured reference metadata";
 message diagnostic.config.expected_value = "expected a configuration value here";
 message diagnostic.config.scalar_type_mismatch = "literal is incompatible with the target scalar type";
 message diagnostic.config.scalar_out_of_range = "numeric literal is outside the target type range";
 message diagnostic.config.none_requires_option = "none can only be assigned to an optional type";
-message diagnostic.config.fixed_array_length_mismatch = "fixed-size array element count does not match the schema declaration";
+message diagnostic.config.fixed_array_length_mismatch = "fixed-size array expects {expected} elements, but the input contains {actual}";
 message diagnostic.config.trailing_content = "unexpected trailing content after the root object";
 message diagnostic.environment.resource_limit = "environment read exceeded the resource limit";
 message diagnostic.environment.name_invalid = "environment name is invalid or does not match field authorization";
@@ -188,6 +205,7 @@ message diagnostic.emergency.capacity_exceeded = "workspace capacity exceeded";
 message diagnostic.emergency.diagnostic_limit_reached = "diagnostic limit reached; subsequent errors were not collected";
 message diagnostic.emergency.internal_error = "an internal error prevented the operation";
 message diagnostic.emergency.source_input_error = "source input could not be processed";
+message diagnostic.emergency.syntax_error = "Schema syntax error";
 message diagnostic.label.evaluation_failed_here = "evaluation failed here";
 message diagnostic.label.constraint_defined_here = "constraint defined here";
 message diagnostic.syntax.expected_punctuation = "expected punctuation here";
@@ -202,6 +220,7 @@ message diagnostic.syntax.unknown_annotation = "unknown Schema annotation";
 message diagnostic.syntax.boundary_argument = "boundary argument must be min or max";
 message diagnostic.syntax.expected_boolean_literal = "expected a boolean literal here";
 message diagnostic.syntax.invalid_type = "not a valid type here";
+message diagnostic.syntax.unique_argument = "@unique argument must be by";
 message diagnostic.syntax.expected_type_expression = "expected a type expression here";
 message diagnostic.syntax.module_missing_closing_brace = "module declaration is missing a closing brace";
 message diagnostic.syntax.expected_schema_declaration = "expected a Schema declaration here";
@@ -298,6 +317,7 @@ message diagnostic.syntax.float_literal_requires_integer_part = "floating-point 
 message diagnostic.syntax.incomplete_escape_sequence = "string escape sequence is incomplete";
 message diagnostic.syntax.block_string_requires_newline = "a block string opening delimiter must be followed by a line ending";
 message diagnostic.syntax.invalid_character = "source contains an invalid character";
+message diagnostic.syntax.invalid_utf8 = "source contains invalid UTF-8";
 message diagnostic.syntax.invalid_line_ending = "a bare CR is not a valid line ending";
 message diagnostic.syntax.malformed_float = "floating-point literal is malformed";
 message diagnostic.syntax.malformed_hex_integer = "hexadecimal integer literal is malformed";
@@ -310,3 +330,62 @@ message diagnostic.schema.combined_length_constraints_unsatisfiable = "combined 
 message diagnostic.schema.combined_numeric_constraints_unsatisfiable = "combined numeric constraints have no satisfiable range";
 message diagnostic.schema.combined_size_constraints_unsatisfiable = "combined @size constraints have no satisfiable range";
 message diagnostic.schema.combined_sum_constraints_unsatisfiable = "combined @sum constraints have no satisfiable range";
+message diagnostic.custom.resource_limit_exceeded = "resource limit exceeded";
+message diagnostic.custom.allocation_failed = "memory allocation failed";
+message diagnostic.custom.lexical_error = "source contains a lexical error";
+message diagnostic.custom.schema_syntax_error = "schema syntax is invalid";
+message diagnostic.custom.diagnostic_limit_reached = "diagnostic limit reached";
+message diagnostic.custom.regex_syntax_error = "regular expression syntax is invalid";
+message diagnostic.custom.schema_semantic_error = "schema static checks failed";
+message diagnostic.custom.schema_resolver_error = "schema import could not be resolved";
+message diagnostic.custom.internal_error = "an internal error prevented the operation";
+message diagnostic.custom.config_syntax_error = "configuration syntax is invalid";
+message diagnostic.custom.config_value_error = "configuration value has an invalid shape or type";
+message diagnostic.custom.config_validation_error = "configuration value failed a constraint";
+message diagnostic.custom.config_environment_error = "environment value could not be read or converted";
+message diagnostic.custom.type_binding_error = "Rust type does not match the schema";
+message diagnostic.custom.rust_conversion_error = "Rust value conversion failed";
+message diagnostic.custom.config_encoding_error = "value cannot be encoded as configuration text";
+message diagnostic.custom.source_input_error = "source input could not be read";
+message diagnostic.custom.capacity_exceeded = "workspace capacity exceeded";
+message diagnostic.custom.schema_context_mismatch = "root schema belongs to a different compilation context";
+message diagnostic.custom.schema_session_finished = "schema compilation session has ended";
+message diagnostic.cli.operation_failed = "operation failed";
+message diagnostic.config.expected_enum_variant_prefix = "enum values must start with a dot before the variant name";
+message diagnostic.config.expected_enum_payload = "single-payload enum variants require a parenthesized payload";
+message diagnostic.config.expected_enum_payload_close_parenthesis = "single-payload enum values must end with a closing parenthesis";
+message diagnostic.config.expected_array = "expected an array value";
+message diagnostic.config.expected_map = "expected a map value";
+message diagnostic.config.expected_map_key_colon = "expected a colon after the map key";
+message diagnostic.config.expected_environment_open_parenthesis = "expected an opening parenthesis after the environment expression";
+message diagnostic.config.expected_environment_close_parenthesis = "expected a closing parenthesis after the environment expression";
+message diagnostic.config.expected_struct_object = "expected a struct object";
+message diagnostic.config.expected_struct_field_colon = "expected a colon after the field name";
+message diagnostic.environment.target_type_invalid = "environment expressions require a scalar target type";
+message diagnostic.validation.assertion_failed = "configuration value does not satisfy the assertion";
+message diagnostic.label.associated_input = "related input";
+message diagnostic.config.string_token_payload_missing = "string token has no decoded content";
+message diagnostic.config.decoded_string_limit_exceeded = "decoded string exceeds the configured byte limit";
+message diagnostic.config.integer_type_unavailable = "schema integer type information is unavailable";
+message diagnostic.config.value_construction_resource_limit = "constructing the configuration value exceeded a resource limit";
+message diagnostic.config.value_construction_allocation_failed = "memory allocation failed while constructing the configuration value";
+message diagnostic.config.value_construction_capacity_exceeded = "configuration value workspace capacity is insufficient";
+message diagnostic.config.value_construction_internal_failure = "configuration value construction encountered an invalid internal state";
+message diagnostic.config.enum_variant_name_expected = "expected an enum variant name after the dot";
+message diagnostic.config.map_key_expected = "expected a string key or closing brace in the map object";
+message diagnostic.config.object_field_name_expected = "expected a field name or closing brace in the struct object";
+message diagnostic.config.source_id_unrepresentable = "configuration source identifier exceeds the representable range";
+message diagnostic.config.located_node_limit = "located configuration node count exceeded the limit";
+message diagnostic.config.assertion_traversal_limit = "assertion instance traversal depth exceeded the limit";
+message diagnostic.config.fallback_rule_limit = "fallback rule count exceeded the limit";
+message diagnostic.config.array_element_limit = "array element count exceeded the limit";
+message diagnostic.config.name_byte_limit = "name or map key exceeds the configured string byte limit";
+message diagnostic.config.field_name_byte_limit = "field name exceeds the configured string byte limit";
+message diagnostic.config.enum_variant_name_byte_limit = "enum variant name exceeds the configured string byte limit";
+message diagnostic.config.enum_payload_resource_limit = "enum payload exceeded a resource limit";
+message diagnostic.config.delimiter_nesting_limit = "configuration delimiter nesting depth exceeded the limit";
+message diagnostic.config.value_tree_nesting_limit = "configuration value tree nesting depth exceeded the limit";
+message diagnostic.environment.source_reference_invalid = "environment source reference is invalid for this Schema field";
+message report.related_locations = "Related locations";
+message report.related_locations_unavailable = "unavailable";
+message report.related_locations_truncated = "truncated at the location limit";

@@ -257,18 +257,26 @@ fn read_hash_map<'slot, T: Typol, Adapter: HashMapAdapter>(
         return context.reject_with_path(out.reborrow());
     };
     let Some(bytes) = entries.len().checked_mul(size_of::<(String, T)>()) else {
-        return Err(out.fail(ConversionContext::resource_error()));
+        return Err(out.fail(ConversionContext::resource_error(
+            context.session().translator(),
+        )));
     };
     context.target_bytes(bytes, out.reborrow())?;
     let mut result = Adapter::new::<T>();
     if !Adapter::try_reserve(&mut result, entries.len()) {
-        return Err(out.fail(ConversionContext::allocation_error()));
+        return Err(out.fail(ConversionContext::allocation_error(
+            context.session().translator(),
+        )));
     }
     let Some(actual) = Adapter::capacity(&result).checked_mul(size_of::<(String, T)>()) else {
-        return Err(out.fail(ConversionContext::resource_error()));
+        return Err(out.fail(ConversionContext::resource_error(
+            context.session().translator(),
+        )));
     };
     let Some(extra) = actual.checked_sub(bytes) else {
-        return Err(out.fail(ConversionContext::resource_error()));
+        return Err(out.fail(ConversionContext::resource_error(
+            context.session().translator(),
+        )));
     };
     context.target_bytes(extra, out.reborrow())?;
     for entry in entries {
@@ -281,6 +289,7 @@ fn read_hash_map<'slot, T: Typol, Adapter: HashMapAdapter>(
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Conversion,
                 Failure::internal(NAMED_ENTRY_NAME_MISSING),
+                context.session().translator(),
             )));
         };
         let key = context.target_text(entry.name(), out.reborrow())?;
@@ -312,7 +321,9 @@ fn read_btree_map<'slot, T: Typol>(
         return context.reject_with_path(out.reborrow());
     };
     let Some(bytes) = entries.len().checked_mul(size_of::<(String, T)>()) else {
-        return Err(out.fail(ConversionContext::resource_error()));
+        return Err(out.fail(ConversionContext::resource_error(
+            context.session().translator(),
+        )));
     };
     context.target_bytes(bytes, out.reborrow())?;
     let mut result = BTreeMap::new();
@@ -326,6 +337,7 @@ fn read_btree_map<'slot, T: Typol>(
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Conversion,
                 Failure::internal(NAMED_ENTRY_NAME_MISSING),
+                context.session().translator(),
             )));
         };
         let key = context.target_text(entry.name(), out.reborrow())?;
@@ -375,6 +387,7 @@ fn read_ordered_map<'slot, T: Typol>(
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Conversion,
                 Failure::internal(NAMED_ENTRY_NAME_MISSING),
+                context.session().translator(),
             )));
         };
         context.session().budget_codec(
@@ -415,18 +428,26 @@ fn read_ordered_map<'slot, T: Typol>(
         previous = Some(*key);
     }
     let Some(bytes) = sorted.len().checked_mul(size_of::<(String, T)>()) else {
-        return Err(out.fail(ConversionContext::resource_error()));
+        return Err(out.fail(ConversionContext::resource_error(
+            context.session().translator(),
+        )));
     };
     context.target_bytes(bytes, out.reborrow())?;
     let mut values = Vec::new();
     if values.try_reserve_exact(sorted.len()).is_err() {
-        return Err(out.fail(ConversionContext::allocation_error()));
+        return Err(out.fail(ConversionContext::allocation_error(
+            context.session().translator(),
+        )));
     }
     let Some(actual) = values.capacity().checked_mul(size_of::<(String, T)>()) else {
-        return Err(out.fail(ConversionContext::resource_error()));
+        return Err(out.fail(ConversionContext::resource_error(
+            context.session().translator(),
+        )));
     };
     let Some(extra) = actual.checked_sub(bytes) else {
-        return Err(out.fail(ConversionContext::resource_error()));
+        return Err(out.fail(ConversionContext::resource_error(
+            context.session().translator(),
+        )));
     };
     context.target_bytes(extra, out.reborrow())?;
     for (name, source_value) in sorted {

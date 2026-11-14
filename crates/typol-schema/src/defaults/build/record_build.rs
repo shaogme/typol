@@ -9,7 +9,7 @@ use crate::{
     symbols::SymbolState,
     types::ResolvedTypeKind,
 };
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 
 use opeo::{OResult, Out};
 use typol_core::ChargedVec;
@@ -39,11 +39,12 @@ impl<'b, 'a, 'd> RecordTaskBuilder<'b, 'a, 'd> {
         state: &mut TaskState<'a>,
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, bool> {
+        let translator = self.compiler.context.translator();
         if let Some((id, supplied)) = frame.waiting.take() {
             let Some(field) = self.compiler.field_symbol(id) else {
                 self.compiler
                     .diagnostics
-                    .abort(schema_internal!(frame.span));
+                    .abort(schema_internal!(translator, frame.span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             let target = match self.compiler.types.field_type(id) {
@@ -51,7 +52,7 @@ impl<'b, 'a, 'd> RecordTaskBuilder<'b, 'a, 'd> {
                 None => {
                     self.compiler
                         .diagnostics
-                        .abort(schema_internal!(field.declaration().span()));
+                        .abort(schema_internal!(translator, field.declaration().span()));
                     return Err(out.fail(BuildFailure::empty()));
                 }
             };
@@ -105,14 +106,14 @@ impl<'b, 'a, 'd> RecordTaskBuilder<'b, 'a, 'd> {
             let Some(supplied) = supplied else {
                 self.compiler
                     .diagnostics
-                    .abort(schema_internal!(frame.span));
+                    .abort(schema_internal!(translator, frame.span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             frame.index += 1;
             let Some(field) = self.compiler.field_symbol(id) else {
                 self.compiler
                     .diagnostics
-                    .abort(schema_internal!(frame.span));
+                    .abort(schema_internal!(translator, frame.span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             if field.state() != SymbolState::Valid {
@@ -184,10 +185,11 @@ impl<'b, 'a, 'd> RecordTaskBuilder<'b, 'a, 'd> {
                     field.declaration().name_node(ast_out)
                 })?;
                 self.compiler.report_invalid(
-                    diagnostic_message!(
-                        "diagnostic.schema.default_struct_required_field_missing",
-                        "struct default omits a required field"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.default_struct_required_field_missing",
+                        locale: self.compiler.diagnostics.translator(),
+                    }
+                    .into(),
                     name_node.span(),
                     out.reborrow(),
                 )?;

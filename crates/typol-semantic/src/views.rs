@@ -2,6 +2,14 @@ mod assertions;
 mod expression;
 mod kinds;
 
+pub use crate::expressions::{ExpressionLiteral, ExpressionMethodInfo};
+pub use assertions::{AssertionIter, AssertionList, AssertionView};
+pub use expression::{
+    ClosureView, ExpressionArgument, ExpressionBindingInfo, ExpressionKind, ExpressionNodeView,
+    ExpressionView,
+};
+pub use kinds::{ConstraintData, RegexCounts, RegexView, TypeKind, VariantPayloadInfo};
+
 use crate::{
     ConstraintList, EnvironmentAuthorization,
     model::{
@@ -14,14 +22,6 @@ use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
     BudgetError, ConfigValue, DiagnosticContext, ExecutionBudget, SourceSpan, diagnostic_context,
 };
-
-pub use crate::expressions::{ExpressionLiteral, ExpressionMethodInfo};
-pub use assertions::{AssertionIter, AssertionList, AssertionView};
-pub use expression::{
-    ClosureView, ExpressionArgument, ExpressionBindingInfo, ExpressionKind, ExpressionNodeView,
-    ExpressionView,
-};
-pub use kinds::{ConstraintData, RegexCounts, RegexView, TypeKind, VariantPayloadInfo};
 
 static VIEW_INDEX_INVARIANT: DiagnosticContext =
     diagnostic_context!("typol-semantic", "schema-view", "field-index-entry-missing",);

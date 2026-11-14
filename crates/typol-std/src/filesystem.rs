@@ -5,9 +5,11 @@ mod source_writer;
 #[cfg(test)]
 mod allocation_tests;
 
-use std::{fmt, fs::File, mem::take, path::Path};
+pub use input::{FileConfigInput, IoWriteSink, ReadSource};
+pub use source_writer::{FileSourceWriter, SourceWriteError, SourceWriteErrorKind};
 
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
+use std::{fmt, fs::File, mem::take, path::Path};
 use typol_core::{BudgetError, ChargedVec, SourceId};
 use typol_schema::{
     ResolverError, SchemaCompileContext, SchemaCompileStage, SchemaResolveRequest, SchemaResolver,
@@ -19,9 +21,6 @@ use self::{
     paths::{FileIdentity, NativePath, PathCandidate, PathResolutionParams},
 };
 use crate::{FileSchemaLimits, HostError, HostErrorKind, HostFailureStep, HostOperation};
-
-pub use input::{FileConfigInput, IoWriteSink, ReadSource};
-pub use source_writer::{FileSourceWriter, SourceWriteError, SourceWriteErrorKind};
 
 struct SelectedFile {
     path: NativePath,

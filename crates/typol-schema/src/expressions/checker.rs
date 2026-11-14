@@ -2,6 +2,8 @@ mod operations;
 mod tasks;
 mod type_checks;
 
+pub(super) use tasks::ExpressionCompileInput;
+
 use crate::{
     diagnostics::{BuildFailure, DiagnosticCollector},
     expressions::{
@@ -15,7 +17,7 @@ use crate::{
 };
 use opeo::{OResult, Out};
 use typol_core::{ChargedVec, SourceSpan};
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 use typol_syntax::{BinaryOperator, BuiltinType, Expr, ExprKind, ScalarLiteral, UnaryOperator};
 
 use operations::{
@@ -24,8 +26,6 @@ use operations::{
 };
 use tasks::{CheckTask, CheckTaskStack, EnterTask};
 use type_checks::TypeChecks;
-
-pub(super) use tasks::ExpressionCompileInput;
 
 struct FinishExpressionInput<'expression> {
     expression: Expr<'expression>,
@@ -97,9 +97,10 @@ impl ExpressionChecker<'_, '_> {
             )?;
         }
         let Some(result_id) = checker.types.semantic_id(result_type) else {
-            checker
-                .diagnostics
-                .push(schema_internal!(expression.span()));
+            checker.diagnostics.push(schema_internal!(
+                checker.diagnostics.translator(),
+                expression.span()
+            ));
             return Err(out.fail(BuildFailure::empty()));
         };
         Ok(CompiledExpression::new(
@@ -466,6 +467,7 @@ impl ExpressionChecker<'_, '_> {
             allow_negative_minimum,
             child,
         } = input;
+        let translator = self.symbols.context().translator();
         let (kind, ty) =
             match TypeChecks::ast_access(self.symbols.context(), out.reborrow(), |ast_out| {
                 expression.kind(ast_out)
@@ -559,10 +561,10 @@ impl ExpressionChecker<'_, '_> {
                                 }
                                 _ => {
                                     return self.operations().fail(
-                                        diagnostic_message!(
-                                            "diagnostic.schema.field_access_requires_struct",
-                                            "field access requires a struct value"
-                                        ),
+                                        t! {
+                                            name: "diagnostic.schema.field_access_requires_struct",
+                                            locale: translator,
+                                        },
                                         field.span(),
                                         out.reborrow(),
                                     );
@@ -571,10 +573,10 @@ impl ExpressionChecker<'_, '_> {
                         }
                         ExpressionType::Builtin(_) => {
                             return self.operations().fail(
-                                diagnostic_message!(
-                                    "diagnostic.schema.field_access_requires_struct",
-                                    "field access requires a struct value"
-                                ),
+                                t! {
+                                    name: "diagnostic.schema.field_access_requires_struct",
+                                    locale: translator,
+                                },
                                 field.span(),
                                 out.reborrow(),
                             );
@@ -584,10 +586,10 @@ impl ExpressionChecker<'_, '_> {
                         LookupResult::Found(id) => id,
                         LookupResult::Missing => {
                             return self.operations().fail(
-                                diagnostic_message!(
-                                    "diagnostic.schema.field_missing_from_struct",
-                                    "field does not exist in the struct"
-                                ),
+                                t! {
+                                    name: "diagnostic.schema.field_missing_from_struct",
+                                    locale: translator,
+                                },
                                 field.span(),
                                 out.reborrow(),
                             );

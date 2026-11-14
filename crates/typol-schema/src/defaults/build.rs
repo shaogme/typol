@@ -17,10 +17,11 @@ use crate::{
     diagnostics::{BuildFailure, EmergencyDiagnostics},
     symbols::FieldSymbolId,
 };
-use typol_i18n::diagnostic_message;
+use typol_i18n::{Translator, t};
 
 use opeo::{OResult, Out};
 use typol_core::{ChargedVec, Diagnostic, SourceSpan, ValueError, ValueErrorKind};
+use typol_semantic::CopyError;
 use typol_syntax::{AstAccessError, BraceKey};
 
 pub(super) struct DefaultBuilder<'b, 'a, 'd> {
@@ -45,6 +46,7 @@ impl<'b, 'a, 'd> DefaultBuilder<'b, 'a, 'd> {
         root: FieldSymbolId,
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, bool> {
+        let translator = self.compiler.context.translator();
         let mut tasks = self.compiler.new_vec(out.reborrow())?;
         self.push_task(&mut tasks, Task::Field(root), out.reborrow())?;
         let mut state = TaskState::new();
@@ -62,23 +64,25 @@ impl<'b, 'a, 'd> DefaultBuilder<'b, 'a, 'd> {
                 Task::Field(id) => {
                     let fallback = self.compiler.fallback;
                     let Some(field) = self.compiler.field_symbol(id) else {
-                        self.compiler.diagnostics.abort(schema_internal!(fallback));
+                        self.compiler
+                            .diagnostics
+                            .abort(schema_internal!(translator, fallback));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     let Some(cache_state) = self.compiler.cached_default_state(id) else {
                         self.compiler
                             .diagnostics
-                            .abort(schema_internal!(field.declaration().span()));
+                            .abort(schema_internal!(translator, field.declaration().span()));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     match cache_state {
                         CachedDefaultState::Finished => continue,
                         CachedDefaultState::Visiting => {
                             if self.compiler.diagnostics.push_semantic(
-                                diagnostic_message!(
-                                    "diagnostic.schema.default_recursive_expansion",
-                                    "default value has recursive expansion"
-                                ),
+                                t! {
+                                    name: "diagnostic.schema.default_recursive_expansion",
+                                    locale: translator,
+                                },
                                 field.declaration().span(),
                             ) {
                                 return Err(out.fail(BuildFailure::empty()));
@@ -225,7 +229,9 @@ impl<'b, 'a, 'd> DefaultBuilder<'b, 'a, 'd> {
         }
         let Some(cached) = self.compiler.cached_default(root) else {
             let fallback = self.compiler.fallback;
-            self.compiler.diagnostics.abort(schema_internal!(fallback));
+            self.compiler
+                .diagnostics
+                .abort(schema_internal!(translator, fallback));
             return Err(out.fail(BuildFailure::empty()));
         };
         Ok(matches!(cached, CachedDefault::Valid(_)))
@@ -296,9 +302,12 @@ impl<'b, 'a, 'd> DefaultBuilder<'b, 'a, 'd> {
         state: &mut TaskState<'a>,
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, ()> {
+        let translator = self.compiler.context.translator();
         if frame.index > 0 {
             let Some(previous) = frame.index.checked_sub(1) else {
-                self.compiler.diagnostics.push(schema_internal!(frame.span));
+                self.compiler
+                    .diagnostics
+                    .push(schema_internal!(translator, frame.span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             let entry = self.ast_access(out.reborrow(), |ast_out| {
@@ -307,7 +316,7 @@ impl<'b, 'a, 'd> DefaultBuilder<'b, 'a, 'd> {
             let Some(entry) = entry else {
                 self.compiler
                     .diagnostics
-                    .abort(schema_internal!(frame.span));
+                    .abort(schema_internal!(translator, frame.span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             let (key, span) = self.ast_access(out.reborrow(), |mut ast_out| {
@@ -395,23 +404,32 @@ impl<'b, 'a, 'd> DefaultBuilder<'b, 'a, 'd> {
         span: SourceSpan,
         out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, ()> {
+        let translator = self.compiler.context.translator();
         if self.compiler.set_cached_default(id, value).is_none() {
-            self.compiler.diagnostics.abort(schema_internal!(span));
+            self.compiler
+                .diagnostics
+                .abort(schema_internal!(translator, span));
             return Err(out.fail(BuildFailure::empty()));
         }
         Ok(())
     }
 
-    pub(super) fn value_diagnostic(error: ValueError, span: SourceSpan) -> Diagnostic {
+    pub(super) fn value_diagnostic(
+        error: ValueError,
+        span: SourceSpan,
+        translator: Translator,
+    ) -> Diagnostic {
         match error.kind() {
-            ValueErrorKind::ResourceLimitExceeded => EmergencyDiagnostics::resource(span),
-            ValueErrorKind::AllocationFailed => EmergencyDiagnostics::allocation(span),
-            ValueErrorKind::CapacityExceeded => EmergencyDiagnostics::capacity(span),
+            ValueErrorKind::ResourceLimitExceeded => {
+                EmergencyDiagnostics::resource(span, translator)
+            }
+            ValueErrorKind::AllocationFailed => EmergencyDiagnostics::allocation(span, translator),
+            ValueErrorKind::CapacityExceeded => EmergencyDiagnostics::capacity(span, translator),
             ValueErrorKind::InternalInvariantFailure => match error.context() {
-                Some(context) => EmergencyDiagnostics::internal(span, context),
-                None => schema_internal!(span),
+                Some(context) => EmergencyDiagnostics::internal(span, context, translator),
+                None => schema_internal!(translator, span),
             },
-            ValueErrorKind::EnvironmentReferenceRequired => schema_internal!(span),
+            ValueErrorKind::EnvironmentReferenceRequired => schema_internal!(translator, span),
             ValueErrorKind::DuplicateMapKey => {
                 let context = error.duplicate_indices().map_or_else(
                     || schema_context!("value-construction", "duplicate-map-index-missing"),
@@ -420,7 +438,7 @@ impl<'b, 'a, 'd> DefaultBuilder<'b, 'a, 'd> {
                             .with_object_id(second as u64)
                     },
                 );
-                EmergencyDiagnostics::internal(span, context)
+                EmergencyDiagnostics::internal(span, context, translator)
             }
             ValueErrorKind::DuplicateFieldName => {
                 let context = error.duplicate_indices().map_or_else(
@@ -430,8 +448,25 @@ impl<'b, 'a, 'd> DefaultBuilder<'b, 'a, 'd> {
                             .with_object_id(second as u64)
                     },
                 );
-                EmergencyDiagnostics::internal(span, context)
+                EmergencyDiagnostics::internal(span, context, translator)
             }
+        }
+    }
+
+    pub(super) fn copy_diagnostic(
+        error: CopyError,
+        span: SourceSpan,
+        translator: Translator,
+    ) -> Diagnostic {
+        match error {
+            CopyError::Resource => EmergencyDiagnostics::resource(span, translator),
+            CopyError::Allocation => EmergencyDiagnostics::allocation(span, translator),
+            CopyError::Capacity => EmergencyDiagnostics::capacity(span, translator),
+            CopyError::Internal => schema_internal!(translator, span),
+            CopyError::InternalAt(context) => {
+                EmergencyDiagnostics::internal(span, context, translator)
+            }
+            CopyError::InvalidValue(error) => Self::value_diagnostic(error, span, translator),
         }
     }
 }

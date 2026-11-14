@@ -7,10 +7,11 @@ use core::{error::Error, fmt, slice::from_ref};
 use opeo::{ErrSlot, OResult, Out};
 use typol_config::{ConfigFailureStage, ConfigParseErrors};
 use typol_core::{
-    BudgetError, Diagnostic, DiagnosticCode, DiagnosticContext as ErrorContext, ExecutionBudget,
-    FilledTerminalSlot, SourceExcerptSet, SourceId, SourceSpan, TerminalSlot, diagnostic_context,
+    BudgetError, Diagnostic, DiagnosticCode, DiagnosticContext as ErrorContext,
+    DiagnosticFieldStatus, ExcerptStatus, ExecutionBudget, FilledTerminalSlot, SourceExcerptSet,
+    SourceId, SourceSpan, TerminalSlot, diagnostic_context,
 };
-use typol_i18n::{Language, Translator};
+use typol_i18n::{Translator, t};
 use typol_schema::{DiagnosticList, SchemaCompileErrors};
 use typol_semantic::SpanLocation;
 use typol_std::{
@@ -127,6 +128,7 @@ impl ExactSizeIterator for TypolDiagnosticIter<'_> {}
 
 pub(crate) struct ErrorSlot {
     slot: TerminalSlot<ErrorPayload>,
+    translator: Translator,
 }
 
 pub(crate) struct ErrorNames {
@@ -136,6 +138,7 @@ pub(crate) struct ErrorNames {
 
 pub(crate) struct StdTypolError {
     storage: ErrorStorage,
+    translator: Translator,
 }
 
 impl ErrorNames {
@@ -157,10 +160,11 @@ impl ErrorNames {
 impl ErrorSlot {
     pub(crate) fn in_budget<'slot>(
         budget: &ExecutionBudget,
+        translator: Translator,
         mut out: Out<'slot, '_, BudgetError>,
     ) -> OResult<'slot, Self> {
         let slot = TerminalSlot::new(budget, out.reborrow())?;
-        Ok(Self { slot })
+        Ok(Self { slot, translator })
     }
 
     fn finish(self, failure: Failure, names: ErrorNames, stage: TypolStage) -> TypolError {
@@ -173,7 +177,7 @@ impl ErrorSlot {
             names: names.names,
             names_failure: names.failure,
         });
-        StdTypolError::finish_stored_payload(slot, stage)
+        StdTypolError::finish_stored_payload(slot, stage, self.translator)
     }
 
     pub(crate) fn schema(self, errors: SchemaCompileErrors, names: SourceNames) -> TypolError {
@@ -222,39 +226,53 @@ impl StdTypolError {
     fn finish_stored_payload(
         slot: Option<FilledTerminalSlot<ErrorPayload>>,
         stage: TypolStage,
+        translator: Translator,
     ) -> Self {
         match slot {
             Some(slot) => Self {
                 storage: ErrorStorage::Retained { slot, stage },
+                translator,
             },
-            None => Self::payload_storage_failure(stage),
+            None => Self::payload_storage_failure(stage, translator),
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn simulated_payload_storage_failure(stage: TypolStage) -> Self {
-        Self::finish_stored_payload(None, stage)
+    pub(crate) fn simulated_payload_storage_failure(
+        stage: TypolStage,
+        translator: Translator,
+    ) -> Self {
+        Self::finish_stored_payload(None, stage, translator)
     }
 
-    pub(crate) fn file(errors: FileSchemaCompileErrors) -> Self {
+    pub(crate) fn file(errors: FileSchemaCompileErrors, translator: Translator) -> Self {
         Self {
             storage: ErrorStorage::File(errors),
+            translator,
         }
     }
 
-    pub(crate) fn schema_budget(error: BudgetError) -> Self {
-        Self::schema_initialization(SchemaCompileErrors::budget_failure(error))
+    pub(crate) fn schema_budget(error: BudgetError, translator: Translator) -> Self {
+        Self::schema_initialization(
+            SchemaCompileErrors::budget_failure(error, translator),
+            translator,
+        )
     }
 
-    pub(crate) fn schema_initialization(errors: SchemaCompileErrors) -> Self {
+    pub(crate) fn schema_initialization(
+        errors: SchemaCompileErrors,
+        translator: Translator,
+    ) -> Self {
         Self {
             storage: ErrorStorage::InlineSchema(errors),
+            translator,
         }
     }
 
-    pub(crate) fn host(error: HostError, stage: TypolStage) -> Self {
+    pub(crate) fn host(error: HostError, stage: TypolStage, translator: Translator) -> Self {
         Self {
             storage: ErrorStorage::InlineHost { error, stage },
+            translator,
         }
     }
 
@@ -262,11 +280,18 @@ impl StdTypolError {
         slot.finish_std(Failure::Codec(errors), names, TypolStage::Binding)
     }
 
-    fn payload_storage_failure(stage: TypolStage) -> Self {
-        let mut diagnostic = Diagnostic::emergency(DiagnosticCode::CAPACITY_EXCEEDED);
+    fn payload_storage_failure(stage: TypolStage, translator: Translator) -> Self {
+        let mut diagnostic = Diagnostic::translated_emergency(
+            DiagnosticCode::CAPACITY_EXCEEDED,
+            t! {
+                name: "diagnostic.internal.error_payload_capacity_exceeded",
+                locale: translator,
+            },
+        );
         diagnostic.set_context(Some(ERROR_PAYLOAD_STORAGE_CONTEXT));
         Self {
             storage: ErrorStorage::PayloadStorageFailure { diagnostic, stage },
+            translator,
         }
     }
 
@@ -357,6 +382,10 @@ impl StdTypolError {
         self.diagnostics().get(index)?.context()
     }
 
+    pub fn excerpt_status(&self, span: SourceSpan) -> ExcerptStatus {
+        self.excerpts().span_status(span)
+    }
+
     pub fn span_location(&self, span: SourceSpan) -> Option<SpanLocation> {
         if let Some(errors) = self.schema_compile_errors() {
             return errors.span_location(span);
@@ -397,6 +426,22 @@ impl StdTypolError {
         self.names().and_then(|names| names.name(source_id))
     }
 
+    pub fn source_name_status(&self, source_id: SourceId) -> DiagnosticFieldStatus {
+        if self.source_name(source_id).is_some() {
+            return DiagnosticFieldStatus::Available;
+        }
+        if self.host_error().and_then(HostError::source_id) == Some(source_id)
+            || self
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic_references_source(diagnostic, source_id))
+        {
+            DiagnosticFieldStatus::Unavailable
+        } else {
+            DiagnosticFieldStatus::NotApplicable
+        }
+    }
+
     pub fn names_failure(&self) -> Option<HostErrorKind> {
         match &self.storage {
             ErrorStorage::Retained { .. } => self.error_payload().and_then(|payload| {
@@ -410,12 +455,16 @@ impl StdTypolError {
 
     pub fn render<'slot>(
         &self,
-        translator: Translator,
         options: RenderOptions,
         mut out: Out<'slot, '_, DiagnosticRenderError>,
     ) -> OResult<'slot, String> {
         if let Some(error) = self.host_error() {
-            return DiagnosticRenderer::render_host(error, options, translator, out.reborrow());
+            return DiagnosticRenderer::render_host(
+                error,
+                options,
+                self.translator,
+                out.reborrow(),
+            );
         }
 
         let source_name = |id| self.source_name(id);
@@ -436,7 +485,7 @@ impl StdTypolError {
                     diagnostic_count: 1,
                     context,
                     options,
-                    translator,
+                    translator: self.translator,
                 },
                 out.reborrow(),
             );
@@ -451,7 +500,7 @@ impl StdTypolError {
                     diagnostic_count: errors.diagnostics().len(),
                     context,
                     options,
-                    translator,
+                    translator: self.translator,
                 },
                 out.reborrow(),
             );
@@ -466,8 +515,79 @@ impl StdTypolError {
                 diagnostic_count: diagnostics.len(),
                 context,
                 options,
-                translator,
+                translator: self.translator,
             },
+            out,
+        )
+    }
+
+    fn write_display<'slot, W: fmt::Write + ?Sized>(
+        &self,
+        writer: &mut W,
+        mut out: Out<'slot, '_, DiagnosticRenderError>,
+    ) -> OResult<'slot, ()> {
+        if let Some(error) = self.host_error() {
+            return DiagnosticRenderer::write_host(
+                error,
+                RenderOptions::default(),
+                self.translator,
+                writer,
+                out.reborrow(),
+            );
+        }
+
+        let source_name = |id| self.source_name(id);
+        let span_location = |span| self.span_location(span);
+        let context = DiagnosticContext {
+            source_name: &source_name,
+            span_location: &span_location,
+            excerpts: self.excerpts(),
+        };
+
+        if let ErrorStorage::PayloadStorageFailure { diagnostic, stage } = &self.storage {
+            return DiagnosticRenderer::write_report(
+                DiagnosticReport {
+                    title: DiagnosticReportTitle::PayloadStorageFailed,
+                    stage: Some(report_stage(*stage)),
+                    diagnostics: from_ref(diagnostic).iter(),
+                    diagnostic_count: 1,
+                    context,
+                    options: RenderOptions::default(),
+                    translator: self.translator,
+                },
+                writer,
+                out.reborrow(),
+            );
+        }
+
+        if let Some(errors) = self.schema_compile_errors() {
+            return DiagnosticRenderer::write_report(
+                DiagnosticReport {
+                    title: DiagnosticReportTitle::SchemaCompilationFailed,
+                    stage: None,
+                    diagnostics: errors.diagnostics().iter(),
+                    diagnostic_count: errors.diagnostics().len(),
+                    context,
+                    options: RenderOptions::default(),
+                    translator: self.translator,
+                },
+                writer,
+                out.reborrow(),
+            );
+        }
+
+        let diagnostics = self.diagnostics();
+        DiagnosticRenderer::write_report(
+            DiagnosticReport {
+                title: DiagnosticReportTitle::OperationFailed,
+                stage: Some(report_stage(self.stage())),
+                diagnostics: diagnostics.iter(),
+                diagnostic_count: diagnostics.len(),
+                context,
+                options: RenderOptions::default(),
+                translator: self.translator,
+            },
+            writer,
             out,
         )
     }
@@ -481,6 +601,16 @@ impl StdTypolError {
             _ => None,
         }
     }
+}
+
+fn diagnostic_references_source(diagnostic: &Diagnostic, source_id: SourceId) -> bool {
+    diagnostic
+        .primary()
+        .is_some_and(|span| span.source_id() == source_id)
+        || diagnostic
+            .related_locations()
+            .iter()
+            .any(|location| location.span().source_id() == source_id)
 }
 
 fn report_stage(stage: TypolStage) -> DiagnosticReportStage {
@@ -509,15 +639,9 @@ impl fmt::Debug for StdTypolError {
 impl fmt::Display for StdTypolError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut errors = ErrSlot::<DiagnosticRenderError>::new();
-        match errors.call(|out| {
-            self.render(
-                Translator::new(Language::English),
-                RenderOptions::default(),
-                out,
-            )
-        }) {
-            Ok(rendered) => formatter.write_str(&rendered),
-            Err(_) => formatter.write_str("Typol operation failed"),
+        match errors.try_call(|out| self.write_display(formatter, out)) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(fmt::Error),
         }
     }
 }
@@ -563,7 +687,8 @@ mod tests {
             TypolStage::Binding,
             TypolStage::Encoding,
         ] {
-            let errors = StdTypolError::simulated_payload_storage_failure(stage);
+            let translator = Translator::new(Language::English);
+            let errors = StdTypolError::simulated_payload_storage_failure(stage, translator);
             let diagnostic = errors
                 .diagnostics()
                 .first()
@@ -587,13 +712,7 @@ mod tests {
             assert!(displayed.contains("failed to store error payload"));
             assert!(displayed.contains("CAPACITY_EXCEEDED"));
 
-            let rendered = TestOpeo::value(|out| {
-                errors.render(
-                    Translator::new(Language::English),
-                    RenderOptions::default(),
-                    out,
-                )
-            })?;
+            let rendered = TestOpeo::value(|out| errors.render(RenderOptions::default(), out))?;
             assert!(rendered.contains("failed to store error payload"));
             assert!(rendered.contains("CAPACITY_EXCEEDED"));
         }
@@ -602,7 +721,9 @@ mod tests {
 
     #[test]
     fn inline_schema_failure_preserves_its_context_through_loading() -> TestResult {
-        let errors = StdTypolError::schema_budget(BudgetError::invariant(&SCHEMA_CONTEXT));
+        let translator = Translator::new(Language::English);
+        let errors =
+            StdTypolError::schema_budget(BudgetError::invariant(&SCHEMA_CONTEXT), translator);
         let diagnostic = errors
             .diagnostics()
             .first()
@@ -625,7 +746,9 @@ mod tests {
         let compiler =
             TestOpeo::value(|out| SchemaCompiler::new(SchemaCompileOptions::default(), out))?;
         let context = TestOpeo::value(|out| compiler.context(out))?;
-        let error_slot = TestOpeo::value(|out| ErrorSlot::in_budget(context.execution(), out))?;
+        let translator = Translator::new(Language::English);
+        let error_slot =
+            TestOpeo::value(|out| ErrorSlot::in_budget(context.execution(), translator, out))?;
         let mut names =
             TestOpeo::value(|out| SourceNames::new(SourceNameLimits::default(), &context, out))?;
         let mut schema_errors = ErrSlot::new();
@@ -649,13 +772,7 @@ mod tests {
             )
         })?;
         let errors = error_slot.schema(schema_errors, names);
-        let rendered = TestOpeo::value(|out| {
-            errors.render(
-                Translator::new(Language::English),
-                RenderOptions::default(),
-                out,
-            )
-        })?;
+        let rendered = TestOpeo::value(|out| errors.render(RenderOptions::default(), out))?;
         let displayed = errors.to_string();
 
         assert!(rendered.contains("custom\\u{1b}\\n:"));
@@ -670,7 +787,9 @@ mod tests {
         let compiler =
             TestOpeo::value(|out| SchemaCompiler::new(SchemaCompileOptions::default(), out))?;
         let context = TestOpeo::value(|out| compiler.context(out))?;
-        let error_slot = TestOpeo::value(|out| ErrorSlot::in_budget(context.execution(), out))?;
+        let translator = Translator::new(Language::English);
+        let error_slot =
+            TestOpeo::value(|out| ErrorSlot::in_budget(context.execution(), translator, out))?;
         let names =
             TestOpeo::value(|out| SourceNames::new(SourceNameLimits::new(0, 4096), &context, out))?;
         let mut schema_errors = ErrSlot::new();
@@ -685,13 +804,7 @@ mod tests {
             Err(caught) => caught.take(),
         };
         let errors = error_slot.schema(schema_errors, names);
-        let rendered = TestOpeo::value(|out| {
-            errors.render(
-                Translator::new(Language::English),
-                RenderOptions::default(),
-                out,
-            )
-        })?;
+        let rendered = TestOpeo::value(|out| errors.render(RenderOptions::default(), out))?;
         let displayed = errors.to_string();
 
         assert!(rendered.contains("source#0:"));

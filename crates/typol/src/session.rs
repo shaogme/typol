@@ -12,6 +12,7 @@ use typol_core::{
     BudgetError, ChargedString, ChargedVec, ExecutionBudget, ExecutionLimits, ValueError,
     ValueScalar,
 };
+use typol_i18n::Translator;
 use typol_semantic::SchemaAccessError;
 
 #[cfg(feature = "serde")]
@@ -27,6 +28,7 @@ pub(crate) struct SessionBudget {
     max_string_bytes: usize,
     max_output_bytes: usize,
     output_bytes: usize,
+    translator: Translator,
     budget_errors: RefCell<Option<ErrSlot<BudgetError>>>,
     value_errors: RefCell<Option<ErrSlot<ValueError>>>,
     schema_errors: RefCell<Option<ErrSlot<SchemaAccessError>>>,
@@ -39,13 +41,18 @@ pub(crate) struct SessionBudget {
 impl SessionBudget {
     pub(crate) fn codec_from_budget<'slot, 'borrow, T>(
         stage: CodecStage,
+        translator: Translator,
         operation: impl for<'call> FnOnce(Out<'call, 'call, BudgetError>) -> OResult<'call, T>,
         out: Out<'slot, 'borrow, CodecErrors>,
     ) -> OResult<'slot, T> {
         let mut errors = ErrSlot::<BudgetError>::new();
         match errors.try_call(operation) {
             Ok(value) => Ok(value),
-            Err(caught) => Err(out.fail(CodecErrors::emergency(stage, caught.take().into()))),
+            Err(caught) => Err(out.fail(CodecErrors::emergency(
+                stage,
+                caught.take().into(),
+                translator,
+            ))),
         }
     }
 
@@ -53,6 +60,7 @@ impl SessionBudget {
         execution: ExecutionLimits,
         max_text_bytes: usize,
         max_output_bytes: usize,
+        translator: Translator,
         mut out: Out<'slot, '_, BudgetError>,
     ) -> OResult<'slot, Self> {
         let execution = ExecutionBudget::new(execution, out.reborrow())?;
@@ -62,6 +70,7 @@ impl SessionBudget {
             max_string_bytes: usize::MAX,
             max_output_bytes,
             output_bytes: 0,
+            translator,
             budget_errors: RefCell::new(None),
             value_errors: RefCell::new(None),
             schema_errors: RefCell::new(None),
@@ -80,6 +89,7 @@ impl SessionBudget {
             options.execution(),
             options.execution().max_steps(),
             0,
+            options.translator(),
             out.reborrow(),
         )?;
         Ok(session)
@@ -93,6 +103,7 @@ impl SessionBudget {
             *options.validation().execution(),
             options.validation().config().max_constructed_text_bytes(),
             options.max_output_bytes(),
+            options.validation().translator(),
             out.reborrow(),
         )?;
         session.max_string_bytes = options.validation().config().max_string_bytes();
@@ -108,6 +119,7 @@ impl SessionBudget {
             *validation.execution(),
             validation.config().max_constructed_text_bytes(),
             max_output_bytes,
+            validation.translator(),
             out.reborrow(),
         )?;
         session.max_string_bytes = validation.config().max_string_bytes();
@@ -122,6 +134,7 @@ impl SessionBudget {
             *options.execution(),
             options.config().max_constructed_text_bytes(),
             0,
+            options.translator(),
             out.reborrow(),
         )?;
         session.max_string_bytes = options.config().max_string_bytes();
@@ -140,6 +153,7 @@ impl SessionBudget {
             max_string_bytes: options.config().max_string_bytes(),
             max_output_bytes: 0,
             output_bytes: 0,
+            translator: options.translator(),
             budget_errors: RefCell::new(None),
             value_errors: RefCell::new(None),
             schema_errors: RefCell::new(None),
@@ -152,6 +166,10 @@ impl SessionBudget {
 
     pub(crate) fn execution(&self) -> &ExecutionBudget {
         &self.execution
+    }
+
+    pub(crate) const fn translator(&self) -> Translator {
+        self.translator
     }
 
     pub(crate) fn budget_codec<'slot, 'borrow, T>(
@@ -167,7 +185,11 @@ impl SessionBudget {
             .try_call(operation)
         {
             Ok(value) => Ok(value),
-            Err(caught) => Err(out.fail(CodecErrors::emergency(stage, caught.take().into()))),
+            Err(caught) => Err(out.fail(CodecErrors::emergency(
+                stage,
+                caught.take().into(),
+                self.translator,
+            ))),
         }
     }
 
@@ -207,6 +229,7 @@ impl SessionBudget {
             Err(caught) => Err(out.fail(CodecErrors::emergency(
                 stage,
                 Failure::value_error(caught.take()),
+                self.translator,
             ))),
         }
     }
@@ -247,6 +270,7 @@ impl SessionBudget {
             Err(caught) => Err(out.fail(CodecErrors::emergency(
                 stage,
                 Failure::schema_access(caught.take()),
+                self.translator,
             ))),
         }
     }
@@ -303,7 +327,7 @@ impl SessionBudget {
             .try_call(operation)
         {
             Ok(value) => Ok(value),
-            Err(caught) => Err(out.fail(CodecErrors::parsing(caught.take()))),
+            Err(caught) => Err(out.fail(CodecErrors::parsing(caught.take(), self.translator))),
         }
     }
 
@@ -319,7 +343,7 @@ impl SessionBudget {
             .try_call(operation)
         {
             Ok(value) => Ok(value),
-            Err(caught) => Err(out.fail(CodecErrors::validation(caught.take()))),
+            Err(caught) => Err(out.fail(CodecErrors::validation(caught.take(), self.translator))),
         }
     }
 
@@ -343,6 +367,7 @@ impl SessionBudget {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Encoding,
                 Failure::Resource,
+                self.translator,
             )));
         };
         let mut budget_slot = budget_errors.borrow_mut();
@@ -359,6 +384,7 @@ impl SessionBudget {
             Err(caught) => Err(out.fail(CodecErrors::emergency(
                 CodecStage::Encoding,
                 caught.take().into(),
+                self.translator,
             ))),
         }
     }
@@ -381,12 +407,14 @@ impl SessionBudget {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Conversion,
                 Failure::Resource,
+                self.translator,
             )));
         }
         let Some(bytes) = name.len().checked_add(fallback_bytes) else {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Conversion,
                 Failure::Resource,
+                self.translator,
             )));
         };
         self.budget_codec(

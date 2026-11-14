@@ -78,7 +78,7 @@ fn capture_excerpt(request: ExcerptCapture<'_>) {
         capture.invalidate();
     }
     capture.end_input();
-    let mut diagnostic = Diagnostic::emergency(DiagnosticCode::CONFIG_SYNTAX_ERROR);
+    let mut diagnostic = Diagnostic::emergency(DiagnosticCode::CONFIG_SYNTAX_ERROR, "syntax error");
     diagnostic.set_located_primary(Some(LocatedSpan::new(span, Some(location))));
     capture.finish(excerpts, &[diagnostic]);
 }

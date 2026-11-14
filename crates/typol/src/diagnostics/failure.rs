@@ -2,6 +2,7 @@ use typol_core::{
     BudgetError, Diagnostic, DiagnosticCode, DiagnosticContext, ValueError, ValueErrorKind,
     diagnostic_context,
 };
+use typol_i18n::{Translator, t};
 use typol_semantic::SchemaAccessError;
 
 #[cfg(all(test, feature = "std"))]
@@ -223,6 +224,55 @@ impl Failure {
         }
     }
 
+    pub(super) fn emergency_diagnostic(self, translator: Translator) -> Diagnostic {
+        let message = match self {
+            Self::Resource | Self::ConversionDepth { .. } => t! {
+                name: "diagnostic.emergency.resource_limit_exceeded",
+                locale: translator,
+            },
+            Self::Allocation => t! {
+                name: "diagnostic.emergency.allocation_failed",
+                locale: translator,
+            },
+            Self::Capacity => t! {
+                name: "diagnostic.emergency.capacity_exceeded",
+                locale: translator,
+            },
+            Self::Internal(_) => t! {
+                name: "diagnostic.emergency.internal_error",
+                locale: translator,
+            },
+            #[cfg(all(test, feature = "std"))]
+            Self::BindingMismatch => t! {
+                name: "diagnostic.binding.type_mismatch",
+                locale: translator,
+            },
+            Self::RecursiveType => t! {
+                name: "diagnostic.binding.recursive_rust_type",
+                locale: translator,
+            },
+            Self::ArrayLength => t! {
+                name: "diagnostic.binding.array_length_unrepresentable",
+                locale: translator,
+            },
+            Self::Conversion | Self::ConversionAt(_) => t! {
+                name: "diagnostic.conversion.failed",
+                locale: translator,
+            },
+            Self::Encoding => t! {
+                name: "diagnostic.encoding.unrepresentable",
+                locale: translator,
+            },
+            Self::SecretOutput => t! {
+                name: "diagnostic.encoding.secret_output_rejected",
+                locale: translator,
+            },
+        };
+        let mut diagnostic = Diagnostic::translated_emergency(self.code(), message);
+        diagnostic.set_context(self.context());
+        diagnostic
+    }
+
     #[cfg(all(test, feature = "std"))]
     fn message(self) -> &'static str {
         match self {
@@ -249,21 +299,16 @@ impl Failure {
         )
     }
 
-    pub(super) fn emergency_diagnostic(self) -> Diagnostic {
-        let mut diagnostic = Diagnostic::emergency(self.code());
-        diagnostic.set_context(self.context());
-        diagnostic
-    }
-
     #[cfg(all(test, feature = "std"))]
     pub(super) fn diagnostic<'slot>(
         self,
         budget: &ExecutionBudget,
         max_text_bytes: usize,
+        translator: Translator,
         mut out: Out<'slot, '_, BudgetError>,
     ) -> OResult<'slot, Diagnostic> {
         let mut diagnostic = if self.terminal() {
-            Diagnostic::emergency(self.code())
+            self.emergency_diagnostic(translator)
         } else {
             budget.construct_text(self.message().len(), max_text_bytes, out.reborrow())?;
             budget.consume(self.message().len(), out.reborrow())?;

@@ -10,7 +10,8 @@ mod type_expr;
 #[cfg(test)]
 mod tests;
 
-use crate::SyntaxLimits;
+pub use typol_model::{BinaryOperator, BuiltinType, UnaryOperator};
+
 pub(crate) use crate::{
     AnnotationKind, NumberKind,
     ast::AstAccessError,
@@ -20,11 +21,8 @@ pub(crate) use crate::{
     },
 };
 pub(crate) use constructors::StorageConstructor;
-use core::mem;
 pub(crate) use expression::{BinaryExpressionParts, ExpressionBuilder, MethodCallParts};
-use height::{ChildHeight, Height};
 pub(crate) use ids::{Edge, Id, ListId, Node, Stored};
-use opeo::{OResult, Out};
 pub(crate) use records::{
     Annotation, AnnotationData, ArrayDefault, ArrayLength, Assertion, BooleanLiteral, BraceEntry,
     BraceKey, BracedDefault, Declaration, DefaultValue, DefaultValueKind, EnumDecl, EnumDefault,
@@ -37,11 +35,24 @@ pub(crate) use records::{
 };
 pub(crate) use text::{TextRef, TextStorage};
 pub(crate) use type_expr::{ArrayTypeExprParts, TypeBuilder};
+
+use crate::SyntaxLimits;
+use core::mem;
+use height::{ChildHeight, Height};
+use opeo::{OResult, Out};
 use typol_core::{
     ChargedString, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, SourceId, SourceSpan,
     Span,
 };
-pub use typol_model::{BinaryOperator, BuiltinType, UnaryOperator};
+use typol_i18n::{Translator, t};
+
+pub(crate) struct StorageOptions<'config> {
+    pub(crate) source_id: SourceId,
+    pub(crate) source_limit: usize,
+    pub(crate) limits: &'config SyntaxLimits,
+    pub(crate) execution: &'config ExecutionBudget,
+    pub(crate) translator: Translator,
+}
 
 pub(crate) struct Storage {
     annotation_edges: ChargedVec<Id<Annotation>>,
@@ -61,6 +72,7 @@ pub(crate) struct Storage {
     node_limit: usize,
     height_limit: usize,
     execution: ExecutionBudget,
+    translator: Translator,
     text: TextStorage,
     annotation: ChargedVec<Stored<Annotation>>,
     array_default: ChargedVec<Stored<ArrayDefault>>,
@@ -113,6 +125,10 @@ impl Storage {
         &self.execution
     }
 
+    pub(crate) const fn translator(&self) -> Translator {
+        self.translator
+    }
+
     pub(crate) fn list<'slot, 'storage, T>(
         &'storage self,
         range: ListId<T>,
@@ -144,6 +160,7 @@ impl Storage {
         let Some(values) = ListId::<T>::table(self).get(start..end) else {
             return Err(out.reborrow().fail(SyntaxDiagnostic::ast_access(
                 AstAccessError::InvalidListRange { start, end },
+                self.translator,
             )));
         };
         Ok(values)
@@ -171,15 +188,20 @@ impl Storage {
             if child >= self.height_limit {
                 return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
                     DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                    t! {
+                        name: "diagnostic.emergency.resource_limit_exceeded",
+                        locale: self.translator,
+                    },
                     span,
                 )));
             }
         }
+        let translator = self.translator;
         let table = ListId::<T>::table_mut(self);
-        SyntaxDiagnostic::try_reserve(table, values.len(), span, out.reborrow())?;
+        SyntaxDiagnostic::try_reserve(table, values.len(), span, translator, out.reborrow())?;
         let start = table.len();
         for value in values {
-            SyntaxDiagnostic::try_push(table, value, span, out.reborrow())?;
+            SyntaxDiagnostic::try_push(table, value, span, translator, out.reborrow())?;
         }
         Ok(ListId::new(start, table.len()))
     }
@@ -218,6 +240,7 @@ impl Storage {
                     self.source_id,
                     self.final_source_len.unwrap_or(self.source_limit),
                     index,
+                    self.translator,
                 )));
         };
         let span = Id::<T>::span(&stored.value);
@@ -226,7 +249,11 @@ impl Storage {
             .is_some_and(|source_len| span.span().end() > source_len)
         {
             return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
-                DiagnosticCode::SCHEMA_SYNTAX_ERROR,
+                DiagnosticCode::INTERNAL_ERROR,
+                t! {
+                    name: "diagnostic.emergency.internal_error",
+                    locale: self.translator,
+                },
                 span,
             )));
         }
@@ -262,6 +289,7 @@ impl Storage {
         let Some(stored) = Id::<T>::table(self).get(index) else {
             return Err(out.reborrow().fail(SyntaxDiagnostic::ast_access(
                 AstAccessError::InvalidNodeId { id: index },
+                self.translator,
             )));
         };
         Ok(stored.height)
@@ -296,6 +324,10 @@ impl Storage {
                 None => {
                     return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
                         DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                        t! {
+                            name: "diagnostic.emergency.resource_limit_exceeded",
+                            locale: self.translator,
+                        },
                         span,
                     )));
                 }
@@ -306,27 +338,42 @@ impl Storage {
         if height > self.height_limit {
             return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
                 DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                t! {
+                    name: "diagnostic.emergency.resource_limit_exceeded",
+                    locale: self.translator,
+                },
                 span,
             )));
         }
+        let translator = self.translator;
         let table = Id::<T>::table_mut(self);
         let index = table.len();
-        SyntaxDiagnostic::try_push(table, Stored { value, height }, span, out.reborrow())?;
+        SyntaxDiagnostic::try_push(
+            table,
+            Stored { value, height },
+            span,
+            translator,
+            out.reborrow(),
+        )?;
         self.node_count += 1;
         Ok(Id::new(index))
     }
 
     pub(crate) fn new<'slot>(
-        source_id: SourceId,
-        source_limit: usize,
-        limits: &SyntaxLimits,
-        execution: &ExecutionBudget,
+        options: StorageOptions<'_>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Self> {
+        let StorageOptions {
+            source_id,
+            source_limit,
+            limits,
+            execution,
+            translator,
+        } = options;
         let span = SourceSpan::new(source_id, Span::empty());
         macro_rules! new_vec {
             ($out:ident) => {
-                SyntaxDiagnostic::new_vec(execution, span, $out.reborrow())?
+                SyntaxDiagnostic::new_vec(execution, span, translator, $out.reborrow())?
             };
         }
         Ok(Self {
@@ -335,12 +382,13 @@ impl Storage {
             actual_source_len: None,
             final_source_len: None,
             execution: execution.try_clone_with(out.reborrow(), |error| {
-                SyntaxDiagnostic::budget(error, span)
+                SyntaxDiagnostic::budget(error, span, translator)
             })?,
+            translator,
             node_count: 0,
             node_limit: limits.max_schema_ast_nodes(),
             height_limit: limits.max_nesting_depth(),
-            text: TextStorage::new(execution, span, out.reborrow())?,
+            text: TextStorage::new(execution, span, translator, out.reborrow())?,
             annotation_edges: new_vec!(out),
             assertion_edges: new_vec!(out),
             brace_entry_edges: new_vec!(out),
@@ -395,6 +443,10 @@ impl Storage {
         if source_len > self.source_limit || self.actual_source_len != Some(source_len) {
             return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
                 DiagnosticCode::INTERNAL_ERROR,
+                t! {
+                    name: "diagnostic.emergency.internal_error",
+                    locale: self.translator,
+                },
                 span,
             )));
         }
@@ -410,6 +462,10 @@ impl Storage {
         if self.node_count >= self.node_limit {
             Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
                 DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                t! {
+                    name: "diagnostic.emergency.resource_limit_exceeded",
+                    locale: self.translator,
+                },
                 span,
             )))
         } else {
@@ -424,7 +480,11 @@ impl Storage {
     ) -> OResult<'slot, ()> {
         if span.source_id() != self.source_id || span.span().end() > self.source_limit {
             return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
-                DiagnosticCode::SCHEMA_SYNTAX_ERROR,
+                DiagnosticCode::INTERNAL_ERROR,
+                t! {
+                    name: "diagnostic.emergency.internal_error",
+                    locale: self.translator,
+                },
                 span,
             )));
         }
@@ -439,28 +499,28 @@ impl Storage {
         self.text.read(reference, out)
     }
 
-    fn pool<'slot>(
+    pub(crate) fn pool<'slot>(
         &mut self,
         text: &str,
         span: SourceSpan,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, TextRef> {
         self.execution.consume_with(1, out.reborrow(), |error| {
-            SyntaxDiagnostic::budget(error, span)
+            SyntaxDiagnostic::budget(error, span, self.translator)
         })?;
         self.check_span(span, out.reborrow())?;
         self.check_node_budget(span, out.reborrow())?;
         self.text.append_pooled(text, span, out)
     }
 
-    fn move_text<'slot>(
+    pub(crate) fn move_text<'slot>(
         &mut self,
         text: ChargedString,
         span: SourceSpan,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, TextRef> {
         self.execution.consume_with(1, out.reborrow(), |error| {
-            SyntaxDiagnostic::budget(error, span)
+            SyntaxDiagnostic::budget(error, span, self.translator)
         })?;
         self.check_span(span, out.reborrow())?;
         self.check_node_budget(span, out.reborrow())?;
@@ -471,6 +531,7 @@ impl Storage {
             return Err(out.reborrow().fail(SyntaxDiagnostic::internal(
                 AST_STORAGE_DECODED_TEXT_BUDGET,
                 span,
+                self.translator,
             )));
         }
         self.text.append_decoded(text, span, out)
@@ -494,6 +555,7 @@ impl Storage {
         let Some(name) = self.name.get(index) else {
             return Err(out.reborrow().fail(SyntaxDiagnostic::ast_access(
                 AstAccessError::InvalidNodeId { id: index },
+                self.translator,
             )));
         };
         self.text
@@ -507,7 +569,7 @@ impl Storage {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<Expr>> {
         self.execution.consume_with(1, out.reborrow(), |error| {
-            SyntaxDiagnostic::budget(error, span)
+            SyntaxDiagnostic::budget(error, span, self.translator)
         })?;
         self.check_span(span, out.reborrow())?;
         let index = id.index();
@@ -516,6 +578,7 @@ impl Storage {
                 AST_STORAGE_UPDATE_EXPR_SPAN,
                 span,
                 index,
+                self.translator,
             )));
         };
         expression.value.span = span;
@@ -528,22 +591,18 @@ impl Storage {
         &mut self,
         data: AnnotationData,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<Annotation>> {
-        let value = Annotation { data, span };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).annotation_new(data, span, out)
     }
 
     pub(crate) fn array_default_new<'slot>(
         &mut self,
         elements: ChargedVec<Id<DefaultValue>>,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<ArrayDefault>> {
-        let elements = self.store_list(elements, span, out.reborrow())?;
-
-        let value = ArrayDefault { elements, span };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).array_default_new(elements, span, out)
     }
 
     pub(crate) fn array_length_number<'slot>(
@@ -560,6 +619,7 @@ impl Storage {
                         AST_STORAGE_ARRAY_LENGTH_NUMBER,
                         span,
                         number.index(),
+                        self.translator,
                     )));
                 }
             },
@@ -573,24 +633,18 @@ impl Storage {
         expression: Id<Expr>,
         message: Id<StringLiteral>,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<Assertion>> {
-        let value = Assertion {
-            expression,
-            message,
-            span,
-        };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).assertion_new(expression, message, span, out)
     }
 
     pub(crate) fn boolean_literal_new<'slot>(
         &mut self,
         value: bool,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<BooleanLiteral>> {
-        let value = BooleanLiteral { value, span };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).boolean_literal_new(value, span, out)
     }
 
     pub(crate) fn brace_entry_new<'slot>(
@@ -598,32 +652,27 @@ impl Storage {
         key: BraceKey,
         value: Id<DefaultValue>,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<BraceEntry>> {
-        let value = BraceEntry { key, value, span };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).brace_entry_new(key, value, span, out)
     }
 
     pub(crate) fn braced_default_new<'slot>(
         &mut self,
         entries: ChargedVec<Id<BraceEntry>>,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<BracedDefault>> {
-        let entries = self.store_list(entries, span, out.reborrow())?;
-
-        let value = BracedDefault { entries, span };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).braced_default_new(entries, span, out)
     }
 
     pub(crate) fn default_value_new<'slot>(
         &mut self,
         kind: DefaultValueKind,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<DefaultValue>> {
-        let value = DefaultValue { kind, span };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).default_value_new(kind, span, out)
     }
 
     pub(crate) fn enum_decl_new<'slot>(
@@ -641,56 +690,35 @@ impl Storage {
         variant: Id<Name>,
         payload: Id<EnumDefaultPayload>,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<EnumDefault>> {
-        let value = EnumDefault {
-            variant,
-            payload,
-            span,
-        };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).enum_default_new(variant, payload, span, out)
     }
 
     pub(crate) fn enum_default_payload_unit<'slot>(
         &mut self,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<EnumDefaultPayload>> {
-        let value = EnumDefaultPayload {
-            kind: EnumDefaultPayloadKind::Unit,
-            span,
-        };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).enum_default_payload_unit(span, out)
     }
 
     pub(crate) fn enum_default_payload_single<'slot>(
         &mut self,
         value: Id<DefaultValue>,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<EnumDefaultPayload>> {
-        let value = EnumDefaultPayload {
-            kind: EnumDefaultPayloadKind::Single(value),
-            span,
-        };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).enum_default_payload_single(value, span, out)
     }
 
     pub(crate) fn enum_default_payload_structure<'slot>(
         &mut self,
         fields: ChargedVec<Id<BraceEntry>>,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<EnumDefaultPayload>> {
-        let value = EnumDefaultPayload {
-            kind: EnumDefaultPayloadKind::Structure(self.braced_default_new(
-                fields,
-                span,
-                out.reborrow(),
-            )?),
-            span,
-        };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).enum_default_payload_structure(fields, span, out)
     }
 
     pub(crate) fn extern_mod_decl_new<'slot>(
@@ -714,13 +742,9 @@ impl Storage {
         &mut self,
         expression: Id<Expr>,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<MethodArgument>> {
-        let value = MethodArgument {
-            kind: MethodArgumentKind::Expression(expression),
-            span,
-        };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).method_argument_expression(expression, span, out)
     }
 
     pub(crate) fn method_argument_closure<'slot>(
@@ -728,13 +752,9 @@ impl Storage {
         parameter: Id<Name>,
         body: Id<Expr>,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<MethodArgument>> {
-        let value = MethodArgument {
-            kind: MethodArgumentKind::Closure { parameter, body },
-            span,
-        };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).method_argument_closure(parameter, body, span, out)
     }
 
     pub(crate) fn module_decl_new<'slot>(
@@ -751,46 +771,26 @@ impl Storage {
         &mut self,
         text: &str,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<Name>> {
-        let value = Name {
-            text: self.pool(text, span, out.reborrow())?,
-            span,
-        };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).name_try_new(text, span, out)
     }
 
     pub(crate) fn number_literal_try_new<'slot>(
         &mut self,
         params: NumberLiteralParams<'_>,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<NumberLiteral>> {
-        let NumberLiteralParams {
-            raw,
-            kind,
-            negative,
-            span,
-        } = params;
-        let value = NumberLiteral {
-            raw: self.pool(raw, span, out.reborrow())?,
-            kind,
-            negative,
-            span,
-        };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).number_literal_try_new(params, out)
     }
 
     pub(crate) fn string_literal_from_owned<'slot>(
         &mut self,
         value: ChargedString,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<StringLiteral>> {
-        let value = StringLiteral {
-            value: self.move_text(value, span, out.reborrow())?,
-            span,
-        };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).string_literal_from_owned(value, span, out)
     }
 
     pub(crate) fn struct_decl_new<'slot>(
@@ -820,40 +820,26 @@ impl Storage {
     pub(crate) fn variant_payload_unit<'slot>(
         &mut self,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<VariantPayload>> {
-        let value = VariantPayload {
-            kind: VariantPayloadKind::Unit,
-            span,
-        };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).variant_payload_unit(span, out)
     }
 
     pub(crate) fn variant_payload_single<'slot>(
         &mut self,
         ty: Id<TypeExpr>,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<VariantPayload>> {
-        let value = VariantPayload {
-            kind: VariantPayloadKind::Single(SingleVariantPayload { ty }),
-            span,
-        };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).variant_payload_single(ty, span, out)
     }
 
     pub(crate) fn variant_payload_structure<'slot>(
         &mut self,
         fields: ChargedVec<Id<FieldDecl>>,
         span: SourceSpan,
-        mut out: Out<'slot, '_, Diagnostic>,
+        out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<VariantPayload>> {
-        let fields = self.store_list(fields, span, out.reborrow())?;
-
-        let value = VariantPayload {
-            kind: VariantPayloadKind::Structure(StructureVariantPayload { fields }),
-            span,
-        };
-        self.insert(value, out.reborrow())
+        StorageConstructor::new(self).variant_payload_structure(fields, span, out)
     }
 }

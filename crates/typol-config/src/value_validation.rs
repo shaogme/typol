@@ -7,7 +7,9 @@ mod tests;
 use crate::{
     ConfigParseErrors, ConfigValidationOptions,
     context::{CompletionState, SemanticStatus},
-    diagnostics::{BudgetDiagnostic, DiagnosticBuffer},
+    diagnostics::{
+        BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticBuffer, DiagnosticFactory,
+    },
     instance::{LocationIndex, Member, NodeId},
     session::ValidationResources,
     validation::{AssertionsRequest, Validator},
@@ -19,6 +21,7 @@ use typol_core::{
     BudgetError, ChargedVec, ConfigValue, Diagnostic, DiagnosticCode, ExecutionBudget,
     InstancePath, LocatedSpan, RegexExecutionBudget,
 };
+use typol_i18n::t;
 use typol_semantic::{
     CompiledSchema, ConstraintList, FieldView, RegexExecutor, TypeView, VariantView,
 };
@@ -83,6 +86,7 @@ impl ValueValidation {
             options,
             budget,
         } = request;
+        let translator = options.translator();
         let mut regex_budget_errors = ErrSlot::<BudgetError>::new();
         let regex_execution = match regex_budget_errors.try_call(|budget_out| {
             let limits = options.regex().execution();
@@ -96,8 +100,9 @@ impl ValueValidation {
             Ok(budget) => budget,
             Err(caught) => {
                 return Err(out.fail(ConfigParseErrors::emergency(
-                    BudgetDiagnostic::from_error(caught.take()),
+                    BudgetDiagnostic::from_error(caught.take(), translator),
                     None,
+                    translator,
                 )));
             }
         };
@@ -108,12 +113,17 @@ impl ValueValidation {
                 schema,
                 options.config().max_diagnostics(),
                 budget,
+                translator,
                 diagnostic_out,
             )
         }) {
             Ok(diagnostics) => diagnostics,
             Err(caught) => {
-                return Err(out.fail(ConfigParseErrors::emergency(caught.take(), None)));
+                return Err(out.fail(ConfigParseErrors::emergency(
+                    caught.take(),
+                    None,
+                    translator,
+                )));
             }
         };
         let mut nodes = 0;
@@ -122,6 +132,7 @@ impl ValueValidation {
                 let normalized = match operation_errors.try_call(|diagnostic_out| {
                     ValueNormalizer::copy(
                         NormalizeRequest {
+                            translator: options.translator(),
                             expected: schema.entry(),
                             value: value.root(),
                             depth: 0,
@@ -152,8 +163,19 @@ impl ValueValidation {
             (None, Some(value)) => (value, false),
             _ => {
                 return Err(out.fail(ConfigParseErrors::emergency(
-                    Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR),
+                    DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                        code: DiagnosticCode::INTERNAL_ERROR,
+                        message:
+                            t! { name: "diagnostic.emergency.internal_error", locale: translator }
+                                .into(),
+                        primary: None,
+                        path: None,
+                        value_source: None,
+                        context: None,
+                        translator,
+                    }),
                     None,
+                    translator,
                 )));
             }
         };
@@ -167,13 +189,13 @@ impl ValueValidation {
         {
             Ok(budget) => budget,
             Err(caught) => {
-                diagnostics.push(BudgetDiagnostic::from_error(caught.take()));
+                diagnostics.push(BudgetDiagnostic::from_error(caught.take(), translator));
                 return Err(out.fail(ConfigParseErrors::finish(diagnostics, schema, None, None)));
             }
         };
-        let mut locations = match operation_errors
-            .try_call(|diagnostic_out| LocationIndex::new_budgeted(budget, diagnostic_out))
-        {
+        let mut locations = match operation_errors.try_call(|diagnostic_out| {
+            LocationIndex::new_budgeted(budget, options.translator(), diagnostic_out)
+        }) {
             Ok(locations) => locations,
             Err(caught) => {
                 diagnostics.push(caught.take());
@@ -185,7 +207,7 @@ impl ValueValidation {
         {
             Ok(path) => path,
             Err(caught) => {
-                diagnostics.push(BudgetDiagnostic::from_error(caught.take()));
+                diagnostics.push(BudgetDiagnostic::from_error(caught.take(), translator));
                 return Err(out.fail(ConfigParseErrors::finish(diagnostics, schema, None, None)));
             }
         };
@@ -194,11 +216,12 @@ impl ValueValidation {
         {
             Ok(inherited) => inherited,
             Err(caught) => {
-                diagnostics.push(BudgetDiagnostic::from_error(caught.take()));
+                diagnostics.push(BudgetDiagnostic::from_error(caught.take(), translator));
                 return Err(out.fail(ConfigParseErrors::finish(diagnostics, schema, None, None)));
             }
         };
         let mut resources = ValidationResources {
+            translator: options.translator(),
             scratch: RegexExecutor::new(),
             value_limits: options.config().values(),
             regex_limits: options.regex().limits(),

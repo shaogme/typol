@@ -15,7 +15,7 @@ use crate::{
 };
 use opeo::{OResult, Out};
 use typol_core::{ChargedVec, SourceSpan};
-use typol_i18n::{diagnostic_key, diagnostic_message};
+use typol_i18n::t;
 use typol_semantic::TypeId;
 use typol_syntax::{AstAccessError, TypeExpr, TypeExprKind};
 
@@ -137,7 +137,10 @@ impl<'a, 'src, 'd> AliasResolver<'a, 'src, 'd> {
                         match resolution {
                             PathResolution::Resolved(target) => {
                                 let Some(target_symbol) = self.symbols.type_symbol(target) else {
-                                    self.diagnostics.push(schema_internal!(path.span()));
+                                    self.diagnostics.push(schema_internal!(
+                                        self.diagnostics.translator(),
+                                        path.span()
+                                    ));
                                     return Err(out.fail(BuildFailure::empty()));
                                 };
                                 if target_symbol.state() != SymbolState::Valid {
@@ -284,8 +287,10 @@ impl<'a, 'src, 'd> AliasResolver<'a, 'src, 'd> {
                                 .iter()
                                 .position(|frame| frame.symbol == dependency.target)
                             else {
-                                self.diagnostics
-                                    .push(schema_internal!(dependency.reference_span,));
+                                self.diagnostics.push(schema_internal!(
+                                    self.diagnostics.translator(),
+                                    dependency.reference_span,
+                                ));
                                 return Err(out.fail(BuildFailure::empty()));
                             };
                             let mut cycle = self
@@ -314,6 +319,7 @@ impl<'a, 'src, 'd> AliasResolver<'a, 'src, 'd> {
                                     out.reborrow(),
                                 )? = AliasState::Invalid;
                             }
+                            let translator = self.context.translator();
                             TypeCycles::new(
                                 self.tree,
                                 self.symbols,
@@ -323,14 +329,16 @@ impl<'a, 'src, 'd> AliasResolver<'a, 'src, 'd> {
                             )
                             .report(
                                 TypeCycleReport {
-                                    key: diagnostic_key!("diagnostic.schema.recursive_alias"),
-                                    message: "recursive type alias detected",
+                                    message: t! {
+                                        name: "diagnostic.schema.recursive_alias",
+                                        locale: translator,
+                                    },
                                     primary: dependency.reference_span,
                                     cycle: &cycle,
-                                    label_key: diagnostic_key!(
-                                        "diagnostic.schema.recursive_alias_declared_here"
-                                    ),
-                                    label_message: "declaration in the alias cycle is here",
+                                    label_message: t! {
+                                        name: "diagnostic.schema.recursive_alias_declared_here",
+                                        locale: translator,
+                                    },
                                 },
                                 out.reborrow(),
                             )?;
@@ -354,8 +362,10 @@ impl<'a, 'src, 'd> AliasResolver<'a, 'src, 'd> {
                 )? == AliasState::Visiting
                 {
                     let Some(symbol) = self.symbols.type_symbol(current) else {
-                        self.diagnostics
-                            .push(schema_internal!(self.tree.root_span()));
+                        self.diagnostics.push(schema_internal!(
+                            self.diagnostics.translator(),
+                            self.tree.root_span()
+                        ));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     let TypeDeclarationKind::Alias(alias) = symbol.declaration() else {
@@ -373,8 +383,10 @@ impl<'a, 'src, 'd> AliasResolver<'a, 'src, 'd> {
                         self.resolve_expression(target_expression, symbol.module(), out.reborrow())?
                     {
                         let Some(target_use) = self.graph.type_use(target) else {
-                            self.diagnostics
-                                .push(schema_internal!(target_expression.span()));
+                            self.diagnostics.push(schema_internal!(
+                                self.diagnostics.translator(),
+                                target_expression.span()
+                            ));
                             return Err(out.fail(BuildFailure::empty()));
                         };
                         let next = target_use.alias_chain();
@@ -469,10 +481,10 @@ impl<'a, 'src, 'd> AliasResolver<'a, 'src, 'd> {
                     Some(ResolvedTypeKind::Option(_))
                 ) {
                     self.diagnostics.push(self.diagnostics.make_semantic(
-                        diagnostic_message!(
-                            "diagnostic.schema.nested_options_unsupported",
-                            "nested options are unsupported after full expansion"
-                        ),
+                        t! {
+                            name: "diagnostic.schema.nested_options_unsupported",
+                            locale: self.diagnostics.translator(),
+                        },
                         span,
                     ));
                     None
@@ -501,10 +513,10 @@ impl<'a, 'src, 'd> AliasResolver<'a, 'src, 'd> {
                         Ok(length) => Some(length),
                         Err(_) => {
                             self.diagnostics.push(self.diagnostics.make_semantic(
-                                diagnostic_message!(
-                                    "diagnostic.schema.fixed_array_length_out_of_range",
-                                    "fixed-size array length exceeds the u32 range"
-                                ),
+                                t! {
+                                    name: "diagnostic.schema.fixed_array_length_out_of_range",
+                                    locale: self.diagnostics.translator(),
+                                },
                                 length.span(),
                             ));
                             return Ok(None);
@@ -542,7 +554,8 @@ impl<'a, 'src, 'd> AliasResolver<'a, 'src, 'd> {
                 match resolution {
                     PathResolution::Resolved(target) => {
                         let Some(symbol) = self.symbols.type_symbol(target) else {
-                            self.diagnostics.push(schema_internal!(path.span()));
+                            self.diagnostics
+                                .push(schema_internal!(self.diagnostics.translator(), path.span()));
                             return Err(out.fail(BuildFailure::empty()));
                         };
                         if symbol.state() != SymbolState::Valid {
@@ -554,7 +567,10 @@ impl<'a, 'src, 'd> AliasResolver<'a, 'src, 'd> {
                                         return Ok(None);
                                     };
                                     let Some(target_type) = self.graph.type_use(target_use) else {
-                                        self.diagnostics.push(schema_internal!(path.span()));
+                                        self.diagnostics.push(schema_internal!(
+                                            self.diagnostics.translator(),
+                                            path.span()
+                                        ));
                                         return Err(out.fail(BuildFailure::empty()));
                                     };
                                     Some(self.push_type_use(

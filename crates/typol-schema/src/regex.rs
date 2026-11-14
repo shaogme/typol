@@ -1,9 +1,11 @@
+pub use typol_semantic::{CompiledRegexConstraint, CompiledRegexConstraints};
+
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage, SourceSpan,
     diagnostic_context,
 };
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 use typol_policy::RegexLimits;
 use typol_regex::{RegexCompileError, RegexCompileOptions, RegexCompiler};
 use typol_syntax::{Annotation, AnnotationData};
@@ -12,8 +14,6 @@ use crate::{
     context::CompileContext,
     diagnostics::{BuildFailure, DiagnosticCollector, EmergencyDiagnostics},
 };
-
-pub use typol_semantic::{CompiledRegexConstraint, CompiledRegexConstraints};
 
 static REGEX_PATTERN_FAILURE: DiagnosticContext =
     diagnostic_context!("typol-schema", "regex-pattern", "pattern-start-offset");
@@ -59,15 +59,18 @@ impl<'a> RegexConstraintCompiler<'a> {
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, ()> {
         if !valid_target {
-            diagnostics.push(self.make_diagnostic(
-                DiagnosticCode::SCHEMA_SEMANTIC_ERROR,
-                diagnostic_message!(
-                    "diagnostic.schema.regex_target_invalid",
-                    "@regex can be used only on string or option<string>"
+            diagnostics.push(
+                self.make_diagnostic(
+                    DiagnosticCode::SCHEMA_SEMANTIC_ERROR,
+                    t! {
+                        name: "diagnostic.schema.regex_target_invalid",
+                        locale: diagnostics.translator(),
+                    }
+                    .into(),
+                    annotation.span(),
+                    diagnostics,
                 ),
-                annotation.span(),
-                diagnostics,
-            ));
+            );
             return Ok(());
         }
         self.compile_pattern_annotation(annotation, diagnostics, out.reborrow())
@@ -104,15 +107,18 @@ impl<'a> RegexConstraintCompiler<'a> {
             BuildFailure::from,
         )?;
         let AnnotationData::Regex(pattern) = data else {
-            diagnostics.push(self.make_diagnostic(
-                DiagnosticCode::SCHEMA_SEMANTIC_ERROR,
-                diagnostic_message!(
-                    "diagnostic.schema.regex_annotation_invalid",
-                    "@regex annotation compile path is invalid"
+            diagnostics.push(
+                self.make_diagnostic(
+                    DiagnosticCode::SCHEMA_SEMANTIC_ERROR,
+                    t! {
+                        name: "diagnostic.schema.regex_annotation_invalid",
+                        locale: diagnostics.translator(),
+                    }
+                    .into(),
+                    annotation.span(),
+                    diagnostics,
                 ),
-                annotation.span(),
-                diagnostics,
-            ));
+            );
             return Ok(());
         };
         let pattern = self.context.ast_access(
@@ -122,25 +128,37 @@ impl<'a> RegexConstraintCompiler<'a> {
         )?;
 
         if self.constraints.len() >= self.limits.max_regex_count() {
-            diagnostics.push(EmergencyDiagnostics::resource(annotation.span()));
+            diagnostics.push(EmergencyDiagnostics::resource(
+                annotation.span(),
+                diagnostics.translator(),
+            ));
             return Ok(());
         }
         let Some(attempted_pattern_bytes) = self.attempted_pattern_bytes.checked_add(pattern.len())
         else {
             self.attempted_pattern_bytes = self.limits.max_regex_total_pattern_bytes();
-            diagnostics.push(EmergencyDiagnostics::resource(annotation.span()));
+            diagnostics.push(EmergencyDiagnostics::resource(
+                annotation.span(),
+                diagnostics.translator(),
+            ));
             return Ok(());
         };
         if attempted_pattern_bytes > self.limits.max_regex_total_pattern_bytes() {
             self.attempted_pattern_bytes = self.limits.max_regex_total_pattern_bytes();
-            diagnostics.push(EmergencyDiagnostics::resource(annotation.span()));
+            diagnostics.push(EmergencyDiagnostics::resource(
+                annotation.span(),
+                diagnostics.translator(),
+            ));
             return Ok(());
         }
         self.attempted_pattern_bytes = attempted_pattern_bytes;
         if pattern.len() > self.limits.max_regex_pattern_bytes()
             || self.instruction_count >= self.limits.max_regex_instructions_total()
         {
-            diagnostics.push(EmergencyDiagnostics::resource(annotation.span()));
+            diagnostics.push(EmergencyDiagnostics::resource(
+                annotation.span(),
+                diagnostics.translator(),
+            ));
             return Ok(());
         }
 
@@ -177,26 +195,41 @@ impl<'a> RegexConstraintCompiler<'a> {
             }
         };
         let Some(total_pattern_bytes) = self.pattern_bytes.checked_add(pattern.len()) else {
-            diagnostics.push(EmergencyDiagnostics::resource(annotation.span()));
+            diagnostics.push(EmergencyDiagnostics::resource(
+                annotation.span(),
+                diagnostics.translator(),
+            ));
             return Ok(());
         };
         let Some(total_instructions) = self
             .instruction_count
             .checked_add(regex.instruction_count())
         else {
-            diagnostics.push(EmergencyDiagnostics::resource(annotation.span()));
+            diagnostics.push(EmergencyDiagnostics::resource(
+                annotation.span(),
+                diagnostics.translator(),
+            ));
             return Ok(());
         };
         if total_instructions > self.limits.max_regex_instructions_total() {
-            diagnostics.push(EmergencyDiagnostics::resource(annotation.span()));
+            diagnostics.push(EmergencyDiagnostics::resource(
+                annotation.span(),
+                diagnostics.translator(),
+            ));
             return Ok(());
         }
         let Some(total_ranges) = self.range_count.checked_add(regex.range_count()) else {
-            diagnostics.push(EmergencyDiagnostics::resource(annotation.span()));
+            diagnostics.push(EmergencyDiagnostics::resource(
+                annotation.span(),
+                diagnostics.translator(),
+            ));
             return Ok(());
         };
         if total_ranges > self.limits.max_regex_ranges_total() {
-            diagnostics.push(EmergencyDiagnostics::resource(annotation.span()));
+            diagnostics.push(EmergencyDiagnostics::resource(
+                annotation.span(),
+                diagnostics.translator(),
+            ));
             return Ok(());
         }
 
@@ -221,10 +254,10 @@ fn compile_error_diagnostic(
         RegexCompileError::Syntax(error) => {
             let mut diagnostic = make_diagnostic(
                 DiagnosticCode::REGEX_SYNTAX_ERROR,
-                diagnostic_message!(
-                    "diagnostic.schema.regex_pattern_syntax_invalid",
-                    "regex pattern syntax is invalid"
-                ),
+                t! {
+                    name: "diagnostic.schema.regex_pattern_syntax_invalid",
+                    locale: diagnostics.translator(),
+                },
                 span,
                 diagnostics,
             );
@@ -233,18 +266,26 @@ fn compile_error_diagnostic(
             ));
             diagnostic
         }
-        RegexCompileError::ResourceLimitExceeded(_) => EmergencyDiagnostics::resource(span),
-        RegexCompileError::AllocationFailed => EmergencyDiagnostics::allocation(span),
-        RegexCompileError::CapacityExceeded => EmergencyDiagnostics::capacity(span),
-        RegexCompileError::InternalInvariantFailure(error) => {
-            EmergencyDiagnostics::internal(span, error.diagnostic_context())
+        RegexCompileError::ResourceLimitExceeded(_) => {
+            EmergencyDiagnostics::resource(span, diagnostics.translator())
         }
+        RegexCompileError::AllocationFailed => {
+            EmergencyDiagnostics::allocation(span, diagnostics.translator())
+        }
+        RegexCompileError::CapacityExceeded => {
+            EmergencyDiagnostics::capacity(span, diagnostics.translator())
+        }
+        RegexCompileError::InternalInvariantFailure(error) => EmergencyDiagnostics::internal(
+            span,
+            error.diagnostic_context(),
+            diagnostics.translator(),
+        ),
     }
 }
 
-fn make_diagnostic(
+fn make_diagnostic<M: Into<DiagnosticMessage<'static>>>(
     code: DiagnosticCode,
-    message: DiagnosticMessage<'static>,
+    message: M,
     span: SourceSpan,
     diagnostics: &DiagnosticCollector,
 ) -> Diagnostic {

@@ -1,12 +1,13 @@
 use opeo::{OResult, Out};
 use typol_core::{
     Diagnostic, DiagnosticContext, ExcerptLimits, ExecutionLimits, LocatedSpan, Read, SliceSource,
-    SourceId, SourceReadError, SourceSpan, Span, diagnostic_context,
+    SourceId, SourceReadError, SourceReadErrorKind, SourceSpan, Span, diagnostic_context,
 };
+use typol_i18n::{Language, Translator, t};
 use typol_policy::{RegexOptions, ValueLimits};
 use typol_syntax::{StreamLimits, SyntaxLimits};
 
-use crate::SchemaCompileContext;
+use crate::{SchemaCompileContext, diagnostics::EmergencyDiagnostics};
 
 /// Fixed Schema declaration AST depth beyond nested types.
 const TYPE_DECLARATION_DEPTH_OVERHEAD: usize = 5;
@@ -77,10 +78,34 @@ impl<'src> SchemaSource<'src> {
         error: SourceReadError,
         source_id: SourceId,
         offset: usize,
+        translator: Translator,
     ) -> Diagnostic {
         let source_id = error.source_id().unwrap_or(source_id);
         let offset = error.offset().unwrap_or(offset);
-        let mut diagnostic = Diagnostic::emergency(error.diagnostic_code());
+        let message = match error.kind() {
+            SourceReadErrorKind::ResourceLimitExceeded => t! {
+                name: "diagnostic.emergency.resource_limit_exceeded",
+                locale: translator,
+            },
+            SourceReadErrorKind::AllocationFailed => t! {
+                name: "diagnostic.emergency.allocation_failed",
+                locale: translator,
+            },
+            SourceReadErrorKind::CapacityExceeded => t! {
+                name: "diagnostic.emergency.capacity_exceeded",
+                locale: translator,
+            },
+            SourceReadErrorKind::HostFailure => t! {
+                name: "diagnostic.emergency.source_input_error",
+                locale: translator,
+            },
+            SourceReadErrorKind::InternalInvariantFailure => t! {
+                name: "diagnostic.emergency.internal_error",
+                locale: translator,
+            },
+        };
+        let mut diagnostic =
+            EmergencyDiagnostics::translated(error.diagnostic_code(), message, None);
         diagnostic.set_located_primary(Some(LocatedSpan::new(
             SourceSpan::new(source_id, Span::point(offset)),
             None,
@@ -299,6 +324,7 @@ pub struct SchemaCompileOptions {
     limits: SchemaLimits,
     regex: RegexOptions,
     execution: ExecutionLimits,
+    translator: Translator,
 }
 
 impl SchemaCompileOptions {
@@ -307,6 +333,7 @@ impl SchemaCompileOptions {
             limits,
             regex: RegexOptions::default(),
             execution: ExecutionLimits::new(67_108_864, 67_108_864),
+            translator: Translator::new(Language::English),
         }
     }
 
@@ -316,6 +343,15 @@ impl SchemaCompileOptions {
 
     pub const fn regex(&self) -> &RegexOptions {
         &self.regex
+    }
+
+    pub const fn translator(&self) -> Translator {
+        self.translator
+    }
+
+    pub const fn with_translator(mut self, translator: Translator) -> Self {
+        self.translator = translator;
+        self
     }
 
     pub const fn with_regex(mut self, regex: RegexOptions) -> Self {

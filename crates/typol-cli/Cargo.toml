@@ -16,10 +16,8 @@ path = "src/main.rs"
 [dependencies]
 typol = { workspace = true, features = ["config-ir", "std"] }
 typol-i18n = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
 u18n.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true
 
 [lints]
 workspace = true

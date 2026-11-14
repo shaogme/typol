@@ -3,8 +3,10 @@ use crate::{
     diagnostics::DiagnosticFactory,
     parser::{
         containers::{ContainerSupport, StructureSpans},
-        context::{ParserContext, ParserControl},
-        literals::{ContextDiagnosticRequest, ParsedValue, Syntax},
+        context::{ParserContext, ParserControl, ValueCallContext},
+        literals::{
+            ContextDiagnosticRequest, ExpectedSymbol, ExpectedValueSymbol, ParsedValue, Syntax,
+        },
         recovery::{ParseFailure, Recovery},
         semantics::SubtreeValidator,
     },
@@ -14,7 +16,7 @@ use crate::{
 use core::mem::replace;
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{ChargedVec, DiagnosticCode, LocatedSpan};
-use typol_i18n::diagnostic_key;
+use typol_i18n::t;
 use typol_semantic::{FieldList, FieldView, TypeView};
 use typol_syntax::{Symbol, TokenKind};
 
@@ -57,8 +59,19 @@ impl<'schema> StructureFrame<'schema> {
     ) -> OResult<'slot, Self> {
         Syntax::expect_value_symbol(
             context,
-            Symbol::LeftBrace,
-            "expected a struct object here",
+            ExpectedValueSymbol {
+                expected: Symbol::LeftBrace,
+                syntax_message: t! {
+                    name: "diagnostic.config.expected_struct_object",
+                    locale: context.session.translator(),
+                }
+                .into(),
+                value_message: t! {
+                    name: "diagnostic.config.expected_struct_object",
+                    locale: context.session.translator(),
+                }
+                .into(),
+            },
             out.reborrow(),
         )?;
         Ok(Self {
@@ -120,8 +133,11 @@ impl<'schema> StructureFrame<'schema> {
                 ContextDiagnosticRequest {
                     context,
                     code,
-                    message: "expected a field name or closing brace here in the struct object",
-                    key: Some(diagnostic_key!("diagnostic.syntax.object_field_names")),
+                    message: t! {
+                        name: "diagnostic.config.object_field_name_expected",
+                        locale: context.session.translator(),
+                    }
+                    .into(),
                     span,
                     value_source: None,
                 },
@@ -144,8 +160,11 @@ impl<'schema> StructureFrame<'schema> {
                 ContextDiagnosticRequest {
                     context,
                     code: DiagnosticCode::CONFIG_VALUE_ERROR,
-                    message: "object contains an undeclared field",
-                    key: Some(diagnostic_key!("diagnostic.config.undeclared_object_field")),
+                    message: t! {
+                        name: "diagnostic.config.undeclared_object_field",
+                        locale: context.session.translator(),
+                    }
+                    .into(),
                     span,
                     value_source: None,
                 },
@@ -160,17 +179,21 @@ impl<'schema> StructureFrame<'schema> {
         )?;
         ContainerSupport::push_field_path(context, field_name, span, out.reborrow())?;
         let Some(slot) = self.slots.get_mut(index) else {
-            return Err(out.fail(ContainerSupport::invalid_parser_state(Some(span))));
+            return Err(out.fail(ContainerSupport::invalid_parser_state(
+                Some(span),
+                context.session.translator(),
+            )));
         };
         if slot.state != FieldSlotState::Unseen {
             let diagnostic = ContainerSupport::context_diagnostic(
                 ContextDiagnosticRequest {
                     context,
                     code: DiagnosticCode::CONFIG_VALUE_ERROR,
-                    message: "duplicate object field",
-                    key: Some(diagnostic_key!(
-                        "diagnostic.config.duplicate_object_field_or_map_key"
-                    )),
+                    message: t! {
+                        name: "diagnostic.config.duplicate_object_field",
+                        locale: context.session.translator(),
+                    }
+                    .into(),
                     span,
                     value_source: None,
                 },
@@ -182,13 +205,22 @@ impl<'schema> StructureFrame<'schema> {
         context.cursor.bump(out.reborrow())?;
         Syntax::expect_symbol(
             context,
-            Symbol::Colon,
-            DiagnosticCode::CONFIG_SYNTAX_ERROR,
-            "expected a colon after the field name",
+            ExpectedSymbol {
+                expected: Symbol::Colon,
+                code: DiagnosticCode::CONFIG_SYNTAX_ERROR,
+                message: t! {
+                    name: "diagnostic.config.expected_struct_field_colon",
+                    locale: context.session.translator(),
+                }
+                .into(),
+            },
             out.reborrow(),
         )?;
         let Some(slot) = self.slots.get_mut(index) else {
-            return Err(out.fail(ContainerSupport::invalid_parser_state(Some(span))));
+            return Err(out.fail(ContainerSupport::invalid_parser_state(
+                Some(span),
+                context.session.translator(),
+            )));
         };
         slot.state = FieldSlotState::Parsing;
         self.pending = Some(field);
@@ -210,7 +242,10 @@ impl<'schema> StructureFrame<'schema> {
     ) -> OResult<'slot, ()> {
         let span = ContainerSupport::current_span(context);
         let Some(field) = self.pending.take() else {
-            return Err(out.fail(ContainerSupport::invalid_parser_state(span)));
+            return Err(out.fail(ContainerSupport::invalid_parser_state(
+                span,
+                context.session.translator(),
+            )));
         };
         let index = ParserControl::schema_call(
             &mut context.session.validation().schema_access_errors,
@@ -218,10 +253,16 @@ impl<'schema> StructureFrame<'schema> {
             out.reborrow(),
         )?;
         let Some(slot) = self.slots.get_mut(index) else {
-            return Err(out.fail(ContainerSupport::invalid_parser_state(span)));
+            return Err(out.fail(ContainerSupport::invalid_parser_state(
+                span,
+                context.session.translator(),
+            )));
         };
         if slot.state != FieldSlotState::Parsing {
-            return Err(out.fail(ContainerSupport::invalid_parser_state(span)));
+            return Err(out.fail(ContainerSupport::invalid_parser_state(
+                span,
+                context.session.translator(),
+            )));
         }
         let item = item_errors.try_call(|mut item_out| {
             match result {
@@ -245,14 +286,20 @@ impl<'schema> StructureFrame<'schema> {
                         item_out.reborrow(),
                     )?;
                     let Some(slot) = self.slots.get_mut(index) else {
-                        return Err(item_out.fail(ContainerSupport::invalid_parser_state(span)));
+                        return Err(item_out.fail(ContainerSupport::invalid_parser_state(
+                            span,
+                            context.session.translator(),
+                        )));
                     };
                     slot.state = FieldSlotState::Present;
                     slot.value = Some(value);
                 }
-                Err(ParseFailure::DeferredField) => {
+                Err(failure) if failure.is_deferred_field() => {
                     let Some(slot) = self.slots.get_mut(index) else {
-                        return Err(item_out.fail(ContainerSupport::invalid_parser_state(span)));
+                        return Err(item_out.fail(ContainerSupport::invalid_parser_state(
+                            span,
+                            context.session.translator(),
+                        )));
                     };
                     slot.state = FieldSlotState::Deferred;
                 }
@@ -264,12 +311,7 @@ impl<'schema> StructureFrame<'schema> {
                     return Err(item_out.fail(failure));
                 }
             }
-            ContainerSupport::item_boundary(
-                context,
-                Symbol::RightBrace,
-                "expected a comma or closing brace after the field value",
-                item_out.reborrow(),
-            )
+            ContainerSupport::item_boundary(context, Symbol::RightBrace, item_out.reborrow())
         });
         context.path.pop();
         let item = match item {
@@ -301,16 +343,20 @@ impl<'schema> StructureFrame<'schema> {
         for (index, field_id) in self.fields.iter().enumerate() {
             context.budget.consume(1, out.reborrow())?;
             let Some(slot) = self.slots.get_mut(index) else {
-                return Err(out.fail(ContainerSupport::invalid_parser_state(Some(close_span))));
+                return Err(out.fail(ContainerSupport::invalid_parser_state(
+                    Some(close_span),
+                    context.session.translator(),
+                )));
             };
             let state = replace(slot, FieldSlot::unseen());
             let field = field_id;
             match state.state {
                 FieldSlotState::Present => {
                     let Some(value) = state.value else {
-                        return Err(
-                            out.fail(ContainerSupport::invalid_parser_state(Some(close_span)))
-                        );
+                        return Err(out.fail(ContainerSupport::invalid_parser_state(
+                            Some(close_span),
+                            context.session.translator(),
+                        )));
                     };
                     ParserControl::budget_call(
                         &mut context.session.validation().budget_errors,
@@ -321,7 +367,10 @@ impl<'schema> StructureFrame<'schema> {
                 }
                 FieldSlotState::Failed => continue,
                 FieldSlotState::Parsing => {
-                    return Err(out.fail(ContainerSupport::invalid_parser_state(Some(close_span))));
+                    return Err(out.fail(ContainerSupport::invalid_parser_state(
+                        Some(close_span),
+                        context.session.translator(),
+                    )));
                 }
                 FieldSlotState::Unseen | FieldSlotState::Deferred => {}
             }
@@ -392,8 +441,11 @@ impl<'schema> StructureFrame<'schema> {
                                     value_out,
                                 )
                             },
-                            close_span,
-                            context.value_source,
+                            ValueCallContext {
+                                span: close_span,
+                                source: context.value_source,
+                                translator: context.session.translator(),
+                            },
                             item_out.reborrow(),
                         )?;
                         let field_span = ParserControl::schema_call(
@@ -424,9 +476,10 @@ impl<'schema> StructureFrame<'schema> {
                         return Err(item_out.fail(diagnostic.into()));
                     }
                     MissingFieldDecision::Provided => {
-                        return Err(
-                            item_out.fail(ContainerSupport::invalid_parser_state(Some(close_span)))
-                        );
+                        return Err(item_out.fail(ContainerSupport::invalid_parser_state(
+                            Some(close_span),
+                            context.session.translator(),
+                        )));
                     }
                 };
                 ParserControl::construct_text(context, field_name.len(), item_out.reborrow())?;
@@ -446,13 +499,13 @@ impl<'schema> StructureFrame<'schema> {
                     let failure = caught.take();
                     self.failed = true;
                     if !Recovery::record_failure(context, failure) {
-                        return Err(out.fail(ParseFailure::Reported));
+                        return Err(out.fail(ParseFailure::reported()));
                     }
                 }
             }
         }
         if self.failed {
-            return Err(out.fail(ParseFailure::Reported));
+            return Err(out.fail(ParseFailure::reported()));
         }
         Ok(output)
     }
@@ -476,8 +529,11 @@ impl<'schema> StructureFrame<'schema> {
             move |value_out| {
                 ValueFactory::structure_owned(fields, value_source, Some(budget), value_out)
             },
-            close_span,
-            value_source,
+            ValueCallContext {
+                span: close_span,
+                source: value_source,
+                translator: context.session.translator(),
+            },
             out.reborrow(),
         )?;
         Ok(ParsedValue {
@@ -486,7 +542,12 @@ impl<'schema> StructureFrame<'schema> {
             span: ParserControl::diagnostic_call(
                 &context.diagnostic_errors,
                 |diagnostic_out| {
-                    DiagnosticFactory::span_through(initial_span, close_span, diagnostic_out)
+                    DiagnosticFactory::span_through(
+                        initial_span,
+                        close_span,
+                        context.session.translator(),
+                        diagnostic_out,
+                    )
                 },
                 out.reborrow(),
             )?,

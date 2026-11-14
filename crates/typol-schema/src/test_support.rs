@@ -6,8 +6,8 @@ use typol_core::{
 };
 use typol_semantic::CompiledSchema;
 use typol_test_support::{
-    TestError, TestExtract, TestFailure, TestOpeo, TestResult, TestResultExt, TestSlot,
-    TestValueExt,
+    TestError, TestExtract, TestFailure, TestOpeo, TestOpeoOutcome, TestResult, TestResultExt,
+    TestSlot, TestValueExt,
 };
 
 use crate::{
@@ -109,10 +109,10 @@ impl TestOperation {
     pub(crate) fn diagnostic<T>(
         &mut self,
         operation: impl for<'slot> FnOnce(Out<'slot, 'slot, Diagnostic>) -> OResult<'slot, T>,
-    ) -> Result<T, Diagnostic> {
+    ) -> TestOpeoOutcome<T, Diagnostic> {
         self.diagnostic_errors
             .get_or_insert_with(TestSlot::new)
-            .access(operation)
+            .run(operation)
     }
 
     pub(crate) fn span<T>(

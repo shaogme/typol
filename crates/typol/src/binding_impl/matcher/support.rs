@@ -5,13 +5,14 @@ use crate::{
 };
 use opeo::{OResult, Out};
 use typol_core::{BudgetError, ChargedVec};
+use typol_i18n::Translator;
 use typol_semantic::{TypeKind, VariantPayloadInfo};
 
 pub(super) struct MatcherSupport;
 
 impl MatcherSupport {
-    pub(super) fn binding_budget_error(error: BudgetError) -> CodecErrors {
-        CodecErrors::emergency(CodecStage::Binding, error.into())
+    pub(super) fn binding_budget_error(error: BudgetError, translator: Translator) -> CodecErrors {
+        CodecErrors::emergency(CodecStage::Binding, error.into(), translator)
     }
 
     pub(super) fn enqueue_child<'slot, 'schema>(

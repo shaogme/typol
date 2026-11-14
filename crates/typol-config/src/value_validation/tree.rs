@@ -1,11 +1,14 @@
 mod environment;
+mod tasks;
 
-use self::environment::{EnvironmentReferenceValidator, EnvironmentValidation};
+use self::{
+    environment::{EnvironmentReferenceValidator, EnvironmentValidation},
+    tasks::{Children, Task, Visit},
+};
 use crate::{
     context::{AssignmentContext, CompletionState, RuleContext, SemanticStatus},
-    diagnostics::{DiagnosticFactory, NAMED_ENTRY_NAME_MISSING},
+    diagnostics::{DetailedDiagnosticRequest, DiagnosticFactory},
     instance::{LocationNode, Member, NodeId},
-    session::ValidationResources,
     validation::Validator,
     value_validation::{TreeContext, TreeTarget, support::TreeSupport},
 };
@@ -13,63 +16,16 @@ use core::mem::replace;
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
     ChargedVec, ConfigValue, Diagnostic, DiagnosticCode, DiagnosticContext, LocatedSpan, ValueKind,
-    ValuePayloadView, ValueSource, ValueView, diagnostic_context,
+    ValuePayloadView, ValueSource, diagnostic_context,
 };
-use typol_semantic::{
-    ConstraintList, FieldList, TypeKind, TypeView, VariantPayloadInfo, VariantView,
-};
+use typol_i18n::{Translator, t};
+use typol_semantic::{ConstraintList, TypeKind, TypeView, VariantPayloadInfo};
 
 static VALUE_TREE_SHAPE_INVARIANT: DiagnosticContext = diagnostic_context!(
     "typol-config",
     "value-tree-validation",
     "preconstructed-tree-shape-mismatch",
 );
-
-#[derive(Clone, Copy)]
-struct Visit<'value, 'schema> {
-    target: TreeTarget<'schema>,
-    value: ValueView<'value>,
-    member: Member<'schema>,
-    fallback_validated: bool,
-}
-
-enum Children<'value, 'schema> {
-    Array {
-        ty: TypeView<'schema>,
-        value: ValueView<'value>,
-        next: usize,
-        span: Option<LocatedSpan>,
-    },
-    Map {
-        ty: TypeView<'schema>,
-        value: ValueView<'value>,
-        next: usize,
-        span: Option<LocatedSpan>,
-    },
-    Fields {
-        fields: FieldList<'schema>,
-        value: ValueView<'value>,
-        variant: Option<VariantView<'schema>>,
-        next: usize,
-        span: Option<LocatedSpan>,
-    },
-}
-
-enum Task<'value, 'schema> {
-    Enter(Visit<'value, 'schema>),
-    Finish {
-        visit: Visit<'value, 'schema>,
-        parent: Option<NodeId>,
-        errors: usize,
-    },
-    Children(Children<'value, 'schema>),
-    Restore {
-        inherited: ChargedVec<ConstraintList<'schema>>,
-        depth: usize,
-    },
-    PopInherited,
-    LeaveNesting,
-}
 
 pub(super) struct TreeTraversal;
 
@@ -87,17 +43,20 @@ impl TreeTraversal {
         let inherited_depth = context.inherited_constraints.len();
         let mut tasks = TreeSupport::budget_call(
             &mut context.resources.budget_errors,
+            context.resources.translator,
             |budget_out| ChargedVec::new(Some(&context.resources.budget), budget_out),
             out.reborrow(),
         )?;
         TreeSupport::reserve_tasks(
             &mut tasks,
             &mut context.resources.budget_errors,
+            context.resources.translator,
             out.reborrow(),
         )?;
         TreeSupport::push_task(
             &mut tasks,
             &mut context.resources.budget_errors,
+            context.resources.translator,
             Task::Enter(Visit {
                 target,
                 value: value.root(),
@@ -166,150 +125,11 @@ impl TreeControl {
     ) -> OResult<'slot, ChargedVec<ConstraintList<'schema>>> {
         let empty = TreeSupport::budget_call(
             &mut context.resources.budget_errors,
+            context.resources.translator,
             |budget_out| ChargedVec::new(Some(&context.resources.budget), budget_out),
             out.reborrow(),
         )?;
         Ok(replace(context.inherited_constraints, empty))
-    }
-}
-
-impl<'value, 'schema> Children<'value, 'schema> {
-    fn next<'slot>(
-        &mut self,
-        resources: &mut ValidationResources<'_>,
-        mut out: Out<'slot, '_, Diagnostic>,
-    ) -> OResult<'slot, Option<Visit<'value, 'schema>>> {
-        let visit = match self {
-            Self::Array {
-                ty,
-                value,
-                next,
-                span,
-            } => {
-                let ValueKind::Array(values) = value.as_ref() else {
-                    return Err(out.fail(internal(*span)));
-                };
-                let Some(value) = values.get(*next) else {
-                    return Ok(None);
-                };
-                let member = Member::Index(*next);
-                *next += 1;
-                Visit {
-                    target: TreeTarget {
-                        expected: *ty,
-                        field: None,
-                        environment_field: None,
-                        variant: None,
-                        span: *span,
-                    },
-                    value: value.value(),
-                    member,
-                    fallback_validated: false,
-                }
-            }
-            Self::Map {
-                ty,
-                value,
-                next,
-                span,
-            } => {
-                let ValueKind::Map(entries) = value.as_ref() else {
-                    return Err(out.fail(internal(*span)));
-                };
-                let Some(entry) = entries.get(*next) else {
-                    return Ok(None);
-                };
-                let member = Member::MapItem(*next);
-                *next += 1;
-                Visit {
-                    target: TreeTarget {
-                        expected: *ty,
-                        field: None,
-                        environment_field: None,
-                        variant: None,
-                        span: *span,
-                    },
-                    value: entry.value(),
-                    member,
-                    fallback_validated: false,
-                }
-            }
-            Self::Fields {
-                fields,
-                value,
-                variant,
-                next,
-                span,
-            } => {
-                let Some(field) = fields.get(*next) else {
-                    return Ok(None);
-                };
-                let value_entry = match (*variant, value.as_ref()) {
-                    (None, ValueKind::Structure(values)) => values.get(*next),
-                    (
-                        Some(_),
-                        ValueKind::Enumeration {
-                            payload: ValuePayloadView::Structure(values),
-                            ..
-                        },
-                    ) => values.get(*next),
-                    _ => None,
-                };
-                let Some(value_entry) = value_entry else {
-                    return Err(out.fail(internal(*span)));
-                };
-                let Some(value_entry) = value_entry.as_named() else {
-                    return Err(out.fail(DiagnosticFactory::internal(
-                        NAMED_ENTRY_NAME_MISSING,
-                        *span,
-                        None,
-                        None,
-                    )));
-                };
-                let field_name = TreeSupport::schema_call(
-                    &mut resources.schema_access_errors,
-                    |schema_out| field.name(schema_out),
-                    out.reborrow(),
-                )?;
-                let equal = TreeSupport::budget_call(
-                    &mut resources.budget_errors,
-                    |budget_out| {
-                        resources
-                            .budget
-                            .compare_text(value_entry.name(), field_name, budget_out)
-                    },
-                    out.reborrow(),
-                )?
-                .is_eq();
-                if !equal {
-                    return Err(out.fail(internal(*span)));
-                }
-                let value = value_entry.value();
-                *next += 1;
-                let expected = TreeSupport::schema_call(
-                    &mut resources.schema_access_errors,
-                    |schema_out| field.ty(schema_out),
-                    out.reborrow(),
-                )?;
-                let member = match *variant {
-                    Some(variant) => Member::VariantField { variant, field },
-                    None => Member::Field(field),
-                };
-                Visit {
-                    target: TreeTarget {
-                        expected,
-                        field: Some(field),
-                        environment_field: Some(field),
-                        variant: None,
-                        span: *span,
-                    },
-                    value,
-                    member,
-                    fallback_validated: false,
-                }
-            }
-        };
-        Ok(Some(visit))
     }
 }
 
@@ -323,6 +143,7 @@ fn run<'schema, 'slot>(
     while let Some(task) = tasks.pop() {
         TreeSupport::budget_call(
             &mut context.resources.budget_errors,
+            context.resources.translator,
             |budget_out| context.resources.budget.consume(1, budget_out),
             out.reborrow(),
         )?;
@@ -350,6 +171,7 @@ fn run<'schema, 'slot>(
                     visit.target.span = Some(
                         TreeSupport::schema_call(
                             &mut context.resources.schema_access_errors,
+                            context.resources.translator,
                             |schema_out| field.span(schema_out),
                             out.reborrow(),
                         )?
@@ -360,6 +182,7 @@ fn run<'schema, 'slot>(
                 TreeSupport::reserve_tasks(
                     tasks,
                     &mut context.resources.budget_errors,
+                    context.resources.translator,
                     out.reborrow(),
                 )?;
                 let parent = context.current_node;
@@ -373,6 +196,7 @@ fn run<'schema, 'slot>(
                 TreeSupport::push_task(
                     tasks,
                     &mut context.resources.budget_errors,
+                    context.resources.translator,
                     Task::Finish {
                         visit,
                         parent,
@@ -400,19 +224,22 @@ fn run<'schema, 'slot>(
                         .value_limits
                         .allows_depth(context.nesting_depth)
                     {
-                        return Err(out.fail(DiagnosticFactory::make_diagnostic(
-                            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                            "value tree nesting depth exceeded the limit",
-                            visit.target.span,
-                            None,
-                            source,
-                        )));
+                        return Err(out.fail(DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                            code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                            message: t! { name: "diagnostic.config.value_tree_nesting_limit", locale: context.resources.translator }.into(),
+                            primary: visit.target.span,
+                            path: None,
+                            value_source: source,
+                            context: None,
+                            translator: context.resources.translator,
+                        })));
                     }
                     let span = if visit.value.source() == ValueSource::SchemaDefault {
                         if let Some(field) = visit.target.field {
                             Some(
                                 TreeSupport::schema_call(
                                     &mut context.resources.schema_access_errors,
+                                    context.resources.translator,
                                     |schema_out| field.span(schema_out),
                                     out.reborrow(),
                                 )?
@@ -428,6 +255,7 @@ fn run<'schema, 'slot>(
                     let result = context.diagnostic_errors.try_call(|diagnostic_out| {
                         Validator::completed(
                             AssignmentContext {
+                                translator: context.resources.translator,
                                 schema: context.schema,
                                 node: context.current_node,
                                 locations: context.locations,
@@ -472,6 +300,7 @@ fn run<'schema, 'slot>(
                     TreeSupport::reserve_tasks(
                         tasks,
                         &mut context.resources.budget_errors,
+                        context.resources.translator,
                         out.reborrow(),
                     )?;
                     let depth = context.path.len();
@@ -480,18 +309,21 @@ fn run<'schema, 'slot>(
                     TreeSupport::push_task(
                         tasks,
                         &mut context.resources.budget_errors,
+                        context.resources.translator,
                         Task::Children(children),
                         out.reborrow(),
                     )?;
                     TreeSupport::push_task(
                         tasks,
                         &mut context.resources.budget_errors,
+                        context.resources.translator,
                         Task::Restore { inherited, depth },
                         out.reborrow(),
                     )?;
                     TreeSupport::push_task(
                         tasks,
                         &mut context.resources.budget_errors,
+                        context.resources.translator,
                         Task::Enter(visit),
                         out.reborrow(),
                     )?;
@@ -520,6 +352,7 @@ fn schedule_children<'value, 'schema, 'slot>(
     let span = target.span;
     let kind = TreeSupport::schema_call(
         &mut context.resources.schema_access_errors,
+        context.resources.translator,
         |schema_out| target.expected.kind(schema_out),
         out.reborrow(),
     )?;
@@ -533,6 +366,7 @@ fn schedule_children<'value, 'schema, 'slot>(
             )?;
             let constraints = TreeSupport::schema_call(
                 &mut context.resources.schema_access_errors,
+                context.resources.translator,
                 |schema_out| {
                     RuleContext::constraints(
                         target.expected,
@@ -545,11 +379,13 @@ fn schedule_children<'value, 'schema, 'slot>(
             )?;
             TreeSupport::budget_call(
                 &mut context.resources.budget_errors,
+                context.resources.translator,
                 |budget_out| context.inherited_constraints.try_reserve(1, budget_out),
                 out.reborrow(),
             )?;
             TreeSupport::budget_call(
                 &mut context.resources.budget_errors,
+                context.resources.translator,
                 |budget_out| {
                     context
                         .inherited_constraints
@@ -560,18 +396,21 @@ fn schedule_children<'value, 'schema, 'slot>(
             TreeSupport::push_task(
                 tasks,
                 &mut context.resources.budget_errors,
+                context.resources.translator,
                 Task::LeaveNesting,
                 out.reborrow(),
             )?;
             TreeSupport::push_task(
                 tasks,
                 &mut context.resources.budget_errors,
+                context.resources.translator,
                 Task::PopInherited,
                 out.reborrow(),
             )?;
             TreeSupport::push_task(
                 tasks,
                 &mut context.resources.budget_errors,
+                context.resources.translator,
                 Task::Enter(Visit {
                     target: TreeTarget {
                         expected: inner,
@@ -617,6 +456,7 @@ fn schedule_children<'value, 'schema, 'slot>(
         ) => {
             let variant = TreeSupport::budget_call(
                 &mut context.resources.budget_errors,
+                context.resources.translator,
                 |budget_out| {
                     target.expected.variant_named_budgeted(
                         name,
@@ -627,11 +467,11 @@ fn schedule_children<'value, 'schema, 'slot>(
                 out.reborrow(),
             )?;
             let variant = variant
-                .ok_or_else(|| internal(span))
+                .ok_or_else(|| internal(span, context.resources.translator))
                 .store_err_into(out.reborrow())?;
             let current_node = context
                 .current_node
-                .ok_or_else(|| internal(span))
+                .ok_or_else(|| internal(span, context.resources.translator))
                 .store_err_into(out.reborrow())?;
             context
                 .locations
@@ -645,11 +485,13 @@ fn schedule_children<'value, 'schema, 'slot>(
             TreeSupport::push_task(
                 tasks,
                 &mut context.resources.budget_errors,
+                context.resources.translator,
                 Task::LeaveNesting,
                 out.reborrow(),
             )?;
             let payload_kind = TreeSupport::schema_call(
                 &mut context.resources.schema_access_errors,
+                context.resources.translator,
                 |schema_out| variant.payload(schema_out),
                 out.reborrow(),
             )?;
@@ -661,6 +503,7 @@ fn schedule_children<'value, 'schema, 'slot>(
                     let depth = context.path.len();
                     TreeSupport::budget_call(
                         &mut context.resources.budget_errors,
+                        context.resources.translator,
                         |budget_out| context.path.push_payload(name, budget_out),
                         out.reborrow(),
                     )?;
@@ -668,12 +511,14 @@ fn schedule_children<'value, 'schema, 'slot>(
                     TreeSupport::push_task(
                         tasks,
                         &mut context.resources.budget_errors,
+                        context.resources.translator,
                         Task::Restore { inherited, depth },
                         out.reborrow(),
                     )?;
                     TreeSupport::push_task(
                         tasks,
                         &mut context.resources.budget_errors,
+                        context.resources.translator,
                         Task::Enter(Visit {
                             target: TreeTarget {
                                 expected: ty,
@@ -706,13 +551,13 @@ fn schedule_children<'value, 'schema, 'slot>(
                         span,
                     }
                 }
-                _ => return Err(out.fail(internal(span))),
+                _ => return Err(out.fail(internal(span, context.resources.translator))),
             }
         }
         (TypeKind::Builtin(_), _) | (TypeKind::Option { .. }, ValueKind::Optional(None)) => {
             return Ok(());
         }
-        _ => return Err(out.fail(internal(span))),
+        _ => return Err(out.fail(internal(span, context.resources.translator))),
     };
     TreeSupport::enter_nesting(
         context,
@@ -723,12 +568,14 @@ fn schedule_children<'value, 'schema, 'slot>(
     TreeSupport::push_task(
         tasks,
         &mut context.resources.budget_errors,
+        context.resources.translator,
         Task::LeaveNesting,
         out.reborrow(),
     )?;
     TreeSupport::push_task(
         tasks,
         &mut context.resources.budget_errors,
+        context.resources.translator,
         Task::Children(children),
         out.reborrow(),
     )?;
@@ -745,24 +592,26 @@ fn append_member<'slot>(
     match member {
         Member::Index(index) => TreeSupport::budget_call(
             &mut context.resources.budget_errors,
+            context.resources.translator,
             |budget_out| context.path.push_index(index, budget_out),
             out.reborrow(),
         )?,
         Member::MapItem(index) => {
             let Children::Map { value, .. } = children else {
-                return Err(out.fail(internal(span)));
+                return Err(out.fail(internal(span, context.resources.translator)));
             };
             let ValueKind::Map(entries) = value.as_ref() else {
-                return Err(out.fail(internal(span)));
+                return Err(out.fail(internal(span, context.resources.translator)));
             };
             let Some(entry) = entries.get(index) else {
-                return Err(out.fail(internal(span)));
+                return Err(out.fail(internal(span, context.resources.translator)));
             };
             let Some(key) = entry.name() else {
-                return Err(out.fail(internal(span)));
+                return Err(out.fail(internal(span, context.resources.translator)));
             };
             TreeSupport::budget_call(
                 &mut context.resources.budget_errors,
+                context.resources.translator,
                 |budget_out| context.path.push_map_key(key, budget_out),
                 out.reborrow(),
             )?
@@ -770,11 +619,13 @@ fn append_member<'slot>(
         Member::Field(field) => {
             let name = TreeSupport::schema_call(
                 &mut context.resources.schema_access_errors,
+                context.resources.translator,
                 |schema_out| field.name(schema_out),
                 out.reborrow(),
             )?;
             TreeSupport::budget_call(
                 &mut context.resources.budget_errors,
+                context.resources.translator,
                 |budget_out| context.path.push_field(name, budget_out),
                 out.reborrow(),
             )?
@@ -782,30 +633,34 @@ fn append_member<'slot>(
         Member::VariantField { variant, field } => {
             let variant_name = TreeSupport::schema_call(
                 &mut context.resources.schema_access_errors,
+                context.resources.translator,
                 |schema_out| variant.name(schema_out),
                 out.reborrow(),
             )?;
             TreeSupport::budget_call(
                 &mut context.resources.budget_errors,
+                context.resources.translator,
                 |budget_out| context.path.push_payload(variant_name, budget_out),
                 out.reborrow(),
             )?;
             let field_name = TreeSupport::schema_call(
                 &mut context.resources.schema_access_errors,
+                context.resources.translator,
                 |schema_out| field.name(schema_out),
                 out.reborrow(),
             )?;
             TreeSupport::budget_call(
                 &mut context.resources.budget_errors,
+                context.resources.translator,
                 |budget_out| context.path.push_field(field_name, budget_out),
                 out.reborrow(),
             )?
         }
-        _ => return Err(out.fail(internal(span))),
+        _ => return Err(out.fail(internal(span, context.resources.translator))),
     }
     Ok(())
 }
 
-fn internal(span: Option<LocatedSpan>) -> Diagnostic {
-    DiagnosticFactory::internal(VALUE_TREE_SHAPE_INVARIANT, span, None, None)
+fn internal(span: Option<LocatedSpan>, translator: Translator) -> Diagnostic {
+    DiagnosticFactory::internal(VALUE_TREE_SHAPE_INVARIANT, span, None, None, translator)
 }

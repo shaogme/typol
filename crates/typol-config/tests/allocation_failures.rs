@@ -19,6 +19,7 @@ use typol_core::{
     LocationError, Read, SliceSource, SourceCapture, SourceExcerptSet, SourceId, SourceSpan, Span,
     SpanError, SpanLocation, ValueError,
 };
+use typol_i18n::{Language, Translator};
 use typol_policy::RegexOptions;
 use typol_schema::{SchemaCompileOptions, SchemaSource};
 use typol_semantic::CompiledSchema;
@@ -209,9 +210,12 @@ fn conversion_diagnostic(budget: &ExecutionBudget, fields: &[&str]) -> TestResul
 fn redact_conversion(
     schema: &CompiledSchema,
     diagnostic: &mut Diagnostic,
-) -> Result<(), Diagnostic> {
+) -> TestOpeoOutcome<(), Diagnostic> {
     let mut errors = TestSlot::<Diagnostic>::default();
-    errors.access(|out| ConfigDiagnosticRedactor::new(schema).redact_conversion(diagnostic, out))
+    errors.run(|out| {
+        ConfigDiagnosticRedactor::new(schema, Translator::new(Language::English))
+            .redact_conversion(diagnostic, out)
+    })
 }
 
 fn parse(
@@ -729,10 +733,9 @@ fn conversion_redaction_allocation_failure_discards_the_original_path() -> TestR
         let mut diagnostic = conversion_diagnostic(&budget, &["value", "member"])?;
         scope.focus(Some(fail_at), false);
         let result = redact_conversion(&schema, &mut diagnostic);
-        let safe = result.err();
-        let code = safe.as_ref().map(Diagnostic::code);
-        let path_is_clear = safe.as_ref().is_some_and(|error| error.path().is_none());
-        drop(safe);
+        let safe = result.error();
+        let code = safe.map(Diagnostic::code);
+        let path_is_clear = safe.is_some_and(|error| error.path().is_none());
         drop(diagnostic);
         let state = scope.finish();
         test_eq!(code, Some(DiagnosticCode::ALLOCATION_FAILED))?;
@@ -1173,7 +1176,7 @@ fn snapshot_oom_preserves_original_diagnostic_and_releases_optional_storage() ->
             test_assert!(safe)?;
             test_eq!(state.live_bytes, 0)?;
             test_eq!(diagnostic.code(), DiagnosticCode::CONFIG_VALIDATION_ERROR)?;
-            test_eq!(diagnostic.message(), "existing diagnostic")?;
+            test_eq!(diagnostic.message().test_value()?, "existing diagnostic")?;
         }
     }
     Ok(())

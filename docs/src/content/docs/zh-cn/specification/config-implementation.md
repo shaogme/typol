@@ -66,7 +66,7 @@ ConfigParser::new(schema).parse(request, environment)
 
 解析成功返回 `ValidatedConfigValue`，明确表示值约束和完整树断言均已通过。调用方可只读借用其中的 `ConfigValue`；只有需要不带验证标记的拥有值时才调用 `into_config_value()`。
 
-`ConfigParseRequest` 包含可读 `Read`、显示名称和 `ConfigParseOptions`。选项分别持有 `ExcerptLimits` 和 `RegexOptions`，并配置 `ConfigLimits`、通用执行/工作区 `ExecutionLimits` 和词法流 `StreamLimits`。Schema 与 Config 共享相同的块字符串 lexer 规则。由于 `Read` 不保证支持回放，lexer 会将当前块 token 正文暂存到计费工作区，再去缩进并解码到第二个计费缓冲区。扫描消耗共享执行额度；源 token 上限包括分隔符、闭合缩进及原始 CRLF 字节，字符串上限只计算最终解码后的 UTF-8 字节。显示名称仅用于诊断元数据，不是配置文本的一部分。
+`ConfigParseRequest` 包含可读 `Read`、显示名称和 `ConfigParseOptions`。选项分别持有 `ExcerptLimits` 和 `RegexOptions`，并配置 `ConfigLimits`、通用执行/工作区 `ExecutionLimits`、词法流 `StreamLimits` 与 `Translator`。`ConfigValidationOptions` 也为外来值校验期间创建的错误携带翻译器。请在解析或校验开始前选择语言；默认使用英文。Schema 与 Config 共享相同的块字符串 lexer 规则。由于 `Read` 不保证支持回放，lexer 会将当前块 token 正文暂存到计费工作区，再去缩进并解码到第二个计费缓冲区。扫描消耗共享执行额度；源 token 上限包括分隔符、闭合缩进及原始 CRLF 字节，字符串上限只计算最终解码后的 UTF-8 字节。显示名称仅用于诊断元数据，不是配置文本的一部分。
 
 `ConfigParser::parse_document` 和 `LoadedSchema::read_document` 会保留 parser 的 UTF-8 源缓冲区及语义定位索引。文档直接接管该缓冲区作为源文本，不再复制第二份完整内容。首次编辑前，源文本本身也用于 `DocumentSnapshot` 写入期望值；首次编辑成功时，旧源缓冲区会直接转为计费快照，不再分配第二份文本。写入成功后，期望值更新为当前源文本，并释放独立快照。
 
@@ -182,6 +182,8 @@ Schema-aware writer 会将保留的引用写成 `env("NAME"[, fallback])`，而�
 普通诊断在错误集合冻结前按主跨度的源 ID、起始字节、结束字节升序排列；主跨度相同或缺失时保留产生顺序。终止诊断（包括诊断上限槽）始终位于列表末尾。排序消耗本次调用的共享执行预算，预算不足按资源错误处理。
 
 `ConfigParseErrors` 和 `ConfigValueErrors` 的 `Display` 写出诊断报告，含符号化错误码、原因、位置、标签和可用片段；收集达到上限时附带“诊断收集已截断，后续错误未收集”说明。两种错误都提供 `is_truncated()` 查询；`Debug` 保留阶段、诊断数量和截断状态。格式化写入 `fmt::Formatter` 时不建立报告缓冲区。`to_string()` 仍会为其返回的 `String` 分配内存。
+
+每条诊断还公开稳定的 `kind().id()`、诊断阶段、语义化 `related_locations()`，以及主跨度、实例路径和值来源状态。facade 的 `TypolError` 在 std 和 no_std 构建中均提供索引查询 `diagnostic_count()` / `diagnostic(index)` 和 `diagnostic_context(index)`。状态用于区分不适用、不可用和脱敏字段。`Diagnostic::message()` 以可失败结果返回已经翻译的原因；翻译失败会继续向上传递，不会换成 fallback 文本。原因语言在解析或校验期间确定，报告 writer 不能再切换语言。
 
 诊断缓冲区按调用方上限收集错误。上限为 0 时按有效容量 1 处理；容量为 1 时保存首条真实诊断、标记截断并停止继续收集，不以 `DIAGNOSTIC_LIMIT_REACHED` 替换该错误；容量至少为 2 时保留末槽，在后续错误到达时追加 `DIAGNOSTIC_LIMIT_REACHED`。调用方应通过 `is_truncated()` 判断收集是否因上限停止；在容量为 1 时，不应再依赖诊断列表末尾必定包含上限错误码。资源超限、分配/容量失败、输入失败和内部不变量错误会终止解析；词法错误也会停止后续恢复。公开错误码类别包括词法、配置语法、配置值、环境、配置校验、资源、分配、输入、诊断超限和内部错误；具体稳定码定义在 `typol-core::DiagnosticCode`。
 

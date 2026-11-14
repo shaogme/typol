@@ -1,12 +1,12 @@
 locale zh-CN;
 
 message cli.help = "用法：
-  typol [--language en|zh-CN] --help
-  typol [--language en|zh-CN] schema check <schema.tschem>
-  typol [--language en|zh-CN] schema fmt [--check] <schema.tschem>
-  typol [--language en|zh-CN] config check --schema <schema.tschem> [--environment inherit|empty] <config.tconf>
-  typol [--language en|zh-CN] config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] [--reject-secrets] <config.tconf>
-  typol [--language en|zh-CN] config fmt --schema <schema.tschem> [--environment inherit|empty] [--check] <config.tconf>
+  typol [--language en|zh-CN] [--format text|json] [--diagnostic-detail] --help
+  typol [全局选项] schema check <schema.tschem>
+  typol [全局选项] schema fmt [--check] <schema.tschem>
+  typol [全局选项] config check --schema <schema.tschem> [--environment inherit|empty] <config.tconf>
+  typol [全局选项] config export-ir --schema <schema.tschem> [--environment inherit|empty] [--pretty] [--reject-secrets] <config.tconf>
+  typol [全局选项] config fmt --schema <schema.tschem> [--environment inherit|empty] [--check] <config.tconf>
 
 命令：
   schema check       编译并检查 Schema 及其导入
@@ -17,6 +17,8 @@ message cli.help = "用法：
 
 选项：
   --language         选择英文或简体中文（默认：自动检测）
+  --format           text（默认）或版本化 JSON 诊断
+  --diagnostic-detail 在 JSON 输出中包含内部诊断上下文
   --environment      inherit（默认）读取进程环境变量；empty 忽略环境变量
   --pretty           以缩进格式输出 IR
   --reject-secrets   配置含有秘密标记时，在写出 IR 前失败
@@ -24,7 +26,7 @@ message cli.help = "用法：
   --check            检查 schema fmt 的格式，不写入文件
   -h, --help         显示此帮助
 
-请在命令前使用 --language。省略该选项时，可通过 TYPOL_LANG 设置语言。\n";
+请在命令前使用全局选项。--diagnostic-detail 必须与 --format=json 一起使用。省略 --language 时，可通过 TYPOL_LANG 设置语言。\n";
 message cli.error_prefix = "命令行错误：";
 message cli.diagnostic_prefix = "Typol 诊断详情：\n";
 message cli.write_stdout_error = "无法写入标准输出。";
@@ -63,13 +65,26 @@ message cli.config_path_missing = "缺少配置文件路径。";
 message cli.config_path_extra = "只能指定一个配置文件路径。";
 message cli.language_missing = "--language 缺少取值。";
 message cli.language_invalid = "--language 必须是 en 或 zh-CN。";
+message cli.format_missing = "--format 缺少取值。";
+message cli.format_invalid = "--format 必须是 text 或 json。";
+message cli.diagnostic_detail_repeated = "--diagnostic-detail 只能指定一次。";
+message cli.diagnostic_detail_requires_json = "--diagnostic-detail 需要 --format=json。";
 message report.path = "路径";
 message report.location = "位置";
 message report.location_unavailable = "位置不可用";
 message report.unknown_source = "未知来源";
 message report.rule = "规则";
+message report.related_location = "相关位置";
+message report.related_role.previous_declaration = "先前声明";
+message report.related_role.first_declaration = "首次声明";
+message report.related_role.type_or_field_definition = "类型或字段定义";
+message report.related_role.constraint_definition = "约束定义";
+message report.related_role.associated_input = "关联输入";
+message report.kind = "诊断类型";
+message report.diagnostic_stage = "诊断阶段";
+message report.field_unavailable = "不可用";
+message report.redacted = "已脱敏";
 message report.source = "来源";
-message report.diagnostic_message_unavailable = "诊断消息不可用";
 message report.source_excerpt_unavailable = "源代码片段不可用";
 message report.diagnostic = "条诊断";
 message report.diagnostics = "条诊断";
@@ -162,12 +177,14 @@ message diagnostic.validation.variants_restriction_failed = "所选枚举变体�
 message diagnostic.validation.duplicate_array_elements = "数组包含重复元素";
 message diagnostic.validation.collection_boundary_failed = "集合不符合边界约束";
 message diagnostic.config.required_field_missing = "缺少必需字段";
-message diagnostic.config.duplicate_object_field_or_map_key = "对象字段或映射键重复";
+message diagnostic.config.duplicate_object_field = "对象字段重复";
+message diagnostic.config.duplicate_map_key = "映射键重复";
+message diagnostic.config.environment_reference_metadata_required = "环境来源需要结构化引用元数据";
 message diagnostic.config.expected_value = "此处应为配置值";
 message diagnostic.config.scalar_type_mismatch = "字面量与目标标量类型不兼容";
 message diagnostic.config.scalar_out_of_range = "数值字面量超出目标类型的取值范围";
 message diagnostic.config.none_requires_option = "none 只能赋给 Option 类型";
-message diagnostic.config.fixed_array_length_mismatch = "定长数组的元素数量与 Schema 声明不匹配";
+message diagnostic.config.fixed_array_length_mismatch = "定长数组需要 {expected} 个元素，输入中有 {actual} 个";
 message diagnostic.config.trailing_content = "根对象后存在多余内容";
 message diagnostic.environment.resource_limit = "读取环境变量时超出资源限制";
 message diagnostic.environment.name_invalid = "环境变量名称无效或未获字段授权";
@@ -188,6 +205,7 @@ message diagnostic.emergency.capacity_exceeded = "超出工作区容量限制";
 message diagnostic.emergency.diagnostic_limit_reached = "达到诊断数量上限；未收集后续错误";
 message diagnostic.emergency.internal_error = "内部错误阻止了操作";
 message diagnostic.emergency.source_input_error = "无法处理来源输入";
+message diagnostic.emergency.syntax_error = "Schema 语法错误";
 message diagnostic.label.evaluation_failed_here = "求值在此处失败";
 message diagnostic.label.constraint_defined_here = "约束定义于此处";
 message diagnostic.syntax.expected_punctuation = "此处应为标点符号";
@@ -202,6 +220,7 @@ message diagnostic.syntax.unknown_annotation = "未知的 Schema 注解";
 message diagnostic.syntax.boundary_argument = "边界参数必须是 min 或 max";
 message diagnostic.syntax.expected_boolean_literal = "此处应为布尔字面量";
 message diagnostic.syntax.invalid_type = "此处不是有效类型";
+message diagnostic.syntax.unique_argument = "@unique 参数必须是 by";
 message diagnostic.syntax.expected_type_expression = "此处应为类型表达式";
 message diagnostic.syntax.module_missing_closing_brace = "模块声明缺少右花括号";
 message diagnostic.syntax.expected_schema_declaration = "此处应为 Schema 声明";
@@ -298,6 +317,7 @@ message diagnostic.syntax.float_literal_requires_integer_part = "浮点字面量
 message diagnostic.syntax.incomplete_escape_sequence = "字符串转义序列不完整";
 message diagnostic.syntax.block_string_requires_newline = "块字符串的起始分隔符后必须紧跟换行符";
 message diagnostic.syntax.invalid_character = "来源包含无效字符";
+message diagnostic.syntax.invalid_utf8 = "来源包含无效 UTF-8";
 message diagnostic.syntax.invalid_line_ending = "单独的 CR 不是有效的换行符";
 message diagnostic.syntax.malformed_float = "浮点字面量格式错误";
 message diagnostic.syntax.malformed_hex_integer = "十六进制整数格式错误";
@@ -310,3 +330,62 @@ message diagnostic.schema.combined_length_constraints_unsatisfiable = "组合 @l
 message diagnostic.schema.combined_numeric_constraints_unsatisfiable = "组合数值约束不存在可满足的范围";
 message diagnostic.schema.combined_size_constraints_unsatisfiable = "组合 @size 约束不存在可满足的范围";
 message diagnostic.schema.combined_sum_constraints_unsatisfiable = "组合 @sum 约束不存在可满足的范围";
+message diagnostic.custom.resource_limit_exceeded = "已超出资源限制";
+message diagnostic.custom.allocation_failed = "内存分配失败";
+message diagnostic.custom.lexical_error = "来源包含词法错误";
+message diagnostic.custom.schema_syntax_error = "Schema 语法无效";
+message diagnostic.custom.diagnostic_limit_reached = "已达到诊断数量上限";
+message diagnostic.custom.regex_syntax_error = "正则表达式语法无效";
+message diagnostic.custom.schema_semantic_error = "Schema 静态检查失败";
+message diagnostic.custom.schema_resolver_error = "无法解析 Schema 导入";
+message diagnostic.custom.internal_error = "内部错误导致操作失败";
+message diagnostic.custom.config_syntax_error = "配置语法无效";
+message diagnostic.custom.config_value_error = "配置值的形状或类型无效";
+message diagnostic.custom.config_validation_error = "配置值未通过约束校验";
+message diagnostic.custom.config_environment_error = "无法读取或转换环境变量值";
+message diagnostic.custom.type_binding_error = "Rust 类型与 Schema 不匹配";
+message diagnostic.custom.rust_conversion_error = "Rust 值转换失败";
+message diagnostic.custom.config_encoding_error = "无法将值编码为配置文本";
+message diagnostic.custom.source_input_error = "无法读取来源输入";
+message diagnostic.custom.capacity_exceeded = "工作区容量不足";
+message diagnostic.custom.schema_context_mismatch = "根 Schema 属于不同的编译上下文";
+message diagnostic.custom.schema_session_finished = "Schema 编译会话已结束";
+message diagnostic.cli.operation_failed = "操作失败";
+message diagnostic.config.expected_enum_variant_prefix = "枚举值必须以点号和变体名称开头";
+message diagnostic.config.expected_enum_payload = "单载荷枚举变体必须使用括号包围载荷";
+message diagnostic.config.expected_enum_payload_close_parenthesis = "单载荷枚举值必须以右括号结束";
+message diagnostic.config.expected_array = "此处应为数组值";
+message diagnostic.config.expected_map = "此处应为映射值";
+message diagnostic.config.expected_map_key_colon = "映射键后应为冒号";
+message diagnostic.config.expected_environment_open_parenthesis = "环境表达式后应为左括号";
+message diagnostic.config.expected_environment_close_parenthesis = "环境表达式后应为右括号";
+message diagnostic.config.expected_struct_object = "此处应为结构体对象";
+message diagnostic.config.expected_struct_field_colon = "字段名称后应为冒号";
+message diagnostic.environment.target_type_invalid = "环境表达式的目标类型必须是标量";
+message diagnostic.validation.assertion_failed = "配置值不符合断言";
+message diagnostic.label.associated_input = "相关输入位置";
+message diagnostic.config.string_token_payload_missing = "字符串词元缺少解码后的内容";
+message diagnostic.config.decoded_string_limit_exceeded = "解码后的字符串超出配置的字节上限";
+message diagnostic.config.integer_type_unavailable = "无法获取 Schema 整数类型信息";
+message diagnostic.config.value_construction_resource_limit = "构造配置值时超出资源限制";
+message diagnostic.config.value_construction_allocation_failed = "构造配置值时内存分配失败";
+message diagnostic.config.value_construction_capacity_exceeded = "配置值工作区容量不足";
+message diagnostic.config.value_construction_internal_failure = "构造配置值时遇到无效的内部状态";
+message diagnostic.config.enum_variant_name_expected = "点号后应为枚举变体名称";
+message diagnostic.config.map_key_expected = "映射对象中应为字符串键或右花括号";
+message diagnostic.config.object_field_name_expected = "结构体对象中应为字段名或右花括号";
+message diagnostic.config.source_id_unrepresentable = "配置来源标识超出可表示范围";
+message diagnostic.config.located_node_limit = "带位置信息的配置节点数量超出上限";
+message diagnostic.config.assertion_traversal_limit = "断言实例遍历深度超出上限";
+message diagnostic.config.fallback_rule_limit = "回退规则数量超出上限";
+message diagnostic.config.array_element_limit = "数组元素数量超出上限";
+message diagnostic.config.name_byte_limit = "名称或映射键超出配置的字符串字节上限";
+message diagnostic.config.field_name_byte_limit = "字段名超出配置的字符串字节上限";
+message diagnostic.config.enum_variant_name_byte_limit = "枚举变体名称超出配置的字符串字节上限";
+message diagnostic.config.enum_payload_resource_limit = "枚举载荷超出资源限制";
+message diagnostic.config.delimiter_nesting_limit = "配置分隔符嵌套深度超出上限";
+message diagnostic.config.value_tree_nesting_limit = "配置值树嵌套深度超出上限";
+message diagnostic.environment.source_reference_invalid = "环境来源引用对该 Schema 字段无效";
+message report.related_locations = "相关位置";
+message report.related_locations_unavailable = "不可用";
+message report.related_locations_truncated = "已达到相关位置数量上限";

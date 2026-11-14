@@ -198,18 +198,12 @@ impl Environment for Bytes<'_> {
 fn safe_errors(errors: &TypolError) -> TestResult {
     let mut output = format!(
         "{errors:?}{errors}{}",
-        TestOpeo::value(|out| {
-            errors.render(
-                Translator::new(Language::English),
-                RenderOptions::default(),
-                out,
-            )
-        })?
+        TestOpeo::value(|out| errors.render(RenderOptions::default(), out))?
     );
     for diagnostic in errors.diagnostics().iter() {
         output.push_str(&format!(
             "{diagnostic:?}{}{:?}{:?}",
-            diagnostic.message(),
+            diagnostic.message().test_value()?,
             diagnostic.path(),
             diagnostic.labels()
         ));
@@ -230,7 +224,6 @@ fn safe_errors(errors: &TypolError) -> TestResult {
     assert_eq!(
         TestOpeo::call(|out| {
             errors.render(
-                Translator::new(Language::English),
                 RenderOptions::new(RenderOptions::default().execution(), 0),
                 out,
             )
@@ -376,7 +369,7 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
     .test_value()?;
     let mut all_outputs = format!("{rendered}{errors:?}{errors}{:?}", errors.diagnostics());
     for diagnostic in errors.diagnostics().iter() {
-        all_outputs.push_str(diagnostic.message());
+        all_outputs.push_str(diagnostic.message().test_value()?);
         for label in diagnostic.labels() {
             all_outputs.push_str(label.message());
         }

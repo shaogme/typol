@@ -1,3 +1,4 @@
+use typol_i18n::{Language, Translator};
 use typol_test_support::ConfigTestSupport as Support;
 
 use typol_config::{
@@ -6,8 +7,9 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{
-    BudgetError, Diagnostic, DiagnosticCode, ExcerptLimits, ExecutionBudget, ExecutionLimits,
-    InstancePath, Read, SliceSource, SourceSpan, ValueKind, ValueSource, ValueView,
+    BudgetError, Diagnostic, DiagnosticCode, DiagnosticParameterValue, ExcerptLimits,
+    ExecutionBudget, ExecutionLimits, InstancePath, Read, SliceSource, SourceSpan, ValueKind,
+    ValueSource, ValueView,
 };
 use typol_policy::{RegexExecutionLimits, RegexOptions};
 use typol_schema::{SchemaCompileOptions, SchemaSource};
@@ -146,6 +148,52 @@ fn execution_budget(limits: ExecutionLimits) -> TestResult<ExecutionBudget> {
 }
 
 #[test]
+fn fixed_array_mismatch_uses_localized_sink_and_keeps_structured_parameters() -> TestResult<()> {
+    let schema = compile("entry struct Root { values: [u8; 2] }")?;
+    let messages = [
+        (
+            Language::English,
+            "fixed-size array expects 2 elements, but the input contains 1",
+        ),
+        (Language::Chinese, "定长数组需要 2 个元素，输入中有 1 个"),
+    ];
+
+    for (language, expected_message) in messages {
+        let mut provider = Provider {
+            bytes: None,
+            names: vec![],
+        };
+        let mut source = SliceSource::new(b"{values: [1]}");
+        let request: ConfigParseRequest<'_, dyn Read> = ConfigParseRequest::new(
+            &mut source,
+            "array-mismatch",
+            ConfigParseOptions::default().with_translator(Translator::new(language)),
+        );
+        let errors = Support::parse(&schema, request, &mut provider).test_error()?;
+        let diagnostic = TestCheck::item(errors.diagnostics(), 0)?;
+        let parameters = diagnostic.parameters();
+        let expected_parameter = parameters.first().test_value()?;
+        let actual_parameter = parameters.get(1).test_value()?;
+
+        test_eq!(diagnostic.message(), Ok(expected_message))?;
+        test_eq!(parameters.len(), 2)?;
+        test_eq!(expected_parameter.name(), "expected")?;
+        test_eq!(
+            expected_parameter.value(),
+            DiagnosticParameterValue::Unsigned(2)
+        )?;
+        test_eq!(actual_parameter.name(), "actual")?;
+        test_eq!(
+            actual_parameter.value(),
+            DiagnosticParameterValue::Unsigned(1)
+        )?;
+        test_assert!(diagnostic.budget().is_some())?;
+    }
+
+    Ok(())
+}
+
+#[test]
 fn config_regex_diagnostic_hides_secret_map_key() -> TestResult<()> {
     let schema = compile(
         r#"type Item = string @regex("x");
@@ -166,8 +214,9 @@ fn config_regex_diagnostic_hides_secret_map_key() -> TestResult<()> {
     .test_error()?;
     let safe = TestCheck::item(errors.diagnostics(), 0)?;
     test_eq!(safe.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)?;
+    test_eq!(safe.kind().id(), "typol.validation.regex_execution_failed")?;
+    test_eq!(safe.message().test_value()?, "value is hidden")?;
     test_eq!(safe.path().test_value()?.len(), 1)?;
-    test_eq!(safe.message(), "value is hidden")?;
 
     test_eq!(safe.labels().len(), 1)?;
     test_assert!(!format!("{errors:?} {safe:?}").contains("PRIVATE-KEY"))?;
@@ -182,7 +231,8 @@ fn conversion_redaction_clears_unresolved_paths_and_fails_closed_on_budget() -> 
     let unresolved_budget = execution_budget(ExecutionLimits::new(1_000_000, 1_048_576))?;
     let mut diagnostic = conversion_diagnostic_with_path(&unresolved_budget, &["unknown"])?;
     let result = TestOpeo::call(|out| {
-        ConfigDiagnosticRedactor::new(&unresolved_schema).redact_conversion(&mut diagnostic, out)
+        ConfigDiagnosticRedactor::new(&unresolved_schema, Translator::new(Language::English))
+            .redact_conversion(&mut diagnostic, out)
     });
     if let Err(error) = result {
         return Err(TestFailure::new(format!(
@@ -199,7 +249,8 @@ fn conversion_redaction_clears_unresolved_paths_and_fails_closed_on_budget() -> 
     TestOpeo::call::<BudgetError, _>(|out| budget.consume(remaining, out))
         .map_err(|error| TestFailure::new(format!("failed to prepare budget: {error:?}")))?;
     let safe = match TestOpeo::call(|out| {
-        ConfigDiagnosticRedactor::new(&secret_schema).redact_conversion(&mut diagnostic, out)
+        ConfigDiagnosticRedactor::new(&secret_schema, Translator::new(Language::English))
+            .redact_conversion(&mut diagnostic, out)
     }) {
         Ok(()) => {
             return Err(TestFailure::new(

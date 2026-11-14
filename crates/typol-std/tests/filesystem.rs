@@ -77,6 +77,20 @@ fn new_source_names(context: &SchemaCompileContext) -> Result<SourceNames, io::E
     new_source_names_with(SourceNameLimits::default(), context)
 }
 
+fn diagnostic_contains_message(
+    errors: &SchemaCompileErrors,
+    expected: &str,
+) -> Result<bool, io::Error> {
+    let mut found = false;
+    for diagnostic in errors.diagnostics().iter() {
+        found |= diagnostic
+            .message()
+            .map_err(io::Error::other)?
+            .contains(expected);
+    }
+    Ok(found)
+}
+
 fn new_file_resolver(
     limits: FileSchemaLimits,
     context: &SchemaCompileContext,
@@ -972,11 +986,10 @@ fn symlink_root_uses_target_directory_and_symlink_duplicates_share_identity()
         .compile("link.tschem", &mut names, compiler)?
         .err()
         .ok_or_else(|| io::Error::other("expected operation to fail"))?;
-    ensure!(errors.diagnostics().iter().any(|diagnostic| {
-        diagnostic
-            .message()
-            .contains("the same schema source identity was imported more than once")
-    }));
+    ensure!(diagnostic_contains_message(
+        &errors,
+        "the same schema source identity was imported more than once"
+    )?);
     ensure_eq!(names.name(SourceId::new(2)), None);
 
     Ok(())
@@ -1000,11 +1013,10 @@ fn import_of_root_symlink_is_a_cycle_and_dangling_symlink_falls_back() -> Result
         .compile("root.tschem", &mut names, compiler)?
         .err()
         .ok_or_else(|| io::Error::other("expected operation to fail"))?;
-    ensure!(errors.diagnostics().iter().any(|diagnostic| {
-        diagnostic
-            .message()
-            .contains("schema import cycle detected")
-    }));
+    ensure!(diagnostic_contains_message(
+        &errors,
+        "schema import cycle detected"
+    )?);
     ensure_eq!(names.name(SourceId::new(1)), None);
     let compiler = new_compiler(SchemaCompileOptions::default())?;
     let context = compiler_context(&compiler)?;
@@ -1045,11 +1057,10 @@ fn hard_link_imports_share_the_opened_file_identity() -> Result<(), Box<dyn Erro
         .ok_or_else(|| {
             io::Error::other("importing a hard link twice should produce a diagnostic")
         })?;
-    ensure!(errors.diagnostics().iter().any(|diagnostic| {
-        diagnostic
-            .message()
-            .contains("the same schema source identity was imported more than once")
-    }));
+    ensure!(diagnostic_contains_message(
+        &errors,
+        "the same schema source identity was imported more than once"
+    )?);
     ensure_eq!(names.name(SourceId::new(2)), None);
 
     Ok(())

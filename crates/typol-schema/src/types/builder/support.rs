@@ -6,8 +6,8 @@ use crate::{
     types::model::TypeSlot,
 };
 use opeo::{OResult, Out};
-use typol_core::{ChargedVec, DiagnosticMessage, DiagnosticMessageKey, SourceSpan};
-use typol_i18n::diagnostic_key;
+use typol_core::{ChargedVec, SourceSpan};
+use typol_i18n::t;
 use typol_syntax::TypeExpr;
 
 #[derive(Clone, Copy)]
@@ -91,20 +91,19 @@ impl TypeGraphSupport {
         span: SourceSpan,
         diagnostics: &mut DiagnosticCollector,
     ) {
-        let (key, message): (DiagnosticMessageKey, &str) = match problem {
-            PathResolution::NotFound => (
-                diagnostic_key!("diagnostic.schema.unknown_type_path"),
-                "unknown type path",
-            ),
-            PathResolution::WrongKind => (
-                diagnostic_key!("diagnostic.schema.type_path_wrong_kind"),
-                "type path must end with a type name",
-            ),
+        let message = match problem {
+            PathResolution::NotFound => t! {
+                name: "diagnostic.schema.unknown_type_path",
+                locale: diagnostics.translator(),
+            },
+            PathResolution::WrongKind => t! {
+                name: "diagnostic.schema.type_path_wrong_kind",
+                locale: diagnostics.translator(),
+            },
             PathResolution::Ambiguous | PathResolution::Invalid | PathResolution::Resolved(_) => {
                 return;
             }
         };
-        diagnostics
-            .push(diagnostics.make_semantic(DiagnosticMessage::localized(message, key), span));
+        diagnostics.push(diagnostics.make_semantic(message, span));
     }
 }

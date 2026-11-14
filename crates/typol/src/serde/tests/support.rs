@@ -14,6 +14,7 @@ use serde::{
 };
 use std::fmt;
 use typol_core::{BudgetError, ConfigValue, DiagnosticCode, ExecutionLimits};
+use typol_i18n::{Language, Translator};
 use typol_semantic::{CompiledSchema, TypeView};
 use typol_test_support::{TestExpect, TestResult};
 
@@ -29,7 +30,15 @@ impl SerdeTestSupport {
         max_text_bytes: usize,
         max_output_bytes: usize,
     ) -> TestResult<SessionBudget> {
-        TestOpeo::value(|out| SessionBudget::new(execution, max_text_bytes, max_output_bytes, out))
+        TestOpeo::value(|out| {
+            SessionBudget::new(
+                execution,
+                max_text_bytes,
+                max_output_bytes,
+                Translator::new(Language::English),
+                out,
+            )
+        })
     }
 
     pub(crate) fn compile(source: &str) -> TestResult<CompiledSchema> {

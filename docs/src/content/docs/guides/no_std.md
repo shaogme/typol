@@ -63,7 +63,7 @@ extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
 use typol::{
-    EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
+    EmptyEnvironment, Language, SchemaLoader, Translator, Typol, TypolError, TypolOptions,
     io::{ReadRequest, SliceSource},
     opeo::{ErrSlot, OResult, Out},
 };
@@ -84,7 +84,9 @@ struct ServiceConfig {
 }
 
 fn read_config<'slot>(out: Out<'slot, '_, TypolError>) -> OResult<'slot, ServiceConfig> {
-    let loaded = SchemaLoader::new(TypolOptions::default()).compile_text(
+    let options = TypolOptions::default()
+        .with_translator(Translator::new(Language::Chinese));
+    let loaded = SchemaLoader::new(options).compile_text(
         b"embedded-schema",
         SCHEMA_TEXT,
         out.reborrow(),
@@ -104,7 +106,26 @@ fn load_service() -> Result<ServiceConfig, TypolError> {
 }
 ```
 
-The caller supplies the OPEO error context (`Out`). `load_service` uses `opeo::ErrSlot` to convert the operation's `OResult` into core `Result` while keeping the `TypolError`. In a no_std build, `TypolError` exposes its stage and structured schema, configuration, budget, or codec errors. Its `Display` text is a short stage summary; rich host diagnostic rendering is part of the `std` adapter.
+The caller supplies the OPEO error context (`Out`). `load_service` uses `opeo::ErrSlot` to convert the operation's `OResult` into core `Result` while keeping the `TypolError`. `Display` writes the diagnostic report directly to the formatter, including nonempty reasons and any available spans, paths, and value origins. The no_std build cannot provide host file names or host-derived line mappings, so those remain unavailable.
+
+Applications can inspect the same diagnostic collection without enabling `std`:
+
+```rust
+for index in 0..error.diagnostic_count() {
+    let Some(diagnostic) = error.diagnostic(index) else {
+        continue;
+    };
+    let _kind_id = diagnostic.kind().id();
+    let _context = error.diagnostic_context(index);
+    let _excerpt_status = diagnostic
+        .primary()
+        .map(|span| error.excerpt_status(span));
+}
+```
+
+`DiagnosticFieldStatus` distinguishes `NotApplicable`, `Available`, `Unavailable`, and `Redacted` for primary spans, paths, and value origins. `TypolError::diagnostic_count`, `diagnostic(index)`, `diagnostic_context(index)`, and `excerpt_status(span)` are available in both no_std and std builds. Source names and mapped line/column locations are host metadata; std callers can query them through `source_name` and `span_location`.
+
+Without `std`, choose the diagnostic language through the relevant options before starting an operation. Reasons are frozen when diagnostics are created. A later `Display` call cannot switch their language.
 
 ## Provide sources and environment access
 

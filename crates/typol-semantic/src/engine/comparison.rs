@@ -33,6 +33,15 @@ struct Pair<'a> {
     depth: usize,
 }
 
+struct AggregateComparisonRequest<'schema, 'value> {
+    left: EvalValue<'value>,
+    right: EvalValue<'value>,
+    equality_only: bool,
+    kind: StoredTypeKind<'schema>,
+    right_kind: StoredTypeKind<'schema>,
+    next_depth: usize,
+}
+
 struct FieldComparisonRequest<'values, 'ids> {
     left: ValueView<'values>,
     right: ValueView<'values>,
@@ -379,175 +388,215 @@ impl ValueComparison {
                 .ok_or(EvalError::internal(COMPARISON_INTERNAL))
                 .store_err_into(out.reborrow())?;
             let right_kind = right_info.kind();
-            let next = depth
+            let next_depth = depth
                 .checked_add(1)
                 .ok_or(EvalError::Resource)
                 .store_err_into(out.reborrow())?;
-            let order = match (left.kind(), right.kind()) {
-                (EvalKind::Signed(left), EvalKind::Signed(right)) => left.cmp(&right),
-                (EvalKind::Unsigned(left), EvalKind::Unsigned(right)) => left.cmp(&right),
-                (EvalKind::Float(left), EvalKind::Float(right)) => left
-                    .partial_cmp(&right)
-                    .ok_or(EvalError::Arithmetic)
-                    .store_err_into(out.reborrow())?,
-                (EvalKind::Boolean(left), EvalKind::Boolean(right)) if equality_only => {
-                    left.cmp(&right)
+            let order =
+                match Self::scalar_order(evaluator, left, right, equality_only, out.reborrow())? {
+                    Some(order) => Some(order),
+                    None => Self::aggregate_order(
+                        evaluator,
+                        &mut tasks,
+                        AggregateComparisonRequest {
+                            left,
+                            right,
+                            equality_only,
+                            kind,
+                            right_kind,
+                            next_depth,
+                        },
+                        out.reborrow(),
+                    )?,
+                };
+            if let Some(order) = order {
+                if order != Ordering::Equal {
+                    return Ok(order);
                 }
-                (EvalKind::String(a), EvalKind::String(b)) => {
-                    evaluator.compare_text(a, b, out.reborrow())?
-                }
-                _ => {
-                    if let StoredTypeKind::Option { inner } = kind {
-                        let StoredTypeKind::Option { inner: right_inner } = right_kind else {
-                            return Err(out.fail(EvalError::internal(COMPARISON_INTERNAL)));
-                        };
-                        match (
-                            optional(left).store_err_into(out.reborrow())?,
-                            optional(right).store_err_into(out.reborrow())?,
-                        ) {
-                            (None, None) => {}
-                            (None, Some(_)) => return Ok(Ordering::Less),
-                            (Some(_), None) => return Ok(Ordering::Greater),
-                            (Some(a), Some(b)) => {
-                                EvaluationStack::push(
-                                    &mut tasks,
-                                    Pair {
-                                        left: EvalValue::config(a, inner, false),
-                                        right: EvalValue::config(b, right_inner, false),
-                                        equality_only,
-                                        depth: next,
-                                    },
-                                    out.reborrow(),
-                                )?;
-                            }
-                        }
-                        continue;
-                    }
-                    if !equality_only {
-                        return Err(out.fail(EvalError::internal(COMPARISON_INTERNAL)));
-                    }
-                    if let StoredTypeKind::Struct { fields: ids } = kind {
-                        let left_fields = left.fields(out.reborrow())?;
-                        let right_fields = right.fields(out.reborrow())?;
-                        let (
-                            ValueKind::Structure(left_entries),
-                            ValueKind::Structure(right_entries),
-                        ) = (left_fields.as_ref(), right_fields.as_ref())
-                        else {
-                            return Err(out.fail(EvalError::internal(COMPARISON_INTERNAL)));
-                        };
-                        if left_entries.len() != ids.len() || right_entries.len() != ids.len() {
-                            return Err(out.fail(EvalError::internal(COMPARISON_INTERNAL)));
-                        }
-                        queue_fields(
-                            evaluator,
-                            &mut tasks,
-                            FieldComparisonRequest {
-                                left: left_fields,
-                                right: right_fields,
-                                ids,
-                                depth: next,
-                            },
-                            out.reborrow(),
-                        )?;
-                        continue;
-                    }
-                    let left_value = left.value(out.reborrow())?;
-                    let right_value = right.value(out.reborrow())?;
-                    match (kind, (left_value.as_ref(), right_value.as_ref())) {
-                        (
-                            StoredTypeKind::Array { element, .. },
-                            (ValueKind::Array(left_entries), ValueKind::Array(right_entries)),
-                        ) => {
-                            let StoredTypeKind::Array {
-                                element: right_element,
-                                ..
-                            } = right_kind
-                            else {
-                                return Err(out.fail(EvalError::internal(COMPARISON_INTERNAL)));
-                            };
-                            if !queue_array(
-                                &mut tasks,
-                                ArrayComparisonRequest {
-                                    left: left_entries,
-                                    right: right_entries,
-                                    left_element: element,
-                                    right_element,
-                                    depth: next,
-                                },
-                                out.reborrow(),
-                            )? {
-                                return Ok(Ordering::Greater);
-                            }
-                        }
-                        (
-                            StoredTypeKind::Map { value },
-                            (ValueKind::Map(left_entries), ValueKind::Map(right_entries)),
-                        ) => {
-                            let StoredTypeKind::Map {
-                                value: right_value_type,
-                            } = right_kind
-                            else {
-                                return Err(out.fail(EvalError::internal(COMPARISON_INTERNAL)));
-                            };
-                            if !queue_map(
-                                evaluator,
-                                &mut tasks,
-                                MapComparisonRequest {
-                                    left: left_entries,
-                                    right: right_entries,
-                                    left_value: value,
-                                    right_value: right_value_type,
-                                    depth: next,
-                                },
-                                out.reborrow(),
-                            )? {
-                                return Ok(Ordering::Greater);
-                            }
-                        }
-                        (
-                            StoredTypeKind::Enum { .. },
-                            (
-                                ValueKind::Enumeration {
-                                    variant: left_variant,
-                                    payload: left_payload,
-                                },
-                                ValueKind::Enumeration {
-                                    variant: right_variant,
-                                    payload: right_payload,
-                                },
-                            ),
-                        ) => {
-                            if !queue_enum(
-                                evaluator,
-                                &mut tasks,
-                                EnumComparisonRequest {
-                                    left,
-                                    right,
-                                    left_value,
-                                    right_value,
-                                    left_variant,
-                                    right_variant,
-                                    left_payload,
-                                    right_payload,
-                                    depth: next,
-                                },
-                                out.reborrow(),
-                            )? {
-                                return Ok(Ordering::Greater);
-                            }
-                        }
-                        _ => {
-                            return Err(out.fail(EvalError::internal(COMPARISON_INTERNAL)));
-                        }
-                    }
-                    continue;
-                }
-            };
-            if order != Ordering::Equal {
-                return Ok(order);
             }
         }
         Ok(Ordering::Equal)
+    }
+
+    fn scalar_order<'slot>(
+        evaluator: &Evaluator<'_>,
+        left: EvalValue<'_>,
+        right: EvalValue<'_>,
+        equality_only: bool,
+        mut out: Out<'slot, '_, EvalError>,
+    ) -> OResult<'slot, Option<Ordering>> {
+        let order = match (left.kind(), right.kind()) {
+            (EvalKind::Signed(left), EvalKind::Signed(right)) => left.cmp(&right),
+            (EvalKind::Unsigned(left), EvalKind::Unsigned(right)) => left.cmp(&right),
+            (EvalKind::Float(left), EvalKind::Float(right)) => left
+                .partial_cmp(&right)
+                .ok_or(EvalError::Arithmetic)
+                .store_err_into(out.reborrow())?,
+            (EvalKind::Boolean(left), EvalKind::Boolean(right)) if equality_only => {
+                left.cmp(&right)
+            }
+            (EvalKind::String(left), EvalKind::String(right)) => {
+                evaluator.compare_text(left, right, out.reborrow())?
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(order))
+    }
+
+    fn aggregate_order<'schema, 'value, 'slot>(
+        evaluator: &Evaluator<'schema>,
+        tasks: &mut ChargedVec<Pair<'value>>,
+        request: AggregateComparisonRequest<'schema, 'value>,
+        mut out: Out<'slot, '_, EvalError>,
+    ) -> OResult<'slot, Option<Ordering>> {
+        let AggregateComparisonRequest {
+            left,
+            right,
+            equality_only,
+            kind,
+            right_kind,
+            next_depth,
+        } = request;
+        if let StoredTypeKind::Option { inner } = kind {
+            let StoredTypeKind::Option { inner: right_inner } = right_kind else {
+                return Err(out.fail(EvalError::internal(COMPARISON_INTERNAL)));
+            };
+            match (
+                optional(left).store_err_into(out.reborrow())?,
+                optional(right).store_err_into(out.reborrow())?,
+            ) {
+                (None, None) => return Ok(None),
+                (None, Some(_)) => return Ok(Some(Ordering::Less)),
+                (Some(_), None) => return Ok(Some(Ordering::Greater)),
+                (Some(left), Some(right)) => {
+                    EvaluationStack::push(
+                        tasks,
+                        Pair {
+                            left: EvalValue::config(left, inner, false),
+                            right: EvalValue::config(right, right_inner, false),
+                            equality_only,
+                            depth: next_depth,
+                        },
+                        out.reborrow(),
+                    )?;
+                }
+            }
+            return Ok(None);
+        }
+        if !equality_only {
+            return Err(out.fail(EvalError::internal(COMPARISON_INTERNAL)));
+        }
+        if let StoredTypeKind::Struct { fields } = kind {
+            let left_fields = left.fields(out.reborrow())?;
+            let right_fields = right.fields(out.reborrow())?;
+            let (ValueKind::Structure(left_entries), ValueKind::Structure(right_entries)) =
+                (left_fields.as_ref(), right_fields.as_ref())
+            else {
+                return Err(out.fail(EvalError::internal(COMPARISON_INTERNAL)));
+            };
+            if left_entries.len() != fields.len() || right_entries.len() != fields.len() {
+                return Err(out.fail(EvalError::internal(COMPARISON_INTERNAL)));
+            }
+            queue_fields(
+                evaluator,
+                tasks,
+                FieldComparisonRequest {
+                    left: left_fields,
+                    right: right_fields,
+                    ids: fields,
+                    depth: next_depth,
+                },
+                out.reborrow(),
+            )?;
+            return Ok(None);
+        }
+        let left_value = left.value(out.reborrow())?;
+        let right_value = right.value(out.reborrow())?;
+        match (kind, (left_value.as_ref(), right_value.as_ref())) {
+            (
+                StoredTypeKind::Array { element, .. },
+                (ValueKind::Array(left_entries), ValueKind::Array(right_entries)),
+            ) => {
+                let StoredTypeKind::Array {
+                    element: right_element,
+                    ..
+                } = right_kind
+                else {
+                    return Err(out.fail(EvalError::internal(COMPARISON_INTERNAL)));
+                };
+                if !queue_array(
+                    tasks,
+                    ArrayComparisonRequest {
+                        left: left_entries,
+                        right: right_entries,
+                        left_element: element,
+                        right_element,
+                        depth: next_depth,
+                    },
+                    out.reborrow(),
+                )? {
+                    return Ok(Some(Ordering::Greater));
+                }
+            }
+            (
+                StoredTypeKind::Map { value },
+                (ValueKind::Map(left_entries), ValueKind::Map(right_entries)),
+            ) => {
+                let StoredTypeKind::Map {
+                    value: right_value_type,
+                } = right_kind
+                else {
+                    return Err(out.fail(EvalError::internal(COMPARISON_INTERNAL)));
+                };
+                if !queue_map(
+                    evaluator,
+                    tasks,
+                    MapComparisonRequest {
+                        left: left_entries,
+                        right: right_entries,
+                        left_value: value,
+                        right_value: right_value_type,
+                        depth: next_depth,
+                    },
+                    out.reborrow(),
+                )? {
+                    return Ok(Some(Ordering::Greater));
+                }
+            }
+            (
+                StoredTypeKind::Enum { .. },
+                (
+                    ValueKind::Enumeration {
+                        variant: left_variant,
+                        payload: left_payload,
+                    },
+                    ValueKind::Enumeration {
+                        variant: right_variant,
+                        payload: right_payload,
+                    },
+                ),
+            ) => {
+                if !queue_enum(
+                    evaluator,
+                    tasks,
+                    EnumComparisonRequest {
+                        left,
+                        right,
+                        left_value,
+                        right_value,
+                        left_variant,
+                        right_variant,
+                        left_payload,
+                        right_payload,
+                        depth: next_depth,
+                    },
+                    out.reborrow(),
+                )? {
+                    return Ok(Some(Ordering::Greater));
+                }
+            }
+            _ => return Err(out.fail(EvalError::internal(COMPARISON_INTERNAL))),
+        }
+        Ok(None)
     }
 }

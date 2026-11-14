@@ -11,6 +11,7 @@ use typol_config::{
     EnvironmentReadContext,
 };
 use typol_core::{ConfigValue, ExecutionLimits, SliceSource, TextLayout, ValueKind};
+use typol_i18n::{Language, Translator};
 use typol_semantic::CompiledSchema;
 use typol_test_support::{TestResult, test_verify as assert, test_verify_eq as assert_eq};
 
@@ -37,6 +38,7 @@ fn session(output: usize) -> TestResult<SessionBudget> {
             ExecutionLimits::new(100_000_000, 67_108_864),
             100_000_000,
             output,
+            Translator::new(Language::English),
             out,
         )
     })

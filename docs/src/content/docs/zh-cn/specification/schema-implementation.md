@@ -59,6 +59,8 @@ Schema 输入必须是有效 UTF-8。词法约定以[Schema DSL §1](../schema-d
 
 `SchemaParser::parse(source_id, byte_source, options, budget)` 接收 `Read<Diagnostic>` 并使用统一的 `SchemaParseOptions` 配置 `SyntaxLimits` 与 `StreamLimits`；`parse_str` 只将字符串包装为 `SliceSource`。需要后续源位置查询时使用 `parse_with_positions`，成功结果同时拥有 `SchemaAst` 和预算化 `SourcePositionIndex`。位置索引记录词法 token 起止端点的字节偏移、行号和 Unicode 标量列号，不保留源字节；EOF token 提供实际源长度及 EOF 位置。parser 不预读或缓存整份输入；来源上限在读取期间约束输入，EOF token 确认后的实际字节偏移用于 `SchemaAst::span()`，AST 存储也在成功完成时将跨度边界收紧到该长度。诊断初始化和 EOF 未知时的通用锚点使用当前已知位置，EOF 语法错误使用 EOF token 的精确跨度。默认调用可使用 `SchemaParseOptions::default()`。成功时返回 AST；词法或语法错误返回非空 `SyntaxErrors`，不会返回可被误用的部分 AST。parser 在顶层声明、模块成员、字段和变体边界的可靠同步点继续收集后续独立错误；恢复循环与 parser 的 token 访问共用 `ExecutionBudget`，资源耗尽、分配失败和内部错误等终止错误会停止解析。
 
+`SchemaParseOptions::with_translator` 为语法诊断选择语言；Schema 编译也可通过 `SchemaCompileOptions` 设置相同语种。如果工具分别调用 parser 和 compiler，应保持两处设置一致。默认使用英文。诊断原因在生成时固定，后续报告 writer 不会重新翻译。
+
 `SchemaAst` 由分表节点存储和拥有型文本缓冲持有，不借用输入源。公开节点是只能通过所属 AST 读取的只读视图；节点、ID 和存储表不可由调用方伪造。AST 保留：
 
 - 顶层项、模块声明、字段、变体的源顺序及各自 span；
@@ -209,6 +211,10 @@ loader 对根源和每个新导入源调用 `SchemaParser`。解析错误保留�
 ## 5. 静态错误与诊断契约
 
 Schema 错误由 `SchemaCompileErrors` 以非空集合或不需分配的内联紧急错误返回。公开读取接口为 `diagnostics()`、`span_location()` 和 `location_status()`。诊断带稳定错误码、主要跨度和可选标签；重复名称诊断可同时指出后续和先前声明。
+
+每条诊断还公开稳定的 `kind().id()`、自身的 `DiagnosticStage`、语义相关位置角色和字段可用状态。`TypolError` 在 std 与 no_std 构建中提供相同的索引诊断及上下文查询接口。应用同时处理 Schema 和配置错误时，应使用公共 facade 查询接口，并将操作阶段与诊断阶段分开保存；
+
+`Diagnostic::message()` 以 `Result` 返回已存储的原因文本，因为紧急翻译失败必须保留并传给调用方。原因在诊断生成时确定，报告和 JSON 消费端直接读取它。
 
 `SchemaCompileErrors` 实现 `Display` 和标准错误接口。`Display` 写出错误码名称与数值、消息、可用位置和安全源码片段，不先申请拥有型报告字符串；`Debug` 只显示诊断数量与位置状态。`internal_cause()` 可查询结构化的 `SchemaInternalCause`，其中 AST 访问失败保留原始错误变体、完整 `usize` 索引及范围端点；内部原因也会出现在展示文本中。源码快照可通过 `excerpts()` 读取。额度为零或收集失败时仍保留诊断和可用位置，源码片段状态为 `Unavailable` 或 `Truncated`。
 

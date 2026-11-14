@@ -1,13 +1,24 @@
 mod binding;
 mod containers;
+mod diagnostics;
 mod pipeline;
 mod value_builder;
 
 #[cfg(all(test, feature = "std"))]
 mod tests;
 
-pub(crate) use containers::ContainerConversions;
 pub use containers::OrderedMap;
+pub use pipeline::{
+    Conversion, ConversionFields, ConversionPayload, ConversionValue, EnumInput,
+    EnvironmentFallback, EnvironmentScalar, EnvironmentSourcedValue, Sourced,
+};
+
+pub(crate) use containers::ContainerConversions;
+pub(crate) use pipeline::ConvertedValue;
+
+pub(super) use self::pipeline::{BindingCursor, BindingState, ConversionState, ResolvedBinding};
+
+use self::diagnostics::ConversionDiagnostics;
 
 use alloc::string::String;
 use binding::BindingConversion;
@@ -27,23 +38,10 @@ use crate::{
 use core::{any::TypeId, fmt, mem};
 use opeo::{OResult, Out};
 use typol_core::{
-    BudgetError, NamedValue, ValueError, ValueId, ValueKind, ValuePayload, ValueScalar, ValueView,
+    BudgetError, NamedValue, ValueError, ValueId, ValuePayload, ValueScalar, ValueView,
 };
+use typol_i18n::Translator;
 use typol_semantic::{TypeKind, TypeView, VariantPayloadInfo};
-
-pub(crate) use pipeline::ConvertedValue;
-pub use pipeline::{
-    Conversion, ConversionFields, ConversionPayload, ConversionValue, EnumInput,
-    EnvironmentFallback, EnvironmentScalar, EnvironmentSourcedValue, Sourced,
-};
-
-pub(super) use self::pipeline::{BindingCursor, BindingState, ConversionState, ResolvedBinding};
-
-struct ShapeMismatch {
-    kind: ConversionErrorKind,
-    expected: &'static str,
-    actual: &'static str,
-}
 
 /// Context for handwritten `Typol` implementations to inspect the current value and dispatch child conversions through the library.
 /// `ConversionLimits` bounds conversion nodes and nesting depth reached through this context; execution budgets cover library-provided workspaces and operations; `target_bytes` and `target_text` charge target storage created by handwritten implementations. Use `target_text` for budgeted owned text and report other owned target storage with `target_bytes`.
@@ -122,6 +120,7 @@ impl<'call> ConversionContext<'call> {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Conversion,
                 Failure::Resource,
+                self.session.translator(),
             )));
         };
         let depth_check = self.session.budget_codec(
@@ -151,24 +150,24 @@ impl<'call> ConversionContext<'call> {
         convert(&mut child, out.reborrow())
     }
 
-    pub fn budget_error(error: BudgetError) -> CodecErrors {
-        CodecErrors::emergency(CodecStage::Conversion, error.into())
+    pub fn budget_error(error: BudgetError, translator: Translator) -> CodecErrors {
+        ConversionDiagnostics::budget_error(error, translator)
     }
 
-    pub fn value_error(error: ValueError) -> CodecErrors {
-        CodecErrors::emergency(CodecStage::Conversion, error.into())
+    pub fn value_error(error: ValueError, translator: Translator) -> CodecErrors {
+        ConversionDiagnostics::value_error(error, translator)
     }
 
-    pub fn conversion_error() -> CodecErrors {
-        CodecErrors::emergency(CodecStage::Conversion, Failure::Conversion)
+    pub fn conversion_error(translator: Translator) -> CodecErrors {
+        ConversionDiagnostics::conversion_error(translator)
     }
 
-    pub fn resource_error() -> CodecErrors {
-        CodecErrors::emergency(CodecStage::Conversion, Failure::Resource)
+    pub fn resource_error(translator: Translator) -> CodecErrors {
+        ConversionDiagnostics::resource_error(translator)
     }
 
-    pub fn allocation_error() -> CodecErrors {
-        CodecErrors::emergency(CodecStage::Conversion, Failure::Allocation)
+    pub fn allocation_error(translator: Translator) -> CodecErrors {
+        ConversionDiagnostics::allocation_error(translator)
     }
 
     pub fn start<'slot, T: Typol>(
@@ -177,7 +176,7 @@ impl<'call> ConversionContext<'call> {
     ) -> OResult<'slot, ()> {
         // Each node context is single-entry, preventing manual implementations from re-entering it recursively.
         if self.started {
-            return Err(out.fail(Self::resource_error()));
+            return Err(out.fail(Self::resource_error(self.session.translator())));
         }
         self.check::<T>(out.reborrow())?;
         if self.builder.is_none() {
@@ -186,7 +185,7 @@ impl<'call> ConversionContext<'call> {
         let identity = TypeId::of::<T>();
         match &mut self.binding {
             BindingState::Unbound => {
-                return Err(out.fail(Conversion::internal_error()));
+                return Err(out.fail(Conversion::internal_error(self.session.translator())));
             }
             BindingState::Type(cursor) | BindingState::Variant { cursor, .. } => {
                 cursor.identity = identity;
@@ -202,11 +201,11 @@ impl<'call> ConversionContext<'call> {
         mut out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, ValueId> {
         if self.started {
-            return Err(out.fail(Self::resource_error()));
+            return Err(out.fail(Self::resource_error(self.session.translator())));
         }
         let converted = T::to_config_value(value, self, out.reborrow())?;
         if !self.started {
-            return Err(out.fail(Self::resource_error()));
+            return Err(out.fail(Self::resource_error(self.session.translator())));
         }
         Ok(converted)
     }
@@ -217,19 +216,23 @@ impl<'call> ConversionContext<'call> {
         mut out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, T> {
         if self.started {
-            return Err(out.fail(Self::resource_error()));
+            return Err(out.fail(Self::resource_error(self.session.translator())));
         }
         let converted = T::from_config_value(value, self, out.reborrow())?;
         if !self.started {
-            return Err(out.fail(Self::resource_error()));
+            return Err(out.fail(Self::resource_error(self.session.translator())));
         }
         Ok(converted)
     }
 
-    pub fn reject<'slot, 'borrow, R>(out: Out<'slot, 'borrow, CodecErrors>) -> OResult<'slot, R> {
+    pub fn reject<'slot, 'borrow, R>(
+        translator: Translator,
+        out: Out<'slot, 'borrow, CodecErrors>,
+    ) -> OResult<'slot, R> {
         Err(out.fail(CodecErrors::emergency(
             CodecStage::Conversion,
             Failure::Conversion,
+            translator,
         )))
     }
 
@@ -257,7 +260,9 @@ impl<'call> ConversionContext<'call> {
             BindingState::Type(cursor) | BindingState::Variant { cursor, .. } => {
                 cursor.plan.schema()
             }
-            BindingState::Unbound => return Err(out.fail(Conversion::internal_error())),
+            BindingState::Unbound => {
+                return Err(out.fail(Conversion::internal_error(self.session.translator())));
+            }
         };
         let error = CodecErrors::conversion(input, schema, self.session, out.reborrow())?;
         Err(out.fail(error))
@@ -423,28 +428,7 @@ impl<'call> ConversionContext<'call> {
         match ValueNode::resolve(kind, value) {
             Some(node) => Ok(node),
             None => {
-                let mismatch = match (kind, value.as_ref()) {
-                    (
-                        TypeKind::Array {
-                            length: Some(_), ..
-                        },
-                        ValueKind::Array(_),
-                    ) => ShapeMismatch {
-                        kind: ConversionErrorKind::ArrayLengthMismatch,
-                        expected: "array with the schema length",
-                        actual: "array with a mismatched length",
-                    },
-                    (TypeKind::Struct { .. }, ValueKind::Structure(_)) => ShapeMismatch {
-                        kind: ConversionErrorKind::FieldCountMismatch,
-                        expected: "struct containing all schema fields",
-                        actual: "struct with a mismatched field count",
-                    },
-                    (expected, actual) => ShapeMismatch {
-                        kind: ConversionErrorKind::ValueShapeMismatch,
-                        expected: BindingConversion::type_shape(expected),
-                        actual: value_shape(actual),
-                    },
-                };
+                let mismatch = ConversionDiagnostics::shape_mismatch(kind, value.as_ref());
                 self.fail_as(
                     ConversionDiagnosticInput::new(
                         mismatch.kind,
@@ -502,12 +486,7 @@ impl<'call> ConversionContext<'call> {
         match self.binding {
             BindingState::Type(cursor) | BindingState::Variant { cursor, .. } => Ok(cursor),
             BindingState::Unbound => self.fail_as(
-                ConversionDiagnosticInput::new(
-                    ConversionErrorKind::InternalBindingInvariant,
-                    "initialized binding context",
-                    "binding context is not initialized",
-                    self.path,
-                ),
+                ConversionDiagnostics::binding_context(self.path),
                 out.reborrow(),
             ),
         }
@@ -747,6 +726,10 @@ impl<'call> ConversionContext<'call> {
         self.session
     }
 
+    pub const fn translator(&self) -> Translator {
+        self.session.translator()
+    }
+
     pub(crate) fn resolve_binding<'slot>(
         &self,
         mut out: Out<'slot, '_, CodecErrors>,
@@ -754,15 +737,7 @@ impl<'call> ConversionContext<'call> {
         let cursor = self.binding_cursor(out.reborrow())?;
         let variant_slot = match self.binding {
             BindingState::Unbound => {
-                return self.fail_as(
-                    ConversionDiagnosticInput::new(
-                        ConversionErrorKind::InternalBindingInvariant,
-                        "initialized binding context",
-                        "binding context is not initialized",
-                        self.path,
-                    ),
-                    out,
-                );
+                return self.fail_as(ConversionDiagnostics::binding_context(self.path), out);
             }
             BindingState::Type(_) => None,
             BindingState::Variant { slot, .. } => Some(slot),
@@ -846,7 +821,7 @@ impl<'call> ConversionContext<'call> {
         }
         match self.builder.as_deref_mut() {
             Some(builder) => Ok(builder),
-            None => Err(out.fail(Conversion::internal_error())),
+            None => Err(out.fail(Conversion::internal_error(self.session.translator()))),
         }
     }
 }
@@ -858,21 +833,5 @@ impl fmt::Debug for ConversionContext<'_> {
             .field("depth", &self.depth.level())
             .field("nodes", &self.nodes.nodes())
             .finish()
-    }
-}
-
-fn value_shape(kind: ValueKind<'_>) -> &'static str {
-    match kind {
-        ValueKind::Signed(_) => "signed integer",
-        ValueKind::Unsigned(_) => "unsigned integer",
-        ValueKind::Float32(_) => "f32 value",
-        ValueKind::Float64(_) => "f64 value",
-        ValueKind::String(_) => "string",
-        ValueKind::Bool(_) => "boolean value",
-        ValueKind::Optional(_) => "optional value",
-        ValueKind::Array(_) => "array",
-        ValueKind::Map(_) => "map",
-        ValueKind::Structure(_) => "struct",
-        ValueKind::Enumeration { .. } => "enum",
     }
 }

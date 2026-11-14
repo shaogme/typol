@@ -63,7 +63,7 @@ extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
 use typol::{
-    EmptyEnvironment, SchemaLoader, Typol, TypolError, TypolOptions,
+    EmptyEnvironment, Language, SchemaLoader, Translator, Typol, TypolError, TypolOptions,
     io::{ReadRequest, SliceSource},
     opeo::{ErrSlot, OResult, Out},
 };
@@ -84,7 +84,9 @@ struct ServiceConfig {
 }
 
 fn read_config<'slot>(out: Out<'slot, '_, TypolError>) -> OResult<'slot, ServiceConfig> {
-    let loaded = SchemaLoader::new(TypolOptions::default()).compile_text(
+    let options = TypolOptions::default()
+        .with_translator(Translator::new(Language::Chinese));
+    let loaded = SchemaLoader::new(options).compile_text(
         b"embedded-schema",
         SCHEMA_TEXT,
         out.reborrow(),
@@ -104,7 +106,26 @@ fn load_service() -> Result<ServiceConfig, TypolError> {
 }
 ```
 
-调用方传入 OPEO 错误上下文 `Out`；操作返回 `OResult`。示例中的 `load_service` 使用 `opeo::ErrSlot` 将 `OResult` 转为 core `Result`，并保留 `TypolError`。在 no_std 构建中，`TypolError` 提供阶段信息以及结构化的 Schema、配置、额度或编解码错误。它的 `Display` 文本是简短的阶段摘要；完整的宿主诊断渲染由 `std` 适配器提供。
+调用方传入 OPEO 错误上下文 `Out`；操作返回 `OResult`。示例中的 `load_service` 使用 `opeo::ErrSlot` 将 `OResult` 转为 core `Result`，并保留 `TypolError`。`Display` 会直接向 formatter 写入诊断报告，其中包含非空原因，以及可用的跨度、路径和值来源。no_std 构建无法提供宿主文件名或宿主生成的行列映射，因此这些字段会保持不可用。
+
+应用无需启用 `std` 即可查询同一诊断集合：
+
+```rust
+for index in 0..error.diagnostic_count() {
+    let Some(diagnostic) = error.diagnostic(index) else {
+        continue;
+    };
+    let _kind_id = diagnostic.kind().id();
+    let _context = error.diagnostic_context(index);
+    let _excerpt_status = diagnostic
+        .primary()
+        .map(|span| error.excerpt_status(span));
+}
+```
+
+`DiagnosticFieldStatus` 用 `NotApplicable`、`Available`、`Unavailable` 和 `Redacted` 区分主跨度、路径和值来源的状态。`TypolError::diagnostic_count`、`diagnostic(index)`、`diagnostic_context(index)` 和 `excerpt_status(span)` 在 no_std 与 std 构建中都可用。来源名称和映射后的行列位置属于宿主元数据；std 调用方可通过 `source_name` 和 `span_location` 查询。
+
+不启用 `std` 时，可在操作开始前通过相应选项选择诊断语言。诊断创建后原因文本即固定，之后调用 `Display` 不能切换语言。
 
 ## 提供输入源和环境访问
 

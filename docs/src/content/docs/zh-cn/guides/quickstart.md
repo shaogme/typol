@@ -149,6 +149,7 @@ use std::{path::Path, process::ExitCode};
 use typol::{
     DefaultConfigOptions, EmptyEnvironment, SchemaLoader, TextLayout, Typol, TypolError,
     TypolOptions,
+    host::{Language, Translator},
     opeo::ErrSlot,
 };
 
@@ -180,7 +181,9 @@ impl ServiceConfig {
 fn main() -> ExitCode {
     let mut errors = ErrSlot::<TypolError>::new();
     match errors.try_call(|mut out| {
-        let loader = SchemaLoader::new(TypolOptions::default());
+        let options = TypolOptions::default()
+            .with_translator(Translator::new(Language::Chinese));
+        let loader = SchemaLoader::new(options);
         let loaded = loader.compile_file(Path::new("service.tschem"), out.reborrow())?;
         let binding = loaded.bind::<ServiceConfig>(out.reborrow())?;
         let mut environment = EmptyEnvironment;
@@ -218,6 +221,8 @@ cargo run
 | `binding.read_file(path, environment, out)` | 读取配置、应用默认值、校验并转换为 `ServiceConfig`。 |
 
 `SchemaLoader::new` 是关联函数，通过类型名调用。`compile_file`、`bind` 和 `read_file` 是作用于实例的方法。可能失败的方法接收 `Out` 错误上下文并返回 OPEO 结果；`ErrSlot::try_call` 会提供该上下文并捕获产生的 `TypolError`。
+
+示例在 Schema 编译前通过 `TypolOptions` 选择中文。诊断原因在编译、解析或校验生成诊断时完成翻译；之后 `Display` 或 JSON 输出都会使用固定文本。`Diagnostic::message()` 本身也可能返回格式化错误，调用方应继续向上传递该结果。CLI 也会在每次操作开始前传入 `--language`。
 
 如果需要在不创建 Rust 结构体的情况下生成初始 `.tconf`，可以直接从已加载的 Schema 生成：
 

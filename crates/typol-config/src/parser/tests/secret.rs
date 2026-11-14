@@ -95,7 +95,7 @@ fn parse(schema: &CompiledSchema, source: &str) -> TestOpeoOutcome<ConfigValue, 
 fn assert_hidden(errors: &ConfigParseErrors, lengths: &[usize]) -> TestResult<()> {
     test_eq!(errors.diagnostics().len(), lengths.len())?;
     for (error, length) in errors.diagnostics().iter().zip(lengths) {
-        test_eq!(error.message(), "value is hidden")?;
+        test_eq!(error.message().test_value()?, "value is hidden")?;
         let path = error.path().test_value()?;
         test_eq!(path.len(), *length)?;
         test_assert!(
@@ -199,8 +199,14 @@ fn ordinary_objects_keep_public_paths_and_only_hide_secret_fields() -> TestResul
     )?;
     let errors = parse(&schema, "{ child: { secret: 999, public: 999 } }").test_error()?;
     let errors = errors.diagnostics();
-    test_eq!(TestCheck::item(errors, 0)?.message(), "value is hidden")?;
-    test_ne!(TestCheck::item(errors, 1)?.message(), "value is hidden")?;
+    test_eq!(
+        TestCheck::item(errors, 0)?.message().test_value()?,
+        "value is hidden"
+    )?;
+    test_ne!(
+        TestCheck::item(errors, 1)?.message().test_value()?,
+        "value is hidden"
+    )?;
     for (error, name) in errors.iter().zip(["secret", "public"]) {
         let path = error.path().test_value()?;
         test_eq!(path.len(), 2)?;
@@ -425,7 +431,10 @@ fn secret_errors_share_budget_and_fatal_paths_are_safe() -> TestResult<()> {
         errors.last().test_value()?.code(),
         DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
     )?;
-    test_eq!(errors.last().test_value()?.message(), "value is hidden")?;
+    test_eq!(
+        errors.last().test_value()?.message().test_value()?,
+        "value is hidden"
+    )?;
     test_assert!(
         errors
             .iter()

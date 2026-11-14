@@ -7,8 +7,9 @@ mod tests;
 
 pub use bound::{BoundRead, BoundSchema, TrustedBoundSchema};
 pub use config::LoadedSchema;
-pub(crate) use config::{ConfigSourceRequest, ReadStrategy};
 pub use loader::SchemaLoader;
+
+pub(crate) use config::{ConfigSourceRequest, ReadStrategy};
 
 use core::fmt::{Debug, Formatter, Result};
 use opeo::{OResult, Out};
@@ -16,19 +17,20 @@ use typol_core::SourceId;
 
 #[cfg(feature = "std")]
 use crate::error::ErrorSlot;
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-#[cfg(not(feature = "std"))]
-use core::str::from_utf8;
 #[cfg(feature = "std")]
 use std::path::Path;
-#[cfg(not(feature = "std"))]
-use typol_schema::{SourceLoadedRequest, SourceObserver, SourceObserverError};
 #[cfg(feature = "std")]
 use typol_std::{
     FileConfigInput, HostError, HostErrorKind, SourceNameEditOptions,
     SourceNames as HostSourceNames,
 };
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use core::str::from_utf8;
+#[cfg(not(feature = "std"))]
+use typol_schema::{SourceLoadedRequest, SourceObserver, SourceObserverError};
 
 #[cfg(feature = "std")]
 pub(crate) struct FileReadRequest<'a> {

@@ -16,6 +16,7 @@ use typol_core::{
     BudgetError, ConfigValue, DiagnosticContext, ValueEntries, ValueId, ValuePayloadView,
     ValueScalar, ValueSource, ValueView, diagnostic_context,
 };
+use typol_i18n::Translator;
 use typol_semantic::TypeView;
 
 static CONVERSION_BINDING_INVARIANT: DiagnosticContext =
@@ -419,6 +420,7 @@ impl ConversionState {
                 CodecErrors::emergency(
                     CodecStage::Conversion,
                     Failure::internal(CONVERSION_STATE_MISSING),
+                    session.translator(),
                 )
             })
             .store_err(out.reborrow())?;
@@ -440,6 +442,7 @@ impl ConversionState {
                 CodecErrors::emergency(
                     CodecStage::Conversion,
                     Failure::internal(CONVERSION_STATE_MISSING),
+                    session.translator(),
                 )
             })
             .store_err(out.reborrow())?;
@@ -473,10 +476,11 @@ impl ConvertedValue {
 pub struct Conversion;
 
 impl Conversion {
-    pub(crate) fn internal_error() -> CodecErrors {
+    pub(crate) fn internal_error(translator: Translator) -> CodecErrors {
         CodecErrors::emergency(
             CodecStage::Conversion,
             Failure::internal(CONVERSION_BINDING_INVARIANT),
+            translator,
         )
     }
 

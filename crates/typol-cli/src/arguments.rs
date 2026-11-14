@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     ffi::OsString,
     path::{Path, PathBuf},
 };
@@ -11,6 +12,13 @@ type TranslationResult<T> = Result<T, RenderError>;
 pub enum EnvironmentMode {
     Inherit,
     Empty,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OutputFormat {
+    #[default]
+    Text,
+    Json,
 }
 
 pub struct ConfigRequest {
@@ -39,11 +47,20 @@ pub enum Command {
 pub struct ParsedCommand {
     command: Command,
     language: Language,
+    output_format: OutputFormat,
+    detailed_diagnostics: bool,
 }
 
 pub struct ArgumentError {
-    message: TranslationResult<&'static str>,
+    message: TranslationResult<Cow<'static, str>>,
     language: Language,
+}
+
+struct GlobalArguments {
+    language: Language,
+    output_format: OutputFormat,
+    detailed_diagnostics: bool,
+    arguments: Vec<OsString>,
 }
 
 pub struct Arguments;
@@ -100,10 +117,18 @@ impl ParsedCommand {
     pub const fn language(&self) -> Language {
         self.language
     }
+
+    pub const fn output_format(&self) -> OutputFormat {
+        self.output_format
+    }
+
+    pub const fn detailed_diagnostics(&self) -> bool {
+        self.detailed_diagnostics
+    }
 }
 
 impl ArgumentError {
-    pub const fn message(&self) -> &TranslationResult<&'static str> {
+    pub const fn message(&self) -> &TranslationResult<Cow<'static, str>> {
         &self.message
     }
 
@@ -117,43 +142,99 @@ impl Arguments {
         arguments: impl IntoIterator<Item = OsString>,
     ) -> Result<ParsedCommand, ArgumentError> {
         let default_language = Language::detect();
-        let (language, arguments) = Self::language_arguments(arguments, default_language)?;
-        let command = Self::parse_command(arguments, language)?;
-        Ok(ParsedCommand { command, language })
+        let global = Self::global_arguments(arguments, default_language)?;
+        let command = Self::parse_command(global.arguments, global.language)?;
+        Ok(ParsedCommand {
+            command,
+            language: global.language,
+            output_format: global.output_format,
+            detailed_diagnostics: global.detailed_diagnostics,
+        })
     }
 
-    fn language_arguments(
+    fn global_arguments(
         arguments: impl IntoIterator<Item = OsString>,
         default_language: Language,
-    ) -> Result<(Language, Vec<OsString>), ArgumentError> {
+    ) -> Result<GlobalArguments, ArgumentError> {
         let translator = Translator::new(default_language);
         let arguments: Vec<OsString> = arguments.into_iter().collect();
-        let first = arguments.first().and_then(|argument| argument.to_str());
-        if first == Some("--language") {
-            let Some(value) = arguments.get(1).and_then(|argument| argument.to_str()) else {
-                return Err(Self::error(
-                    t!("cli.language_missing", locale = translator),
-                    default_language,
-                ));
+        let mut language = default_language;
+        let mut output_format = OutputFormat::Text;
+        let mut detailed_diagnostics = false;
+        let mut index = 0;
+        while let Some(argument) = arguments.get(index).and_then(|argument| argument.to_str()) {
+            let option_value = if argument == "--language" || argument == "--format" {
+                index += 1;
+                let Some(value) = arguments.get(index).and_then(|argument| argument.to_str())
+                else {
+                    let message = if argument == "--language" {
+                        t! { name: "cli.language_missing", locale: translator }
+                    } else {
+                        t! { name: "cli.format_missing", locale: translator }
+                    };
+                    return Err(Self::error(message, language));
+                };
+                Some((argument, value))
+            } else if let Some(value) = argument.strip_prefix("--language=") {
+                Some(("--language", value))
+            } else if let Some(value) = argument.strip_prefix("--format=") {
+                Some(("--format", value))
+            } else if argument == "--diagnostic-detail" {
+                if detailed_diagnostics {
+                    return Err(Self::error(
+                        t! {
+                            name: "cli.diagnostic_detail_repeated",
+                            locale: Translator::new(language),
+                        },
+                        language,
+                    ));
+                }
+                detailed_diagnostics = true;
+                index += 1;
+                continue;
+            } else {
+                None
             };
-            let Some(language) = parse_language_option(value) else {
-                return Err(Self::error(
-                    t!("cli.language_invalid", locale = translator),
-                    default_language,
-                ));
+            let Some((option, value)) = option_value else {
+                break;
             };
-            return Ok((language, arguments.into_iter().skip(2).collect()));
+            if option == "--language" {
+                let Some(parsed) = parse_language_option(value) else {
+                    return Err(Self::error(
+                        t! { name: "cli.language_invalid", locale: Translator::new(language) },
+                        language,
+                    ));
+                };
+                language = parsed;
+            } else {
+                output_format = match value {
+                    "text" => OutputFormat::Text,
+                    "json" => OutputFormat::Json,
+                    _ => {
+                        return Err(Self::error(
+                            t! { name: "cli.format_invalid", locale: Translator::new(language) },
+                            language,
+                        ));
+                    }
+                };
+            }
+            index += 1;
         }
-        if let Some(value) = first.and_then(|value| value.strip_prefix("--language=")) {
-            let Some(language) = parse_language_option(value) else {
-                return Err(Self::error(
-                    t!("cli.language_invalid", locale = translator),
-                    default_language,
-                ));
-            };
-            return Ok((language, arguments.into_iter().skip(1).collect()));
+        if detailed_diagnostics && output_format != OutputFormat::Json {
+            return Err(Self::error(
+                t! {
+                    name: "cli.diagnostic_detail_requires_json",
+                    locale: Translator::new(language),
+                },
+                language,
+            ));
         }
-        Ok((default_language, arguments))
+        Ok(GlobalArguments {
+            language,
+            output_format,
+            detailed_diagnostics,
+            arguments: arguments.into_iter().skip(index).collect(),
+        })
     }
 
     fn parse_command(
@@ -165,15 +246,18 @@ impl Arguments {
         let Some(command) = arguments.next() else {
             return Ok(Command::Help);
         };
-        let command = command
-            .to_str()
-            .ok_or_else(|| Self::error(t!("cli.command_utf8", locale = translator), language))?;
+        let command = command.to_str().ok_or_else(|| {
+            Self::error(
+                t! { name: "cli.command_utf8", locale: translator },
+                language,
+            )
+        })?;
         match command {
             "--help" | "-h" | "help" => Ok(Command::Help),
             "schema" => Self::parse_schema(arguments, language),
             "config" => Self::parse_configuration_arguments(arguments, language),
             _ => Err(Self::error(
-                t!("cli.unknown_command", locale = translator),
+                t! { name: "cli.unknown_command", locale: translator },
                 language,
             )),
         }
@@ -186,12 +270,15 @@ impl Arguments {
         let translator = Translator::new(language);
         let Some(action) = arguments.next() else {
             return Err(Self::error(
-                t!("cli.schema_action_missing", locale = translator),
+                t! { name: "cli.schema_action_missing", locale: translator },
                 language,
             ));
         };
         let action = action.to_str().ok_or_else(|| {
-            Self::error(t!("cli.schema_action_utf8", locale = translator), language)
+            Self::error(
+                t! { name: "cli.schema_action_utf8", locale: translator },
+                language,
+            )
         })?;
         if matches!(action, "--help" | "-h") {
             return Ok(Command::Help);
@@ -201,13 +288,13 @@ impl Arguments {
         }
         if action != "check" {
             return Err(Self::error(
-                t!("cli.schema_action_invalid", locale = translator),
+                t! { name: "cli.schema_action_invalid", locale: translator },
                 language,
             ));
         }
         let Some(path) = arguments.next() else {
             return Err(Self::error(
-                t!("cli.schema_path_missing", locale = translator),
+                t! { name: "cli.schema_path_missing", locale: translator },
                 language,
             ));
         };
@@ -216,7 +303,7 @@ impl Arguments {
         }
         if arguments.next().is_some() {
             return Err(Self::error(
-                t!("cli.schema_path_extra", locale = translator),
+                t! { name: "cli.schema_path_extra", locale: translator },
                 language,
             ));
         }
@@ -243,14 +330,14 @@ impl Arguments {
                     continue;
                 }
                 return Err(Self::error(
-                    t!("cli.option_utf8", locale = translator),
+                    t! { name: "cli.option_utf8", locale: translator },
                     language,
                 ));
             };
             if !positional_only && option == "--check" {
                 if check_seen {
                     return Err(Self::error(
-                        t!("cli.format_check_repeated", locale = translator),
+                        t! { name: "cli.format_check_repeated", locale: translator },
                         language,
                     ));
                 }
@@ -260,7 +347,7 @@ impl Arguments {
                 return Ok(Command::Help);
             } else if !positional_only && option.starts_with('-') {
                 return Err(Self::error(
-                    t!("cli.schema_option_invalid", locale = translator),
+                    t! { name: "cli.schema_option_invalid", locale: translator },
                     language,
                 ));
             } else {
@@ -268,7 +355,10 @@ impl Arguments {
             }
         }
         let schema_path = path.ok_or_else(|| {
-            Self::error(t!("cli.schema_path_missing", locale = translator), language)
+            Self::error(
+                t! { name: "cli.schema_path_missing", locale: translator },
+                language,
+            )
         })?;
         Ok(Command::SchemaFmt(SchemaFormatRequest {
             schema_path,
@@ -283,7 +373,7 @@ impl Arguments {
     ) -> Result<(), ArgumentError> {
         if path.is_some() {
             return Err(Self::error(
-                t!("cli.schema_path_extra", locale = Translator::new(language)),
+                t! { name: "cli.schema_path_extra", locale: Translator::new(language) },
                 language,
             ));
         }
@@ -298,12 +388,15 @@ impl Arguments {
         let translator = Translator::new(language);
         let Some(action) = arguments.next() else {
             return Err(Self::error(
-                t!("cli.config_action_missing", locale = translator),
+                t! { name: "cli.config_action_missing", locale: translator },
                 language,
             ));
         };
         let action = action.to_str().ok_or_else(|| {
-            Self::error(t!("cli.config_action_utf8", locale = translator), language)
+            Self::error(
+                t! { name: "cli.config_action_utf8", locale: translator },
+                language,
+            )
         })?;
         if matches!(action, "--help" | "-h") {
             return Ok(Command::Help);
@@ -313,7 +406,7 @@ impl Arguments {
             "export-ir" => true,
             _ => {
                 return Err(Self::error(
-                    t!("cli.config_action_invalid", locale = translator),
+                    t! { name: "cli.config_action_invalid", locale: translator },
                     language,
                 ));
             }
@@ -339,20 +432,20 @@ impl Arguments {
                     continue;
                 }
                 return Err(Self::error(
-                    t!("cli.option_utf8", locale = translator),
+                    t! { name: "cli.option_utf8", locale: translator },
                     language,
                 ));
             };
             if !positional_only && option == "--schema" {
                 if schema_path.is_some() {
                     return Err(Self::error(
-                        t!("cli.schema_option_repeated", locale = translator),
+                        t! { name: "cli.schema_option_repeated", locale: translator },
                         language,
                     ));
                 }
                 let Some(value) = arguments.next() else {
                     return Err(Self::error(
-                        t!("cli.schema_option_value_missing", locale = translator),
+                        t! { name: "cli.schema_option_value_missing", locale: translator },
                         language,
                     ));
                 };
@@ -360,13 +453,13 @@ impl Arguments {
             } else if !positional_only && option == "--environment" {
                 if environment_seen {
                     return Err(Self::error(
-                        t!("cli.environment_option_repeated", locale = translator),
+                        t! { name: "cli.environment_option_repeated", locale: translator },
                         language,
                     ));
                 }
                 let Some(value) = arguments.next() else {
                     return Err(Self::error(
-                        t!("cli.environment_value_missing", locale = translator),
+                        t! { name: "cli.environment_value_missing", locale: translator },
                         language,
                     ));
                 };
@@ -375,7 +468,7 @@ impl Arguments {
                     Some("empty") => EnvironmentMode::Empty,
                     _ => {
                         return Err(Self::error(
-                            t!("cli.environment_value_invalid", locale = translator),
+                            t! { name: "cli.environment_value_invalid", locale: translator },
                             language,
                         ));
                     }
@@ -384,13 +477,13 @@ impl Arguments {
             } else if !positional_only && option == "--pretty" {
                 if !export {
                     return Err(Self::error(
-                        t!("cli.pretty_invalid", locale = translator),
+                        t! { name: "cli.pretty_invalid", locale: translator },
                         language,
                     ));
                 }
                 if pretty {
                     return Err(Self::error(
-                        t!("cli.pretty_repeated", locale = translator),
+                        t! { name: "cli.pretty_repeated", locale: translator },
                         language,
                     ));
                 }
@@ -398,13 +491,13 @@ impl Arguments {
             } else if !positional_only && option == "--check" {
                 if action != "fmt" {
                     return Err(Self::error(
-                        t!("cli.format_check_invalid", locale = translator),
+                        t! { name: "cli.format_check_invalid", locale: translator },
                         language,
                     ));
                 }
                 if format_check_seen {
                     return Err(Self::error(
-                        t!("cli.format_check_repeated", locale = translator),
+                        t! { name: "cli.format_check_repeated", locale: translator },
                         language,
                     ));
                 }
@@ -413,13 +506,13 @@ impl Arguments {
             } else if !positional_only && option == "--reject-secrets" {
                 if !export {
                     return Err(Self::error(
-                        t!("cli.reject_secrets_invalid", locale = translator),
+                        t! { name: "cli.reject_secrets_invalid", locale: translator },
                         language,
                     ));
                 }
                 if reject_secrets {
                     return Err(Self::error(
-                        t!("cli.reject_secrets_repeated", locale = translator),
+                        t! { name: "cli.reject_secrets_repeated", locale: translator },
                         language,
                     ));
                 }
@@ -428,7 +521,7 @@ impl Arguments {
                 return Ok(Command::Help);
             } else if !positional_only && option.starts_with('-') {
                 return Err(Self::error(
-                    t!("cli.option_invalid", locale = translator),
+                    t! { name: "cli.option_invalid", locale: translator },
                     language,
                 ));
             } else {
@@ -438,12 +531,15 @@ impl Arguments {
 
         let schema_path = schema_path.ok_or_else(|| {
             Self::error(
-                t!("cli.schema_option_missing", locale = translator),
+                t! { name: "cli.schema_option_missing", locale: translator },
                 language,
             )
         })?;
         let config_path = config_path.ok_or_else(|| {
-            Self::error(t!("cli.config_path_missing", locale = translator), language)
+            Self::error(
+                t! { name: "cli.config_path_missing", locale: translator },
+                language,
+            )
         })?;
         let request = ConfigRequest {
             schema_path,
@@ -469,7 +565,7 @@ impl Arguments {
     ) -> Result<(), ArgumentError> {
         if config_path.is_some() {
             return Err(Self::error(
-                t!("cli.config_path_extra", locale = Translator::new(language)),
+                t! { name: "cli.config_path_extra", locale: Translator::new(language) },
                 language,
             ));
         }
@@ -477,7 +573,7 @@ impl Arguments {
         Ok(())
     }
 
-    fn error(message: TranslationResult<&'static str>, language: Language) -> ArgumentError {
+    fn error(message: TranslationResult<Cow<'static, str>>, language: Language) -> ArgumentError {
         ArgumentError { message, language }
     }
 }

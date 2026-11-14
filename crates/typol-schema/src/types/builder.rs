@@ -23,7 +23,7 @@ use crate::{
 };
 use opeo::{OResult, Out};
 use typol_core::SourceSpan;
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 use typol_semantic::TypeId;
 use typol_syntax::{AstAccessError, BuiltinType, TypeExpr, TypeExprKind, VariantPayloadKind};
 pub(crate) struct TypeGraphBuilder<'a, 'd> {
@@ -131,7 +131,10 @@ impl<'a, 'd> TypeGraphBuilder<'a, 'd> {
             .checked_add(builtins.len())
             .and_then(|n| n.checked_add(symbols.variants().len()));
         let Some(count) = count else {
-            diagnostics.push(EmergencyDiagnostics::resource(span));
+            diagnostics.push(EmergencyDiagnostics::resource(
+                span,
+                diagnostics.translator(),
+            ));
             return Err(out.fail(BuildFailure::empty()));
         };
         graph
@@ -209,16 +212,20 @@ impl<'a, 'd> TypeGraphBuilder<'a, 'd> {
                 FieldOwner::Type(id) => id,
                 FieldOwner::Variant(id) => {
                     let Some(variant) = self.symbols.variant_symbol(id) else {
-                        self.diagnostics
-                            .push(schema_internal!(field.declaration().span()));
+                        self.diagnostics.push(schema_internal!(
+                            self.diagnostics.translator(),
+                            field.declaration().span()
+                        ));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     variant.owner()
                 }
             };
             let Some(owner) = self.symbols.type_symbol(owner) else {
-                self.diagnostics
-                    .push(schema_internal!(field.declaration().span()));
+                self.diagnostics.push(schema_internal!(
+                    self.diagnostics.translator(),
+                    field.declaration().span()
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             };
             if owner.state() != SymbolState::Valid {
@@ -244,8 +251,10 @@ impl<'a, 'd> TypeGraphBuilder<'a, 'd> {
                 continue;
             }
             let Some(owner) = self.symbols.type_symbol(variant.owner()) else {
-                self.diagnostics
-                    .push(schema_internal!(variant.declaration().span()));
+                self.diagnostics.push(schema_internal!(
+                    self.diagnostics.translator(),
+                    variant.declaration().span()
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             };
             if owner.state() != SymbolState::Valid {
@@ -328,10 +337,10 @@ impl<'a, 'd> TypeGraphBuilder<'a, 'd> {
                     Some(ResolvedTypeKind::Option(_))
                 ) {
                     self.diagnostics.push(self.diagnostics.make_semantic(
-                        diagnostic_message!(
-                            "diagnostic.schema.nested_options_unsupported",
-                            "nested options are unsupported after full expansion"
-                        ),
+                        t! {
+                            name: "diagnostic.schema.nested_options_unsupported",
+                            locale: self.diagnostics.translator(),
+                        },
                         span,
                     ));
                     None
@@ -360,10 +369,10 @@ impl<'a, 'd> TypeGraphBuilder<'a, 'd> {
                         Ok(length) => Some(length),
                         Err(_) => {
                             self.diagnostics.push(self.diagnostics.make_semantic(
-                                diagnostic_message!(
-                                    "diagnostic.schema.fixed_array_length_out_of_range",
-                                    "fixed-size array length exceeds the u32 range"
-                                ),
+                                t! {
+                                    name: "diagnostic.schema.fixed_array_length_out_of_range",
+                                    locale: self.diagnostics.translator(),
+                                },
                                 length.span(),
                             ));
                             return Ok(None);
@@ -401,7 +410,8 @@ impl<'a, 'd> TypeGraphBuilder<'a, 'd> {
                 match resolution {
                     PathResolution::Resolved(target) => {
                         let Some(symbol) = self.symbols.type_symbol(target) else {
-                            self.diagnostics.push(schema_internal!(path.span()));
+                            self.diagnostics
+                                .push(schema_internal!(self.diagnostics.translator(), path.span()));
                             return Err(out.fail(BuildFailure::empty()));
                         };
                         if symbol.state() != SymbolState::Valid {
@@ -413,7 +423,10 @@ impl<'a, 'd> TypeGraphBuilder<'a, 'd> {
                                         return Ok(None);
                                     };
                                     let Some(target_type) = self.graph.type_use(target_use) else {
-                                        self.diagnostics.push(schema_internal!(path.span()));
+                                        self.diagnostics.push(schema_internal!(
+                                            self.diagnostics.translator(),
+                                            path.span()
+                                        ));
                                         return Err(out.fail(BuildFailure::empty()));
                                     };
                                     Some(self.push_type_use(

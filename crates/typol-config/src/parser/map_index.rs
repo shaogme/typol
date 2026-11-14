@@ -5,6 +5,7 @@ use typol_core::{
     BudgetError, ChargedString, ChargedVec, ConfigValue, Diagnostic, DiagnosticContext,
     ExecutionBudget, diagnostic_context,
 };
+use typol_i18n::Translator;
 
 #[cfg(test)]
 use alloc::string::String;
@@ -54,15 +55,17 @@ impl EntryId {
 pub(super) struct MapIndex {
     entries: ChargedVec<Entry>,
     root: Option<EntryId>,
+    translator: Translator,
     #[cfg(test)]
     comparisons: usize,
 }
 
 impl MapIndex {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(translator: Translator) -> Self {
         Self {
             entries: ChargedVec::unmetered(),
             root: None,
+            translator,
             #[cfg(test)]
             comparisons: 0,
         }
@@ -70,12 +73,13 @@ impl MapIndex {
 
     pub(super) fn new_budgeted<'slot, E>(
         budget: &ExecutionBudget,
+        translator: Translator,
         mut out: Out<'slot, '_, E>,
     ) -> OResult<'slot, Self>
     where
         E: From<BudgetError>,
     {
-        let mut index = Self::new();
+        let mut index = Self::new(translator);
         index.entries = ChargedVec::new(Some(budget), out.reborrow())?;
         Ok(index)
     }
@@ -194,6 +198,7 @@ impl MapIndex {
                     None,
                     None,
                     None,
+                    self.translator,
                 ))));
             };
             let entry = MapEntry::try_new(&entry.key, value, budget.as_ref(), out.reborrow())?;
@@ -371,6 +376,7 @@ mod tests {
 
     use alloc::{format, vec::Vec};
     use typol_core::{BudgetError, Diagnostic, ValueKind};
+    use typol_i18n::{Language, Translator};
 
     #[test]
     fn ordered_reverse_and_shuffled_keys_keep_avl_bounds_and_source_slots() -> TestResult<()> {
@@ -378,7 +384,7 @@ mod tests {
         let mut diagnostics = TestSlot::<Diagnostic>::default();
         for size in [256_usize, 512] {
             for order in [0, 1, 2] {
-                let mut index = MapIndex::new();
+                let mut index = MapIndex::new(Translator::new(Language::English));
                 let mut keys = Vec::new();
                 for slot in 0..size {
                     let number = match order {

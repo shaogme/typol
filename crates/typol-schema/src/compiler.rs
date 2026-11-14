@@ -1,5 +1,6 @@
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{BudgetError, ExecutionBudget, Read, RegexExecutionBudget, SourceReadError};
+use typol_i18n::Translator;
 use typol_policy::{RegexLimits, RegexOptions};
 use typol_semantic::CompiledSchema;
 
@@ -49,14 +50,14 @@ impl SchemaResolver for NoImports {
 pub struct SchemaCompileContext {
     resources: SchemaLimits,
     regex: RegexOptions,
+    translator: Translator,
     execution: ExecutionBudget,
     regex_execution: RegexExecutionBudget,
 }
 
 impl SchemaCompileContext {
     pub(crate) fn new<'slot, E>(
-        resources: SchemaLimits,
-        regex: RegexOptions,
+        options: SchemaCompileOptions,
         execution: &ExecutionBudget,
         regex_execution: &RegexExecutionBudget,
         mut out: Out<'slot, '_, E>,
@@ -67,8 +68,9 @@ impl SchemaCompileContext {
         let execution = execution.try_clone(out.reborrow())?;
         let regex_execution = regex_execution.try_clone(out.reborrow())?;
         Ok(Self {
-            resources,
-            regex,
+            resources: *options.limits(),
+            regex: *options.regex(),
+            translator: options.translator(),
             execution,
             regex_execution,
         })
@@ -76,8 +78,9 @@ impl SchemaCompileContext {
 
     pub fn try_clone<'slot>(&self, mut out: Out<'slot, '_, BudgetError>) -> OResult<'slot, Self> {
         let context = Self::new(
-            self.resources,
-            self.regex,
+            SchemaCompileOptions::new(self.resources)
+                .with_regex(self.regex)
+                .with_translator(self.translator),
             &self.execution,
             &self.regex_execution,
             out.reborrow(),
@@ -95,6 +98,10 @@ impl SchemaCompileContext {
 
     pub const fn regex(&self) -> &RegexOptions {
         &self.regex
+    }
+
+    pub const fn translator(&self) -> Translator {
+        self.translator
     }
 
     pub const fn regex_limits(&self) -> &RegexLimits {
@@ -146,7 +153,7 @@ pub struct SchemaCompiler {
 impl SchemaCompiler {
     pub fn new<'slot>(
         options: SchemaCompileOptions,
-        mut out: Out<'slot, '_, SchemaCompileErrors>,
+        out: Out<'slot, '_, SchemaCompileErrors>,
     ) -> OResult<'slot, Self> {
         let mut budget_errors = ErrSlot::new();
         let execution = match budget_errors
@@ -154,7 +161,10 @@ impl SchemaCompiler {
         {
             Ok(execution) => execution,
             Err(caught) => {
-                return Err(out.fail(SchemaCompileErrors::from(caught.take())));
+                return Err(out.fail(SchemaCompileErrors::budget_failure(
+                    caught.take(),
+                    options.translator(),
+                )));
             }
         };
         let regex_execution = match budget_errors.try_call(|budget_out| {
@@ -168,16 +178,23 @@ impl SchemaCompiler {
         }) {
             Ok(execution) => execution,
             Err(caught) => {
-                return Err(out.fail(SchemaCompileErrors::regex_budget_failure(caught.take())));
+                return Err(out.fail(SchemaCompileErrors::regex_budget_failure(
+                    caught.take(),
+                    options.translator(),
+                )));
             }
         };
-        let context = SchemaCompileContext::new(
-            *options.limits(),
-            *options.regex(),
-            &execution,
-            &regex_execution,
-            out.reborrow(),
-        )?;
+        let context = match budget_errors.try_call(|budget_out| {
+            SchemaCompileContext::new(options, &execution, &regex_execution, budget_out)
+        }) {
+            Ok(context) => context,
+            Err(caught) => {
+                return Err(out.fail(SchemaCompileErrors::budget_failure(
+                    caught.take(),
+                    options.translator(),
+                )));
+            }
+        };
         Ok(Self { context })
     }
 

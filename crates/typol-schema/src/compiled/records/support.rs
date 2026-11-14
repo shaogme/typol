@@ -98,14 +98,14 @@ impl RecordSupport {
         fallback: SourceSpan,
     ) -> BuildResult<(Option<RefinementId>, bool)> {
         let Some(type_use) = types.type_use(target) else {
-            diagnostics.abort(schema_internal!(fallback));
+            diagnostics.abort(schema_internal!(diagnostics.translator(), fallback));
             return Err(BuildFailure::empty());
         };
         let Some(link_id) = type_use.alias_chain() else {
             return Ok((None, false));
         };
         links.get(link_id.index()).copied().ok_or_else(|| {
-            diagnostics.abort(schema_internal!(type_use.span()));
+            diagnostics.abort(schema_internal!(diagnostics.translator(), type_use.span()));
             BuildFailure::empty()
         })
     }
@@ -182,7 +182,7 @@ impl RecordSupport {
         let id = types
             .semantic_id(ty)
             .ok_or_else(|| {
-                diagnostics.push(schema_internal!(span));
+                diagnostics.push(schema_internal!(diagnostics.translator(), span));
                 BuildFailure::empty()
             })
             .store_err_into(out.reborrow())?;
@@ -214,7 +214,7 @@ impl RecordSupport {
         while let Some(id) = current {
             execution.consume(1, out.reborrow())?;
             let Some(module) = tree.module(id) else {
-                diagnostics.abort(schema_internal!(fallback));
+                diagnostics.abort(schema_internal!(diagnostics.translator(), fallback));
                 return Err(out.fail(BuildFailure::empty()));
             };
             if let Some(segment) = module.name() {
@@ -317,7 +317,7 @@ impl RecordSupport {
             type_use_rules.try_push(rules, out.reborrow())?;
         }
         if type_use_rules.len() != types.uses.len() {
-            diagnostics.push(schema_internal!(fallback));
+            diagnostics.push(schema_internal!(diagnostics.translator(), fallback));
             return Err(out.fail(BuildFailure::empty()));
         }
         let mut links: ChargedVec<(Option<RefinementId>, bool)> =
@@ -328,7 +328,7 @@ impl RecordSupport {
             let (next, inherited_secret) = match link.next() {
                 Some(id) => {
                     let Some(value) = links.get(id.index()) else {
-                        diagnostics.push(schema_internal!(fallback));
+                        diagnostics.push(schema_internal!(diagnostics.translator(), fallback));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     *value
@@ -336,7 +336,7 @@ impl RecordSupport {
                 None => (None, false),
             };
             let Some(rules) = alias_rules.get_mut(link.symbol().index()) else {
-                diagnostics.push(schema_internal!(fallback));
+                diagnostics.push(schema_internal!(diagnostics.translator(), fallback));
                 return Err(out.fail(BuildFailure::empty()));
             };
             let target_type = RecordSupport::type_id(
@@ -383,7 +383,7 @@ impl RecordSupport {
                 let (local_rules, local_secret) = match ty {
                     ExpressionType::Resolved(id) => {
                         let Some(local) = type_use_rules.get_mut(id.index()) else {
-                            diagnostics.push(schema_internal!(fallback));
+                            diagnostics.push(schema_internal!(diagnostics.translator(), fallback));
                             return Err(out.fail(BuildFailure::empty()));
                         };
                         (
@@ -398,7 +398,7 @@ impl RecordSupport {
                         (diagnostics.new_vec(execution, out.reborrow())?, false)
                     }
                     _ => {
-                        diagnostics.push(schema_internal!(fallback));
+                        diagnostics.push(schema_internal!(diagnostics.translator(), fallback));
                         return Err(out.fail(BuildFailure::empty()));
                     }
                 };
@@ -459,14 +459,14 @@ impl RecordSupport {
         }
         let (mut defaults, default_validation) = defaults.into_parts();
         let Some(default_validation) = default_validation else {
-            diagnostics.abort(schema_internal!(fallback));
+            diagnostics.abort(schema_internal!(diagnostics.translator(), fallback));
             return Err(out.fail(BuildFailure::empty()));
         };
         if defaults.len() != symbols.fields().len()
             || fields.len() != symbols.fields().len()
             || variants.len() != symbols.variants().len()
         {
-            diagnostics.push(schema_internal!(fallback));
+            diagnostics.push(schema_internal!(diagnostics.translator(), fallback));
             return Err(out.fail(BuildFailure::empty()));
         }
         for (field, items) in symbols.fields().iter().zip(fields) {
@@ -474,7 +474,7 @@ impl RecordSupport {
             let declaration = field.declaration();
             let span = declaration.span();
             let Some(target) = types.field_type(field.id()) else {
-                diagnostics.push(schema_internal!(span));
+                diagnostics.push(schema_internal!(diagnostics.translator(), span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             let (head, secret) = RecordSupport::use_rules(target, types, &links, diagnostics, span)
@@ -517,7 +517,7 @@ impl RecordSupport {
             let name = RecordSupport::copy_text(name, execution, out.reborrow())?;
             let mut record = FieldRecord::new(name, ty, span);
             let Some(default) = defaults.get_mut(field.id().index()) else {
-                diagnostics.push(schema_internal!(span));
+                diagnostics.push(schema_internal!(diagnostics.translator(), span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             record.set_default(default.take());
@@ -528,7 +528,7 @@ impl RecordSupport {
                 model.add_field(record, builder_out)
             })?;
             if id != field.id() {
-                diagnostics.push(schema_internal!(span));
+                diagnostics.push(schema_internal!(diagnostics.translator(), span));
                 return Err(out.fail(BuildFailure::empty()));
             }
         }
@@ -553,7 +553,7 @@ impl RecordSupport {
                 VariantPayloadKind::Unit => StoredVariantPayload::Unit,
                 VariantPayloadKind::Single(_) => {
                     let Some(target) = target else {
-                        diagnostics.push(schema_internal!(span));
+                        diagnostics.push(schema_internal!(diagnostics.translator(), span));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     StoredVariantPayload::Single(RecordSupport::type_id(
@@ -617,7 +617,7 @@ impl RecordSupport {
                 }
                 None if rules.ids.is_empty() => None,
                 None => {
-                    diagnostics.push(schema_internal!(span));
+                    diagnostics.push(schema_internal!(diagnostics.translator(), span));
                     return Err(out.fail(BuildFailure::empty()));
                 }
             };
@@ -657,7 +657,7 @@ impl RecordSupport {
                 model.add_variant(record, builder_out)
             })?;
             if id != variant.id() {
-                diagnostics.push(schema_internal!(span));
+                diagnostics.push(schema_internal!(diagnostics.translator(), span));
                 return Err(out.fail(BuildFailure::empty()));
             }
         }
@@ -673,12 +673,16 @@ impl RecordSupport {
         }) {
             Ok(locations) => locations,
             Err(caught) => {
-                diagnostics.push(SourceLocations::diagnostic(caught.take(), fallback));
+                diagnostics.push(SourceLocations::diagnostic(
+                    caught.take(),
+                    fallback,
+                    diagnostics.translator(),
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             }
         };
         let Some(entry_type) = symbols.entry_type() else {
-            diagnostics.push(schema_internal!(fallback));
+            diagnostics.push(schema_internal!(diagnostics.translator(), fallback));
             return Err(out.fail(BuildFailure::empty()));
         };
         let entry = RecordSupport::type_id(

@@ -1,23 +1,25 @@
 mod builtins;
 mod model;
 
+pub use builtins::{BudgetedTypol, Typol};
+pub use model::{
+    DescriptorName, DescriptorNode, DescriptorProvider, MapContainer, TypeDescriptor, TypeShape,
+    VariantShape,
+};
+
 use crate::{
     diagnostics::{CodecErrors, CodecStage, Failure},
     options::BindingLimits,
     session::{NodeBudget, SessionBudget},
 };
-pub use builtins::{BudgetedTypol, Typol};
 use core::{
     any::TypeId,
     fmt,
     sync::atomic::{AtomicUsize, Ordering},
 };
-pub use model::{
-    DescriptorName, DescriptorNode, DescriptorProvider, MapContainer, TypeDescriptor, TypeShape,
-    VariantShape,
-};
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{ChargedVec, DiagnosticContext, diagnostic_context};
+use typol_i18n::Translator;
 use typol_model::BuiltinType;
 
 static NAME_BUDGET_MISMATCH: DiagnosticContext =
@@ -55,7 +57,13 @@ impl<'session> DescribeContext<'session> {
         let owner = loop {
             let following = next_owner
                 .checked_add(1)
-                .ok_or_else(|| CodecErrors::emergency(CodecStage::Binding, Failure::Resource))
+                .ok_or_else(|| {
+                    CodecErrors::emergency(
+                        CodecStage::Binding,
+                        Failure::Resource,
+                        session.translator(),
+                    )
+                })
                 .store_err_into(out.reborrow())?;
             match NEXT_OWNER.compare_exchange_weak(
                 next_owner,
@@ -127,6 +135,7 @@ impl<'session> DescribeContext<'session> {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Binding,
                 self.session.execution().resource_error().into(),
+                self.session.translator(),
             )));
         }
         let copied = self.session.budget_codec(
@@ -182,6 +191,7 @@ impl<'session> DescribeContext<'session> {
 
     pub fn array_length<'slot>(
         length: usize,
+        translator: Translator,
         mut out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, u32> {
         match u32::try_from(length) {
@@ -189,6 +199,7 @@ impl<'session> DescribeContext<'session> {
             Err(_) => Err(out.reborrow().fail(CodecErrors::emergency(
                 CodecStage::Binding,
                 Failure::ArrayLength,
+                translator,
             ))),
         }
     }
@@ -231,6 +242,7 @@ impl<'session> DescribeContext<'session> {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Binding,
                 Failure::internal(NAME_BUDGET_MISMATCH),
+                self.session.translator(),
             )));
         }
         let members = match node {
@@ -256,6 +268,7 @@ impl<'session> DescribeContext<'session> {
                 return Err(out.fail(CodecErrors::emergency(
                     CodecStage::Binding,
                     Failure::internal(MEMBER_BUDGET_MISMATCH),
+                    self.session.translator(),
                 )));
             }
             for descriptor in members {
@@ -268,6 +281,7 @@ impl<'session> DescribeContext<'session> {
                             Failure::internal(
                                 MEMBER_KIND_MISMATCH.with_object_id(descriptor.slot() as u64),
                             ),
+                            self.session.translator(),
                         )));
                     }
                 }
@@ -292,6 +306,7 @@ impl<'session> DescribeContext<'session> {
                 Failure::internal(
                     DESCRIPTOR_OWNER_MISMATCH.with_object_id(descriptor.slot() as u64),
                 ),
+                self.session.translator(),
             )));
         }
         match self.arena.get(descriptor.slot()) {
@@ -301,6 +316,7 @@ impl<'session> DescribeContext<'session> {
                 Failure::internal(
                     DESCRIPTOR_INDEX_MISSING.with_object_id(descriptor.slot() as u64),
                 ),
+                self.session.translator(),
             ))),
         }
     }

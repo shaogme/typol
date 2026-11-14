@@ -2,15 +2,23 @@ use alloc::{string::String, vec::Vec};
 use core::cmp::Ordering;
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    ChargedString, ChargedVec, ConfigValue, Diagnostic, DiagnosticCode, ExecutionBudget, Span,
-    ValueKind, ValuePayloadView, ValueSource, ValueView,
+    BudgetError, ChargedString, ChargedVec, ConfigValue, DiagnosticContext, ExecutionBudget, Span,
+    ValueKind, ValuePayloadView, ValueSource, ValueView, diagnostic_context,
 };
+use typol_i18n::Translator;
 use typol_semantic::{FieldView, SchemaAccessError, VariantView};
 
 use crate::{
     ConfigParseErrors,
+    diagnostics::BudgetDiagnostic,
     instance::{LocationIndex, Member},
 };
+
+static DOCUMENT_PATH_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-config",
+    "document-path-index",
+    "retained-value-shape-invalid",
+);
 
 /// A typed path into a parsed configuration value.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -142,8 +150,10 @@ impl SourcePathIndex {
         locations: &LocationIndex<'schema>,
         value: &ConfigValue,
         budget: &ExecutionBudget,
+        translator: Translator,
         mut out: Out<'slot, '_, ConfigParseErrors>,
     ) -> OResult<'slot, Self> {
+        let internal_document_error = || internal_document_error(translator);
         let mut entries = ChargedVec::new(Some(budget), out.reborrow())?;
         entries.try_push(
             PathIndexEntry {
@@ -183,8 +193,13 @@ impl SourcePathIndex {
             let Some(parent_value) = values.get(parent_id.index()).copied().flatten() else {
                 return Err(out.fail(internal_document_error()));
             };
-            let (child_value, segments) =
-                child_value(parent_value, node.member(), budget, out.reborrow())?;
+            let (child_value, segments) = child_value(
+                parent_value,
+                node.member(),
+                budget,
+                translator,
+                out.reborrow(),
+            )?;
             let mut path_id = parent_path;
             let mut insertion_parent = parent_path;
             let parent_span = entries.get(parent_path).and_then(|entry| entry.span);
@@ -418,12 +433,14 @@ fn child_value<'slot, 'value>(
     parent: ValueView<'value>,
     member: Member<'_>,
     budget: &ExecutionBudget,
+    translator: Translator,
     mut out: Out<'slot, '_, ConfigParseErrors>,
 ) -> OResult<'slot, (ValueView<'value>, [Option<IndexedPathSegment>; 2])> {
+    let internal_document_error = || internal_document_error(translator);
     match member {
         Member::Root => Err(out.fail(internal_document_error())),
         Member::Field(field) => {
-            let slot = field_slot(field, out.reborrow())?;
+            let slot = field_slot(field, translator, out.reborrow())?;
             let ValueKind::Structure(fields) = parent.as_ref() else {
                 return Err(out.fail(internal_document_error()));
             };
@@ -489,7 +506,7 @@ fn child_value<'slot, 'value>(
             Ok((value, [Some(variant), Some(IndexedPathSegment::Payload)]))
         }
         Member::VariantField { variant, field } => {
-            let slot = field_slot(field, out.reborrow())?;
+            let slot = field_slot(field, translator, out.reborrow())?;
             let ValueKind::Enumeration {
                 payload: ValuePayloadView::Structure(fields),
                 ..
@@ -503,7 +520,7 @@ fn child_value<'slot, 'value>(
             let Some(name) = field_value.name() else {
                 return Err(out.fail(internal_document_error()));
             };
-            let variant = variant_name(variant, budget, out.reborrow())?;
+            let variant = variant_name(variant, budget, translator, out.reborrow())?;
             Ok((
                 field_value.value(),
                 [
@@ -517,8 +534,10 @@ fn child_value<'slot, 'value>(
 
 fn field_slot<'slot>(
     field: FieldView<'_>,
+    translator: Translator,
     out: Out<'slot, '_, ConfigParseErrors>,
 ) -> OResult<'slot, usize> {
+    let internal_document_error = || internal_document_error(translator);
     let mut errors = ErrSlot::<SchemaAccessError>::new();
     match errors.try_call(|schema_out| field.slot(schema_out)) {
         Ok(slot) => Ok(slot),
@@ -552,8 +571,10 @@ fn indexed_variant<'slot>(
 fn variant_name<'slot>(
     variant: VariantView<'_>,
     budget: &ExecutionBudget,
+    translator: Translator,
     mut out: Out<'slot, '_, ConfigParseErrors>,
 ) -> OResult<'slot, IndexedPathSegment> {
+    let internal_document_error = || internal_document_error(translator);
     let mut errors = ErrSlot::<SchemaAccessError>::new();
     let name = match errors.try_call(|schema_out| variant.name(schema_out)) {
         Ok(name) => name,
@@ -638,6 +659,10 @@ fn compare_map_key(indexed: &Option<IndexedPathSegment>, query: &str) -> Orderin
     }
 }
 
-fn internal_document_error() -> ConfigParseErrors {
-    ConfigParseErrors::emergency(Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR), None)
+fn internal_document_error(translator: Translator) -> ConfigParseErrors {
+    ConfigParseErrors::emergency(
+        BudgetDiagnostic::from_error(BudgetError::invariant(&DOCUMENT_PATH_INVARIANT), translator),
+        None,
+        translator,
+    )
 }

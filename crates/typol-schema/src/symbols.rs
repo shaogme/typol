@@ -5,24 +5,23 @@ pub(crate) use model::{
     FieldOwner, FieldSymbol, LookupResult, NamespaceTarget, SymbolState, TypeSymbolId,
     VariantSymbol,
 };
+pub(crate) use typol_semantic::{FieldId as FieldSymbolId, VariantId as VariantSymbolId};
 
 use model::VariantSymbolInput;
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 
 use opeo::{OResult, Out};
-use typol_core::{BudgetError, ChargedVec, SourceSpan};
+use typol_core::{BudgetError, ChargedVec, RelatedLocationRole, SourceSpan};
 use typol_syntax::{AstAccessError, FieldDeclList, VariantPayloadKind};
 
 use crate::{
-    context::CompileContext,
-    diagnostics::{BudgetDiagnostics, BuildFailure, DiagnosticCollector},
+    context::{CompileContext, CompileContextOptions},
+    diagnostics::{BudgetDiagnostics, BuildFailure, DiagnosticCollector, DuplicateLabel},
     module_tree::{
         ModuleId, ModuleMember, ModuleTree, TypeDeclId, TypeDeclaration, TypeDeclarationKind,
     },
     symbols::index::NameIndex,
 };
-
-pub(crate) use typol_semantic::{FieldId as FieldSymbolId, VariantId as VariantSymbolId};
 
 pub(crate) struct TypeSymbol<'a> {
     id: TypeSymbolId,
@@ -224,10 +223,13 @@ impl<'a> SymbolTable<'a> {
         let mut builder = SymbolBuilder {
             symbols: {
                 let internal_context = CompileContext::new::<BuildFailure>(
-                    *context.limits(),
-                    context.regex_limits(),
-                    context.execution(),
-                    context.regex_execution(),
+                    CompileContextOptions {
+                        limits: *context.limits(),
+                        regex_limits: context.regex_limits(),
+                        execution: context.execution(),
+                        regex_execution: context.regex_execution(),
+                        translator: context.translator(),
+                    },
                     out.reborrow(),
                 )?;
                 Self {
@@ -244,10 +246,10 @@ impl<'a> SymbolTable<'a> {
         builder.declarations(tree, out.reborrow())?;
         if tree.root_entries().is_empty() {
             builder.diagnostics.push(builder.diagnostics.make_semantic(
-                diagnostic_message!(
-                    "diagnostic.schema.root_missing_entry",
-                    "root schema must declare an entry struct"
-                ),
+                t! {
+                    name: "diagnostic.schema.root_missing_entry",
+                    locale: builder.diagnostics.translator(),
+                },
                 tree.root_span(),
             ));
         }
@@ -314,8 +316,10 @@ impl<'a> SymbolBuilder<'a, '_> {
             self.consume(declaration.name_span(), out.reborrow())?;
             let id = TypeSymbolId::new(self.symbols.types.len());
             if declaration.id().index() != id.index() {
-                self.diagnostics
-                    .abort(schema_internal!(declaration.name_span()));
+                self.diagnostics.abort(schema_internal!(
+                    self.diagnostics.translator(),
+                    declaration.name_span()
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             }
             let fields = self
@@ -358,18 +362,24 @@ impl<'a> SymbolBuilder<'a, '_> {
                         declaration.name_span(),
                         out.reborrow(),
                     )?;
-                    self.diagnostics.push(self.diagnostics.make_duplicate(
-                        diagnostic_message!(
-                            "diagnostic.schema.duplicate_entry_struct",
-                            "root schema can declare only one entry struct"
+                    self.diagnostics.push(
+                        self.diagnostics.make_duplicate(
+                            t! {
+                                name: "diagnostic.schema.duplicate_entry_struct",
+                                locale: self.diagnostics.translator(),
+                            },
+                            declaration.name_span(),
+                            DuplicateLabel {
+                                span: first.name_span(),
+                                role: RelatedLocationRole::FirstDeclaration,
+                                message: t! {
+                                    name: "diagnostic.label.first_entry_struct",
+                                    locale: self.diagnostics.translator(),
+                                }
+                                .into(),
+                            },
                         ),
-                        declaration.name_span(),
-                        first.name_span(),
-                        diagnostic_message!(
-                            "diagnostic.label.first_entry_struct",
-                            "the first entry struct is here"
-                        ),
-                    ));
+                    );
                 } else {
                     first_entry = Some(declaration.id());
                 }
@@ -403,14 +413,20 @@ impl<'a> SymbolBuilder<'a, '_> {
                         let Some(variant) = self
                             .ast_access(out.reborrow(), |ast_out| variants.get(offset, ast_out))?
                         else {
-                            self.diagnostics.abort(schema_internal!(declaration.span()));
+                            self.diagnostics.abort(schema_internal!(
+                                self.diagnostics.translator(),
+                                declaration.span()
+                            ));
                             return Err(out.fail(BuildFailure::empty()));
                         };
                         self.consume(variant.span(), out.reborrow())?;
                         let Some(target) = first_variant.checked_add(offset) else {
                             let error = self.symbols.context.execution().resource_error();
-                            self.diagnostics
-                                .abort(BudgetDiagnostics::make(error, variant.span()));
+                            self.diagnostics.abort(BudgetDiagnostics::make(
+                                error,
+                                variant.span(),
+                                self.diagnostics.translator(),
+                            ));
                             return Err(out.fail(BuildFailure::empty()));
                         };
                         let (name, name_span) =
@@ -437,7 +453,10 @@ impl<'a> SymbolBuilder<'a, '_> {
                         let Some(variant) = self
                             .ast_access(out.reborrow(), |ast_out| variants.get(offset, ast_out))?
                         else {
-                            self.diagnostics.abort(schema_internal!(declaration.span()));
+                            self.diagnostics.abort(schema_internal!(
+                                self.diagnostics.translator(),
+                                declaration.span()
+                            ));
                             return Err(out.fail(BuildFailure::empty()));
                         };
                         self.consume(variant.span(), out.reborrow())?;
@@ -448,7 +467,10 @@ impl<'a> SymbolBuilder<'a, '_> {
                             .is_some_and(|duplicate| duplicate.later == variant_id)
                         {
                             let Some(duplicate) = duplicates.next() else {
-                                self.diagnostics.abort(schema_internal!(variant.span()));
+                                self.diagnostics.abort(schema_internal!(
+                                    self.diagnostics.translator(),
+                                    variant.span()
+                                ));
                                 return Err(out.fail(BuildFailure::empty()));
                             };
                             self.consume(duplicate.later_span, out.reborrow())?;
@@ -460,18 +482,24 @@ impl<'a> SymbolBuilder<'a, '_> {
                                 )?
                                 .set_state(SymbolState::Ambiguous);
                             state = SymbolState::Ambiguous;
-                            self.diagnostics.push(self.diagnostics.make_duplicate(
-                                diagnostic_message!(
-                                    "diagnostic.schema.duplicate_variant_name",
-                                    "duplicate variant name in the same enum"
+                            self.diagnostics.push(
+                                self.diagnostics.make_duplicate(
+                                    t! {
+                                        name: "diagnostic.schema.duplicate_variant_name",
+                                        locale: self.diagnostics.translator(),
+                                    },
+                                    duplicate.later_span,
+                                    DuplicateLabel {
+                                        span: duplicate.first_span,
+                                        role: RelatedLocationRole::PreviousDeclaration,
+                                        message: t! {
+                                            name: "diagnostic.label.earlier_variant",
+                                            locale: self.diagnostics.translator(),
+                                        }
+                                        .into(),
+                                    },
                                 ),
-                                duplicate.later_span,
-                                duplicate.first_span,
-                                diagnostic_message!(
-                                    "diagnostic.label.earlier_variant",
-                                    "the earlier variant is here"
-                                ),
-                            ));
+                            );
                         }
                         let owner_symbol = self.diagnostics.require(
                             self.symbols.types.get_mut(id.index()),
@@ -542,7 +570,8 @@ impl<'a> SymbolBuilder<'a, '_> {
                 declarations.get(position, ast_out)
             })?
             else {
-                self.diagnostics.abort(schema_internal!(span));
+                self.diagnostics
+                    .abort(schema_internal!(self.diagnostics.translator(), span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             let (name, span) = self.ast_access(out.reborrow(), |mut ast_out| {
@@ -581,18 +610,24 @@ impl<'a> SymbolBuilder<'a, '_> {
                     out.reborrow(),
                 )?
                 .set_state(SymbolState::Ambiguous);
-            self.diagnostics.push(self.diagnostics.make_duplicate(
-                diagnostic_message!(
-                    "diagnostic.schema.duplicate_field_name",
-                    "duplicate field name in the same struct"
+            self.diagnostics.push(
+                self.diagnostics.make_duplicate(
+                    t! {
+                        name: "diagnostic.schema.duplicate_field_name",
+                        locale: self.diagnostics.translator(),
+                    },
+                    duplicate.later_span,
+                    DuplicateLabel {
+                        span: duplicate.first_span,
+                        role: RelatedLocationRole::PreviousDeclaration,
+                        message: t! {
+                            name: "diagnostic.label.earlier_field",
+                            locale: self.diagnostics.translator(),
+                        }
+                        .into(),
+                    },
                 ),
-                duplicate.later_span,
-                duplicate.first_span,
-                diagnostic_message!(
-                    "diagnostic.label.earlier_field",
-                    "the earlier field is here"
-                ),
-            ));
+            );
         }
         Ok((ids, name_index))
     }
@@ -606,7 +641,10 @@ impl<'a> SymbolBuilder<'a, '_> {
             let module_span = module.name_span().unwrap_or(tree.root_span());
             self.consume(tree.root_span(), out.reborrow())?;
             if module.id().index() != self.symbols.namespaces.len() {
-                self.diagnostics.abort(schema_internal!(tree.root_span()));
+                self.diagnostics.abort(schema_internal!(
+                    self.diagnostics.translator(),
+                    tree.root_span()
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             }
             let mut index =
@@ -671,18 +709,24 @@ impl<'a> SymbolBuilder<'a, '_> {
                             .state = SymbolState::Ambiguous;
                     }
                 }
-                self.diagnostics.push(self.diagnostics.make_duplicate(
-                    diagnostic_message!(
-                        "diagnostic.schema.duplicate_declaration_name",
-                        "duplicate declaration name in the same module"
+                self.diagnostics.push(
+                    self.diagnostics.make_duplicate(
+                        t! {
+                            name: "diagnostic.schema.duplicate_declaration_name",
+                            locale: self.diagnostics.translator(),
+                        },
+                        duplicate.later_span,
+                        DuplicateLabel {
+                            span: duplicate.first_span,
+                            role: RelatedLocationRole::PreviousDeclaration,
+                            message: t! {
+                                name: "diagnostic.label.earlier_declaration",
+                                locale: self.diagnostics.translator(),
+                            }
+                            .into(),
+                        },
                     ),
-                    duplicate.later_span,
-                    duplicate.first_span,
-                    diagnostic_message!(
-                        "diagnostic.label.earlier_declaration",
-                        "the earlier declaration is here"
-                    ),
-                ));
+                );
             }
             self.symbols.namespaces.try_push(index, out.reborrow())?;
         }

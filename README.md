@@ -75,6 +75,8 @@ The main path has three stages:
 
 Operations that can fail take an OPEO `Out` error context and return an OPEO result. The Quick start shows how `opeo::ErrSlot::try_call` captures and reports a `TypolError`.
 
+`TypolError` writes a nonempty diagnostic report through `Display`. Its indexed diagnostic query API works in both std and no_std builds. Diagnostic text is translated while Schema compilation, configuration parsing, or validation runs, then stays fixed through display and JSON output. Library options default to English. The CLI passes `--language` into its operations, so versioned JSON reasons use the selected language without translating during serialization.
+
 Configuration inputs are explicit too: `BoundSchema::read` receives a `ReadRequest` containing a `Read` source such as `SliceSource`. With `std`, `read_file` and `read_io` adapt host files and readers. Each read also receives an `Environment` provider; Typol never consults process variables implicitly.
 
 ## Workspace structure

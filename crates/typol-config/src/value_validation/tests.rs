@@ -751,7 +751,9 @@ fn secret_element_struct_assertions_hide_messages_before_path_copy() -> TestResu
     let value = test.object(vec![("values", values)])?;
     let errors = test.run(&schema, &value).test_error()?;
     test_eq!(
-        TestCheck::item(errors.diagnostics(), 0)?.message(),
+        TestCheck::item(errors.diagnostics(), 0)?
+            .message()
+            .test_value()?,
         "value is hidden"
     )?;
     test_eq!(
@@ -766,7 +768,9 @@ fn secret_element_struct_assertions_hide_messages_before_path_copy() -> TestResu
         .parse(&schema, r#"{values: {"private-key": {n: 1}}}"#)
         .test_error()?;
     test_eq!(
-        TestCheck::item(text.diagnostics(), 0)?.message(),
+        TestCheck::item(text.diagnostics(), 0)?
+            .message()
+            .test_value()?,
         "value is hidden"
     )?;
     let schema = test.compile(
@@ -795,7 +799,9 @@ fn secret_element_struct_assertions_hide_messages_before_path_copy() -> TestResu
         DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
     )?;
     test_eq!(
-        TestCheck::item(errors.diagnostics(), 0)?.message(),
+        TestCheck::item(errors.diagnostics(), 0)?
+            .message()
+            .test_value()?,
         "value is hidden"
     )?;
     test_eq!(

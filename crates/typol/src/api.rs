@@ -39,12 +39,16 @@ pub mod config {
 pub mod core {
     pub use typol_core::{
         AllocationError, BudgetError, ChargedString, ChargedVec, ConfigValue, ConfigValueBuilder,
-        Diagnostic, DiagnosticCode, DiagnosticContext as ErrorContext, ExcerptLimits,
-        ExecutionBudget, ExecutionLimits, LocatedSpan, NamedValue, NamedValueEntryView, Read,
-        RegexExecutionBudget, SliceSource, SourceCapture, SourceCommitError, SourceExcerptSet,
-        SourceExpectation, SourceId, SourceLocation, SourceReadError, SourceRevision, SourceSpan,
-        SourceWriter, TextLayout, ValueCopyLimits, ValueEntries, ValueEntryView, ValueError,
-        ValueId, ValueKind, ValuePayload, ValuePayloadView, ValueSource, ValueView,
+        Diagnostic, DiagnosticCode, DiagnosticContext as ErrorContext, DiagnosticFailure,
+        DiagnosticFieldStatus, DiagnosticKind, DiagnosticObjectIdentifier, DiagnosticParameter,
+        DiagnosticParameterValue, DiagnosticStage, ExcerptLimits, ExcerptStatus, ExecutionBudget,
+        ExecutionLimits, LocatedSpan, MAX_DIAGNOSTIC_PARAMETER_NAME_BYTES,
+        MAX_DIAGNOSTIC_PARAMETERS, MAX_RELATED_LOCATIONS, NamedValue, NamedValueEntryView,
+        PathSegment, Read, RegexExecutionBudget, RelatedLocation, RelatedLocationRole, SliceSource,
+        SourceCapture, SourceCommitError, SourceExcerptSet, SourceExpectation, SourceId,
+        SourceLocation, SourceReadError, SourceRevision, SourceSpan, SourceWriter, TextLayout,
+        ValueCopyLimits, ValueEntries, ValueEntryView, ValueError, ValueId, ValueKind,
+        ValuePayload, ValuePayloadView, ValueSource, ValueView,
     };
 
     pub use crate::loading::SourceNames;
@@ -61,6 +65,7 @@ pub mod policy {
 #[cfg(feature = "std")]
 pub mod host {
     pub use typol_i18n::{Language, Translator};
+    pub use typol_report::{DiagnosticReportField, DiagnosticReportFieldName};
     pub use typol_std::{
         DiagnosticContext, DiagnosticRenderError, DiagnosticRenderer, DiagnosticReport,
         DiagnosticReportStage, DiagnosticReportTitle, DisplayError, DisplayFailurePoint,

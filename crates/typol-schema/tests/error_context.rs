@@ -1,4 +1,5 @@
 use typol_core::{BudgetError, DiagnosticCode, DiagnosticContext, diagnostic_context};
+use typol_i18n::{Language, Translator};
 use typol_schema::{LocationFailure, LocationStatus, SchemaCompileErrors};
 use typol_test_support::*;
 
@@ -7,8 +8,10 @@ static BUDGET_FAILURE_CONTEXT: DiagnosticContext =
 
 #[test]
 fn inline_budget_failures_keep_context_without_inventing_a_span() -> TestResult {
-    let errors =
-        SchemaCompileErrors::budget_failure(BudgetError::invariant(&BUDGET_FAILURE_CONTEXT));
+    let errors = SchemaCompileErrors::budget_failure(
+        BudgetError::invariant(&BUDGET_FAILURE_CONTEXT),
+        Translator::new(Language::English),
+    );
     let diagnostic = errors.diagnostics().first().test_value()?;
     let context = diagnostic.context().test_value()?;
 

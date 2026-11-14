@@ -12,7 +12,7 @@ use crate::{
 use core::{cell::RefCell, ops::Deref};
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{DiagnosticMessage, SourceSpan, ValueKind};
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 use typol_semantic::{
     AllItemRequest, AllItemValue, EvalError, Evaluator, SumBoundsRequest, ValueRules,
 };
@@ -60,10 +60,11 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
         } = input;
         let ValueKind::Array(_) = value.value.as_ref() else {
             return self.constraint_failure(
-                diagnostic_message!(
-                    "diagnostic.schema.default_unique_constraint_failed",
-                    "schema default does not satisfy the @unique constraint"
-                ),
+                t! {
+                    name: "diagnostic.schema.default_unique_constraint_failed",
+                    locale: self.data.diagnostics.translator(),
+                }
+                .into(),
                 value.span,
                 constraint_span,
                 out.reborrow(),
@@ -72,7 +73,10 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
         let Some(ResolvedTypeKind::Array { element, .. }) =
             self.data.types.type_use(target).map(|item| item.kind())
         else {
-            self.data.diagnostics.push(schema_internal!(value.span));
+            self.data.diagnostics.push(schema_internal!(
+                self.data.diagnostics.translator(),
+                value.span
+            ));
             return Err(out.fail(BuildFailure::empty()));
         };
         let model = CompileModel::new(self.data.types, self.data.symbols, self.data.annotations);
@@ -90,7 +94,10 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
         {
             Ok(Some(element)) => element,
             Ok(None) => {
-                self.data.diagnostics.push(schema_internal!(value.span));
+                self.data.diagnostics.push(schema_internal!(
+                    self.data.diagnostics.translator(),
+                    value.span
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             }
             Err(caught) => {
@@ -126,10 +133,11 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
                 let context = self.data.context;
                 let diagnostics = &mut self.data.diagnostics;
                 let mut diagnostic = DefaultDiagnostic::semantic(
-                    diagnostic_message!(
-                        "diagnostic.schema.default_duplicate_elements",
-                        "schema default contains duplicate elements"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.default_duplicate_elements",
+                        locale: diagnostics.translator(),
+                    }
+                    .into(),
                     span,
                     context,
                     diagnostics,
@@ -173,7 +181,10 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
             {
                 return Ok(true);
             }
-            self.data.diagnostics.push(schema_internal!(value.span));
+            self.data.diagnostics.push(schema_internal!(
+                self.data.diagnostics.translator(),
+                value.span
+            ));
             return Err(out.fail(BuildFailure::empty()));
         };
         let model = CompileModel::new(self.data.types, self.data.symbols, self.data.annotations);
@@ -188,7 +199,10 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
             Some(ResolvedTypeKind::Array { element, .. })
             | Some(ResolvedTypeKind::Map(element)) => element,
             _ => {
-                self.data.diagnostics.push(schema_internal!(value.span));
+                self.data.diagnostics.push(schema_internal!(
+                    self.data.diagnostics.translator(),
+                    value.span
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             }
         };
@@ -199,7 +213,10 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
         {
             Ok(Some(element)) => element,
             Ok(None) => {
-                self.data.diagnostics.push(schema_internal!(value.span));
+                self.data.diagnostics.push(schema_internal!(
+                    self.data.diagnostics.translator(),
+                    value.span
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             }
             Err(caught) => {
@@ -215,7 +232,10 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
             ValueKind::Array(values) => (values, false),
             ValueKind::Map(values) => (values, true),
             _ => {
-                self.data.diagnostics.push(schema_internal!(value.span));
+                self.data.diagnostics.push(schema_internal!(
+                    self.data.diagnostics.translator(),
+                    value.span
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             }
         };
@@ -231,7 +251,10 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
                     value: entry.value(),
                 },
                 _ => {
-                    self.data.diagnostics.push(schema_internal!(value.span));
+                    self.data.diagnostics.push(schema_internal!(
+                        self.data.diagnostics.translator(),
+                        value.span
+                    ));
                     return Err(out.fail(BuildFailure::empty()));
                 }
             };
@@ -291,10 +314,11 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
         } = input;
         let ValueKind::Array(_) = value.value.as_ref() else {
             return self.constraint_failure(
-                diagnostic_message!(
-                    "diagnostic.schema.default_sum_constraint_failed",
-                    "schema default does not satisfy the @sum constraint"
-                ),
+                t! {
+                    name: "diagnostic.schema.default_sum_constraint_failed",
+                    locale: self.data.diagnostics.translator(),
+                }
+                .into(),
                 value.span,
                 constraint_span,
                 out.reborrow(),
@@ -303,7 +327,10 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
         let Some(ResolvedTypeKind::Array { element, .. }) =
             self.data.types.type_use(target).map(|item| item.kind())
         else {
-            self.data.diagnostics.push(schema_internal!(value.span));
+            self.data.diagnostics.push(schema_internal!(
+                self.data.diagnostics.translator(),
+                value.span
+            ));
             return Err(out.fail(BuildFailure::empty()));
         };
         let model = CompileModel::new(self.data.types, self.data.symbols, self.data.annotations);
@@ -321,7 +348,10 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
         {
             Ok(Some(element)) => element,
             Ok(None) => {
-                self.data.diagnostics.push(schema_internal!(value.span));
+                self.data.diagnostics.push(schema_internal!(
+                    self.data.diagnostics.translator(),
+                    value.span
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             }
             Err(caught) => {
@@ -354,10 +384,11 @@ impl<'borrow, 'data, 'diagnostics> DefaultRuleChecker<'borrow, 'data, 'diagnosti
         match result {
             Ok(true) => Ok(true),
             Ok(false) => self.constraint_failure(
-                diagnostic_message!(
-                    "diagnostic.schema.default_sum_constraint_failed",
-                    "schema default does not satisfy the @sum constraint"
-                ),
+                t! {
+                    name: "diagnostic.schema.default_sum_constraint_failed",
+                    locale: self.data.diagnostics.translator(),
+                }
+                .into(),
                 value.span,
                 constraint_span,
                 out.reborrow(),

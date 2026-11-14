@@ -308,12 +308,15 @@ fn anonymous_variants_keep_source_preorder_then_default_declaration_order() -> T
         &ConfigLimits::default(),
     )
     .test_error()?;
-    let mut messages: Vec<_> = errors.iter().map(|error| error.message()).collect();
+    let mut messages: Vec<_> = errors
+        .iter()
+        .map(|error| error.message().unwrap_or("diagnostic rendering failed"))
+        .collect();
     messages.sort_unstable();
     test_eq!(messages, ["child", "child", "child", "root", "variant"])?;
     let mut names: Vec<_> = errors
         .iter()
-        .filter(|error| error.message() == "child")
+        .filter(|error| error.message().unwrap_or("diagnostic rendering failed") == "child")
         .map(|error| -> TestResult<_> {
             let path = error.path().test_value()?.segments();
             TestCheck::item(path, 2)?.as_field().test_value()
@@ -321,7 +324,10 @@ fn anonymous_variants_keep_source_preorder_then_default_declaration_order() -> T
         .collect::<TestResult<Vec<_>>>()?;
     names.sort_unstable();
     test_eq!(names, ["first", "second", "third"])?;
-    for error in errors.iter().filter(|error| error.message() == "child") {
+    for error in errors
+        .iter()
+        .filter(|error| error.message().unwrap_or("diagnostic rendering failed") == "child")
+    {
         let path = error.path().test_value()?.segments();
         test_eq!(TestCheck::item(path, 0)?.as_field(), Some("e"))?;
         test_eq!(TestCheck::item(path, 1)?.as_enum_payload(), Some("Obj"))?;

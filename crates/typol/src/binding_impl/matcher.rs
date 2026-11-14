@@ -20,6 +20,7 @@ use index::BindingIndex;
 use opeo::{OResult, Out, ResultOutExt};
 use support::MatcherSupport;
 use typol_core::{BudgetError, ChargedVec, DiagnosticContext, diagnostic_context};
+use typol_i18n::Translator;
 use typol_semantic::{TypeKind, TypeView, VariantPayloadInfo};
 
 static BINDING_INVARIANT: DiagnosticContext =
@@ -101,7 +102,7 @@ impl<'schema> Matcher<'schema> {
     ) -> OResult<'slot, ()> {
         self.active
             .pop()
-            .ok_or_else(internal_error)
+            .ok_or_else(|| internal_error(context.session().translator()))
             .store_err_into(out.reborrow())?;
         let identity = binding.identity;
         let ty = binding.ty;
@@ -114,7 +115,7 @@ impl<'schema> Matcher<'schema> {
             .index
             .insert(identity, ty, context.session(), out.reborrow())?;
         if !inserted {
-            return Err(out.fail(internal_error()));
+            return Err(out.fail(internal_error(context.session().translator())));
         }
         Ok(())
     }
@@ -183,6 +184,7 @@ impl<'schema> Matcher<'schema> {
                     requested_depth: pending.depth,
                     maximum_depth: MAX_CONVERSION_DEPTH,
                 },
+                context.session().translator(),
             )));
         }
         context.check_depth(pending.depth, out.reborrow())?;
@@ -208,7 +210,7 @@ impl<'schema> Matcher<'schema> {
             .resolve(context, pending.depth, out.reborrow())?;
         let DescriptorNode::Type { name, shape, .. } = context.get(descriptor, out.reborrow())?
         else {
-            return Err(out.fail(internal_error()));
+            return Err(out.fail(internal_error(context.session().translator())));
         };
         let mut binding = TypeBinding {
             identity,
@@ -223,7 +225,12 @@ impl<'schema> Matcher<'schema> {
         let depth = pending
             .depth
             .checked_add(1)
-            .ok_or_else(|| MatcherSupport::binding_budget_error(BudgetError::Resource))
+            .ok_or_else(|| {
+                MatcherSupport::binding_budget_error(
+                    BudgetError::Resource,
+                    context.session().translator(),
+                )
+            })
             .store_err_into(out.reborrow())?;
         let mut children = context.session().budget_codec(
             CodecStage::Binding,
@@ -482,7 +489,7 @@ impl<'schema> Matcher<'schema> {
                     let DescriptorNode::Variant { name, shape } =
                         context.get(*descriptor, out.reborrow())?
                     else {
-                        return Err(out.fail(internal_error()));
+                        return Err(out.fail(internal_error(context.session().translator())));
                     };
                     context.session().budget_codec(
                         CodecStage::Binding,
@@ -563,11 +570,11 @@ impl<'schema> Matcher<'schema> {
                     let (rust_slot, shape) = sorted
                         .get(found)
                         .map(|entry| entry.1)
-                        .ok_or_else(internal_error)
+                        .ok_or_else(|| internal_error(context.session().translator()))
                         .store_err_into(out.reborrow())?;
                     let seen_slot = seen
                         .get_mut(rust_slot)
-                        .ok_or_else(internal_error)
+                        .ok_or_else(|| internal_error(context.session().translator()))
                         .store_err_into(out.reborrow())?;
                     *seen_slot = true;
                     let variant_path = type_path.extend(
@@ -653,7 +660,7 @@ impl<'schema> Matcher<'schema> {
                     let matched = seen
                         .get(*rust_slot)
                         .copied()
-                        .ok_or_else(internal_error)
+                        .ok_or_else(|| internal_error(context.session().translator()))
                         .store_err_into(out.reborrow())?;
                     if !matched {
                         let path = type_path.extend(
@@ -796,6 +803,10 @@ fn check_name<'slot>(
     Ok(type_path)
 }
 
-fn internal_error() -> CodecErrors {
-    CodecErrors::emergency(CodecStage::Binding, Failure::internal(BINDING_INVARIANT))
+fn internal_error(translator: Translator) -> CodecErrors {
+    CodecErrors::emergency(
+        CodecStage::Binding,
+        Failure::internal(BINDING_INVARIANT),
+        translator,
+    )
 }

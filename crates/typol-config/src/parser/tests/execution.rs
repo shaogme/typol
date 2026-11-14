@@ -66,7 +66,11 @@ fn compile(text: &str) -> TestResult<CompiledSchema> {
             errors
                 .diagnostics()
                 .iter()
-                .map(|diagnostic| diagnostic.message())
+                .map(|diagnostic| {
+                    diagnostic
+                        .message()
+                        .unwrap_or("diagnostic rendering failed")
+                })
                 .collect::<Vec<_>>()
         ))),
     }

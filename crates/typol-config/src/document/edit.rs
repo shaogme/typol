@@ -1,6 +1,8 @@
 mod analysis;
 mod error;
 
+pub use error::{ConfigEditError, ConfigEditErrorKind};
+
 use self::analysis::{ContainerAnalysis, PreparedEdits, RemovalEntry};
 use super::{
     encoding::{EntryEncoding, ScalarEncoder, ValueEncodingContext},
@@ -11,8 +13,6 @@ use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, ConfigValue, ExecutionBudget, TextLayout, ValueView,
 };
-
-pub use error::{ConfigEditError, ConfigEditErrorKind};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConfigEditOptions {

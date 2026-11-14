@@ -27,11 +27,6 @@ mod pass_tests;
 #[cfg(test)]
 mod test_support;
 
-pub(crate) use annotations::{AnnotationCompileInput, AnnotationCompiler};
-pub(crate) use defaults::{DefaultInputs, DefaultPass};
-pub(crate) use expressions::{ExpressionCompileInput, ExpressionCompiler};
-pub(crate) use types::TypeGraphCompiler;
-
 pub use opeo;
 
 pub use compiled::{
@@ -44,3 +39,8 @@ pub use resolver::{
     ResolverError, SchemaCompileOptions, SchemaLimits, SchemaResolveRequest, SchemaResolver,
     SchemaSource, SourceLoadedRequest, SourceObserver, SourceObserverError,
 };
+
+pub(crate) use annotations::{AnnotationCompileInput, AnnotationCompiler};
+pub(crate) use defaults::{DefaultInputs, DefaultPass};
+pub(crate) use expressions::{ExpressionCompileInput, ExpressionCompiler};
+pub(crate) use types::TypeGraphCompiler;

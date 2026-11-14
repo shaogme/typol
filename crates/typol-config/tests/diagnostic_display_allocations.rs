@@ -181,9 +181,11 @@ fn formatting_many_diagnostics_from_a_large_input_does_not_allocate() -> TestRes
     let report = output.as_str()?;
     test_eq!(attempts, 0)?;
     test_eq!(
-        report.matches("CONFIG_VALUE_ERROR").count(),
+        report.matches("CONFIG_VALUE_ERROR (11):").count(),
         errors.diagnostics().len()
     )?;
-    test_assert!(report.contains("configuration load failed (parsing, 96 diagnostics)"))?;
+    test_assert!(
+        report.contains("Typol operation failed (configuration reading, 96 diagnostics)")
+    )?;
     Ok(())
 }

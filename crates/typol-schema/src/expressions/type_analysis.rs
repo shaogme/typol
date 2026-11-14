@@ -5,7 +5,7 @@ use crate::{
     symbols::{FieldSymbolId, SymbolTable, TypeSymbolId, VariantSymbolId},
     types::{ResolvedTypeGraph, ResolvedTypeKind, TypeShapeId, TypeUseId},
 };
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 
 use opeo::{OResult, Out};
 use typol_core::{ChargedVec, DiagnosticMessage, SourceSpan};
@@ -356,10 +356,10 @@ impl<'t, 'src, 'd> TypeAnalyzer<'t, 'src, 'd> {
             .consume(1, self.fallback_span, self.diagnostics, out.reborrow())?;
         let Some(field_type) = self.types.field_type(field) else {
             return self.fail(
-                diagnostic_message!(
-                    "diagnostic.schema.field_type_unavailable",
-                    "field type is unavailable"
-                ),
+                t! {
+                    name: "diagnostic.schema.field_type_unavailable",
+                    locale: self.diagnostics.translator(),
+                },
                 self.fallback_span,
                 out.reborrow(),
             );
@@ -385,7 +385,8 @@ impl<'t, 'src, 'd> TypeAnalyzer<'t, 'src, 'd> {
         span: SourceSpan,
         out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, T> {
-        self.diagnostics.abort(schema_internal!(span));
+        self.diagnostics
+            .abort(schema_internal!(self.diagnostics.translator(), span));
         Err(out.fail(BuildFailure::empty()))
     }
 }

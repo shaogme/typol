@@ -5,16 +5,16 @@ use crate::{
         DiagnosticBuffer, DiagnosticFactory, ExecutionDiagnostic, RuleFailureLocation,
         RuleFailureMessage,
     },
-    secret::SecretPolicy,
+    secret::{SecretPathContext, SecretPolicy, SecretTypeContext},
     session::ValidationResources,
     validation::Validator,
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, Diagnostic, DiagnosticContext, DiagnosticMessageKey, LocatedSpan, ValueKind,
+    BudgetError, Diagnostic, DiagnosticContext, DiagnosticMessage, LocatedSpan, ValueKind,
     ValueSource, ValueView, diagnostic_context,
 };
-use typol_i18n::diagnostic_key;
+use typol_i18n::{Translator, t};
 use typol_semantic::{
     AllItemRequest, AllItemValue, Constraint, ConstraintData, EvalError, SchemaAccessError,
     SchemaEvaluator as Evaluator, SchemaRules, SumBoundsRequest, TypeKind, TypeView,
@@ -55,19 +55,20 @@ impl<'a> CollectionView<'a> {
         self,
         index: usize,
         span: Option<LocatedSpan>,
+        translator: Translator,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, ValueSource> {
         match match self.contents {
             CollectionContents::Array(value) | CollectionContents::Map(value) => {
                 let entries = match value.as_ref() {
                     ValueKind::Array(entries) | ValueKind::Map(entries) => entries,
-                    _ => return Err(out.fail(collection_invariant(span))),
+                    _ => return Err(out.fail(collection_invariant(span, translator))),
                 };
                 entries.get(index).map(|entry| entry.value().source())
             }
         } {
             Some(source) => Ok(source),
-            None => Err(out.fail(collection_invariant(span))),
+            None => Err(out.fail(collection_invariant(span, translator))),
         }
     }
 }
@@ -81,8 +82,7 @@ enum ItemLocation<'a> {
 struct ItemFailure<'a> {
     constraint: Constraint<'a>,
     result: Result<bool, EvalError>,
-    message: &'a str,
-    key: Option<DiagnosticMessageKey>,
+    message: DiagnosticMessage<'a>,
     location: Option<ItemLocation<'a>>,
 }
 
@@ -115,7 +115,6 @@ fn report_item<'slot>(
         constraint,
         result,
         message,
-        key,
         location,
     } = item;
     if matches!(result, Ok(true)) {
@@ -125,15 +124,21 @@ fn report_item<'slot>(
     let hidden_path = SecretPolicy::hides(
         metadata.schema,
         metadata.path,
-        metadata.span,
-        metadata.source,
+        SecretPathContext {
+            primary: metadata.span,
+            value_source: metadata.source,
+            translator: metadata.translator,
+        },
         out.reborrow(),
     )?;
     let hidden_type = SecretPolicy::secret_type(
         collection.item_type,
-        metadata.path.budget(),
-        schema_errors,
-        budget_errors,
+        SecretTypeContext {
+            budget: metadata.path.budget(),
+            schema_errors,
+            budget_errors,
+            translator: metadata.translator,
+        },
         out.reborrow(),
     )?;
     let hidden = hidden_path || hidden_type;
@@ -141,10 +146,11 @@ fn report_item<'slot>(
         match collection.contents {
             CollectionContents::Array(_) => {
                 if matches!(location, Some(ItemLocation::Map { .. })) {
-                    return Err(out.fail(collection_invariant(metadata.span)));
+                    return Err(out.fail(collection_invariant(metadata.span, metadata.translator)));
                 }
                 Validator::budget_call(
                     budget_errors,
+                    metadata.translator,
                     |budget_out| path.push_index(index, budget_out),
                     out.reborrow(),
                 )?;
@@ -153,23 +159,30 @@ fn report_item<'slot>(
                 let key = match location {
                     Some(ItemLocation::Map { key, .. }) => key,
                     Some(ItemLocation::Array { .. }) => {
-                        return Err(out.fail(collection_invariant(metadata.span)));
+                        return Err(
+                            out.fail(collection_invariant(metadata.span, metadata.translator))
+                        );
                     }
                     None => {
                         let Some(entry) = (match entries.as_ref() {
                             ValueKind::Map(entries) => entries.get(index),
                             _ => None,
                         }) else {
-                            return Err(out.fail(collection_invariant(metadata.span)));
+                            return Err(
+                                out.fail(collection_invariant(metadata.span, metadata.translator))
+                            );
                         };
                         let Some(key) = entry.name() else {
-                            return Err(out.fail(collection_invariant(metadata.span)));
+                            return Err(
+                                out.fail(collection_invariant(metadata.span, metadata.translator))
+                            );
                         };
                         key
                     }
                 };
                 Validator::budget_call(
                     budget_errors,
+                    metadata.translator,
                     |budget_out| path.push_map_key(key, budget_out),
                     out.reborrow(),
                 )?;
@@ -182,14 +195,16 @@ fn report_item<'slot>(
     let span = node.map_or(metadata.span, |node| node.span());
     let source = match location {
         Some(ItemLocation::Array { source }) | Some(ItemLocation::Map { source, .. }) => source,
-        None => collection.item_source(index, metadata.span, out.reborrow())?,
+        None => {
+            collection.item_source(index, metadata.span, metadata.translator, out.reborrow())?
+        }
     };
     let error = ExecutionDiagnostic::failure(
         result,
         RuleFailureMessage {
-            text: message,
+            message,
             redacted: hidden,
-            key,
+            translator: metadata.translator,
         },
         RuleFailureLocation {
             span,
@@ -234,17 +249,18 @@ impl CollectionValidator {
         let contents = match value.as_ref() {
             ValueKind::Array(_) => CollectionContents::Array(value),
             ValueKind::Map(_) => CollectionContents::Map(value),
-            _ => return Err(out.fail(collection_invariant(metadata.span))),
+            _ => return Err(out.fail(collection_invariant(metadata.span, metadata.translator))),
         };
         let kind = Validator::schema_call(
             &mut resources.schema_access_errors,
+            resources.translator,
             |access_out| metadata.expected.kind(access_out),
             out.reborrow(),
         )?;
         let item_type = match (kind, contents) {
             (TypeKind::Array { element, .. }, CollectionContents::Array(_)) => element,
             (TypeKind::Map { value }, CollectionContents::Map(_)) => value,
-            _ => return Err(out.fail(collection_invariant(metadata.span))),
+            _ => return Err(out.fail(collection_invariant(metadata.span, metadata.translator))),
         };
         let collection = CollectionView {
             contents,
@@ -254,11 +270,13 @@ impl CollectionValidator {
         for &constraint in constraints {
             Validator::budget_call(
                 &mut resources.budget_errors,
+                resources.translator,
                 |budget_out| resources.budget.consume(1, budget_out),
                 out.reborrow(),
             )?;
             let data = Validator::schema_call(
                 &mut resources.schema_access_errors,
+                resources.translator,
                 |access_out| constraint.data(access_out),
                 out.reborrow(),
             )?;
@@ -274,7 +292,9 @@ impl CollectionValidator {
                     }),
                 ConstraintData::SumBounds { min, max } => {
                     let Some(values) = collection.array() else {
-                        return Err(out.fail(collection_invariant(metadata.span)));
+                        return Err(
+                            out.fail(collection_invariant(metadata.span, metadata.translator))
+                        );
                     };
                     let evaluator = Evaluator::new(
                         metadata.schema,
@@ -300,7 +320,9 @@ impl CollectionValidator {
                 }
                 ConstraintData::Unique { by } => {
                     let Some(values) = collection.array() else {
-                        return Err(out.fail(collection_invariant(metadata.span)));
+                        return Err(
+                            out.fail(collection_invariant(metadata.span, metadata.translator))
+                        );
                     };
                     let evaluator = Evaluator::new(
                         metadata.schema,
@@ -326,10 +348,9 @@ impl CollectionValidator {
                                             item: ItemFailure {
                                                 constraint,
                                                 result: Ok(false),
-                                                message: "array contains duplicate elements",
-                                                key: Some(diagnostic_key!(
-                                                    "diagnostic.validation.duplicate_array_elements"
-                                                )),
+                                                message: DiagnosticMessage::from(
+                                                    t! { name: "diagnostic.validation.duplicate_array_elements", locale: metadata.translator },
+                                                ),
                                                 location: None,
                                             },
                                             budget_errors: &mut resources.budget_errors,
@@ -349,9 +370,11 @@ impl CollectionValidator {
                             let error = ExecutionDiagnostic::failure(
                                 Err(error),
                                 RuleFailureMessage {
-                                    text: "array uniqueness validation failed",
+                                    message: DiagnosticMessage::custom(
+                                        "array uniqueness validation failed",
+                                    ),
                                     redacted: false,
-                                    key: None,
+                                    translator: metadata.translator,
                                 },
                                 RuleFailureLocation {
                                     span: metadata.span,
@@ -387,7 +410,11 @@ impl CollectionValidator {
                     );
                     let entries = match value.as_ref() {
                         ValueKind::Array(entries) | ValueKind::Map(entries) => entries,
-                        _ => return Err(out.fail(collection_invariant(metadata.span))),
+                        _ => {
+                            return Err(
+                                out.fail(collection_invariant(metadata.span, metadata.translator))
+                            );
+                        }
                     };
                     for (index, entry) in entries.enumerate() {
                         let item_value = entry.value();
@@ -408,7 +435,12 @@ impl CollectionValidator {
                                     source: item_value.source(),
                                 },
                             ),
-                            _ => return Err(out.fail(collection_invariant(metadata.span))),
+                            _ => {
+                                return Err(out.fail(collection_invariant(
+                                    metadata.span,
+                                    metadata.translator,
+                                )));
+                            }
                         };
                         let result = resources
                             .eval_errors
@@ -432,8 +464,7 @@ impl CollectionValidator {
                                 item: ItemFailure {
                                     constraint,
                                     result,
-                                    message,
-                                    key: None,
+                                    message: DiagnosticMessage::custom(message),
                                     location: Some(location),
                                 },
                                 budget_errors: &mut resources.budget_errors,
@@ -455,11 +486,11 @@ impl CollectionValidator {
                 if let Some(error) = ExecutionDiagnostic::failure(
                     result,
                     RuleFailureMessage {
-                        text: "collection does not satisfy its boundary constraint",
+                        message: DiagnosticMessage::from(
+                            t! { name: "diagnostic.validation.collection_boundary_failed", locale: metadata.translator },
+                        ),
                         redacted: false,
-                        key: Some(diagnostic_key!(
-                            "diagnostic.validation.collection_boundary_failed"
-                        )),
+                        translator: metadata.translator,
                     },
                     RuleFailureLocation {
                         span: metadata.span,
@@ -480,6 +511,6 @@ impl CollectionValidator {
     }
 }
 
-fn collection_invariant(span: Option<LocatedSpan>) -> Diagnostic {
-    DiagnosticFactory::internal(COLLECTION_VALUE_SHAPE, span, None, None)
+fn collection_invariant(span: Option<LocatedSpan>, translator: Translator) -> Diagnostic {
+    DiagnosticFactory::internal(COLLECTION_VALUE_SHAPE, span, None, None, translator)
 }

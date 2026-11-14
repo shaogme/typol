@@ -1,6 +1,7 @@
 use core::fmt;
 use opeo::{OResult, Out};
 use typol_core::{BudgetError, ExcerptLimits, ExecutionBudget, ExecutionLimits, Read};
+use typol_i18n::{Language, Translator};
 use typol_policy::{RegexOptions, ValueLimits};
 use typol_syntax::{InputLimits, StreamLimits};
 
@@ -147,6 +148,7 @@ pub struct ConfigParseOptions {
     config: ConfigLimits,
     execution: ExecutionLimits,
     stream: StreamLimits,
+    translator: Translator,
 }
 
 impl ConfigParseOptions {
@@ -162,6 +164,7 @@ impl ConfigParseOptions {
             config,
             execution,
             stream: StreamLimits::DEFAULT,
+            translator: Translator::new(Language::English),
         }
     }
 
@@ -190,6 +193,11 @@ impl ConfigParseOptions {
         self
     }
 
+    pub const fn with_translator(mut self, translator: Translator) -> Self {
+        self.translator = translator;
+        self
+    }
+
     pub const fn stream(&self) -> StreamLimits {
         self.stream
     }
@@ -208,6 +216,10 @@ impl ConfigParseOptions {
 
     pub const fn execution(&self) -> &ExecutionLimits {
         &self.execution
+    }
+
+    pub const fn translator(&self) -> Translator {
+        self.translator
     }
 }
 
@@ -229,6 +241,7 @@ pub struct ConfigValidationOptions {
     regex: RegexOptions,
     config: ConfigLimits,
     execution: ExecutionLimits,
+    translator: Translator,
 }
 
 impl ConfigValidationOptions {
@@ -243,6 +256,7 @@ impl ConfigValidationOptions {
             regex,
             config,
             execution,
+            translator: Translator::new(Language::English),
         }
     }
 
@@ -266,6 +280,11 @@ impl ConfigValidationOptions {
         self
     }
 
+    pub const fn with_translator(mut self, translator: Translator) -> Self {
+        self.translator = translator;
+        self
+    }
+
     pub const fn excerpts(&self) -> &ExcerptLimits {
         &self.excerpts
     }
@@ -280,6 +299,10 @@ impl ConfigValidationOptions {
 
     pub const fn execution(&self) -> &ExecutionLimits {
         &self.execution
+    }
+
+    pub const fn translator(&self) -> Translator {
+        self.translator
     }
 }
 

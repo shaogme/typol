@@ -11,6 +11,7 @@ use typol_core::{
     ExecutionLimits, LineIndex, LocationError, Read, SliceSource, SourceId, SourceReadError,
     SourceReadErrorKind, ValueKind, ValuePayloadView,
 };
+use typol_i18n::{Language, Translator};
 use typol_schema::{SchemaCompileOptions, SchemaSource};
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
@@ -500,6 +501,20 @@ fn input_failure_preserves_earlier_diagnostics_and_uses_explicit_stage() -> Test
         DiagnosticCode::SOURCE_INPUT_ERROR
     )?;
 
+    let mut translated_source = Source::new(text, vec![]);
+    translated_source.fail_at = Some(text.len());
+    let request: ConfigParseRequest<'_, dyn Read> = ConfigParseRequest::new(
+        &mut translated_source,
+        "input-failure",
+        ConfigParseOptions::default().with_translator(Translator::new(Language::Chinese)),
+    );
+    let translated_errors =
+        Support::parse(&schema, request, &mut Provider::default()).test_error()?;
+    test_eq!(
+        TestCheck::item(translated_errors.diagnostics(), 1)?.message(),
+        Ok("无法处理来源输入")
+    )?;
+
     Ok(())
 }
 
@@ -584,7 +599,10 @@ fn ordinary_errors_preserve_order_paths_and_locations_at_every_cut() -> TestResu
                     actual.diagnostics().iter().zip(expected.diagnostics())
                 {
                     test_eq!(actual_error.code(), expected_error.code())?;
-                    test_eq!(actual_error.message(), expected_error.message())?;
+                    test_eq!(
+                        actual_error.message().test_value()?,
+                        expected_error.message().test_value()?
+                    )?;
                     test_eq!(actual_error.primary(), expected_error.primary())?;
                     test_eq!(actual_error.value_source(), expected_error.value_source())?;
                     test_eq!(

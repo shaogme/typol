@@ -1,5 +1,6 @@
 mod constraint_checks;
 mod regex_errors;
+mod scalar;
 
 use crate::{
     SchemaLimits,
@@ -25,14 +26,15 @@ use core::{
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedVec, ConfigValue, ConfigValueBuilder, Diagnostic, DiagnosticMessage,
-    ExecutionBudget, SourceSpan, ValueError, ValueId, ValueSource,
+    BudgetError, ChargedVec, ConfigValue, ConfigValueBuilder, DiagnosticMessage, ExecutionBudget,
+    SourceSpan, ValueError, ValueId,
 };
+use typol_i18n::Translator;
 use typol_semantic::{
     CopyError, CopyOptions, CopyRequest, EvalError, RegexExecutionError, RegexExecutor,
     RegexMatchOptions, SchemaDefaultValidation, ValueCopy,
 };
-use typol_syntax::{AstAccessError, BuiltinType, ScalarLiteral};
+use typol_syntax::{AstAccessError, BuiltinType, NumberLiteral, ScalarLiteral};
 
 pub(super) struct BuiltValue {
     pub(super) value: ConfigValue,
@@ -50,12 +52,6 @@ pub(super) enum CachedDefault {
     Visiting,
     Valid(usize),
     Invalid,
-}
-
-enum ScalarDefault<'a> {
-    String(&'a str),
-    Boolean(bool),
-    Number(DefaultNumber),
 }
 
 #[derive(Clone, Copy)]
@@ -89,6 +85,25 @@ pub(super) struct DefaultCompiler<'a, 'd> {
 }
 
 impl<'a, 'd> DefaultCompiler<'a, 'd> {
+    pub(super) fn translator(&self) -> Translator {
+        self.data.diagnostics.translator()
+    }
+
+    pub(super) fn build_number<'slot>(
+        &mut self,
+        number: NumberLiteral<'_>,
+        builtin: BuiltinType,
+        out: Out<'slot, '_, BuildFailure>,
+    ) -> OResult<'slot, Option<DefaultNumber>> {
+        DefaultLiterals::build_number(
+            number,
+            builtin,
+            self.data.context,
+            self.data.diagnostics,
+            out,
+        )
+    }
+
     pub(super) fn ast_access<'slot, 'borrow, T>(
         &self,
         out: Out<'slot, 'borrow, BuildFailure>,
@@ -115,9 +130,11 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
         match result {
             Ok(value) => Ok(value),
             Err(error) => {
-                self.data
-                    .diagnostics
-                    .push(DefaultBuilder::value_diagnostic(error, span));
+                self.data.diagnostics.push(DefaultBuilder::value_diagnostic(
+                    error,
+                    span,
+                    self.data.diagnostics.translator(),
+                ));
                 Err(out.fail(BuildFailure::empty()))
             }
         }
@@ -199,7 +216,9 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
     ) -> OResult<'slot, ()> {
         let field_index = id.index();
         if self.data.fields.get(field_index).is_none() {
-            self.data.diagnostics.abort(schema_internal!(span));
+            self.data
+                .diagnostics
+                .abort(schema_internal!(self.data.diagnostics.translator(), span));
             return Err(out.fail(BuildFailure::empty()));
         }
         let cached_index = self.data.cached_values.len();
@@ -207,7 +226,9 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
             .cached_values
             .try_push(CachedFieldValue { field_index, value }, out.reborrow())?;
         let Some(field) = self.data.fields.get_mut(field_index) else {
-            self.data.diagnostics.abort(schema_internal!(span));
+            self.data
+                .diagnostics
+                .abort(schema_internal!(self.data.diagnostics.translator(), span));
             return Err(out.fail(BuildFailure::empty()));
         };
         *field = CachedDefault::Valid(cached_index);
@@ -290,7 +311,7 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
         for cached in cached_values {
             context.consume(1, fallback, diagnostics, out.reborrow())?;
             let Some(field) = defaults.get_mut(cached.field_index) else {
-                diagnostics.abort(schema_internal!(fallback));
+                diagnostics.abort(schema_internal!(diagnostics.translator(), fallback));
                 return Err(out.fail(BuildFailure::empty()));
             };
             *field = Some(cached.value.value);
@@ -309,84 +330,9 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
         source: ScalarLiteral<'_>,
         target: ResolvedTypeKind,
         span: SourceSpan,
-        mut out: Out<'slot, '_, BuildFailure>,
+        out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, Option<BuiltValue>> {
-        let ResolvedTypeKind::Builtin(builtin) = target else {
-            self.report_invalid(
-                DefaultDiagnostic::scalar_type_mismatch(),
-                source.span(),
-                out.reborrow(),
-            )?;
-            return Ok(None);
-        };
-        let scalar = match source {
-            ScalarLiteral::String(value) if builtin == BuiltinType::String => {
-                let text = self.ast_access(out.reborrow(), |ast_out| value.value(ast_out))?;
-                if !self.check_string(text, value.span(), out.reborrow())? {
-                    return Ok(None);
-                }
-                ScalarDefault::String(text)
-            }
-            ScalarLiteral::Boolean(value) if builtin == BuiltinType::Bool => {
-                ScalarDefault::Boolean(value.value())
-            }
-            ScalarLiteral::Number(value) => match DefaultLiterals::build_number(
-                value,
-                builtin,
-                self.data.context,
-                self.data.diagnostics,
-                out.reborrow(),
-            )? {
-                Some(value) => ScalarDefault::Number(value),
-                None => return Ok(None),
-            },
-            ScalarLiteral::String(_) => {
-                self.report_invalid(
-                    DefaultDiagnostic::string_type_mismatch(),
-                    source.span(),
-                    out.reborrow(),
-                )?;
-                return Ok(None);
-            }
-            ScalarLiteral::Boolean(_) => {
-                self.report_invalid(
-                    DefaultDiagnostic::boolean_type_mismatch(),
-                    source.span(),
-                    out.reborrow(),
-                )?;
-                return Ok(None);
-            }
-        };
-        let value = self.build_value(
-            span,
-            |builder, _, mut value_out| {
-                let source = ValueSource::SchemaDefault;
-                let root = match scalar {
-                    ScalarDefault::String(text) => {
-                        builder.add_string(text, source, value_out.reborrow())?
-                    }
-                    ScalarDefault::Boolean(value) => {
-                        builder.add_bool(value, source, value_out.reborrow())?
-                    }
-                    ScalarDefault::Number(DefaultNumber::Signed(value)) => {
-                        builder.add_signed(value, source, value_out.reborrow())?
-                    }
-                    ScalarDefault::Number(DefaultNumber::Unsigned(value)) => {
-                        builder.add_unsigned(value, source, value_out.reborrow())?
-                    }
-                    ScalarDefault::Number(DefaultNumber::Float32(value)) => {
-                        builder.add_float32(value, source, value_out.reborrow())?
-                    }
-                    ScalarDefault::Number(DefaultNumber::Float64(value)) => {
-                        builder.add_float64(value, source, value_out.reborrow())?
-                    }
-                };
-                Ok(root)
-            },
-            out.reborrow(),
-        )?;
-        let member_spans = self.new_vec(out.reborrow())?;
-        Ok(Some(self.built(value, span, member_spans)))
+        scalar::ScalarDefaultBuilder::build(self, source, target, span, out)
     }
 
     pub(super) fn clone_cached_default<'slot>(
@@ -406,7 +352,7 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
             return Ok(None);
         };
         let Some(cached) = cached_values.get(*index) else {
-            diagnostics.abort(schema_internal!(use_span));
+            diagnostics.abort(schema_internal!(diagnostics.translator(), use_span));
             return Err(out.fail(BuildFailure::empty()));
         };
         let value = &cached.value;
@@ -426,7 +372,11 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
         }) {
             Ok(value) => value,
             Err(caught) => {
-                diagnostics.push(copy_diagnostic(caught.take(), span));
+                diagnostics.push(DefaultBuilder::copy_diagnostic(
+                    caught.take(),
+                    span,
+                    diagnostics.translator(),
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             }
         };
@@ -461,20 +411,24 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
                 .context
                 .consume(1, span, self.data.diagnostics, out.reborrow())?;
             let Some(next_depth) = depth.checked_add(1) else {
-                self.data
-                    .diagnostics
-                    .push(EmergencyDiagnostics::resource(span));
+                self.data.diagnostics.push(EmergencyDiagnostics::resource(
+                    span,
+                    self.data.diagnostics.translator(),
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             };
             depth = next_depth;
             if depth > self.data.limits.max_nesting_depth() {
-                self.data
-                    .diagnostics
-                    .push(EmergencyDiagnostics::resource(span));
+                self.data.diagnostics.push(EmergencyDiagnostics::resource(
+                    span,
+                    self.data.diagnostics.translator(),
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             }
             let Some(alias) = self.data.types.alias_link(link_id) else {
-                self.data.diagnostics.push(schema_internal!(span));
+                self.data
+                    .diagnostics
+                    .push(schema_internal!(self.data.diagnostics.translator(), span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             if let Some(constraints) = self.data.annotations.alias_constraints(alias.symbol()) {
@@ -607,7 +561,7 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
             Ok(true)
         } else {
             self.constraint_failure(
-                DefaultDiagnostic::local_constraint_failed(),
+                DefaultDiagnostic::local_constraint_failed(self.data.diagnostics.translator()),
                 value.span,
                 constraint.span(),
                 out.reborrow(),
@@ -629,7 +583,7 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
         )?
         else {
             return self.constraint_failure(
-                DefaultDiagnostic::regex_constraint_failed(),
+                DefaultDiagnostic::regex_constraint_failed(self.data.diagnostics.translator()),
                 value.span,
                 constraint_span,
                 out.reborrow(),
@@ -648,7 +602,10 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
             .get(regex_id.index())
             .map(|entry| entry.regex())
         else {
-            self.data.diagnostics.push(schema_internal!(value.span));
+            self.data.diagnostics.push(schema_internal!(
+                self.data.diagnostics.translator(),
+                value.span
+            ));
             return Err(out.fail(BuildFailure::empty()));
         };
         let scratch = &mut self.data.regex_scratch;
@@ -672,7 +629,7 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
         match result {
             Ok(true) => Ok(true),
             Ok(false) => self.constraint_failure(
-                DefaultDiagnostic::regex_constraint_failed(),
+                DefaultDiagnostic::regex_constraint_failed(self.data.diagnostics.translator()),
                 value.span,
                 constraint_span,
                 out.reborrow(),
@@ -736,9 +693,10 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
         out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, ()> {
         if !self.data.limits.values().allows_depth(depth) {
-            self.data
-                .diagnostics
-                .push(EmergencyDiagnostics::resource(span));
+            self.data.diagnostics.push(EmergencyDiagnostics::resource(
+                span,
+                self.data.diagnostics.translator(),
+            ));
             Err(out.fail(BuildFailure::empty()))
         } else {
             Ok(())
@@ -751,16 +709,18 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
         out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, ()> {
         let Some(value_nodes) = self.data.value_nodes.checked_add(1) else {
-            self.data
-                .diagnostics
-                .push(EmergencyDiagnostics::resource(span));
+            self.data.diagnostics.push(EmergencyDiagnostics::resource(
+                span,
+                self.data.diagnostics.translator(),
+            ));
             return Err(out.fail(BuildFailure::empty()));
         };
         self.data.value_nodes = value_nodes;
         if self.data.value_nodes > self.data.limits.max_value_nodes() {
-            self.data
-                .diagnostics
-                .push(EmergencyDiagnostics::resource(span));
+            self.data.diagnostics.push(EmergencyDiagnostics::resource(
+                span,
+                self.data.diagnostics.translator(),
+            ));
             return Err(out.fail(BuildFailure::empty()));
         }
         Ok(())
@@ -773,9 +733,10 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
         out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, bool> {
         if value.len() > self.data.limits.max_string_bytes() {
-            self.data
-                .diagnostics
-                .push(EmergencyDiagnostics::resource(span));
+            self.data.diagnostics.push(EmergencyDiagnostics::resource(
+                span,
+                self.data.diagnostics.translator(),
+            ));
             return Err(out.fail(BuildFailure::empty()));
         }
         Ok(true)
@@ -822,16 +783,5 @@ impl<'a, 'd> Deref for DefaultCompiler<'a, 'd> {
 impl DerefMut for DefaultCompiler<'_, '_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.data
-    }
-}
-
-fn copy_diagnostic(error: CopyError, span: SourceSpan) -> Diagnostic {
-    match error {
-        CopyError::Resource => EmergencyDiagnostics::resource(span),
-        CopyError::Allocation => EmergencyDiagnostics::allocation(span),
-        CopyError::Capacity => EmergencyDiagnostics::capacity(span),
-        CopyError::Internal => schema_internal!(span),
-        CopyError::InternalAt(context) => EmergencyDiagnostics::internal(span, context),
-        CopyError::InvalidValue(error) => DefaultBuilder::value_diagnostic(error, span),
     }
 }

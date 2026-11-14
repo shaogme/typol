@@ -1,9 +1,11 @@
 mod factory;
 mod value_errors;
 
+pub use value_errors::{ConfigFailureStage, ConfigValueErrors};
+
 pub(crate) use factory::{
     BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticFactory, ExecutionDiagnostic,
-    RuleFailureLocation, RuleFailureMessage,
+    LabelMessageRequest, RuleFailureLocation, RuleFailureMessage, WorkspaceDiagnosticRequest,
 };
 
 use crate::{options::ConfigLimits, secret::SecretPolicy};
@@ -14,11 +16,11 @@ use typol_core::{
     ExcerptLimits, ExecutionBudget, SourceExcerptSet, SourceId, SourceReadError,
     SourceReadErrorKind, SourceSpan, diagnostic_context,
 };
+use typol_i18n::{Translator, t};
 use typol_report::{DiagnosticReport, ReportContext};
 use typol_semantic::{CompiledSchema, SpanLocation};
 
 use value_errors::ErrorStorage;
-pub use value_errors::{ConfigFailureStage, ConfigValueErrors};
 
 #[cfg(test)]
 use core::ops::Deref;
@@ -46,10 +48,15 @@ pub(crate) struct DiagnosticBuffer<'schema> {
     truncated: bool,
     budget_errors: ErrSlot<BudgetError>,
     redaction_errors: ErrSlot<Diagnostic>,
+    translator: Translator,
 }
 
 impl<'schema> DiagnosticBuffer<'schema> {
-    pub(super) fn new(schema: &'schema CompiledSchema, limit: usize) -> Self {
+    pub(super) fn new(
+        schema: &'schema CompiledSchema,
+        limit: usize,
+        translator: Translator,
+    ) -> Self {
         Self {
             schema,
             diagnostics: ChargedVec::unmetered(),
@@ -59,6 +66,7 @@ impl<'schema> DiagnosticBuffer<'schema> {
             truncated: false,
             budget_errors: ErrSlot::new(),
             redaction_errors: ErrSlot::new(),
+            translator,
         }
     }
 
@@ -66,16 +74,17 @@ impl<'schema> DiagnosticBuffer<'schema> {
         schema: &'schema CompiledSchema,
         limit: usize,
         budget: &ExecutionBudget,
+        translator: Translator,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, Self> {
-        let mut buffer = Self::new(schema, limit);
+        let mut buffer = Self::new(schema, limit, translator);
         buffer.diagnostics = match buffer
             .budget_errors
             .try_call(|budget_out| ChargedVec::new(Some(budget), budget_out))
         {
             Ok(diagnostics) => diagnostics,
             Err(caught) => {
-                return Err(out.fail(BudgetDiagnostic::from_error(caught.take())));
+                return Err(out.fail(BudgetDiagnostic::from_error(caught.take(), translator)));
             }
         };
         Ok(buffer)
@@ -86,10 +95,9 @@ impl<'schema> DiagnosticBuffer<'schema> {
             return false;
         }
         // This is the sole redaction boundary before storage; later stages only organize safe diagnostics.
-        if let Err(caught) = self
-            .redaction_errors
-            .try_call(|out| SecretPolicy::redact(self.schema, &mut diagnostic, out))
-        {
+        if let Err(caught) = self.redaction_errors.try_call(|out| {
+            SecretPolicy::redact(self.schema, &mut diagnostic, self.translator, out)
+        }) {
             diagnostic = caught.take();
         }
         let code = diagnostic.code();
@@ -101,7 +109,8 @@ impl<'schema> DiagnosticBuffer<'schema> {
                 | DiagnosticCode::SOURCE_INPUT_ERROR
                 | DiagnosticCode::INTERNAL_ERROR
                 | DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED
-        ) {
+        ) || diagnostic.message().is_err()
+        {
             if self.len() >= self.limit {
                 self.truncated = true;
                 self.stopped = true;
@@ -117,7 +126,7 @@ impl<'schema> DiagnosticBuffer<'schema> {
                 .budget_errors
                 .try_call(|budget_out| self.diagnostics.try_reserve(1, budget_out))
             {
-                self.terminal = Some(BudgetDiagnostic::from_error(caught.take()));
+                self.terminal = Some(BudgetDiagnostic::from_error(caught.take(), self.translator));
                 self.stopped = true;
                 return false;
             }
@@ -125,7 +134,7 @@ impl<'schema> DiagnosticBuffer<'schema> {
                 .budget_errors
                 .try_call(|budget_out| self.diagnostics.try_push(diagnostic, budget_out))
             {
-                self.terminal = Some(BudgetDiagnostic::from_error(caught.take()));
+                self.terminal = Some(BudgetDiagnostic::from_error(caught.take(), self.translator));
                 self.stopped = true;
                 return false;
             }
@@ -136,6 +145,7 @@ impl<'schema> DiagnosticBuffer<'schema> {
         if self.diagnostics.len() >= self.limit - 1 {
             self.terminal = Some(DiagnosticFactory::limit_diagnostic(
                 diagnostic.located_primary(),
+                self.translator,
             ));
             self.truncated = true;
             self.stopped = true;
@@ -147,7 +157,7 @@ impl<'schema> DiagnosticBuffer<'schema> {
             .try_call(|budget_out| self.diagnostics.try_reserve(2, budget_out))
         {
             let error = caught.take();
-            self.terminal = Some(BudgetDiagnostic::from_error(error));
+            self.terminal = Some(BudgetDiagnostic::from_error(error, self.translator));
             self.stopped = true;
             return false;
         }
@@ -156,7 +166,7 @@ impl<'schema> DiagnosticBuffer<'schema> {
             .budget_errors
             .try_call(|budget_out| self.diagnostics.try_push(diagnostic, budget_out))
         {
-            self.terminal = Some(BudgetDiagnostic::from_error(caught.take()));
+            self.terminal = Some(BudgetDiagnostic::from_error(caught.take(), self.translator));
             self.stopped = true;
         }
         !self.stopped
@@ -186,6 +196,7 @@ impl<'schema> DiagnosticBuffer<'schema> {
 /// An owned, nonempty set of configuration errors that does not retain source text or raw environment bytes.
 pub struct ConfigParseErrors {
     storage: ErrorStorage,
+    translator: Option<Translator>,
 }
 
 impl ConfigParseErrors {
@@ -251,7 +262,11 @@ impl ConfigParseErrors {
         excerpts
     }
 
-    pub(crate) fn emergency(mut diagnostic: Diagnostic, source_id: Option<SourceId>) -> Self {
+    pub(crate) fn emergency(
+        mut diagnostic: Diagnostic,
+        source_id: Option<SourceId>,
+        translator: Translator,
+    ) -> Self {
         let mut path_errors = ErrSlot::new();
         if let Err(caught) =
             path_errors.try_call(|path_out| diagnostic.try_set_path(None, None, path_out))
@@ -266,6 +281,20 @@ impl ConfigParseErrors {
                 },
                 None => ErrorStorage::UnlocatedEmergency(diagnostic),
             },
+            translator: Some(translator),
+        }
+    }
+
+    fn unrenderable(mut diagnostic: Diagnostic) -> Self {
+        let mut path_errors = ErrSlot::new();
+        if let Err(caught) =
+            path_errors.try_call(|path_out| diagnostic.try_set_path(None, None, path_out))
+        {
+            let _ = caught.take();
+        }
+        Self {
+            storage: ErrorStorage::UnlocatedEmergency(diagnostic),
+            translator: None,
         }
     }
 
@@ -284,14 +313,16 @@ impl ConfigParseErrors {
         source_id: Option<SourceId>,
         source_name: Option<ChargedString>,
     ) -> Self {
+        let translator = buffer.translator;
         if buffer
             .diagnostics
             .budget()
             .is_some_and(ExecutionBudget::exhausted)
         {
             return Self::emergency(
-                BudgetDiagnostic::from_error(BudgetError::Resource),
+                BudgetDiagnostic::from_error(BudgetError::Resource, translator),
                 source_id,
+                translator,
             );
         }
         if buffer
@@ -300,22 +331,31 @@ impl ConfigParseErrors {
             .is_some_and(|diagnostic| diagnostic.code() == DiagnosticCode::ALLOCATION_FAILED)
         {
             return match buffer.terminal.take() {
-                Some(diagnostic) => Self::emergency(diagnostic, source_id),
+                Some(diagnostic) => Self::emergency(diagnostic, source_id, translator),
                 None => Self::emergency(
                     DiagnosticFactory::internal(
                         CONFIG_MISSING_TERMINAL_DIAGNOSTIC,
                         None,
                         None,
                         None,
+                        translator,
                     ),
                     source_id,
+                    translator,
                 ),
             };
         }
         if buffer.is_empty() {
             return Self::emergency(
-                DiagnosticFactory::internal(CONFIG_EMPTY_PARSE_RESULT, None, None, None),
+                DiagnosticFactory::internal(
+                    CONFIG_EMPTY_PARSE_RESULT,
+                    None,
+                    None,
+                    None,
+                    translator,
+                ),
                 source_id,
+                translator,
             );
         }
         let budget = match buffer.diagnostics.budget() {
@@ -325,7 +365,11 @@ impl ConfigParseErrors {
             {
                 Ok(budget) => Some(budget),
                 Err(caught) => {
-                    return Self::emergency(BudgetDiagnostic::from_error(caught.take()), source_id);
+                    return Self::emergency(
+                        BudgetDiagnostic::from_error(caught.take(), translator),
+                        source_id,
+                        translator,
+                    );
                 }
             },
             None => None,
@@ -359,7 +403,11 @@ impl ConfigParseErrors {
             }
         };
         if let Some(error) = sort_error {
-            return Self::emergency(BudgetDiagnostic::from_error(error), source_id);
+            return Self::emergency(
+                BudgetDiagnostic::from_error(error, translator),
+                source_id,
+                translator,
+            );
         }
         let mut spans = match buffer
             .budget_errors
@@ -367,7 +415,11 @@ impl ConfigParseErrors {
         {
             Ok(spans) => spans,
             Err(caught) => {
-                return Self::emergency(BudgetDiagnostic::from_error(caught.take()), source_id);
+                return Self::emergency(
+                    BudgetDiagnostic::from_error(caught.take(), translator),
+                    source_id,
+                    translator,
+                );
             }
         };
         for diagnostic in buffer.diagnostics.iter().chain(buffer.terminal.iter()) {
@@ -376,7 +428,11 @@ impl ConfigParseErrors {
                     .budget_errors
                     .try_call(|budget_out| budget.consume(1, budget_out))
                 {
-                    return Self::emergency(BudgetDiagnostic::from_error(caught.take()), source_id);
+                    return Self::emergency(
+                        BudgetDiagnostic::from_error(caught.take(), translator),
+                        source_id,
+                        translator,
+                    );
                 }
             }
             for span in diagnostic
@@ -390,8 +446,9 @@ impl ConfigParseErrors {
                         .try_call(|budget_out| budget.consume(1, budget_out))
                     {
                         return Self::emergency(
-                            BudgetDiagnostic::from_error(caught.take()),
+                            BudgetDiagnostic::from_error(caught.take(), translator),
                             source_id,
+                            translator,
                         );
                     }
                 }
@@ -399,13 +456,21 @@ impl ConfigParseErrors {
                     .budget_errors
                     .try_call(|budget_out| spans.try_reserve(1, budget_out))
                 {
-                    return Self::emergency(BudgetDiagnostic::from_error(caught.take()), source_id);
+                    return Self::emergency(
+                        BudgetDiagnostic::from_error(caught.take(), translator),
+                        source_id,
+                        translator,
+                    );
                 }
                 if let Err(caught) = buffer
                     .budget_errors
                     .try_call(|budget_out| spans.try_push(span, budget_out))
                 {
-                    return Self::emergency(BudgetDiagnostic::from_error(caught.take()), source_id);
+                    return Self::emergency(
+                        BudgetDiagnostic::from_error(caught.take(), translator),
+                        source_id,
+                        translator,
+                    );
                 }
             }
         }
@@ -423,14 +488,22 @@ impl ConfigParseErrors {
                 sort_out,
             )
         }) {
-            return Self::emergency(BudgetDiagnostic::from_error(caught.take()), source_id);
+            return Self::emergency(
+                BudgetDiagnostic::from_error(caught.take(), translator),
+                source_id,
+                translator,
+            );
         }
         if let Some(budget) = budget.as_ref() {
             if let Err(caught) = buffer
                 .budget_errors
                 .try_call(|budget_out| budget.consume(spans.len().saturating_sub(1), budget_out))
             {
-                return Self::emergency(BudgetDiagnostic::from_error(caught.take()), source_id);
+                return Self::emergency(
+                    BudgetDiagnostic::from_error(caught.take(), translator),
+                    source_id,
+                    translator,
+                );
             }
         }
         spans.dedup();
@@ -440,14 +513,22 @@ impl ConfigParseErrors {
         {
             Ok(locations) => locations,
             Err(caught) => {
-                return Self::emergency(BudgetDiagnostic::from_error(caught.take()), source_id);
+                return Self::emergency(
+                    BudgetDiagnostic::from_error(caught.take(), translator),
+                    source_id,
+                    translator,
+                );
             }
         };
         if let Err(caught) = buffer
             .budget_errors
             .try_call(|budget_out| locations.try_reserve_exact(spans.len(), budget_out))
         {
-            return Self::emergency(BudgetDiagnostic::from_error(caught.take()), source_id);
+            return Self::emergency(
+                BudgetDiagnostic::from_error(caught.take(), translator),
+                source_id,
+                translator,
+            );
         }
         for located in spans {
             let span = located.source_span();
@@ -456,7 +537,11 @@ impl ConfigParseErrors {
                     .budget_errors
                     .try_call(|budget_out| budget.consume(1, budget_out))
                 {
-                    return Self::emergency(BudgetDiagnostic::from_error(caught.take()), source_id);
+                    return Self::emergency(
+                        BudgetDiagnostic::from_error(caught.take(), translator),
+                        source_id,
+                        translator,
+                    );
                 }
             }
             let location = if Some(span.source_id()) == source_id {
@@ -469,8 +554,9 @@ impl ConfigParseErrors {
                         Ok(location) => location,
                         Err(caught) => {
                             return Self::emergency(
-                                BudgetDiagnostic::from_error(caught.take()),
+                                BudgetDiagnostic::from_error(caught.take(), translator),
                                 source_id,
+                                translator,
                             );
                         }
                     }
@@ -485,7 +571,11 @@ impl ConfigParseErrors {
                 .budget_errors
                 .try_call(|budget_out| locations.try_push((span, location), budget_out))
             {
-                return Self::emergency(BudgetDiagnostic::from_error(caught.take()), source_id);
+                return Self::emergency(
+                    BudgetDiagnostic::from_error(caught.take(), translator),
+                    source_id,
+                    translator,
+                );
             }
         }
         if let Some(terminal) = buffer.terminal.take() {
@@ -493,13 +583,21 @@ impl ConfigParseErrors {
                 .budget_errors
                 .try_call(|budget_out| buffer.diagnostics.try_reserve(1, budget_out))
             {
-                return Self::emergency(BudgetDiagnostic::from_error(caught.take()), source_id);
+                return Self::emergency(
+                    BudgetDiagnostic::from_error(caught.take(), translator),
+                    source_id,
+                    translator,
+                );
             }
             if let Err(caught) = buffer
                 .budget_errors
                 .try_call(|budget_out| buffer.diagnostics.try_push(terminal, budget_out))
             {
-                return Self::emergency(BudgetDiagnostic::from_error(caught.take()), source_id);
+                return Self::emergency(
+                    BudgetDiagnostic::from_error(caught.take(), translator),
+                    source_id,
+                    translator,
+                );
             }
         }
         let truncated = buffer.is_truncated();
@@ -513,6 +611,7 @@ impl ConfigParseErrors {
                 excerpts: SourceExcerptSet::unavailable(),
                 truncated,
             },
+            translator: Some(translator),
         }
     }
 
@@ -622,6 +721,10 @@ impl ConfigParseErrors {
         }
     }
 
+    pub(crate) const fn translator(&self) -> Option<Translator> {
+        self.translator
+    }
+
     pub fn config_source_name(&self) -> Option<&str> {
         match &self.storage {
             ErrorStorage::Emergency { .. }
@@ -647,18 +750,6 @@ impl ConfigParseErrors {
     }
 }
 
-impl From<BudgetError> for ConfigParseErrors {
-    fn from(error: BudgetError) -> Self {
-        Self::emergency(BudgetDiagnostic::from_error(error), None)
-    }
-}
-
-impl From<Diagnostic> for ConfigParseErrors {
-    fn from(diagnostic: Diagnostic) -> Self {
-        Self::emergency(diagnostic, None)
-    }
-}
-
 impl fmt::Debug for ConfigParseErrors {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -672,21 +763,31 @@ impl fmt::Debug for ConfigParseErrors {
 
 impl fmt::Display for ConfigParseErrors {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Some(translator) = self.translator else {
+            return Err(fmt::Error);
+        };
+        let title = t! {
+            name: "report.title.operation_failed",
+            locale: translator,
+        }
+        .map_err(|_| fmt::Error)?;
+        let stage = t! {
+            name: "report.stage.configuration_reading",
+            locale: translator,
+        }
+        .map_err(|_| fmt::Error)?;
         let source_name = |source_id| {
             (self.config_source_id() == Some(source_id))
                 .then(|| self.config_source_name())
                 .flatten()
         };
         let span_location = |span| self.span_location(span);
-        let stage = match self.stage() {
-            ConfigFailureStage::Input => "input",
-            ConfigFailureStage::Parsing => "parsing",
-        };
         DiagnosticReport::new(
-            "configuration load failed",
-            Some(stage),
+            title.as_ref(),
+            Some(stage.as_ref()),
             self.diagnostics(),
             ReportContext::new(&source_name, &span_location, self.excerpts()),
+            translator,
         )
         .write_to(formatter)?;
         write_truncation_notice(formatter, self.is_truncated())
@@ -703,6 +804,18 @@ fn write_truncation_notice(formatter: &mut fmt::Formatter<'_>, truncated: bool) 
 }
 
 impl Error for ConfigParseErrors {}
+
+impl From<BudgetError> for ConfigParseErrors {
+    fn from(error: BudgetError) -> Self {
+        Self::unrenderable(Diagnostic::from(error))
+    }
+}
+
+impl From<Diagnostic> for ConfigParseErrors {
+    fn from(diagnostic: Diagnostic) -> Self {
+        Self::unrenderable(diagnostic)
+    }
+}
 
 #[cfg(test)]
 impl Deref for ConfigParseErrors {

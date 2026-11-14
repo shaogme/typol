@@ -9,7 +9,7 @@ use crate::{
 };
 use opeo::{OResult, Out};
 use typol_core::{ChargedVec, Diagnostic, SourceSpan};
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 
 struct BinaryOperation {
     operator: BinaryOperator,
@@ -87,7 +87,7 @@ impl ExpressionParser {
 
         loop {
             parser.execution.consume_with(1, out.reborrow(), |error| {
-                SyntaxDiagnostic::budget(error, ParserControl::eof_span(parser))
+                SyntaxDiagnostic::budget(error, ParserControl::eof_span(parser), parser.translator)
             })?;
 
             if left.is_none() {
@@ -109,6 +109,7 @@ impl ExpressionParser {
 
             let Some(mut expression) = left.take() else {
                 return Err(out.reborrow().fail(parser_internal_error!(
+                    parser,
                     "expression-frame-has-no-left-value",
                     ParserControl::eof_span(parser),
                 )));
@@ -150,15 +151,16 @@ impl ExpressionParser {
                         return ParserControl::syntax_failure(
                             parser,
                             info.span,
-                            diagnostic_message!(
-                                "diagnostic.syntax.comparison_operators_cannot_be_chained",
-                                "comparison operators cannot be chained"
-                            ),
+                            t! {
+                                name: "diagnostic.syntax.comparison_operators_cannot_be_chained",
+                                locale: parser.translator,
+                            },
                             out.reborrow(),
                         );
                     }
                     ParserControl::bump(parser, out.reborrow())?;
                     ParserControl::try_push(
+                        parser,
                         &mut frames,
                         ExpressionFrame::Binary {
                             left: expression,
@@ -205,6 +207,7 @@ impl ExpressionParser {
                 ParserControl::enter_prefix_frame(parser, info.span, out.reborrow())?;
                 ParserControl::bump(parser, out.reborrow())?;
                 ParserControl::try_push(
+                    parser,
                     frames,
                     ExpressionFrame::Unary {
                         operator,
@@ -219,6 +222,7 @@ impl ExpressionParser {
             TokenKind::Symbol(Symbol::LeftParen) => {
                 ParserControl::bump(parser, out.reborrow())?;
                 ParserControl::try_push(
+                    parser,
                     frames,
                     ExpressionFrame::Group {
                         start: info.span,
@@ -272,6 +276,7 @@ impl ExpressionParser {
                     None
                 };
             ParserControl::try_push(
+                parser,
                 frames,
                 ExpressionFrame::Method {
                     receiver: expression,
@@ -473,10 +478,10 @@ impl ExpressionParser {
             _ => ParserControl::syntax_failure(
                 parser,
                 info.span,
-                diagnostic_message!(
-                    "diagnostic.syntax.expected_expression",
-                    "expected an expression here"
-                ),
+                t! {
+                    name: "diagnostic.syntax.expected_expression",
+                    locale: parser.translator,
+                },
                 out.reborrow(),
             ),
         }

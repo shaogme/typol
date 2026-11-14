@@ -1,9 +1,10 @@
-use crate::diagnostics::{DiagnosticList, ErrorDiagnostics};
+use crate::diagnostics::{DiagnosticList, EmergencyDiagnostics, ErrorDiagnostics};
 use core::{cmp::Ordering, error::Error, fmt, slice::from_ref};
 use typol_core::{
     BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, SourceExcerptSet,
     SourceId, SourceSpan,
 };
+use typol_i18n::{Translator, t};
 use typol_report::{DiagnosticReport, ReportContext};
 use typol_semantic::SpanLocation;
 use typol_syntax::AstAccessError;
@@ -92,6 +93,7 @@ pub struct SchemaCompileErrors {
     storage: SchemaErrorStorage,
     context_failure: Option<SchemaCompileContextFailure>,
     budget_domain: Option<SchemaCompileBudgetDomain>,
+    translator: Translator,
 }
 
 impl SchemaCompileErrors {
@@ -112,7 +114,7 @@ impl SchemaCompileErrors {
         self
     }
 
-    pub fn budget_failure(error: BudgetError) -> Self {
+    pub fn budget_failure(error: BudgetError, translator: Translator) -> Self {
         let budget_domain = match error {
             BudgetError::RegexSteps
             | BudgetError::RegexSearchSteps
@@ -122,43 +124,69 @@ impl SchemaCompileErrors {
             | BudgetError::CapacityExceeded
             | BudgetError::InvariantViolation(_) => SchemaCompileBudgetDomain::Execution,
         };
-        Self::budget_failure_in_domain(error, budget_domain)
+        Self::budget_failure_in_domain(error, budget_domain, translator)
     }
 
-    pub(crate) fn regex_budget_failure(error: BudgetError) -> Self {
-        Self::budget_failure_in_domain(error, SchemaCompileBudgetDomain::Regex)
+    pub(crate) fn regex_budget_failure(error: BudgetError, translator: Translator) -> Self {
+        Self::budget_failure_in_domain(error, SchemaCompileBudgetDomain::Regex, translator)
     }
 
     fn budget_failure_in_domain(
         error: BudgetError,
         budget_domain: SchemaCompileBudgetDomain,
+        translator: Translator,
     ) -> Self {
         let code = error.diagnostic_code();
-        let mut diagnostic = Diagnostic::emergency(code);
+        let message = match error {
+            BudgetError::Allocation => t! {
+                name: "diagnostic.emergency.allocation_failed",
+                locale: translator,
+            },
+            BudgetError::CapacityExceeded => t! {
+                name: "diagnostic.emergency.capacity_exceeded",
+                locale: translator,
+            },
+            BudgetError::InvariantViolation(_) => t! {
+                name: "diagnostic.emergency.internal_error",
+                locale: translator,
+            },
+            BudgetError::Resource
+            | BudgetError::RegexSteps
+            | BudgetError::RegexSearchSteps
+            | BudgetError::RegexWorkspace => t! {
+                name: "diagnostic.emergency.resource_limit_exceeded",
+                locale: translator,
+            },
+        };
+        let mut diagnostic = EmergencyDiagnostics::translated(code, message, None);
         diagnostic.set_context(error.context());
         Self {
             storage: SchemaErrorStorage::Inline(diagnostic),
             context_failure: None,
             budget_domain: Some(budget_domain),
+            translator,
         }
     }
 
-    pub(crate) fn inline(diagnostic: Diagnostic) -> Self {
+    pub(crate) fn inline(diagnostic: Diagnostic, translator: Translator) -> Self {
         Self {
             storage: SchemaErrorStorage::Inline(diagnostic),
             context_failure: None,
             budget_domain: None,
+            translator,
         }
     }
 
     pub(crate) fn with_context_failure(
         diagnostic: Diagnostic,
         failure: SchemaCompileContextFailure,
+        translator: Translator,
     ) -> Self {
         Self {
             storage: SchemaErrorStorage::Inline(diagnostic),
             context_failure: Some(failure),
             budget_domain: None,
+            translator,
         }
     }
 
@@ -167,6 +195,7 @@ impl SchemaCompileErrors {
         locations: ChargedVec<(SourceSpan, SpanLocation)>,
         location_status: LocationStatus,
     ) -> Self {
+        let translator = diagnostics.translator();
         Self {
             storage: SchemaErrorStorage::Collected {
                 diagnostics,
@@ -176,6 +205,7 @@ impl SchemaCompileErrors {
             },
             context_failure: None,
             budget_domain: None,
+            translator,
         }
     }
 
@@ -183,6 +213,7 @@ impl SchemaCompileErrors {
         diagnostics: ErrorDiagnostics,
         location_status: LocationStatus,
     ) -> Self {
+        let translator = diagnostics.translator();
         Self {
             storage: SchemaErrorStorage::Collected {
                 diagnostics,
@@ -192,6 +223,7 @@ impl SchemaCompileErrors {
             },
             context_failure: None,
             budget_domain: None,
+            translator,
         }
     }
 
@@ -311,6 +343,7 @@ impl SchemaCompileErrors {
                     None,
                     regular,
                     ReportContext::new(&source_name, &span_location, self.excerpts()),
+                    self.translator,
                 )
                 .write_to(writer)?;
                 writer.write_str("\n\n")?;
@@ -325,6 +358,7 @@ impl SchemaCompileErrors {
                 None,
                 from_ref(terminal),
                 ReportContext::new(&source_name, &span_location, self.excerpts()),
+                self.translator,
             )
             .write_to(writer)?;
         } else {
@@ -333,6 +367,7 @@ impl SchemaCompileErrors {
                 None,
                 regular,
                 ReportContext::new(&source_name, &span_location, self.excerpts()),
+                self.translator,
             )
             .write_to(writer)?;
         }
@@ -357,12 +392,6 @@ fn diagnostic_span_location(diagnostic: &Diagnostic, span: SourceSpan) -> Option
         .iter()
         .find(|label| label.span() == span)
         .and_then(|label| label.located_span().location())
-}
-
-impl From<BudgetError> for SchemaCompileErrors {
-    fn from(error: BudgetError) -> Self {
-        Self::budget_failure(error)
-    }
 }
 
 fn location_failure_from_context(context: Option<DiagnosticContext>) -> LocationFailure {
@@ -470,13 +499,22 @@ mod tests {
     use super::{SchemaCompileErrors, SchemaInternalCause};
     use crate::diagnostics::EmergencyDiagnostics;
     use alloc::string::ToString;
-    use typol_core::{Diagnostic, DiagnosticCode};
+    use typol_core::DiagnosticCode;
+    use typol_i18n::{Language, Translator, t};
     use typol_syntax::AstAccessError;
 
     fn errors_for_ast_access(error: AstAccessError) -> SchemaCompileErrors {
-        let mut diagnostic = Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR);
+        let translator = Translator::new(Language::English);
+        let mut diagnostic = EmergencyDiagnostics::translated(
+            DiagnosticCode::INTERNAL_ERROR,
+            t! {
+                name: "diagnostic.emergency.internal_error",
+                locale: translator,
+            },
+            None,
+        );
         diagnostic.set_context(Some(EmergencyDiagnostics::ast_access_context(error)));
-        SchemaCompileErrors::inline(diagnostic)
+        SchemaCompileErrors::inline(diagnostic, translator)
     }
 
     #[test]

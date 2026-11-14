@@ -8,6 +8,7 @@ use typol_core::{
     ChargedBox, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, SourceId, SourceSpan,
     diagnostic_context,
 };
+use typol_i18n::{Translator, t};
 
 pub(crate) struct DelimiterFrame {
     pub(crate) close: Symbol,
@@ -18,6 +19,7 @@ pub(crate) struct DelimiterFrame {
 pub(crate) struct SyntaxBudget {
     frame_limit: usize,
     frames: usize,
+    translator: Translator,
 }
 
 pub(crate) struct ParserState<'src> {
@@ -34,6 +36,7 @@ pub(crate) struct ParserState<'src> {
     pub(crate) last_end: usize,
     pub(crate) stopped: bool,
     pub(crate) execution: ExecutionBudget,
+    pub(crate) translator: Translator,
 }
 
 #[derive(Clone, Copy)]
@@ -43,10 +46,11 @@ pub(crate) struct TokenInfo {
 }
 
 impl SyntaxBudget {
-    pub(crate) const fn new(frame_limit: usize) -> Self {
+    pub(crate) const fn new(frame_limit: usize, translator: Translator) -> Self {
         Self {
             frame_limit,
             frames: 0,
+            translator,
         }
     }
 
@@ -58,6 +62,10 @@ impl SyntaxBudget {
         if self.frames >= self.frame_limit {
             return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
                 DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                t! {
+                    name: "diagnostic.emergency.resource_limit_exceeded",
+                    locale: self.translator,
+                },
                 span,
             )));
         }
@@ -75,6 +83,7 @@ impl SyntaxBudget {
             return Err(out.reborrow().fail(SyntaxDiagnostic::internal(
                 diagnostic_context!("typol-syntax", "parser-budget", "frame-depth-underflow"),
                 span,
+                self.translator,
             )));
         };
         self.frames = frames;

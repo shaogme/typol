@@ -3,13 +3,14 @@ use crate::{
     SchemaResolveRequest, SchemaResolver, SchemaSource,
     allocation_support::{CompileRunErrors, TestOperation},
     annotations::{AnnotationCompilation, AnnotationCompileInput, AnnotationCompiler},
-    context::CompileContext,
+    compiler::SchemaCompileContext,
+    context::{CompileContext, CompileContextOptions},
     defaults::{DefaultCompilation, DefaultInputs, DefaultPass},
     diagnostics::{BuildFailure, DiagnosticCollector},
     expressions::{ExpressionCompilation, ExpressionCompileInput, ExpressionCompiler},
-    loader::SourceLoader,
+    loader::{SourceLoadRequest, SourceLoader},
     module_tree::ModuleTree,
-    opeo::{OResult, Out},
+    opeo::{ErrSlot, OResult, Out},
     session::CompileBudget,
     session::SourceCatalog,
     symbols::SymbolTable,
@@ -26,9 +27,10 @@ use std::{
     thread_local,
 };
 use typol_core::{
-    DiagnosticCode, ExcerptLimits, ExcerptStatus, ExecutionBudget, ExecutionLimits,
+    Diagnostic, DiagnosticCode, ExcerptLimits, ExcerptStatus, ExecutionBudget, ExecutionLimits,
     RegexExecutionBudget, SliceSource, SourceId, SourceSpan, Span,
 };
+use typol_i18n::{Language, Translator};
 use typol_policy::{RegexExecutionLimits, RegexLimits, RegexOptions};
 use typol_regex::{Regex, RegexCompiler};
 use typol_test_support::*;
@@ -207,10 +209,13 @@ fn make_context(
     operations
         .budget(|out| {
             CompileContext::new(
-                limits,
-                regex_options.limits(),
-                execution,
-                regex_execution,
+                CompileContextOptions {
+                    limits,
+                    regex_limits: regex_options.limits(),
+                    execution,
+                    regex_execution,
+                    translator: Translator::new(Language::English),
+                },
                 out,
             )
         })
@@ -224,7 +229,15 @@ fn make_diagnostics(
     execution: &ExecutionBudget,
 ) -> TestResult<DiagnosticCollector> {
     operations
-        .diagnostic(|out| DiagnosticCollector::new(limit, span, execution, out))
+        .diagnostic(|out| {
+            DiagnosticCollector::new(
+                limit,
+                span,
+                execution,
+                Translator::new(Language::English),
+                out,
+            )
+        })
         .into_test_value()
 }
 
@@ -235,8 +248,14 @@ fn make_budget(
     execution: &ExecutionBudget,
     regex_execution: &RegexExecutionBudget,
 ) -> TestResult<CompileBudget> {
+    let options = SchemaCompileOptions::new(limits)
+        .with_regex(*regex_options)
+        .with_translator(Translator::new(Language::English));
+    let context = operations
+        .budget(|out| SchemaCompileContext::new(options, execution, regex_execution, out))
+        .into_test_value()?;
     operations
-        .budget(|out| CompileBudget::new(limits, regex_options, execution, regex_execution, out))
+        .budget(|out| CompileBudget::new(&context, out))
         .into_test_value()
 }
 
@@ -319,14 +338,22 @@ fn iterative_schema_passes_fail_atomically_and_release_all_tracked_storage() -> 
             &execution,
             &regex_execution,
         )?;
-        let loaded = SourceLoader::load(
-            SchemaSource::from_str(b"root", source),
-            &mut EmptyResolver,
-            &mut budget,
-            &mut setup,
-            None,
-        )
-        .into_test_value()?;
+        let mut load_errors = ErrSlot::<Diagnostic>::new();
+        let loaded = load_errors
+            .call(|out| {
+                SourceLoader::load(
+                    SourceLoadRequest {
+                        root: SchemaSource::from_str(b"root", source),
+                        resolver: &mut EmptyResolver,
+                        budget: &mut budget,
+                        diagnostics: &mut setup,
+                        observer: None,
+                    },
+                    out,
+                    |diagnostic| diagnostic,
+                )
+            })
+            .into_test_value()?;
         let context = make_context(
             &mut operations,
             limits,
@@ -397,9 +424,15 @@ fn iterative_schema_passes_fail_atomically_and_release_all_tracked_storage() -> 
                     state.set(current);
                 });
                 let (failed, has_allocation) = match operations.diagnostic(|out| {
-                    DiagnosticCollector::new(limits.max_diagnostics(), span, &execution, out)
+                    DiagnosticCollector::new(
+                        limits.max_diagnostics(),
+                        span,
+                        &execution,
+                        Translator::new(Language::English),
+                        out,
+                    )
                 }) {
-                    Ok(mut collector) => {
+                    TestOpeoOutcome::Value(mut collector) => {
                         let result = run(&mut operations, &mut collector);
                         let diagnostics = collector.into_diagnostics();
                         (
@@ -409,7 +442,7 @@ fn iterative_schema_passes_fail_atomically_and_release_all_tracked_storage() -> 
                             }),
                         )
                     }
-                    Err(diagnostic) => {
+                    TestOpeoOutcome::Error(diagnostic) => {
                         (true, diagnostic.code() == DiagnosticCode::ALLOCATION_FAILED)
                     }
                 };
@@ -785,14 +818,22 @@ fn measure_passes(count: usize) -> TestResult<PassMeasurement> {
         &execution,
         &regex_execution,
     )?;
-    let loaded = SourceLoader::load(
-        SchemaSource::from_str(b"root", &source),
-        &mut EmptyResolver,
-        &mut budget,
-        &mut diagnostics,
-        None,
-    )
-    .into_test_value()?;
+    let mut load_errors = ErrSlot::<Diagnostic>::new();
+    let loaded = load_errors
+        .call(|out| {
+            SourceLoader::load(
+                SourceLoadRequest {
+                    root: SchemaSource::from_str(b"root", &source),
+                    resolver: &mut EmptyResolver,
+                    budget: &mut budget,
+                    diagnostics: &mut diagnostics,
+                    observer: None,
+                },
+                out,
+                |diagnostic| diagnostic,
+            )
+        })
+        .into_test_value()?;
     let initial = execution.workspace_bytes();
     let old_peak = execution.peak_workspace_bytes();
     let initial_steps = execution.steps();
@@ -898,14 +939,22 @@ fn measure_compile_pass(pass: CompilePass, count: usize) -> TestResult<PassMeasu
         &execution,
         &regex_execution,
     )?;
-    let loaded = SourceLoader::load(
-        SchemaSource::from_str(b"root", &source),
-        &mut EmptyResolver,
-        &mut budget,
-        &mut diagnostics,
-        None,
-    )
-    .into_test_value()?;
+    let mut load_errors = ErrSlot::<Diagnostic>::new();
+    let loaded = load_errors
+        .call(|out| {
+            SourceLoader::load(
+                SourceLoadRequest {
+                    root: SchemaSource::from_str(b"root", &source),
+                    resolver: &mut EmptyResolver,
+                    budget: &mut budget,
+                    diagnostics: &mut diagnostics,
+                    observer: None,
+                },
+                out,
+                |diagnostic| diagnostic,
+            )
+        })
+        .into_test_value()?;
     let tree =
         module_tree(&mut operations, &loaded, &context, &mut diagnostics).into_test_value()?;
     let symbols =
@@ -1268,6 +1317,7 @@ fn location_oom_keeps_existing_messages_labels_and_first_terminal_reason() -> Te
                 .first()
                 .into_test_value()?
                 .message()
+                .test_value()?
                 .is_empty()
         );
         test_verify_eq!(
@@ -1286,11 +1336,12 @@ fn location_oom_keeps_existing_messages_labels_and_first_terminal_reason() -> Te
                 DiagnosticCode::ALLOCATION_FAILED
             );
             test_verify!(
-                errors
+                !errors
                     .diagnostics()
                     .get(1)
                     .into_test_value()?
                     .message()
+                    .test_value()?
                     .is_empty()
             );
             test_verify_eq!(

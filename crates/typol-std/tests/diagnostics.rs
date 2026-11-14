@@ -3,7 +3,7 @@
 mod assertions;
 
 use std::{cell::Cell, error::Error, io, path::Path, rc::Rc, slice::from_ref};
-use typol_i18n::{Language, Translator, diagnostic_message};
+use typol_i18n::{Language, Translator, t};
 
 use opeo::{OResult, Out};
 use typol_opeo_test_support::TestOpeo;
@@ -14,9 +14,9 @@ use typol_config::{
 };
 use typol_core::{
     BudgetError, Diagnostic, DiagnosticCode, DiagnosticContext as CoreDiagnosticContext,
-    DiagnosticContextDescriptor, DiagnosticMessage, DiagnosticMessageKey,
-    DiagnosticTranslationError, ExecutionBudget, ExecutionLimits, InstancePath, SliceSource,
-    SourceExcerptSet, SourceId, SourceLocation, SourceSpan, Span, ValueSource,
+    DiagnosticContextDescriptor, DiagnosticFailure, DiagnosticLabelInput, ExecutionBudget,
+    ExecutionLimits, InstancePath, RelatedLocationRole, SliceSource, SourceExcerptSet, SourceId,
+    SourceLocation, SourceSpan, Span, ValueSource,
 };
 use typol_report::{DiagnosticReport as StructuredDiagnosticReport, ReportContext};
 use typol_schema::{
@@ -179,12 +179,37 @@ fn layout_preserves_codes_labels_paths_provenance_and_optional_fields() -> Resul
     TestOpeo::call(|out| path.push_payload("Some", out))?;
     TestOpeo::call(|out| diagnostic.try_set_path(Some(path), None, out))?;
     diagnostic.set_value_source(Some(ValueSource::ExplicitFallback));
-    TestOpeo::call(|out| diagnostic.try_add_label(label, "definition", None, out))?;
-    TestOpeo::call(|out| diagnostic.try_add_label(primary, "another rule", None, out))?;
+    TestOpeo::call(|out| {
+        diagnostic.try_add_label_with_text(
+            DiagnosticLabelInput {
+                span: label,
+                text: "definition",
+                role: RelatedLocationRole::AssociatedInput,
+            },
+            None,
+            out,
+        )
+    })?;
+    TestOpeo::call(|out| {
+        diagnostic.try_add_label_with_text(
+            DiagnosticLabelInput {
+                span: primary,
+                text: "another rule",
+                role: RelatedLocationRole::AssociatedInput,
+            },
+            None,
+            out,
+        )
+    })?;
     let diagnostics = [
         diagnostic,
         TestOpeo::call(|out| {
-            Diagnostic::try_new(DiagnosticCode::ALLOCATION_FAILED, "", None, out)
+            Diagnostic::try_new(
+                DiagnosticCode::ALLOCATION_FAILED,
+                "allocation failed",
+                None,
+                out,
+            )
         })?,
     ];
     let text = render_in(
@@ -204,12 +229,17 @@ fn layout_preserves_codes_labels_paths_provenance_and_optional_fields() -> Resul
     ensure_eq!(
         text,
         concat!(
-            "CONFIG_VALIDATION_ERROR (12): rule failed\nPath: $.items[1][\"a\\\"\\\\\\n\"]::Some",
+            "CONFIG_VALIDATION_ERROR (12): rule failed",
+            "\nKind: CONFIG_VALIDATION_ERROR",
+            "\nDiagnostic stage: constraint_validation",
+            "\nPath: $.items[1][\"a\\\"\\\\\\n\"]::Some",
             "\nLocation: config:1:2-3:4\n  = source excerpt unavailable",
-            "\nRule: source#7:1:2-3:4: definition\n  = source excerpt unavailable",
-            "\nRule: config:1:2-3:4: another rule\n  = source excerpt unavailable",
+            "\nRelated location (associated input): source#7:1:2-3:4: definition\n  = source excerpt unavailable",
+            "\nRelated location (associated input): config:1:2-3:4: another rule\n  = source excerpt unavailable",
             "\nSource: ExplicitFallback",
-            "\n\nALLOCATION_FAILED (2): memory allocation failed"
+            "\n\nALLOCATION_FAILED (2): allocation failed",
+            "\nKind: ALLOCATION_FAILED",
+            "\nDiagnostic stage: internal"
         )
     );
     ensure_eq!(
@@ -235,7 +265,7 @@ fn localized_parser_builtin_errors_use_catalog_keys() -> Result<(), Box<dyn Erro
             ConfigParseRequest::new(
                 &mut SliceSource::new(b"{missing: 1}"),
                 "config",
-                ConfigParseOptions::default(),
+                ConfigParseOptions::default().with_translator(Translator::new(Language::Chinese)),
             ),
             &mut environment,
             out,
@@ -254,7 +284,7 @@ fn localized_parser_builtin_errors_use_catalog_keys() -> Result<(), Box<dyn Erro
             ConfigParseRequest::new(
                 &mut SliceSource::new(br#"{value: env("PORT")}"#),
                 "config",
-                ConfigParseOptions::default(),
+                ConfigParseOptions::default().with_translator(Translator::new(Language::Chinese)),
             ),
             &mut environment,
             out,
@@ -269,19 +299,26 @@ fn localized_parser_builtin_errors_use_catalog_keys() -> Result<(), Box<dyn Erro
 }
 
 #[test]
-fn public_error_displays_resolve_catalog_and_emergency_messages() -> Result<(), Box<dyn Error>> {
-    let diagnostic = Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR);
+fn public_error_displays_keep_the_generated_message() -> Result<(), Box<dyn Error>> {
+    let translator = Translator::new(Language::English);
+    let diagnostic = TestOpeo::call(|out| {
+        Diagnostic::try_new(
+            DiagnosticCode::INTERNAL_ERROR,
+            t! { name: "diagnostic.emergency.internal_error", locale: translator },
+            None,
+            out,
+        )
+    })?;
     let parse_errors = ConfigParseErrors::from(diagnostic);
-    let parse_text = parse_errors.to_string();
-    ensure!(parse_text.contains("an internal error prevented the operation"));
-    ensure!(!parse_text.contains("diagnostic message unavailable"));
+    let rendered = render(parse_errors.diagnostics(), RenderOptions::default())?;
+    ensure!(rendered.contains("an internal error prevented the operation"));
 
     let value_errors = ConfigValueErrors::from(parse_errors);
-    let value_text = value_errors.to_string();
-    ensure!(value_text.contains("an internal error prevented the operation"));
-    ensure!(!value_text.contains("diagnostic message unavailable"));
+    let mut value_text = String::new();
+    ensure!(std::fmt::write(&mut value_text, format_args!("{value_errors}")).is_err());
+    ensure!(value_text.is_empty());
 
-    let schema_errors = SchemaCompileErrors::budget_failure(BudgetError::Resource);
+    let schema_errors = SchemaCompileErrors::budget_failure(BudgetError::Resource, translator);
     let schema_text = schema_errors.to_string();
     ensure!(schema_text.contains("resource limit exceeded"));
     ensure!(!schema_text.contains("diagnostic message unavailable"));
@@ -299,22 +336,27 @@ fn localized_report_translates_builtin_text_and_preserves_custom_text() -> Resul
     let mut diagnostic = TestOpeo::call(|out| {
         Diagnostic::try_new(
             DiagnosticCode::SCHEMA_SEMANTIC_ERROR,
-            diagnostic_message!(
-                "diagnostic.schema.root_missing_entry",
-                "root schema must declare an entry struct"
-            ),
+            t! {
+                name: "diagnostic.schema.root_missing_entry",
+                locale: Translator::new(Language::English)
+            },
             None,
             out,
         )
     })?;
     diagnostic.set_primary(Some(span));
+    let label = t! {
+        name: "diagnostic.label.constraint_defined_here",
+        locale: Translator::new(Language::English)
+    }
+    .map_err(io::Error::other)?;
     TestOpeo::call(|out| {
         diagnostic.try_add_label_with_text(
-            span,
-            diagnostic_message!(
-                "diagnostic.label.constraint_defined_here",
-                "constraint defined here"
-            ),
+            DiagnosticLabelInput {
+                span,
+                text: label.as_ref(),
+                role: RelatedLocationRole::ConstraintDefinition,
+            },
             None,
             out,
         )
@@ -345,10 +387,11 @@ fn localized_report_translates_builtin_text_and_preserves_custom_text() -> Resul
     ensure!(translated.contains("Typol 操作失败"));
     ensure!(translated.contains("读取配置"));
     ensure!(translated.contains("1 条诊断"));
-    ensure!(translated.contains("根 Schema 必须声明 entry 结构体"));
+    ensure!(translated.contains("root schema must declare an entry struct"));
     ensure!(translated.contains("位置: config:1:1-1:2"));
-    ensure!(translated.contains("规则: config:1:1-1:2: 约束定义于此处"));
-    ensure!(!translated.contains("root schema must declare"));
+    ensure!(translated.contains("诊断类型: SCHEMA_SEMANTIC_ERROR"));
+    ensure!(translated.contains("诊断阶段: schema_compilation"));
+    ensure!(translated.contains("相关位置 (约束定义): config:1:1-1:2: constraint defined here"));
 
     let custom = TestOpeo::call(|out| {
         Diagnostic::try_new(
@@ -396,17 +439,10 @@ fn localized_report_translates_builtin_text_and_preserves_custom_text() -> Resul
     })?;
     ensure!(custom_resource_text.contains("custom resource detail"));
 
-    let mut invalid = TestOpeo::call(|out| {
-        Diagnostic::try_new(
-            DiagnosticCode::CONFIG_VALUE_ERROR,
-            DiagnosticMessage::localized(
-                "an english fallback must not be used",
-                DiagnosticMessageKey::__from_index(u16::MAX),
-            ),
-            None,
-            out,
-        )
-    })?;
+    let mut invalid = Diagnostic::failure(
+        DiagnosticCode::CONFIG_VALUE_ERROR,
+        DiagnosticFailure::Budget(BudgetError::Resource),
+    );
     invalid.set_primary(Some(span));
     let failure = TestOpeo::call(|out| {
         DiagnosticRenderer::render(
@@ -423,12 +459,15 @@ fn localized_report_translates_builtin_text_and_preserves_custom_text() -> Resul
     });
     ensure!(matches!(
         failure,
-        Err(DiagnosticRenderError::Translation(
-            DiagnosticTranslationError
+        Err(DiagnosticRenderError::Diagnostic(
+            DiagnosticFailure::Budget(BudgetError::Resource)
         ))
     ));
 
-    let emergency = Diagnostic::emergency(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED);
+    let emergency = Diagnostic::emergency(
+        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+        "resource limit exceeded",
+    );
     let localized_emergency = TestOpeo::call(|out| {
         DiagnosticRenderer::render(
             from_ref(&emergency),
@@ -442,7 +481,7 @@ fn localized_report_translates_builtin_text_and_preserves_custom_text() -> Resul
             out,
         )
     })?;
-    ensure!(localized_emergency.contains("超出资源限制"));
+    ensure!(localized_emergency.contains("resource limit exceeded"));
     Ok(())
 }
 
@@ -486,7 +525,13 @@ fn arbitrary_path_names_are_unambiguous_in_both_renderers() -> Result<(), Box<dy
     let span_locations = |_: SourceSpan| None;
     let excerpts = SourceExcerptSet::unavailable();
     let context = ReportContext::new(&source_names, &span_locations, &excerpts);
-    let report = StructuredDiagnosticReport::new("", None, from_ref(&diagnostic), context);
+    let report = StructuredDiagnosticReport::new(
+        "",
+        None,
+        from_ref(&diagnostic),
+        context,
+        Translator::new(Language::English),
+    );
     let mut report_text = String::new();
     report.write_to(&mut report_text)?;
     ensure!(report_text.contains(&format!("Path: {expected_path}")));
@@ -509,7 +554,17 @@ fn every_dynamic_channel_escapes_controls_and_bidi_without_double_escaping()
         Diagnostic::try_new(DiagnosticCode::CONFIG_VALUE_ERROR, raw, None, out)
     })?;
     diagnostic.set_primary(Some(span));
-    TestOpeo::call(|out| diagnostic.try_add_label(span, raw, None, out))?;
+    TestOpeo::call(|out| {
+        diagnostic.try_add_label_with_text(
+            DiagnosticLabelInput {
+                span,
+                text: raw,
+                role: RelatedLocationRole::AssociatedInput,
+            },
+            None,
+            out,
+        )
+    })?;
     let mut path = TestOpeo::call(|out| InstancePath::new(None, out))?;
     TestOpeo::call(|out| path.push_field(raw, out))?;
     TestOpeo::call(|out| path.push_map_key(raw, out))?;
@@ -543,9 +598,13 @@ fn every_dynamic_channel_escapes_controls_and_bidi_without_double_escaping()
             Diagnostic::try_new(DiagnosticCode::CONFIG_VALUE_ERROR, &message, None, out)
         })?;
         let text = render(&[diagnostic], RenderOptions::default())?;
-        ensure!(!text.contains(
-            char::from_u32(code).ok_or_else(|| io::Error::other("invalid Unicode code point"))?
-        ));
+        let character =
+            char::from_u32(code).ok_or_else(|| io::Error::other("invalid Unicode code point"))?;
+        if character == '\n' {
+            ensure_eq!(text.matches('\n').count(), 2);
+        } else {
+            ensure!(!text.contains(character));
+        }
     }
 
     Ok(())
@@ -553,24 +612,39 @@ fn every_dynamic_channel_escapes_controls_and_bidi_without_double_escaping()
 
 #[test]
 fn unavailable_snapshots_do_not_invent_names_or_positions() -> Result<(), Box<dyn Error>> {
-    let mut diagnostic = Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR);
+    let mut diagnostic = Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR, "internal error");
     let span = SourceSpan::new(
         SourceId::new(0),
         TestOpeo::call(|out| Span::new(0, 0, out))
             .map_err(|error| io::Error::other(format!("{error:?}")))?,
     );
     diagnostic.set_primary(Some(span));
-    TestOpeo::call(|out| diagnostic.try_add_label(span, "rule", None, out))?;
+    TestOpeo::call(|out| {
+        diagnostic.try_add_label_with_text(
+            DiagnosticLabelInput {
+                span,
+                text: "rule",
+                role: RelatedLocationRole::AssociatedInput,
+            },
+            None,
+            out,
+        )
+    })?;
     let text = render(&[diagnostic], RenderOptions::default())?;
     ensure_eq!(
         text,
         concat!(
-            "INTERNAL_ERROR (9): an internal error prevented the operation",
+            "INTERNAL_ERROR (9): internal error",
+            "\nKind: INTERNAL_ERROR",
+            "\nDiagnostic stage: internal",
             "\nLocation: location unavailable\n  = source excerpt unavailable",
-            "\nRule: location unavailable: rule\n  = source excerpt unavailable"
+            "\nRelated location (associated input): location unavailable: rule\n  = source excerpt unavailable"
         )
     );
-    let error = SchemaCompileErrors::budget_failure(BudgetError::Allocation);
+    let error = SchemaCompileErrors::budget_failure(
+        BudgetError::Allocation,
+        Translator::new(Language::English),
+    );
     ensure_eq!(
         render(
             from_ref(
@@ -581,7 +655,11 @@ fn unavailable_snapshots_do_not_invent_names_or_positions() -> Result<(), Box<dy
             ),
             RenderOptions::default(),
         )?,
-        "ALLOCATION_FAILED (2): memory allocation failed"
+        concat!(
+            "ALLOCATION_FAILED (2): memory allocation failed",
+            "\nKind: ALLOCATION_FAILED",
+            "\nDiagnostic stage: internal"
+        )
     );
 
     Ok(())
@@ -643,7 +721,10 @@ fn exact_output_and_execution_limits_are_atomic_and_leave_business_errors_intact
         .first()
         .ok_or_else(|| io::Error::other("diagnostic is missing"))?;
     ensure_eq!(diagnostic.code(), DiagnosticCode::CONFIG_VALUE_ERROR);
-    ensure_eq!(diagnostic.message(), "Ḁḁ\n".repeat(200));
+    ensure_eq!(
+        diagnostic.message().map_err(io::Error::other)?,
+        "Ḁḁ\n".repeat(200)
+    );
 
     Ok(())
 }
@@ -758,7 +839,7 @@ fn config_two_source_snapshots_survive_inputs_and_schema_and_keep_unicode_crlf()
         RenderOptions::default(),
     )?;
     ensure!(text.contains("Location: config\\npublic:2:9-2:12"));
-    ensure!(text.contains("Rule: Schema:2:"));
+    ensure!(text.contains("Related location (constraint definition): Schema:2:"));
     ensure!(text.contains("| 2 |  value: \"Ḁ\""));
     ensure!(text.contains("\n  |           ^^^"));
     let schema = compile("entry struct Root {}")?;

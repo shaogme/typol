@@ -1,9 +1,9 @@
+pub(crate) use typol_test_support::{TestOpeo, TestOpeoOutcome};
+
 use crate::value::{EnumPayload, FieldValue, MapEntry, ValueFactory};
 use opeo::{OResult, Out};
 use std::process::abort;
 use typol_core::{ChargedVec, ConfigValue, ValueError};
-
-pub(crate) use typol_test_support::{TestOpeo, TestOpeoOutcome};
 
 pub(crate) struct TestValues;
 

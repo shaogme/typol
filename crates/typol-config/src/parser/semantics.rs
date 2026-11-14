@@ -1,7 +1,7 @@
 use super::{
     containers::ContainerSupport,
     context::ParserContext,
-    literals::{ContextDiagnosticRequest, LiteralParser, ParsedValue, Syntax},
+    literals::{ContextDiagnosticRequest, ExpectedSymbol, LiteralParser, ParsedValue, Syntax},
     recovery::ParseFailure,
 };
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
     },
     diagnostics::DiagnosticFactory,
     environment::{EnvironmentAuthorizationRequest, EnvironmentResolver},
-    parser::context::ParserControl,
+    parser::context::{ParserControl, ValueCallContext},
     session::{AssertionRequest, EnvironmentRequest},
     value::ValueFactory,
     value_normalization::{NormalizeRequest, ValueNormalizer},
@@ -23,7 +23,7 @@ use typol_core::{
     ConfigValue, Diagnostic, DiagnosticCode, DiagnosticContext, LocatedSpan, ValueKind,
     ValueSource, diagnostic_context,
 };
-use typol_i18n::diagnostic_key;
+use typol_i18n::t;
 use typol_semantic::{FieldView, SchemaAccessError, TypeKind, TypeView};
 use typol_syntax::{BuiltinType, Symbol, TokenKind};
 
@@ -77,8 +77,8 @@ fn status_result<'slot, 'borrow>(
 ) -> OResult<'slot, ()> {
     match status {
         SemanticStatus::Success => Ok(()),
-        SemanticStatus::Reported => Err(out.fail(ParseFailure::Reported)),
-        SemanticStatus::Stopped => Err(out.fail(ParseFailure::Stopped)),
+        SemanticStatus::Reported => Err(out.fail(ParseFailure::reported())),
+        SemanticStatus::Stopped => Err(out.fail(ParseFailure::stopped())),
     }
 }
 
@@ -125,6 +125,7 @@ impl SemanticParser {
             let result = diagnostic_errors.try_call(|diagnostic_out| {
                 context.session.completed(
                     AssignmentContext {
+                        translator: context.session.translator(),
                         schema: context.schema,
                         node: context.current_node,
                         locations: &context.locations,
@@ -151,8 +152,9 @@ impl SemanticParser {
             Ok(status) => status,
             Err(diagnostic) => {
                 let failure = enrich_diagnostic(context, diagnostic, span, value.source());
-                let ParseFailure::Diagnostic(diagnostic) = failure else {
-                    return Err(out.fail(failure));
+                let diagnostic = match failure.into_diagnostic() {
+                    Some(diagnostic) => diagnostic,
+                    None => return Err(out.fail(ParseFailure::reported())),
                 };
                 if context.diagnostics.push(diagnostic) {
                     SemanticStatus::Reported
@@ -162,10 +164,10 @@ impl SemanticParser {
             }
         };
         if context.diagnostics.stopped() {
-            return Err(out.fail(ParseFailure::Stopped));
+            return Err(out.fail(ParseFailure::stopped()));
         }
         if context.diagnostics.len() > before {
-            return Err(out.fail(ParseFailure::Reported));
+            return Err(out.fail(ParseFailure::reported()));
         }
         status_result(status, out.reborrow())
     }
@@ -198,7 +200,7 @@ impl SemanticParser {
             Err(diagnostic) => return Err(out.fail(diagnostic.into())),
         };
         if context.diagnostics.stopped() {
-            return Err(out.fail(ParseFailure::Stopped));
+            return Err(out.fail(ParseFailure::stopped()));
         }
         status_result(result, out.reborrow())
     }
@@ -226,8 +228,11 @@ impl SemanticParser {
                         ContextDiagnosticRequest {
                             context,
                             code: DiagnosticCode::CONFIG_VALUE_ERROR,
-                            message: "environment expressions are only allowed for authorized scalar fields",
-                            key: Some(diagnostic_key!("diagnostic.environment.expression_invalid")),
+                            message: t! {
+                                name: "diagnostic.environment.expression_invalid",
+                                locale: context.session.translator(),
+                            }
+                            .into(),
                             span: start,
                             value_source: None,
                         },
@@ -275,8 +280,11 @@ impl SemanticParser {
                         ContextDiagnosticRequest {
                             context,
                             code: DiagnosticCode::CONFIG_VALUE_ERROR,
-                            message: "environment expressions are only allowed for authorized scalar fields",
-                            key: Some(diagnostic_key!("diagnostic.environment.expression_invalid")),
+                            message: t! {
+                                name: "diagnostic.environment.expression_invalid",
+                                locale: context.session.translator(),
+                            }
+                            .into(),
                             span: start,
                             value_source: None,
                         },
@@ -290,9 +298,15 @@ impl SemanticParser {
         context.cursor.bump(out.reborrow())?;
         Syntax::expect_symbol(
             context,
-            Symbol::LeftParen,
-            DiagnosticCode::CONFIG_SYNTAX_ERROR,
-            "expected an opening parenthesis in the environment expression",
+            ExpectedSymbol {
+                expected: Symbol::LeftParen,
+                code: DiagnosticCode::CONFIG_SYNTAX_ERROR,
+                message: t! {
+                    name: "diagnostic.config.expected_environment_open_parenthesis",
+                    locale: context.session.translator(),
+                }
+                .into(),
+            },
             out.reborrow(),
         )?;
         let name = LiteralParser::parse_scalar(context, BuiltinType::String, out.reborrow())?;
@@ -307,6 +321,7 @@ impl SemanticParser {
                     Some(name.span),
                     None,
                     Some(ValueSource::EnvironmentVariable),
+                    context.session.translator(),
                 )
                 .into(),
             ));
@@ -321,6 +336,7 @@ impl SemanticParser {
             authorization,
             span: spans.name,
             budget: &context.budget,
+            translator: context.session.translator(),
         };
         let authorization_result = {
             let mut diagnostic_errors = context.diagnostic_errors.borrow_mut();
@@ -377,14 +393,27 @@ impl SemanticParser {
         };
         let close = Syntax::expect_symbol(
             context,
-            Symbol::RightParen,
-            DiagnosticCode::CONFIG_SYNTAX_ERROR,
-            "expected a closing parenthesis in the environment expression",
+            ExpectedSymbol {
+                expected: Symbol::RightParen,
+                code: DiagnosticCode::CONFIG_SYNTAX_ERROR,
+                message: t! {
+                    name: "diagnostic.config.expected_environment_close_parenthesis",
+                    locale: context.session.translator(),
+                }
+                .into(),
+            },
             out.reborrow(),
         )?;
         spans.call = diagnostic_call(
             &context.diagnostic_errors,
-            |diagnostic_out| DiagnosticFactory::span_through(start, close, diagnostic_out),
+            |diagnostic_out| {
+                DiagnosticFactory::span_through(
+                    start,
+                    close,
+                    context.session.translator(),
+                    diagnostic_out,
+                )
+            },
             out.reborrow(),
         )?;
         let fallback = if let Some(parsed) = fallback {
@@ -413,8 +442,11 @@ impl SemanticParser {
                             value_out,
                         )
                     },
-                    value_span,
-                    ValueSource::ExplicitFallback,
+                    ValueCallContext {
+                        span: value_span,
+                        source: ValueSource::ExplicitFallback,
+                        translator: context.session.translator(),
+                    },
                     out.reborrow(),
                 )?
             } else {
@@ -425,6 +457,7 @@ impl SemanticParser {
                 match diagnostic_errors.try_call(|diagnostic_out| {
                     context.session.validate_fallback(
                         AssignmentContext {
+                            translator: context.session.translator(),
                             schema: context.schema,
                             node: None,
                             locations: &context.locations,
@@ -450,9 +483,9 @@ impl SemanticParser {
                 Ok(Some(proof)) => proof,
                 Ok(None) => {
                     return Err(out.fail(if context.diagnostics.stopped() {
-                        ParseFailure::Stopped
+                        ParseFailure::stopped()
                     } else {
-                        ParseFailure::Reported
+                        ParseFailure::reported()
                     }));
                 }
                 Err(diagnostic) => return Err(out.fail(diagnostic.into())),
@@ -468,6 +501,7 @@ impl SemanticParser {
         let call_span = spans.call;
         let environment_request = EnvironmentRequest {
             metadata: AssignmentContext {
+                translator: context.session.translator(),
                 schema: context.schema,
                 node: None,
                 locations: &context.locations,
@@ -506,7 +540,7 @@ impl SemanticParser {
             }
         };
         let Some(resolved) = resolved else {
-            return Err(out.fail(ParseFailure::DeferredField));
+            return Err(out.fail(ParseFailure::deferred_field()));
         };
         let span = resolved.origin.span();
         let value = resolved.value;
@@ -545,6 +579,7 @@ impl SubtreeValidator {
         field: FieldView<'_>,
         mut out: Out<'slot, '_, ParseFailure>,
     ) -> OResult<'slot, ConfigValue> {
+        let translator = context.session.translator();
         let metadata =
             context
                 .session
@@ -564,12 +599,14 @@ impl SubtreeValidator {
                         None,
                         None,
                         None,
+                        translator,
                     )
                     .into(),
                 ));
             }
         };
         let request = NormalizeRequest {
+            translator,
             expected,
             value: value.root(),
             depth: context.nesting_depth,
@@ -643,8 +680,8 @@ impl SubtreeValidator {
         };
         match status {
             SemanticStatus::Success => Ok(()),
-            SemanticStatus::Reported => Err(out.fail(ParseFailure::Reported)),
-            SemanticStatus::Stopped => Err(out.fail(ParseFailure::Stopped)),
+            SemanticStatus::Reported => Err(out.fail(ParseFailure::reported())),
+            SemanticStatus::Stopped => Err(out.fail(ParseFailure::stopped())),
         }
     }
 

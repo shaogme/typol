@@ -682,7 +682,8 @@ impl<'graph, 'symbols, 'src, 'context, 'diagnostics>
     }
 
     fn internal<'slot, T>(&mut self, out: Out<'slot, '_, BuildFailure>) -> OResult<'slot, T> {
-        self.diagnostics.push(schema_internal!(self.span));
+        self.diagnostics
+            .push(schema_internal!(self.diagnostics.translator(), self.span));
         Err(out.fail(BuildFailure::empty()))
     }
 }

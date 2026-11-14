@@ -57,7 +57,10 @@ impl AnnotationTaskCollector {
             .checked_add(symbols.fields().len())
             .and_then(|value| value.checked_add(symbols.variants().len()))
             .ok_or_else(|| {
-                diagnostics.push(EmergencyDiagnostics::resource(span));
+                diagnostics.push(EmergencyDiagnostics::resource(
+                    span,
+                    diagnostics.translator(),
+                ));
                 BuildFailure::empty()
             })
             .store_err_into(out.reborrow())?;
@@ -80,7 +83,7 @@ impl AnnotationTaskCollector {
                 (ObjectState::Valid, Some(target)) => target,
                 (ObjectState::Invalid | ObjectState::Ambiguous, None) => continue,
                 _ => {
-                    diagnostics.abort(schema_internal!(alias.span()));
+                    diagnostics.abort(schema_internal!(diagnostics.translator(), alias.span()));
                     return Err(out.fail(BuildFailure::empty()));
                 }
             };
@@ -115,7 +118,7 @@ impl AnnotationTaskCollector {
                 (ObjectState::Valid, Some(target)) => target,
                 (ObjectState::Invalid | ObjectState::Ambiguous, None) => continue,
                 _ => {
-                    diagnostics.abort(schema_internal!(field_span));
+                    diagnostics.abort(schema_internal!(diagnostics.translator(), field_span));
                     return Err(out.fail(BuildFailure::empty()));
                 }
             };
@@ -166,7 +169,7 @@ impl AnnotationTaskCollector {
                 (ObjectState::Valid, Some(target)) => target,
                 (ObjectState::Invalid | ObjectState::Ambiguous, None) => continue,
                 _ => {
-                    diagnostics.abort(schema_internal!(variant_span));
+                    diagnostics.abort(schema_internal!(diagnostics.translator(), variant_span));
                     return Err(out.fail(BuildFailure::empty()));
                 }
             };
@@ -259,7 +262,10 @@ impl AnnotationTaskCollector {
                 (TypeExprKind::Builtin(_), Some(ResolvedTypeKind::Builtin(_)))
                 | (TypeExprKind::Path(_), Some(_)) => None,
                 _ => {
-                    diagnostics.push(schema_internal!(frame.expression.span()));
+                    diagnostics.push(schema_internal!(
+                        diagnostics.translator(),
+                        frame.expression.span()
+                    ));
                     return Err(out.fail(BuildFailure::empty()));
                 }
             };
@@ -292,7 +298,7 @@ fn primary_annotation_span<'slot>(
     )? {
         Some(annotation) => Ok(annotation.span()),
         None => {
-            diagnostics.abort(schema_internal!(fallback));
+            diagnostics.abort(schema_internal!(diagnostics.translator(), fallback));
             Err(out.fail(BuildFailure::empty()))
         }
     }

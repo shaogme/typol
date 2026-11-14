@@ -52,7 +52,7 @@ impl Serde {
             Ok(value)
         }) {
             Ok(value) => Ok(SerdeValue { value }),
-            Err(error) => Err(out.fail(error.into_errors())),
+            Err(error) => Err(out.fail(error.into_errors(session.translator()))),
         }
     }
 
@@ -71,7 +71,7 @@ impl Serde {
             fault.complete(value, serde_out.reborrow())
         }) {
             Ok(value) => Ok(value),
-            Err(error) => Err(out.fail(error.into_errors())),
+            Err(error) => Err(out.fail(error.into_errors(session.translator()))),
         }
     }
 
@@ -143,7 +143,7 @@ impl Model {
             Ok(value)
         }) {
             Ok(value) => Ok(value),
-            Err(error) => Err(out.fail(error.into_errors())),
+            Err(error) => Err(out.fail(error.into_errors(session.translator()))),
         }
     }
 
@@ -162,7 +162,7 @@ impl Model {
             fault.complete(value, serde_out.reborrow())
         }) {
             Ok(value) => Ok(value),
-            Err(error) => Err(out.fail(error.into_errors())),
+            Err(error) => Err(out.fail(error.into_errors(session.translator()))),
         }
     }
 }

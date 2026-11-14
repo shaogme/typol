@@ -17,6 +17,7 @@ use typol_core::{
     BudgetError, ConfigValue, DiagnosticCode, ExecutionBudget, ExecutionLimits, SliceSource,
     TextLayout, ValueKind,
 };
+use typol_i18n::{Language, Translator};
 use typol_semantic::CompiledSchema;
 use typol_test_support::{
     TestExpect, TestExtract, TestFailure, TestResult, test_verify as assert,
@@ -65,6 +66,7 @@ fn session(output: usize) -> TestResult<SessionBudget> {
             ExecutionLimits::new(100_000_000, 67_108_864),
             100_000_000,
             output,
+            Translator::new(Language::English),
             out,
         )
     })
@@ -75,7 +77,15 @@ fn session_with_limits(
     text_limit: usize,
     output_limit: usize,
 ) -> TestResult<SessionBudget> {
-    TestOpeo::value(|out| SessionBudget::new(limits, text_limit, output_limit, out))
+    TestOpeo::value(|out| {
+        SessionBudget::new(
+            limits,
+            text_limit,
+            output_limit,
+            Translator::new(Language::English),
+            out,
+        )
+    })
 }
 
 fn cloned_budget(budget: &ExecutionBudget) -> TestResult<ExecutionBudget> {

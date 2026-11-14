@@ -1,6 +1,7 @@
 use crate::{LexEvent, TokenKind, input::InputConfig, lexer::Lexer, parser::SourcePositionIndex};
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 use typol_core::{Diagnostic, SourceSpan, diagnostic_context};
+use typol_i18n::Translator;
 
 /// Scans lexical events on demand and caches at most the current event and one lookahead event.
 pub struct TokenCursor<'src> {
@@ -18,9 +19,10 @@ impl<'src> TokenCursor<'src> {
 
     pub fn new<'slot, 'config>(
         config: InputConfig<'src, 'config>,
+        translator: Translator,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Self> {
-        let lexer = Lexer::new(config, out.reborrow())?;
+        let lexer = Lexer::new(config, translator, out.reborrow())?;
         Ok(Self {
             lexer,
             error_slot: ErrSlot::new(),

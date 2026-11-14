@@ -36,18 +36,18 @@ macro_rules! rejected_typol_impl {
 
             fn to_config_value<'slot, 'borrow>(
                 &self,
-                _: &mut ConversionContext<'_>,
+                context: &mut ConversionContext<'_>,
                 out: Out<'slot, 'borrow, CodecErrors>,
             ) -> OResult<'slot, ValueId> {
-                ConversionContext::reject(out)
+                ConversionContext::reject(context.session().translator(), out)
             }
 
             fn from_config_value<'slot, 'borrow>(
                 _value: ConversionValue<'_>,
-                _: &mut ConversionContext<'_>,
+                context: &mut ConversionContext<'_>,
                 out: Out<'slot, 'borrow, CodecErrors>,
             ) -> OResult<'slot, Self> {
-                ConversionContext::reject(out)
+                ConversionContext::reject(context.session().translator(), out)
             }
         }
     };
@@ -311,6 +311,7 @@ impl<const MODE: usize> Typol for Bad<MODE> {
             _ => {
                 let session = SessionBudget::codec_from_budget(
                     CodecStage::Binding,
+                    BindOptions::default().translator(),
                     |budget_out| SessionBudget::binding(BindOptions::default(), budget_out),
                     out.reborrow(),
                 )?;
@@ -323,18 +324,18 @@ impl<const MODE: usize> Typol for Bad<MODE> {
 
     fn to_config_value<'slot, 'borrow>(
         &self,
-        _: &mut ConversionContext<'_>,
+        context: &mut ConversionContext<'_>,
         out: Out<'slot, 'borrow, CodecErrors>,
     ) -> OResult<'slot, ValueId> {
-        ConversionContext::reject(out)
+        ConversionContext::reject(context.session().translator(), out)
     }
 
     fn from_config_value<'slot, 'borrow>(
         _value: ConversionValue<'_>,
-        _: &mut ConversionContext<'_>,
+        context: &mut ConversionContext<'_>,
         out: Out<'slot, 'borrow, CodecErrors>,
     ) -> OResult<'slot, Self> {
-        ConversionContext::reject(out)
+        ConversionContext::reject(context.session().translator(), out)
     }
 }
 
@@ -419,8 +420,9 @@ impl Typol for Empty {
         mut out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, ValueId> {
         context.start::<Self>(out.reborrow())?;
+        let translator = context.session().translator();
         context.structure(
-            |_, _, child_out| ConversionContext::reject(child_out),
+            |_, _, child_out| ConversionContext::reject(translator, child_out),
             out.reborrow(),
         )
     }
@@ -697,8 +699,9 @@ fn enum_map_and_nested_binding_errors_keep_specific_paths() -> TestResult {
         .diagnostics()
         .first()
         .test_expect("binding diagnostics should preserve a readable reason")?;
-    assert!(diagnostic.message().contains("field shape mismatch"));
-    assert!(diagnostic.message().contains("$.Root.child.Child.value"));
+    let message = diagnostic.message().test_value()?;
+    assert!(message.contains("field shape mismatch"));
+    assert!(message.contains("$.Root.child.Child.value"));
     Ok(())
 }
 

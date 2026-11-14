@@ -359,7 +359,7 @@ fn missing_required_environment_fails_all_original_fixtures_safely() -> TestResu
         assert_code(&errors, DiagnosticCode::CONFIG_VALUE_ERROR)?;
         test_eq!(errors.config_source_name(), Some(fixture.name))?;
         for diagnostic in errors.diagnostics() {
-            test_eq!(diagnostic.message(), "value is hidden")?;
+            test_eq!(diagnostic.message().test_value()?, "value is hidden")?;
             test_assert!(diagnostic.value_source().is_none())?;
             test_assert!(
                 errors
@@ -576,7 +576,7 @@ fn illegal_environment_never_uses_valid_fallback_or_exposes_secret_text() -> Tes
                     .is_some()
             )?;
             if case.name == case.fixture.required || case.name == "TYPOL_SECRET_TOKEN" {
-                test_eq!(diagnostic.message(), "value is hidden")?;
+                test_eq!(diagnostic.message().test_value()?, "value is hidden")?;
                 test_assert!(!format!("{errors:?}").contains("short"))?;
             }
         }

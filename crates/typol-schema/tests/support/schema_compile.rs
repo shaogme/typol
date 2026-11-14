@@ -1,7 +1,10 @@
+pub(super) use typol_test_support::TestOpeoOutcome;
+
 use typol_core::{
     BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read, SourceId,
     SourceReadError, Span, SpanError,
 };
+use typol_i18n::Translator;
 use typol_policy::RegexLimits;
 use typol_schema::{
     LocationFailure, LocationStatus, ResolverError, SchemaCompileContext,
@@ -13,7 +16,6 @@ use typol_semantic::{
     CompiledSchema, Constraint, ConstraintList, EvalError, SchemaAccessError, SchemaEvaluator,
 };
 use typol_syntax::{SchemaParseOptions, SchemaParser, SyntaxErrors};
-pub(super) use typol_test_support::TestOpeoOutcome;
 use typol_test_support::*;
 
 pub(super) struct SchemaCompileTestSupport;
@@ -150,13 +152,16 @@ impl SchemaCompileTestSupport {
         source: SchemaSource<'_, S>,
         resolver: &mut R,
     ) -> TestOpeoOutcome<CompileRun, SchemaCompileErrors> {
+        let translator = options.translator();
         let compiler = match Self::run_compiler(options) {
             TestOpeoOutcome::Value(compiler) => compiler,
             TestOpeoOutcome::Error(error) => return TestOpeoOutcome::Error(error),
         };
         let context = match TestOpeo::outcome(|out| compiler.context(out)) {
             TestOpeoOutcome::Value(context) => TestOpeoOutcome::Value(context),
-            TestOpeoOutcome::Error(error) => TestOpeoOutcome::Error(error.into()),
+            TestOpeoOutcome::Error(error) => {
+                TestOpeoOutcome::Error(SchemaCompileErrors::budget_failure(error, translator))
+            }
         };
         let context = match context {
             TestOpeoOutcome::Value(context) => context,
@@ -170,11 +175,12 @@ impl SchemaCompileTestSupport {
         options: SchemaCompileOptions,
         failure: SchemaCompileContextFailure,
     ) -> TestOpeoOutcome<CompiledSchema, SchemaCompileErrors> {
+        let translator = options.translator();
         let compiler = match Self::run_compiler(options) {
             TestOpeoOutcome::Value(compiler) => compiler,
             TestOpeoOutcome::Error(error) => return TestOpeoOutcome::Error(error),
         };
-        let context = match Self::compiler_context(&compiler) {
+        let context = match Self::compiler_context(&compiler, translator) {
             TestOpeoOutcome::Value(context) => context,
             TestOpeoOutcome::Error(error) => return TestOpeoOutcome::Error(error),
         };
@@ -184,7 +190,7 @@ impl SchemaCompileTestSupport {
                     TestOpeoOutcome::Value(compiler) => compiler,
                     TestOpeoOutcome::Error(error) => return TestOpeoOutcome::Error(error),
                 };
-                match Self::compiler_context(&other) {
+                match Self::compiler_context(&other, translator) {
                     TestOpeoOutcome::Value(context) => context,
                     TestOpeoOutcome::Error(error) => return TestOpeoOutcome::Error(error),
                 }
@@ -205,10 +211,13 @@ impl SchemaCompileTestSupport {
 
     fn compiler_context(
         compiler: &SchemaCompiler,
+        translator: Translator,
     ) -> TestOpeoOutcome<SchemaCompileContext, SchemaCompileErrors> {
         match TestOpeo::outcome(|out| compiler.context(out)) {
             TestOpeoOutcome::Value(context) => TestOpeoOutcome::Value(context),
-            TestOpeoOutcome::Error(error) => TestOpeoOutcome::Error(error.into()),
+            TestOpeoOutcome::Error(error) => {
+                TestOpeoOutcome::Error(SchemaCompileErrors::budget_failure(error, translator))
+            }
         }
     }
 

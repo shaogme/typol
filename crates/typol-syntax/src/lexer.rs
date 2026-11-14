@@ -2,18 +2,20 @@ mod block_string;
 
 use crate::{
     InputLimits, StreamLimits,
-    error::SyntaxDiagnostic,
+    error::{MessageBuild, SyntaxDiagnostic},
     input::{Input, InputConfig},
     parser::SourcePositionIndex,
     token::{CommentKind, Keyword, Symbol, Token, TokenKind},
 };
+use alloc::borrow::Cow;
 use block_string::{BlockStringContext, BlockStringDecoder};
 use opeo::{OResult, Out};
 use typol_core::{
-    ChargedString, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage,
-    ExecutionBudget, LocatedSpan, SourceLocation, SourceSpan, Span, diagnostic_context,
+    ChargedString, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, ExecutionBudget,
+    LocatedSpan, SourceLocation, SourceSpan, Span, diagnostic_context,
 };
-use typol_i18n::diagnostic_message;
+use typol_i18n::{Translator, t};
+use u18n::RenderError;
 
 pub(crate) struct Lexer<'input> {
     input: Input<'input>,
@@ -22,28 +24,32 @@ pub(crate) struct Lexer<'input> {
     budget: ExecutionBudget,
     positions: ChargedVec<(usize, u64)>,
     extended_positions: ChargedVec<(usize, SourceLocation)>,
+    translator: Translator,
     fatal: bool,
 }
 
 impl<'input> Lexer<'input> {
     pub(crate) fn new<'slot, 'config>(
         config: InputConfig<'input, 'config>,
+        translator: Translator,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Self> {
         let limits = config.resources;
         let stream = config.stream;
         let budget = config.budget;
-        let input = Input::new(config, out.reborrow())?;
+        let input = Input::new(config, translator, out.reborrow())?;
         let budget = budget.try_clone_with(out.reborrow(), |error| input.budget_error(error))?;
         let mark = input.mark();
         let span = SourceSpan::new(mark.source_id(), Span::empty());
-        let mut positions = SyntaxDiagnostic::new_vec(&budget, span, out.reborrow())?;
-        let extended_positions = SyntaxDiagnostic::new_vec(&budget, span, out.reborrow())?;
+        let mut positions = SyntaxDiagnostic::new_vec(&budget, span, translator, out.reborrow())?;
+        let extended_positions =
+            SyntaxDiagnostic::new_vec(&budget, span, translator, out.reborrow())?;
         if let Some(location) = mark.location() {
             SyntaxDiagnostic::try_push(
                 &mut positions,
                 (0, pack_position(location.start)),
                 span,
+                translator,
                 out.reborrow(),
             )?;
         }
@@ -54,6 +60,7 @@ impl<'input> Lexer<'input> {
             budget,
             positions,
             extended_positions,
+            translator,
             fatal: false,
         })
     }
@@ -129,6 +136,7 @@ impl<'input> Lexer<'input> {
                     &mut self.extended_positions,
                     (offset, point),
                     span.source_span(),
+                    self.translator,
                     out.reborrow(),
                 )?;
             }
@@ -136,6 +144,7 @@ impl<'input> Lexer<'input> {
                 &mut self.positions,
                 (offset, packed),
                 span.source_span(),
+                self.translator,
                 out.reborrow(),
             )?;
         }
@@ -185,10 +194,10 @@ impl<'input> Lexer<'input> {
             }
             let diagnostic = self.diagnostic(
                 start,
-                diagnostic_message!(
-                    "diagnostic.syntax.float_literal_requires_integer_part",
-                    "floating-point literals must include an integer part"
-                ),
+                t! {
+                    name: "diagnostic.syntax.float_literal_requires_integer_part",
+                    locale: self.translator,
+                },
                 out.reborrow(),
             )?;
             return Err(out.reborrow().fail(diagnostic));
@@ -202,6 +211,7 @@ impl<'input> Lexer<'input> {
                     limits: self.limits,
                     stream: self.stream,
                     budget: &self.budget,
+                    translator: self.translator,
                 };
                 return BlockStringDecoder::scan(context, start, out.reborrow());
             }
@@ -219,10 +229,10 @@ impl<'input> Lexer<'input> {
         self.input.advance(out.reborrow())?;
         let diagnostic = self.diagnostic(
             start,
-            diagnostic_message!(
-                "diagnostic.syntax.invalid_character",
-                "source contains an invalid character"
-            ),
+            t! {
+                name: "diagnostic.syntax.invalid_character",
+                locale: self.translator,
+            },
             out.reborrow(),
         )?;
         Err(out.reborrow().fail(diagnostic))
@@ -231,23 +241,21 @@ impl<'input> Lexer<'input> {
     fn diagnostic<'slot>(
         &self,
         start: LocatedSpan,
-        message: DiagnosticMessage<'static>,
+        message: Result<Cow<'static, str>, RenderError>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Diagnostic> {
-        let mut diagnostic = SyntaxDiagnostic::budgeted_with(
-            out.reborrow(),
-            |out| {
-                Diagnostic::try_new(
-                    DiagnosticCode::LEXICAL_ERROR,
-                    message,
-                    Some(&self.budget),
-                    out,
-                )
+        let located_span = self.input.span_from(start, out.reborrow())?;
+        let mut diagnostic = SyntaxDiagnostic::make(
+            MessageBuild {
+                code: DiagnosticCode::LEXICAL_ERROR,
+                span: located_span.source_span(),
+                budget: &self.budget,
+                translator: self.translator,
             },
-            |error| self.input.budget_error(error),
+            message,
+            out.reborrow(),
         )?;
-        let span = self.input.span_from(start, out.reborrow())?;
-        diagnostic.set_located_primary(Some(span));
+        diagnostic.set_located_primary(Some(located_span));
         Ok(diagnostic)
     }
 
@@ -270,9 +278,7 @@ impl<'input> Lexer<'input> {
             .checked_add(character.len_utf8())
             .is_none_or(|next| next > self.stream.max_token_bytes())
         {
-            return Err(out
-                .reborrow()
-                .fail(self.input.failure(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)));
+            return Err(out.reborrow().fail(self.input.resource_failure()));
         }
         self.input.advance(out.reborrow())
     }
@@ -290,9 +296,7 @@ impl<'input> Lexer<'input> {
                 .checked_add(character.len_utf8())
                 .is_none_or(|next| next > self.limits.max_string_bytes())
         {
-            return Err(out
-                .reborrow()
-                .fail(self.input.failure(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)));
+            return Err(out.reborrow().fail(self.input.resource_failure()));
         }
         SyntaxDiagnostic::budgeted_with(
             out,
@@ -314,10 +318,10 @@ impl<'input> Lexer<'input> {
                     if !paired {
                         let diagnostic = self.diagnostic(
                             start,
-                            diagnostic_message!(
-                                "diagnostic.syntax.invalid_line_ending",
-                                "a bare CR is not a valid line ending"
-                            ),
+                            t! {
+                                name: "diagnostic.syntax.invalid_line_ending",
+                                locale: self.translator,
+                            },
                             out.reborrow(),
                         )?;
                         return Err(out.reborrow().fail(diagnostic));
@@ -353,10 +357,10 @@ impl<'input> Lexer<'input> {
                     None if block => {
                         let diagnostic = self.diagnostic(
                             start,
-                            diagnostic_message!(
-                                "diagnostic.syntax.unterminated_block_comment",
-                                "block comment is unterminated"
-                            ),
+                            t! {
+                                name: "diagnostic.syntax.unterminated_block_comment",
+                                locale: self.translator,
+                            },
                             out.reborrow(),
                         )?;
                         Err(out.reborrow().fail(diagnostic))
@@ -375,10 +379,10 @@ impl<'input> Lexer<'input> {
                 if issue.is_none() {
                     issue = Some(self.diagnostic(
                         mark,
-                        diagnostic_message!(
-                            "diagnostic.syntax.invalid_line_ending",
-                            "a bare CR is not a valid line ending"
-                        ),
+                        t! {
+                            name: "diagnostic.syntax.invalid_line_ending",
+                            locale: self.translator,
+                        },
                         out.reborrow(),
                     )?);
                 }
@@ -447,10 +451,10 @@ impl<'input> Lexer<'input> {
             if hex.is_empty() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 let diagnostic = self.diagnostic(
                     start,
-                    diagnostic_message!(
-                        "diagnostic.syntax.malformed_hex_integer",
-                        "hexadecimal integer literal is malformed"
-                    ),
+                    t! {
+                        name: "diagnostic.syntax.malformed_hex_integer",
+                        locale: self.translator,
+                    },
                     out.reborrow(),
                 )?;
                 return Err(out.reborrow().fail(diagnostic));
@@ -466,10 +470,10 @@ impl<'input> Lexer<'input> {
             {
                 let diagnostic = self.diagnostic(
                     start,
-                    diagnostic_message!(
-                        "diagnostic.syntax.malformed_float",
-                        "floating-point literal is malformed"
-                    ),
+                    t! {
+                        name: "diagnostic.syntax.malformed_float",
+                        locale: self.translator,
+                    },
                     out.reborrow(),
                 )?;
                 return Err(out.reborrow().fail(diagnostic));
@@ -479,10 +483,10 @@ impl<'input> Lexer<'input> {
             if !text.bytes().all(|byte| byte.is_ascii_digit()) {
                 let diagnostic = self.diagnostic(
                     start,
-                    diagnostic_message!(
-                        "diagnostic.syntax.number_followed_by_identifier",
-                        "an identifier character cannot immediately follow a number"
-                    ),
+                    t! {
+                        name: "diagnostic.syntax.number_followed_by_identifier",
+                        locale: self.translator,
+                    },
                     out.reborrow(),
                 )?;
                 return Err(out.reborrow().fail(diagnostic));
@@ -515,10 +519,10 @@ impl<'input> Lexer<'input> {
                     None => {
                         let diagnostic = self.diagnostic(
                             start,
-                            diagnostic_message!(
-                                "diagnostic.syntax.unterminated_string",
-                                "string literal is unterminated"
-                            ),
+                            t! {
+                                name: "diagnostic.syntax.unterminated_string",
+                                locale: self.translator,
+                            },
                             out.reborrow(),
                         )?;
                         Err(out.reborrow().fail(diagnostic))
@@ -537,10 +541,10 @@ impl<'input> Lexer<'input> {
                         None => {
                             let diagnostic = self.diagnostic(
                                 mark,
-                                diagnostic_message!(
-                                    "diagnostic.syntax.incomplete_escape_sequence",
-                                    "string escape sequence is incomplete"
-                                ),
+                                t! {
+                                    name: "diagnostic.syntax.incomplete_escape_sequence",
+                                    locale: self.translator,
+                                },
                                 out.reborrow(),
                             )?;
                             Err(out.reborrow().fail(diagnostic))
@@ -558,10 +562,10 @@ impl<'input> Lexer<'input> {
                         if issue.is_none() {
                             issue = Some(self.diagnostic(
                                 mark,
-                                diagnostic_message!(
-                                    "diagnostic.syntax.unsupported_escape_sequence",
-                                    "string contains an unsupported escape sequence"
-                                ),
+                                t! {
+                                    name: "diagnostic.syntax.unsupported_escape_sequence",
+                                    locale: self.translator,
+                                },
                                 out.reborrow(),
                             )?);
                         }
@@ -572,10 +576,10 @@ impl<'input> Lexer<'input> {
                 if issue.is_none() {
                     issue = Some(self.diagnostic(
                         mark,
-                        diagnostic_message!(
-                            "diagnostic.syntax.unescaped_control_character",
-                            "string contains an unescaped control character"
-                        ),
+                        t! {
+                            name: "diagnostic.syntax.unescaped_control_character",
+                            locale: self.translator,
+                        },
                         out.reborrow(),
                     )?);
                 }

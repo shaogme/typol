@@ -11,7 +11,7 @@ use crate::{
 };
 use opeo::{OResult, Out};
 use typol_core::{ChargedString, ChargedVec};
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 use typol_semantic::{ProgramId, VariantRestrictionMode as CompiledVariantRestrictionMode};
 use typol_syntax::{
     Annotation, AnnotationData, AnnotationKind, BuiltinType, NumberLiteral, VariantRestrictionMode,
@@ -43,10 +43,11 @@ impl AnnotationRuleCompiler {
                 "target-type-missing"
             ))));
         };
-        let (value_kind, _) = match AnnotationValues::unwrap_option(types, target) {
-            Ok(value) => value,
-            Err(error) => return Err(out.fail(error)),
-        };
+        let (value_kind, _) =
+            match AnnotationValues::unwrap_option(types, target, context.budget.translator()) {
+                Ok(value) => value,
+                Err(error) => return Err(out.fail(error)),
+            };
         let kind = context.budget.ast_access(
             out.reborrow(),
             |ast_out| annotation.kind(ast_out),
@@ -61,10 +62,13 @@ impl AnnotationRuleCompiler {
         match data {
             AnnotationData::Min(_) | AnnotationData::Max(_) | AnnotationData::Range { .. } => {
                 let Some(builtin) = AnnotationValues::numeric_builtin(value_kind) else {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_numeric_only",
-                        "numeric bound annotations apply only to numeric types"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_numeric_only",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 };
                 let (min, max) = match data {
                     AnnotationData::Min(number) => (
@@ -107,10 +111,13 @@ impl AnnotationRuleCompiler {
                     }
                 };
                 if AnnotationValues::bounds_reversed(min, max) {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_numeric_bounds_reversed",
-                        "the minimum numeric constraint cannot exceed the maximum"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_numeric_bounds_reversed",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 }
                 Ok(CompiledAnnotation::Constraint(
                     ConstraintData::NumberBounds { min, max },
@@ -118,32 +125,44 @@ impl AnnotationRuleCompiler {
             }
             AnnotationData::Length { min, max } => {
                 if value_kind != ResolvedTypeKind::Builtin(BuiltinType::String) {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_length_requires_string",
-                        "@length applies only to string or option<string>"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_length_requires_string",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 }
                 let min =
                     AnnotationValues::parse_nonnegative_u64(min, context.budget, out.reborrow())?;
                 let Some(min) = min else {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_length_bounds_invalid",
-                        "@length bounds must be non-negative decimal integers within the u64 range"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_length_bounds_invalid",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 };
                 let max =
                     AnnotationValues::parse_nonnegative_u64(max, context.budget, out.reborrow())?;
                 let Some(max) = max else {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_length_bounds_invalid",
-                        "@length bounds must be non-negative decimal integers within the u64 range"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_length_bounds_invalid",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 };
                 if min > max {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_length_bounds_reversed",
-                        "the @length minimum cannot exceed the maximum"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_length_bounds_reversed",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 }
                 Ok(CompiledAnnotation::Constraint(
                     ConstraintData::LengthBounds { min, max },
@@ -152,8 +171,12 @@ impl AnnotationRuleCompiler {
             AnnotationData::Host | AnnotationData::Email => {
                 if value_kind != ResolvedTypeKind::Builtin(BuiltinType::String) {
                     return Err(out.fail(AnnotationError::Invalid(
-                    diagnostic_message!("diagnostic.schema.annotation_host_email_requires_string", "@host and @email apply only to string or option<string> and take no arguments"),
-                )));
+                        t! {
+                            name: "diagnostic.schema.annotation_host_email_requires_string",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 }
                 if kind == AnnotationKind::Host {
                     Ok(CompiledAnnotation::Constraint(ConstraintData::Host))
@@ -163,10 +186,13 @@ impl AnnotationRuleCompiler {
             }
             AnnotationData::Cidr(argument) => {
                 if value_kind != ResolvedTypeKind::Builtin(BuiltinType::String) {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_cidr_requires_string",
-                        "@cidr applies only to string or option<string>"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_cidr_requires_string",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 }
                 Ok(CompiledAnnotation::Constraint(ConstraintData::Cidr {
                     v4_only: argument.value().value(),
@@ -177,10 +203,13 @@ impl AnnotationRuleCompiler {
                     target_kind,
                     ResolvedTypeKind::Array { .. } | ResolvedTypeKind::Map(_)
                 ) {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_size_requires_collection",
-                        "@size applies only to arrays or maps"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_size_requires_collection",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 }
                 let (min, max) = AnnotationBounds::parse_collection_bounds(
                     bounds,
@@ -194,10 +223,13 @@ impl AnnotationRuleCompiler {
             }
             AnnotationData::Unique(argument) => {
                 let ResolvedTypeKind::Array { element, .. } = target_kind else {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_unique_requires_array",
-                        "@unique applies only to arrays"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_unique_requires_array",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 };
                 let by_name = match argument {
                     Some(argument) => Some(context.budget.ast_access(
@@ -215,10 +247,10 @@ impl AnnotationRuleCompiler {
                 };
                 let by = if let Some(path) = by_name {
                     let ResolvedTypeKind::User(owner) = element_kind else {
-                        return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                            "diagnostic.schema.annotation_unique_by_requires_struct_array",
-                            "@unique(by=...) applies only to arrays of structs"
-                        ))));
+                        return Err(out.fail(AnnotationError::Invalid(t! {
+                            name: "diagnostic.schema.annotation_unique_by_requires_struct_array",
+                            locale: context.budget.translator(),
+                        }.into())));
                     };
                     Some(AnnotationValues::resolve_unique_path(
                         UniquePathInput {
@@ -233,10 +265,13 @@ impl AnnotationRuleCompiler {
                 } else {
                     if matches!(element_kind, ResolvedTypeKind::User(owner) if symbols.type_symbol(owner).is_some_and(|item| matches!(item.declaration(), TypeDeclarationKind::Struct(_))))
                     {
-                        return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                            "diagnostic.schema.annotation_unique_by_required",
-                            "@unique on an array of structs must specify a by field path"
-                        ))));
+                        return Err(out.fail(AnnotationError::Invalid(
+                            t! {
+                                name: "diagnostic.schema.annotation_unique_by_required",
+                                locale: context.budget.translator(),
+                            }
+                            .into(),
+                        )));
                     }
                     None
                 };
@@ -249,10 +284,13 @@ impl AnnotationRuleCompiler {
                     target_kind,
                     ResolvedTypeKind::Array { .. } | ResolvedTypeKind::Map(_)
                 ) {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_all_requires_collection",
-                        "@all applies only to arrays or maps"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_all_requires_collection",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 }
                 Ok(CompiledAnnotation::Constraint(ConstraintData::All {
                     program: ProgramId::new(usize::MAX),
@@ -260,10 +298,13 @@ impl AnnotationRuleCompiler {
             }
             AnnotationData::Sum(bounds) => {
                 let ResolvedTypeKind::Array { element, .. } = target_kind else {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_sum_requires_numeric_array",
-                        "@sum applies only to numeric arrays"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_sum_requires_numeric_array",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 };
                 let Some(element_kind) = AnnotationValues::resolved_kind(types, element) else {
                     return Err(out.fail(AnnotationError::internal(schema_context!(
@@ -272,10 +313,13 @@ impl AnnotationRuleCompiler {
                     ))));
                 };
                 let Some(builtin) = AnnotationValues::numeric_builtin(element_kind) else {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_sum_requires_numeric_array",
-                        "@sum applies only to numeric arrays"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_sum_requires_numeric_array",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 };
                 let (min_value, max_value) = AnnotationBounds::parse_sum_bounds(
                     bounds,
@@ -284,10 +328,13 @@ impl AnnotationRuleCompiler {
                     out.reborrow(),
                 )?;
                 if AnnotationValues::bounds_reversed(min_value, max_value) {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_sum_bounds_reversed",
-                        "the @sum minimum cannot exceed the maximum"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_sum_bounds_reversed",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 }
                 Ok(CompiledAnnotation::Constraint(ConstraintData::SumBounds {
                     min: min_value,
@@ -296,10 +343,13 @@ impl AnnotationRuleCompiler {
             }
             AnnotationData::Variants { mode, names } => {
                 let ResolvedTypeKind::User(enum_symbol) = value_kind else {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_variants_target_invalid",
-                        "@variants applies only to enum or option<enum> types"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_variants_target_invalid",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 };
                 let Some(symbol) = symbols.type_symbol(enum_symbol) else {
                     return Err(out.fail(AnnotationError::internal(schema_context!(
@@ -308,10 +358,13 @@ impl AnnotationRuleCompiler {
                     ))));
                 };
                 if !matches!(symbol.declaration(), TypeDeclarationKind::Enum(_)) {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_variants_target_invalid",
-                        "@variants applies only to enum or option<enum> types"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_variants_target_invalid",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 }
                 let mut variants =
                     ChargedVec::new(Some(context.budget.execution()), out.reborrow())?;
@@ -348,30 +401,35 @@ impl AnnotationRuleCompiler {
                         LookupResult::Found(variant) => variant,
                         LookupResult::Missing | LookupResult::Ambiguous => {
                             return Err(out.fail(AnnotationError::InvalidAt {
-                                message: diagnostic_message!(
-                                    "diagnostic.schema.annotation_variants_unknown_name",
-                                    "@variants refers to an unknown enum variant"
-                                ),
+                                message: t! {
+                                    name: "diagnostic.schema.annotation_variants_unknown_name",
+                                    locale: context.budget.translator(),
+                                }
+                                .into(),
                                 span: item.span(),
                             }));
                         }
                     };
                     if variants.contains(&variant) {
                         return Err(out.fail(AnnotationError::InvalidAt {
-                            message: diagnostic_message!(
-                                "diagnostic.schema.annotation_variants_name_repeated",
-                                "@variants lists the same enum variant more than once"
-                            ),
+                            message: t! {
+                                name: "diagnostic.schema.annotation_variants_name_repeated",
+                                locale: context.budget.translator(),
+                            }
+                            .into(),
                             span: item.span(),
                         }));
                     }
                     variants.try_push(variant, out.reborrow())?;
                 }
                 if variants.is_empty() {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_variants_target_invalid",
-                        "@variants requires at least one enum variant"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_variants_target_invalid",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 }
                 variants.sort_unstable_by_key(|variant| variant.index());
                 let mode = match mode {
@@ -384,26 +442,41 @@ impl AnnotationRuleCompiler {
             }
             AnnotationData::Env(value) => {
                 if !matches!(layer, ConstraintLayer::Field) {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_env_requires_field",
-                        "@env can be used only on struct fields or anonymous struct variant fields"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_env_requires_field",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 }
-                let effective_builtin = match AnnotationValues::effective_builtin(types, target) {
+                let effective_builtin = match AnnotationValues::effective_builtin(
+                    types,
+                    target,
+                    context.budget.translator(),
+                ) {
                     Ok(result) => result,
                     Err(error) => return Err(out.fail(error)),
                 };
                 let Some((builtin, _)) = effective_builtin else {
                     return Err(out.fail(AnnotationError::Invalid(
-                    diagnostic_message!("diagnostic.schema.annotation_env_target_invalid", "@env targets must be string, bool, a numeric type, or a single-layer option of one of these types"),
-                )));
+                        t! {
+                            name: "diagnostic.schema.annotation_env_target_invalid",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 };
                 if !matches!(builtin, BuiltinType::String | BuiltinType::Bool)
                     && !AnnotationValues::is_numeric_builtin(builtin)
                 {
                     return Err(out.fail(AnnotationError::Invalid(
-                    diagnostic_message!("diagnostic.schema.annotation_env_target_invalid", "@env targets must be string, bool, a numeric type, or a single-layer option of one of these types"),
-                )));
+                        t! {
+                            name: "diagnostic.schema.annotation_env_target_invalid",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 }
                 let name = context.budget.ast_access(
                     out.reborrow(),
@@ -415,10 +488,13 @@ impl AnnotationRuleCompiler {
                     .execution()
                     .consume(name.len(), out.reborrow())?;
                 if !AnnotationValues::valid_environment_name(name) {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_env_name_invalid",
-                        "@env names must follow the environment variable identifier format"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_env_name_invalid",
+                            locale: context.budget.translator(),
+                        }
+                        .into(),
+                    )));
                 }
                 let owned =
                     ChargedString::copy(name, Some(context.budget.execution()), out.reborrow())?;
@@ -428,12 +504,13 @@ impl AnnotationRuleCompiler {
                 )))
             }
             AnnotationData::Secret => Ok(CompiledAnnotation::Secret),
-            AnnotationData::Regex(_) => {
-                Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                    "diagnostic.schema.annotation_metadata_not_value_rule",
-                    "metadata cannot be compiled as a value rule"
-                ))))
-            }
+            AnnotationData::Regex(_) => Err(out.fail(AnnotationError::Invalid(
+                t! {
+                    name: "diagnostic.schema.annotation_metadata_not_value_rule",
+                    locale: context.budget.translator(),
+                }
+                .into(),
+            ))),
         }
     }
 
@@ -466,9 +543,12 @@ fn required_typed_number<'slot>(
     let value = AnnotationValues::parse_typed_number(number, builtin, context, out.reborrow())?;
     match value {
         Some(value) => Ok(value),
-        None => Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-            "diagnostic.schema.annotation_numeric_bound_incompatible",
-            "numeric bound is incompatible with the target type"
-        )))),
+        None => Err(out.fail(AnnotationError::Invalid(
+            t! {
+                name: "diagnostic.schema.annotation_numeric_bound_incompatible",
+                locale: context.translator(),
+            }
+            .into(),
+        ))),
     }
 }

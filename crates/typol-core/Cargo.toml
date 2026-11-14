@@ -11,6 +11,7 @@ readme.workspace = true
 
 [dependencies]
 opeo.workspace = true
+u18n.workspace = true
 
 [dev-dependencies]
 typol-opeo-test-support.workspace = true

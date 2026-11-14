@@ -8,26 +8,26 @@ mod regex;
 mod rules;
 mod values;
 
+pub use comparison::{ComparisonOptions, ValueComparison};
+pub use copy::{CopyError, CopyOptions, CopyRequest, ValueCopy};
+pub use error::{EvalError, EvalFailure};
+pub use model::{ExecutionField, ExecutionModel, ExecutionType, ExecutionVariant};
+pub use numeric::Numeric;
+pub use regex::{RegexExecutionError, RegexExecutionFailure, RegexExecutor, RegexMatchOptions};
+pub use rules::{AllItemRequest, AllItemValue, SumBoundsRequest, ValueRules};
+pub use values::{Bindings, EvalKind, EvalValue};
+
 use crate::{
     ExpressionLiteral, ExpressionMethodInfo, FieldId, StoredBindingInfo, StoredExpressionArgument,
     StoredExpressionKind, StoredTypeKind, TypeId, TypedExpression, VariantId,
 };
 use core::{cell::RefCell, cmp::Ordering};
+use expression::ExpressionExecutor;
+use model::{FinishInputs, Local, MethodCall};
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 use typol_core::{DiagnosticContext, ExecutionBudget, ValueKind, diagnostic_context};
 use typol_model::{BinaryOperator, BuiltinType, UnaryOperator};
 use typol_policy::{RegexLimits, ValueLimits};
-
-pub use comparison::{ComparisonOptions, ValueComparison};
-pub use copy::{CopyError, CopyOptions, CopyRequest, ValueCopy};
-pub use error::{EvalError, EvalFailure};
-use expression::ExpressionExecutor;
-pub use model::{ExecutionField, ExecutionModel, ExecutionType, ExecutionVariant};
-use model::{FinishInputs, Local, MethodCall};
-pub use numeric::Numeric;
-pub use regex::{RegexExecutionError, RegexExecutionFailure, RegexExecutor, RegexMatchOptions};
-pub use rules::{AllItemRequest, AllItemValue, SumBoundsRequest, ValueRules};
-pub use values::{Bindings, EvalKind, EvalValue};
 
 pub(super) static EVALUATOR_INTERNAL: DiagnosticContext = diagnostic_context!(
     "typol-semantic",

@@ -1,4 +1,4 @@
-use crate::error::SyntaxDiagnostic;
+use crate::error::{MessageBuild, SyntaxDiagnostic};
 use core::{cell::Cell, error::Error, fmt, num::NonZeroUsize, str::from_utf8};
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
@@ -6,6 +6,7 @@ use typol_core::{
     LocatedSpan, Read, SourceId, SourceLocation, SourceReadError, SourceReadErrorKind, SourceSpan,
     Span, SpanLocation, diagnostic_context,
 };
+use typol_i18n::{Translator, t};
 
 /// Source and string ceilings for byte-stream lexing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -204,6 +205,7 @@ pub(crate) struct Input<'input> {
     column: NonZeroUsize,
     source_id: SourceId,
     budget: ExecutionBudget,
+    translator: Translator,
     invalid_utf8: bool,
     fatal: Cell<bool>,
 }
@@ -211,6 +213,7 @@ pub(crate) struct Input<'input> {
 impl<'input> Input<'input> {
     pub(crate) fn new<'slot, 'config>(
         config: InputConfig<'input, 'config>,
+        translator: Translator,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Self> {
         let InputConfig {
@@ -221,9 +224,9 @@ impl<'input> Input<'input> {
             budget,
         } = config;
         let initial_span = SourceSpan::new(source_id, Span::empty());
-        let window = SyntaxDiagnostic::new_vec(budget, initial_span, out.reborrow())?;
+        let window = SyntaxDiagnostic::new_vec(budget, initial_span, translator, out.reborrow())?;
         let budget = budget.try_clone_with(out.reborrow(), |error| {
-            SyntaxDiagnostic::budget(error, initial_span)
+            SyntaxDiagnostic::budget(error, initial_span, translator)
         })?;
         let mut input = Self {
             source,
@@ -240,6 +243,7 @@ impl<'input> Input<'input> {
             column: NonZeroUsize::MIN,
             source_id,
             budget,
+            translator,
             invalid_utf8: false,
             fatal: Cell::new(false),
         };
@@ -248,6 +252,7 @@ impl<'input> Input<'input> {
             &mut input.window,
             window_bytes,
             initial_span,
+            translator,
             out.reborrow(),
         )?;
         let zeros = [0; 256];
@@ -262,7 +267,7 @@ impl<'input> Input<'input> {
                         "zero-window-chunk-range"
                     ))));
             };
-            SyntaxDiagnostic::budgeted(initial_span, out.reborrow(), |out| {
+            SyntaxDiagnostic::budgeted(initial_span, translator, out.reborrow(), |out| {
                 input.window.extend_from_slice(chunk, out)
             })?;
         }
@@ -327,14 +332,12 @@ impl<'input> Input<'input> {
                 return Ok(None);
             }
             if remaining == 0 {
-                return Err(out
-                    .reborrow()
-                    .fail(self.failure(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)));
+                return Err(out.reborrow().fail(self.resource_failure()));
             }
             self.fetched = self
                 .fetched
                 .checked_add(count)
-                .ok_or_else(|| self.failure(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED))
+                .ok_or_else(|| self.resource_failure())
                 .store_err_into(out.reborrow())?;
             self.index = 0;
             self.length = count;
@@ -354,7 +357,7 @@ impl<'input> Input<'input> {
         self.index = self
             .index
             .checked_add(1)
-            .ok_or_else(|| self.failure(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED))
+            .ok_or_else(|| self.resource_failure())
             .store_err_into(out.reborrow())?;
         Ok(Some(byte))
     }
@@ -449,7 +452,6 @@ impl<'input> Input<'input> {
     ) -> OResult<'slot, Diagnostic> {
         self.invalid_utf8 = true;
         self.fatal.set(true);
-        let mut error = self.failure(DiagnosticCode::LEXICAL_ERROR);
         let Some(end) = self.offset.checked_add(self.pending_len) else {
             return Err(out
                 .reborrow()
@@ -466,7 +468,21 @@ impl<'input> Input<'input> {
                 "invalid-utf8-span-reversed"
             ))
         })?;
-        error.set_primary(Some(SourceSpan::new(self.source_id, span)));
+        let source_span = SourceSpan::new(self.source_id, span);
+        let mut error = SyntaxDiagnostic::make(
+            MessageBuild {
+                code: DiagnosticCode::LEXICAL_ERROR,
+                span: source_span,
+                budget: &self.budget,
+                translator: self.translator,
+            },
+            t! {
+                name: "diagnostic.syntax.invalid_utf8",
+                locale: self.translator,
+            },
+            out.reborrow(),
+        )?;
+        error.set_located_primary(Some(LocatedSpan::from(source_span)));
         Ok(error)
     }
 
@@ -490,7 +506,7 @@ impl<'input> Input<'input> {
         let offset = self
             .offset
             .checked_add(width)
-            .ok_or_else(|| self.failure(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED))
+            .ok_or_else(|| self.resource_failure())
             .store_err_into(out.reborrow())?;
         let (line, column) = if character == '\n' {
             let line = self
@@ -498,7 +514,7 @@ impl<'input> Input<'input> {
                 .get()
                 .checked_add(1)
                 .and_then(NonZeroUsize::new)
-                .ok_or_else(|| self.failure(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED))
+                .ok_or_else(|| self.resource_failure())
                 .store_err_into(out.reborrow())?;
             (line, NonZeroUsize::MIN)
         } else if !paired_cr {
@@ -507,7 +523,7 @@ impl<'input> Input<'input> {
                 .get()
                 .checked_add(1)
                 .and_then(NonZeroUsize::new)
-                .ok_or_else(|| self.failure(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED))
+                .ok_or_else(|| self.resource_failure())
                 .store_err_into(out.reborrow())?;
             (self.line, column)
         } else {
@@ -590,31 +606,39 @@ impl<'input> Input<'input> {
         Ok(span)
     }
 
-    pub(crate) fn failure(&self, code: DiagnosticCode) -> Diagnostic {
-        if matches!(
-            code,
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
-                | DiagnosticCode::ALLOCATION_FAILED
-                | DiagnosticCode::SOURCE_INPUT_ERROR
-                | DiagnosticCode::INTERNAL_ERROR
-        ) {
-            self.fatal.set(true);
-        }
-        let mut error = Diagnostic::emergency(code);
+    pub(crate) fn resource_failure(&self) -> Diagnostic {
+        self.fatal.set(true);
+        let mut error = SyntaxDiagnostic::emergency(
+            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+            t! {
+                name: "diagnostic.emergency.resource_limit_exceeded",
+                locale: self.translator,
+            },
+            self.mark().source_span(),
+        );
         error.set_located_primary(Some(self.mark()));
         error
     }
 
     pub(crate) fn internal_failure(&self, context: DiagnosticContext) -> Diagnostic {
         self.fatal.set(true);
-        let mut diagnostic = SyntaxDiagnostic::internal(context, self.mark().source_span());
+        let mut diagnostic =
+            SyntaxDiagnostic::internal(context, self.mark().source_span(), self.translator);
         diagnostic.set_located_primary(Some(self.mark()));
         diagnostic
     }
 
     pub(crate) fn source_error(&self, error: SourceReadError) -> Diagnostic {
         self.fatal.set(true);
-        let mut diagnostic = self.failure(error.diagnostic_code());
+        let mut diagnostic = SyntaxDiagnostic::emergency(
+            DiagnosticCode::SOURCE_INPUT_ERROR,
+            t! {
+                name: "diagnostic.emergency.source_input_error",
+                locale: self.translator,
+            },
+            self.mark().source_span(),
+        );
+        diagnostic.set_located_primary(Some(self.mark()));
         let mut context = error.context().unwrap_or_else(|| {
             diagnostic_context!("typol-syntax", "stream-input", "source-adapter-read")
         });
@@ -629,7 +653,8 @@ impl<'input> Input<'input> {
 
     pub(crate) fn budget_error(&self, error: BudgetError) -> Diagnostic {
         self.fatal.set(true);
-        let mut diagnostic = self.failure(error.diagnostic_code());
+        let mut diagnostic =
+            SyntaxDiagnostic::budget(error, self.mark().source_span(), self.translator);
         diagnostic.set_context(error.context());
         diagnostic
     }
@@ -651,19 +676,27 @@ mod tests {
         BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read,
         SliceSource, SourceId,
     };
+    use typol_i18n::{Language, Translator};
+    use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome};
 
     #[derive(Debug)]
     struct TestFailure;
+
+    impl From<OpeoTestFailure> for TestFailure {
+        fn from(_: OpeoTestFailure) -> Self {
+            Self
+        }
+    }
 
     type TestResult = Result<(), TestFailure>;
 
     fn call<T>(
         slot: &mut ErrSlot<Diagnostic>,
         operation: impl for<'slot> FnOnce(Out<'slot, 'slot, Diagnostic>) -> OResult<'slot, T>,
-    ) -> Result<T, Diagnostic> {
+    ) -> TestOpeoOutcome<T, Diagnostic> {
         match slot.try_call(operation) {
-            Ok(value) => Ok(value),
-            Err(caught) => Err(caught.take()),
+            Ok(value) => TestOpeoOutcome::Value(value),
+            Err(caught) => TestOpeoOutcome::Error(caught.take()),
         }
     }
 
@@ -688,19 +721,24 @@ mod tests {
                     stream: StreamLimits::default(),
                     budget: &budget,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
+        .test_value()
         .map_err(|_| TestFailure)?;
 
-        if call(&mut errors, |out| input.byte(3, out)).map_err(|_| TestFailure)? != Some(0x80)
+        if call(&mut errors, |out| input.byte(3, out))
+            .test_value()
+            .map_err(|_| TestFailure)?
+            != Some(0x80)
             || input.pending_len != 4
         {
             return Err(TestFailure);
         }
         let error = call(&mut errors, |out| input.byte(4, out))
-            .err()
-            .ok_or(TestFailure)?;
+            .test_error()
+            .map_err(|_| TestFailure)?;
         if error.code() != DiagnosticCode::INTERNAL_ERROR || input.pending_len != 4 {
             return Err(TestFailure);
         }
@@ -718,7 +756,11 @@ mod tests {
         {
             return Err(TestFailure);
         }
-        if call(&mut errors, |out| input.advance(out)).map_err(|_| TestFailure)? != '🦀' {
+        if call(&mut errors, |out| input.advance(out))
+            .test_value()
+            .map_err(|_| TestFailure)?
+            != '🦀'
+        {
             return Err(TestFailure);
         }
         if input.mark().span().end() != 4 || input.pending_len != 0 {

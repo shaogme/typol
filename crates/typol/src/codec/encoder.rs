@@ -1,3 +1,7 @@
+mod model;
+
+use model::{ENCODER_INVARIANT, EncoderModel, FieldsInput, Frame, ValueInput};
+
 use crate::{
     codec::literals::Literal,
     diagnostics::{CodecErrors, CodecStage, Failure},
@@ -9,53 +13,11 @@ use crate::{
 use core::fmt::LowerExp;
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
-    ChargedVec, ConfigValue, DiagnosticContext, EnvironmentReference, TextLayout, ValueEntries,
-    ValueEntryView, ValueScalar, ValueSource, ValueView, Write, WriteError, diagnostic_context,
+    ChargedVec, ConfigValue, EnvironmentReference, TextLayout, ValueEntries, ValueEntryView,
+    ValueScalar, ValueSource, Write, WriteError,
 };
-use typol_semantic::{FieldList, TypeView};
-
-static ENCODER_INVARIANT: DiagnosticContext =
-    diagnostic_context!("typol", "encoding", "encoder-invariant");
-
-struct ValueInput<'schema, 'value> {
-    ty: TypeView<'schema>,
-    value: ValueView<'value>,
-    indent: usize,
-}
-
-struct FieldsInput<'schema, 'value> {
-    fields: FieldList<'schema>,
-    values: ValueEntries<'value>,
-    indent: usize,
-}
-
-enum Frame<'schema, 'value> {
-    Value(ValueInput<'schema, 'value>),
-    Text(&'static str),
-    Fields {
-        fields: FieldList<'schema>,
-        values: ChargedVec<ValueEntryView<'value>>,
-        slots: ChargedVec<usize>,
-        next: usize,
-        indent: usize,
-    },
-    Array {
-        ty: TypeView<'schema>,
-        values: ChargedVec<ValueEntryView<'value>>,
-        next: usize,
-        indent: usize,
-    },
-    Map {
-        ty: TypeView<'schema>,
-        values: ChargedVec<ValueEntryView<'value>>,
-        slots: ChargedVec<usize>,
-        next: usize,
-        indent: usize,
-    },
-    EnumPayloadEnd {
-        indent: usize,
-    },
-}
+use typol_i18n::Translator;
+use typol_semantic::TypeView;
 
 pub(super) struct Encoder<'call> {
     session: &'call mut SessionBudget,
@@ -69,8 +31,8 @@ pub(super) struct EncoderOutput<'output> {
 }
 
 impl<'call> Encoder<'call> {
-    pub(super) fn invariant_error() -> CodecErrors {
-        encoding_error(Failure::internal(ENCODER_INVARIANT))
+    pub(super) fn invariant_error(translator: Translator) -> CodecErrors {
+        encoding_error(Failure::internal(ENCODER_INVARIANT), translator)
     }
 
     pub(super) fn run<'slot>(
@@ -124,7 +86,7 @@ impl<'call> Encoder<'call> {
         self.output
             .write_all(text.as_bytes())
             .map_err(write_failure)
-            .map_err(encoding_error)
+            .map_err(|failure| encoding_error(failure, self.session.translator()))
             .store_err_into(out)
     }
 
@@ -168,7 +130,7 @@ impl<'call> Encoder<'call> {
                 },
                 out.reborrow(),
             )?;
-            match Literal::escape(character, out.reborrow())? {
+            match Literal::escape(character, self.session.translator(), out.reborrow())? {
                 Some(escaped) => self.write(escaped, out.reborrow())?,
                 None => self.write(character.encode_utf8(&mut [0; 4]), out.reborrow())?,
             }
@@ -273,7 +235,9 @@ impl<'call> Encoder<'call> {
                     self.write(if *value { "true" } else { "false" }, out.reborrow())?;
                 }
                 ValueScalar::Float32(_) | ValueScalar::Float64(_) => {
-                    return Err(out.fail(encoding_error(Failure::Encoding)));
+                    return Err(
+                        out.fail(encoding_error(Failure::Encoding, self.session.translator()))
+                    );
                 }
             }
         }
@@ -331,7 +295,10 @@ impl<'call> Encoder<'call> {
                     | FieldIndexError::InvalidSlot
                     | FieldIndexError::MissingField => ENCODER_INVARIANT,
                 };
-                Err(invalid_out.fail(encoding_error(Failure::internal(context))))
+                Err(invalid_out.fail(encoding_error(
+                    Failure::internal(context),
+                    self.session.translator(),
+                )))
             },
             out.reborrow(),
         )?;
@@ -392,11 +359,21 @@ impl<'call> Encoder<'call> {
                 let slot = slots
                     .get(next)
                     .copied()
-                    .ok_or_else(|| encoding_error(Failure::internal(ENCODER_INVARIANT)))
+                    .ok_or_else(|| {
+                        encoding_error(
+                            Failure::internal(ENCODER_INVARIANT),
+                            self.session.translator(),
+                        )
+                    })
                     .store_err_into(out.reborrow())?;
                 let value = values
                     .get(slot)
-                    .ok_or_else(|| encoding_error(Failure::internal(ENCODER_INVARIANT)))
+                    .ok_or_else(|| {
+                        encoding_error(
+                            Failure::internal(ENCODER_INVARIANT),
+                            self.session.translator(),
+                        )
+                    })
                     .store_err_into(out.reborrow())?
                     .value();
                 let ty = self.session.schema_codec(
@@ -481,12 +458,18 @@ impl<'call> Encoder<'call> {
                 };
                 let entry = values
                     .get(*slot)
-                    .ok_or_else(|| encoding_error(Failure::internal(ENCODER_INVARIANT)))
+                    .ok_or_else(|| {
+                        encoding_error(
+                            Failure::internal(ENCODER_INVARIANT),
+                            self.session.translator(),
+                        )
+                    })
                     .store_err_into(out.reborrow())?;
                 let Some(entry) = entry.as_named() else {
-                    return Err(
-                        out.fail(encoding_error(Failure::internal(NAMED_ENTRY_NAME_MISSING)))
-                    );
+                    return Err(out.fail(encoding_error(
+                        Failure::internal(NAMED_ENTRY_NAME_MISSING),
+                        self.session.translator(),
+                    )));
                 };
                 let name = entry.name();
                 let value = entry.value();
@@ -536,16 +519,21 @@ impl<'call> Encoder<'call> {
             out.reborrow(),
         )?;
         let node = ValueNode::resolve(kind, value)
-            .ok_or_else(|| encoding_error(Failure::internal(ENCODER_INVARIANT)))
+            .ok_or_else(|| {
+                encoding_error(
+                    Failure::internal(ENCODER_INVARIANT),
+                    self.session.translator(),
+                )
+            })
             .store_err_into(out.reborrow())?;
         if let Some(reference) = value.environment_reference() {
             if !matches!(&node, ValueNodeKind::Optional { value: None, .. }) {
                 return self.environment_reference(reference, out.reborrow());
             }
-            return Err(out.fail(encoding_error(Failure::Encoding)));
+            return Err(out.fail(encoding_error(Failure::Encoding, self.session.translator())));
         }
         if value.source() == ValueSource::EnvironmentVariable {
-            return Err(out.fail(encoding_error(Failure::Encoding)));
+            return Err(out.fail(encoding_error(Failure::Encoding, self.session.translator())));
         }
         match node {
             ValueNodeKind::Signed { value, .. } => {
@@ -621,12 +609,16 @@ impl<'call> Encoder<'call> {
                 )?;
                 for slot in 0..values.len() {
                     let Some(entry) = values.get(slot) else {
-                        return Err(out.fail(encoding_error(Failure::internal(ENCODER_INVARIANT))));
+                        return Err(out.fail(encoding_error(
+                            Failure::internal(ENCODER_INVARIANT),
+                            self.session.translator(),
+                        )));
                     };
                     if entry.as_named().is_none() {
-                        return Err(
-                            out.fail(encoding_error(Failure::internal(NAMED_ENTRY_NAME_MISSING)))
-                        );
+                        return Err(out.fail(encoding_error(
+                            Failure::internal(NAMED_ENTRY_NAME_MISSING),
+                            self.session.translator(),
+                        )));
                     }
                     self.session.budget_codec(
                         CodecStage::Encoding,
@@ -642,24 +634,28 @@ impl<'call> Encoder<'call> {
                 slots.sort_by(
                     |left, right, mut sort_out| {
                         let Some(left_entry) = values.get(*left) else {
-                            return Err(
-                                sort_out.fail(encoding_error(Failure::internal(ENCODER_INVARIANT)))
-                            );
+                            return Err(sort_out.fail(encoding_error(
+                                Failure::internal(ENCODER_INVARIANT),
+                                self.session.translator(),
+                            )));
                         };
                         let Some(right_entry) = values.get(*right) else {
-                            return Err(
-                                sort_out.fail(encoding_error(Failure::internal(ENCODER_INVARIANT)))
-                            );
+                            return Err(sort_out.fail(encoding_error(
+                                Failure::internal(ENCODER_INVARIANT),
+                                self.session.translator(),
+                            )));
                         };
                         let Some(left_entry) = left_entry.as_named() else {
-                            return Err(sort_out.fail(encoding_error(Failure::internal(
-                                NAMED_ENTRY_NAME_MISSING,
-                            ))));
+                            return Err(sort_out.fail(encoding_error(
+                                Failure::internal(NAMED_ENTRY_NAME_MISSING),
+                                self.session.translator(),
+                            )));
                         };
                         let Some(right_entry) = right_entry.as_named() else {
-                            return Err(sort_out.fail(encoding_error(Failure::internal(
-                                NAMED_ENTRY_NAME_MISSING,
-                            ))));
+                            return Err(sort_out.fail(encoding_error(
+                                Failure::internal(NAMED_ENTRY_NAME_MISSING),
+                                self.session.translator(),
+                            )));
                         };
                         let order = self.session.budget_codec(
                             CodecStage::Encoding,
@@ -703,7 +699,10 @@ impl<'call> Encoder<'call> {
                     out.reborrow(),
                 )?;
                 let Some(variant) = variant else {
-                    return Err(out.fail(encoding_error(Failure::internal(ENCODER_INVARIANT))));
+                    return Err(out.fail(encoding_error(
+                        Failure::internal(ENCODER_INVARIANT),
+                        self.session.translator(),
+                    )));
                 };
                 self.write(".", out.reborrow())?;
                 let name = self.session.schema_codec(
@@ -719,7 +718,12 @@ impl<'call> Encoder<'call> {
                 )?;
                 let payload = value
                     .resolve_payload(variant_payload)
-                    .ok_or_else(|| encoding_error(Failure::internal(ENCODER_INVARIANT)))
+                    .ok_or_else(|| {
+                        encoding_error(
+                            Failure::internal(ENCODER_INVARIANT),
+                            self.session.translator(),
+                        )
+                    })
                     .store_err_into(out.reborrow())?;
                 match payload {
                     EnumPayloadValue::Unit => Ok(()),
@@ -765,7 +769,10 @@ impl<'call> Encoder<'call> {
                     }
                 }
             }
-            _ => Err(out.fail(encoding_error(Failure::internal(ENCODER_INVARIANT)))),
+            _ => Err(out.fail(encoding_error(
+                Failure::internal(ENCODER_INVARIANT),
+                self.session.translator(),
+            ))),
         }
     }
 
@@ -796,12 +803,7 @@ impl<'call> Encoder<'call> {
 }
 
 fn write_failure(error: WriteError) -> Failure {
-    match error {
-        WriteError::AllocationFailed => Failure::Allocation,
-        WriteError::CapacityExceeded => Failure::Capacity,
-        WriteError::HostFailure => Failure::Encoding,
-        WriteError::InternalInvariantFailure => Failure::internal(ENCODER_INVARIANT),
-    }
+    EncoderModel::write_failure(error)
 }
 
 fn push<'slot, 'schema, 'value>(
@@ -810,13 +812,9 @@ fn push<'slot, 'schema, 'value>(
     frame: Frame<'schema, 'value>,
     out: Out<'slot, '_, CodecErrors>,
 ) -> OResult<'slot, ()> {
-    session.budget_codec(
-        CodecStage::Encoding,
-        |budget_out| frames.try_push(frame, budget_out),
-        out,
-    )
+    EncoderModel::push(session, frames, frame, out)
 }
 
-fn encoding_error(failure: Failure) -> CodecErrors {
-    CodecErrors::emergency(CodecStage::Encoding, failure)
+fn encoding_error(failure: Failure, translator: Translator) -> CodecErrors {
+    EncoderModel::encoding_error(failure, translator)
 }

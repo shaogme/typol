@@ -13,6 +13,7 @@ use opeo::{OResult, Out};
 use typol_core::{
     ChargedVec, NamedValue, ValueEntries, ValueId, ValuePayload, ValuePayloadView, ValueView,
 };
+use typol_i18n::Translator;
 use typol_model::BuiltinType;
 use typol_semantic::{TypeKind, TypeView, VariantPayloadInfo};
 
@@ -149,7 +150,7 @@ impl BindingConversion {
         )?;
         if let Some(value) = fields.get(field_slot) {
             let Some(value) = value.as_named() else {
-                return Err(out.fail(Self::named_entry_name_error()));
+                return Err(out.fail(Self::named_entry_name_error(context.session().translator())));
             };
             let ordering = context.session().budget_codec(
                 CodecStage::Conversion,
@@ -174,7 +175,7 @@ impl BindingConversion {
         let mut selected = None;
         for value in fields {
             let Some(value) = value.as_named() else {
-                return Err(out.fail(Self::named_entry_name_error()));
+                return Err(out.fail(Self::named_entry_name_error(context.session().translator())));
             };
             let ordering = context.session().budget_codec(
                 CodecStage::Conversion,
@@ -534,16 +535,17 @@ impl BindingConversion {
                 out.reborrow(),
             )?;
             if value.as_named().is_none() {
-                return Err(out.fail(Self::named_entry_name_error()));
+                return Err(out.fail(Self::named_entry_name_error(context.session().translator())));
             }
         }
         Ok(())
     }
 
-    fn named_entry_name_error() -> CodecErrors {
+    fn named_entry_name_error(translator: Translator) -> CodecErrors {
         CodecErrors::emergency(
             CodecStage::Conversion,
             Failure::internal(NAMED_ENTRY_NAME_MISSING),
+            translator,
         )
     }
 }

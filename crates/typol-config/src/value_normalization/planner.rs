@@ -1,6 +1,9 @@
 use crate::{
-    diagnostics::{BudgetDiagnostic, DiagnosticFactory, NAMED_ENTRY_NAME_MISSING},
-    secret::SecretPolicy,
+    diagnostics::{
+        BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticFactory, LabelMessageRequest,
+        NAMED_ENTRY_NAME_MISSING,
+    },
+    secret::{SecretPolicy, SecretTypeContext},
     validation::Validator,
     value_normalization::model::{
         ChildRole, FieldsRequest, Input, NORMALIZE_FIELD_SLOT, NORMALIZE_MAP_CHILD_ROLE,
@@ -11,9 +14,9 @@ use crate::{
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
     BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticMessage, InstancePath,
-    ValueKind, ValuePayloadView, ValueSource, ValueView,
+    RelatedLocationRole, ValueKind, ValuePayloadView, ValueSource, ValueView,
 };
-use typol_i18n::diagnostic_message;
+use typol_i18n::{Translator, t};
 use typol_semantic::{TypeKind, VariantPayloadInfo};
 
 pub(super) struct NormalizePlanner;
@@ -83,7 +86,9 @@ impl NormalizePlanner {
             .nodes
             .checked_add(1)
             .filter(|nodes| *nodes <= state.limits.max_value_nodes())
-            .ok_or_else(|| BudgetDiagnostic::from_error(BudgetError::Resource))
+            .ok_or_else(|| {
+                BudgetDiagnostic::from_error(BudgetError::Resource, state.request.translator)
+            })
             .store_err_into(out.reborrow())?;
         Ok(())
     }
@@ -100,23 +105,26 @@ impl NormalizePlanner {
             |budget_out| path.copy(budget_out),
             out.reborrow(),
         )?;
-        let mut error = DiagnosticFactory::make_diagnostic(
-            DiagnosticCode::CONFIG_VALUE_ERROR,
-            if input.hidden {
-                diagnostic_message!("diagnostic.validation.value_hidden", "value is hidden")
+        let mut error = DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+            code: DiagnosticCode::CONFIG_VALUE_ERROR,
+            message: if input.hidden {
+                t! { name: "diagnostic.validation.value_hidden", locale: state.request.translator }
+                    .into()
             } else {
                 message
             },
-            state.request.primary,
-            Some(copied_path),
-            input.value.map(|_| {
+            primary: state.request.primary,
+            path: Some(copied_path),
+            value_source: input.value.map(|_| {
                 if input.schema_default {
                     ValueSource::SchemaDefault
                 } else {
                     ValueSource::RustValue
                 }
             }),
-        );
+            context: None,
+            translator: state.request.translator,
+        });
         let span = match input.field {
             Some(field) => NormalizeOps::schema_call(
                 &mut state.errors.schema,
@@ -131,11 +139,12 @@ impl NormalizePlanner {
         };
         DiagnosticFactory::add_label_message(
             &mut error,
-            span,
-            diagnostic_message!(
-                "diagnostic.label.type_or_field_defined_here",
-                "type or field defined here"
-            ),
+            LabelMessageRequest {
+                span,
+                message: t! { name: "diagnostic.label.type_or_field_defined_here", locale: state.request.translator },
+                role: RelatedLocationRole::TypeOrFieldDefinition,
+                translator: state.request.translator,
+            },
             out.reborrow(),
         )?;
         Ok(error)
@@ -169,10 +178,7 @@ impl NormalizePlanner {
                 state,
                 input,
                 path,
-                diagnostic_message!(
-                    "diagnostic.config.required_field_missing",
-                    "required field is missing"
-                ),
+                t! { name: "diagnostic.config.required_field_missing", locale: state.request.translator }.into(),
                 out.reborrow(),
             )?;
             return Err(out.fail(diagnostic));
@@ -185,10 +191,7 @@ impl NormalizePlanner {
                 state,
                 input,
                 path,
-                diagnostic_message!(
-                    "diagnostic.environment.expression_invalid",
-                    "environment source metadata requires Schema-complete validation"
-                ),
+                t! { name: "diagnostic.environment.expression_invalid", locale: state.request.translator }.into(),
                 out.reborrow(),
             )?;
             return Err(out.fail(diagnostic));
@@ -239,10 +242,7 @@ impl NormalizePlanner {
                         state,
                         input,
                         path,
-                        diagnostic_message!(
-                            "diagnostic.config.enum_variant_undeclared",
-                            "enum variant is undeclared"
-                        ),
+                        t! { name: "diagnostic.config.enum_variant_undeclared", locale: state.request.translator }.into(),
                         out.reborrow(),
                     )?;
                     return Err(out.fail(diagnostic));
@@ -271,9 +271,12 @@ impl NormalizePlanner {
                         NormalizeOps::reserve(&mut children, &mut state.errors, 1, out.reborrow())?;
                         let type_hidden = SecretPolicy::secret_type(
                             ty,
-                            Some(state.budget),
-                            &mut state.errors.schema,
-                            &mut state.errors.budget,
+                            SecretTypeContext {
+                                budget: Some(state.budget),
+                                schema_errors: &mut state.errors.schema.slot,
+                                budget_errors: &mut state.errors.budget.slot,
+                                translator: state.request.translator,
+                            },
                             out.reborrow(),
                         )?;
                         NormalizeOps::push(
@@ -315,10 +318,7 @@ impl NormalizePlanner {
                             state,
                             input,
                             path,
-                            diagnostic_message!(
-                                "diagnostic.config.enum_payload_shape_mismatch",
-                                "enum payload shape does not match"
-                            ),
+                            t! { name: "diagnostic.config.enum_payload_shape_mismatch", locale: state.request.translator }.into(),
                             out.reborrow(),
                         )?;
                         return Err(out.fail(diagnostic));
@@ -334,9 +334,12 @@ impl NormalizePlanner {
                 )?;
                 let type_hidden = SecretPolicy::secret_type(
                     element,
-                    Some(state.budget),
-                    &mut state.errors.schema,
-                    &mut state.errors.budget,
+                    SecretTypeContext {
+                        budget: Some(state.budget),
+                        schema_errors: &mut state.errors.schema.slot,
+                        budget_errors: &mut state.errors.budget.slot,
+                        translator: state.request.translator,
+                    },
                     out.reborrow(),
                 )?;
                 let hidden = input.hidden || type_hidden;
@@ -373,9 +376,12 @@ impl NormalizePlanner {
                 )?;
                 let type_hidden = SecretPolicy::secret_type(
                     ty,
-                    Some(state.budget),
-                    &mut state.errors.schema,
-                    &mut state.errors.budget,
+                    SecretTypeContext {
+                        budget: Some(state.budget),
+                        schema_errors: &mut state.errors.schema.slot,
+                        budget_errors: &mut state.errors.budget.slot,
+                        translator: state.request.translator,
+                    },
                     out.reborrow(),
                 )?;
                 let hidden = input.hidden || type_hidden;
@@ -387,7 +393,7 @@ impl NormalizePlanner {
                     )?;
                     Self::node(state, out.reborrow())?;
                     let Some(entry) = entry.as_named() else {
-                        return Err(out.fail(Self::missing_name_error()));
+                        return Err(out.fail(Self::missing_name_error(state.request.translator)));
                     };
                     let key = entry.name();
                     Self::text(state, key, out.reborrow())?;
@@ -459,10 +465,7 @@ impl NormalizePlanner {
                     state,
                     input,
                     path,
-                    diagnostic_message!(
-                        "diagnostic.config.value_shape_mismatch",
-                        "value shape does not match the schema type"
-                    ),
+                    t! { name: "diagnostic.config.value_shape_mismatch", locale: state.request.translator }.into(),
                     out.reborrow(),
                 )?;
                 return Err(out.fail(diagnostic));
@@ -505,7 +508,7 @@ impl NormalizePlanner {
                 out.reborrow(),
             )?;
             let Some(value) = value.as_named() else {
-                return Err(out.fail(Self::missing_name_error()));
+                return Err(out.fail(Self::missing_name_error(state.request.translator)));
             };
             let Some((slot, _)) = NormalizeOps::budget_call(
                 &mut state.errors.budget,
@@ -517,10 +520,7 @@ impl NormalizePlanner {
                     state,
                     input,
                     path,
-                    diagnostic_message!(
-                        "diagnostic.config.undeclared_object_field",
-                        "object contains an undeclared field"
-                    ),
+                    t! { name: "diagnostic.config.undeclared_object_field", locale: state.request.translator }.into(),
                     out.reborrow(),
                 )?;
                 return Err(out.fail(diagnostic));
@@ -528,7 +528,10 @@ impl NormalizePlanner {
             let slot_value = slots
                 .get_mut(slot)
                 .ok_or_else(|| {
-                    BudgetDiagnostic::from_error(BudgetError::invariant(&NORMALIZE_FIELD_SLOT))
+                    BudgetDiagnostic::from_error(
+                        BudgetError::invariant(&NORMALIZE_FIELD_SLOT),
+                        state.request.translator,
+                    )
                 })
                 .store_err_into(out.reborrow())?;
             if slot_value.replace(value.value()).is_some() {
@@ -536,10 +539,7 @@ impl NormalizePlanner {
                     state,
                     input,
                     path,
-                    diagnostic_message!(
-                        "diagnostic.config.duplicate_object_field_or_map_key",
-                        "duplicate object field"
-                    ),
+                    t! { name: "diagnostic.config.duplicate_object_field", locale: state.request.translator }.into(),
                     out.reborrow(),
                 )?;
                 return Err(out.fail(diagnostic));
@@ -561,7 +561,10 @@ impl NormalizePlanner {
                 .get(slot)
                 .copied()
                 .ok_or_else(|| {
-                    BudgetDiagnostic::from_error(BudgetError::invariant(&NORMALIZE_FIELD_SLOT))
+                    BudgetDiagnostic::from_error(
+                        BudgetError::invariant(&NORMALIZE_FIELD_SLOT),
+                        state.request.translator,
+                    )
                 })
                 .store_err_into(out.reborrow())?;
             let default = NormalizeOps::schema_call(
@@ -588,7 +591,7 @@ impl NormalizePlanner {
                 (None, MissingFieldDecision::OptionalNone | MissingFieldDecision::Required) => {
                     (None, false)
                 }
-                _ => return Err(out.fail(NormalizeOps::invariant_error())),
+                _ => return Err(out.fail(NormalizeOps::invariant_error(state.request.translator))),
             };
             let role = match input.value.map(ValueView::as_ref) {
                 Some(ValueKind::Enumeration { variant, .. }) => {
@@ -621,7 +624,10 @@ impl NormalizePlanner {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ()> {
         if text.len() > state.limits.max_string_bytes() {
-            return Err(out.fail(BudgetDiagnostic::from_error(BudgetError::Resource)));
+            return Err(out.fail(BudgetDiagnostic::from_error(
+                BudgetError::Resource,
+                state.request.translator,
+            )));
         }
         NormalizeOps::budget_call(
             &mut state.errors.budget,
@@ -635,7 +641,7 @@ impl NormalizePlanner {
         Ok(())
     }
 
-    fn missing_name_error() -> Diagnostic {
-        DiagnosticFactory::internal(NAMED_ENTRY_NAME_MISSING, None, None, None)
+    fn missing_name_error(translator: Translator) -> Diagnostic {
+        DiagnosticFactory::internal(NAMED_ENTRY_NAME_MISSING, None, None, None, translator)
     }
 }

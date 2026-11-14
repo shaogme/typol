@@ -7,6 +7,7 @@ use std::{
     string::{String, ToString},
     vec::Vec,
 };
+use typol_i18n::{Language, Translator};
 use typol_test_support::*;
 
 use typol_core::{
@@ -292,6 +293,7 @@ fn stage_four_handoff_uses_only_compiled_schema_token_cursor_and_core_values() -
                 stream: StreamLimits::default(),
                 budget: &execution,
             },
+            Translator::new(Language::English),
             out,
         )
     })
@@ -1228,7 +1230,7 @@ fn default_all_and_sum_report_arithmetic_errors_separately_from_constraint_failu
         let diagnostic = errors.diagnostics().first().test_value()?;
         test_verify_eq!(diagnostic.code(), DiagnosticCode::SCHEMA_SEMANTIC_ERROR);
         test_verify_eq!(
-            diagnostic.message(),
+            diagnostic.message().test_value()?,
             case.expected_message,
             "{}",
             case.source
@@ -1372,20 +1374,20 @@ fn all_default_failures_redact_messages_values_and_debug_in_every_secret_context
         test_verify_eq!(errors.location_status(), LocationStatus::Complete);
         for diagnostic in errors.diagnostics() {
             test_verify_eq!(
-                diagnostic.message(),
+                diagnostic.message().test_value()?,
                 "schema default does not satisfy the @all constraint"
             );
             let primary = diagnostic.primary().test_value()?;
             test_verify!(errors.span_location(primary).is_some());
             test_verify_eq!(diagnostic.labels().len(), 1);
             let label = &diagnostic.labels().first().test_value()?;
-            test_verify_eq!(label.message(), "constraint is defined here");
+            test_verify_eq!(label.message(), "constraint defined here");
             let span = label.span().span();
             test_verify!(source[span.start()..span.end()].starts_with("@all("));
             test_verify!(errors.span_location(label.span()).is_some());
             let debug = format!("{diagnostic:?} {label:?} {errors:?}");
             for secret in ["PRIVATE-MESSAGE", "PRIVATE-VALUE"] {
-                test_verify!(!diagnostic.message().contains(secret));
+                test_verify!(!diagnostic.message().test_value()?.contains(secret));
                 test_verify!(!label.message().contains(secret));
                 test_verify!(!debug.contains(secret));
             }
@@ -1490,7 +1492,12 @@ fn recoverable_import_errors_preserve_independent_semantic_checks() -> TestResul
         .test_error()?;
     test_verify_eq!(diagnostic_codes(&errors), [7, 7]);
     test_verify_eq!(
-        errors.diagnostics().first().test_value()?.message(),
+        errors
+            .diagnostics()
+            .first()
+            .test_value()?
+            .message()
+            .test_value()?,
         "imported schema file does not exist"
     );
     let span = errors
@@ -1543,24 +1550,29 @@ fn non_constructible_recursive_types_skip_derived_default_errors() -> TestResult
         .compile("root", source, &SchemaLimits::default())
         .test_error()?;
     test_verify_eq!(diagnostic_codes(&errors), [7]);
-    test_verify!(
-        errors
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.message() == "recursive type has no finite value")
-    );
+    test_verify!(errors.diagnostics().iter().any(|diagnostic| {
+        diagnostic
+            .message()
+            .unwrap_or("diagnostic rendering failed")
+            == "recursive type has no finite value"
+    }));
     let recursive = errors
         .diagnostics()
         .iter()
-        .find(|diagnostic| diagnostic.message() == "recursive type has no finite value")
+        .find(|diagnostic| {
+            diagnostic
+                .message()
+                .unwrap_or("diagnostic rendering failed")
+                == "recursive type has no finite value"
+        })
         .test_value()?;
     test_verify_eq!(recursive.labels().len(), 1);
-    test_verify!(
-        !errors
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.message() == "default value has recursive expansion")
-    );
+    test_verify!(!errors.diagnostics().iter().any(|diagnostic| {
+        diagnostic
+            .message()
+            .unwrap_or("diagnostic rendering failed")
+            == "default value has recursive expansion"
+    }));
 
     Ok(())
 }
@@ -1571,18 +1583,18 @@ fn invalid_references_do_not_cascade_into_recursive_type_diagnostics() -> TestRe
     let errors = MemoryResolver::new()
         .compile("root", source, &SchemaLimits::default())
         .test_error()?;
-    test_verify!(
-        errors
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| { diagnostic.message() == "unknown type path" })
-    );
-    test_verify!(
-        errors
-            .diagnostics()
-            .iter()
-            .all(|diagnostic| { diagnostic.message() != "recursive type has no finite value" })
-    );
+    test_verify!(errors.diagnostics().iter().any(|diagnostic| {
+        diagnostic
+            .message()
+            .unwrap_or("diagnostic rendering failed")
+            == "unknown type path"
+    }));
+    test_verify!(errors.diagnostics().iter().all(|diagnostic| {
+        diagnostic
+            .message()
+            .unwrap_or("diagnostic rendering failed")
+            != "recursive type has no finite value"
+    }));
 
     Ok(())
 }
@@ -1607,10 +1619,13 @@ fn failed_import_slots_do_not_shift_successful_targets_or_repeat_path_errors() -
         .collect();
     test_verify_eq!(semantic.len(), 3);
     test_verify_eq!(
-        semantic.first().test_value()?.message(),
+        semantic.first().test_value()?.message().test_value()?,
         "imported schema file does not exist"
     );
-    test_verify_eq!(semantic.get(1).test_value()?.message(), "unknown type path");
+    test_verify_eq!(
+        semantic.get(1).test_value()?.message().test_value()?,
+        "unknown type path"
+    );
     test_verify_eq!(
         semantic
             .get(1)
@@ -1663,23 +1678,32 @@ fn recursive_and_incomplete_dependencies_skip_defaults_but_check_independent_fie
             .compile("root", source, &SchemaLimits::default())
             .test_error()?;
         test_verify!(
-            errors
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.message().contains("range")),
+            errors.diagnostics().iter().any(|diagnostic| {
+                diagnostic
+                    .message()
+                    .unwrap_or("diagnostic rendering failed")
+                    .contains("range")
+            }),
             "independent defaults should be checked: {source}; {:?}",
             errors
                 .diagnostics()
                 .iter()
-                .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+                .map(|diagnostic| {
+                    (
+                        diagnostic.code(),
+                        diagnostic
+                            .message()
+                            .unwrap_or("diagnostic rendering failed"),
+                    )
+                })
                 .collect::<Vec<_>>()
         );
-        test_verify!(
-            !errors
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.message() == "default value has recursive expansion")
-        );
+        test_verify!(!errors.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message()
+                .unwrap_or("diagnostic rendering failed")
+                == "default value has recursive expansion"
+        }));
         test_verify!(
             errors
                 .diagnostics()
@@ -1784,12 +1808,12 @@ fn assertions_depending_on_invalid_root_do_not_add_derived_errors() -> TestResul
         .compile("root", source, &SchemaLimits::default())
         .test_error()?;
     test_verify_eq!(diagnostic_codes(&errors), [7, 7]);
-    test_verify!(
-        !errors
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.message() == "field type is unavailable")
-    );
+    test_verify!(!errors.diagnostics().iter().any(|diagnostic| {
+        diagnostic
+            .message()
+            .unwrap_or("diagnostic rendering failed")
+            == "field type is unavailable"
+    }));
 
     Ok(())
 }

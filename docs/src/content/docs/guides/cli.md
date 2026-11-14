@@ -7,7 +7,7 @@ sidebar:
 
 The `typol` command line tool checks and formats `.tschem` schemas, validates and formats `.tconf` files, and exports configuration values as typed JSON. It complements the [Rust quick start](../quickstart/): use the CLI to check or format files directly, or use the Rust library when your application needs to load values itself.
 
-The CLI supports English and Simplified Chinese. Help, command-line errors, operation messages, and detailed schema and configuration diagnostics use the same selected language. The CLI checks are rendered from the build-time `u18n` catalogs in `typol-i18n`.
+The CLI supports English and Simplified Chinese. Help, command-line errors, operation messages, and diagnostics use the same selected language. The CLI selects the language before Schema compilation and configuration reads run. Each diagnostic stores the translated reason it produced; text reports and JSON serialization use that stored reason. The CLI checks are rendered from build-time translation catalogs.
 
 ## Build and run
 
@@ -116,7 +116,9 @@ typol config fmt --schema <schema.tschem> [--environment inherit|empty] [--check
 - `--pretty` is available only for `config export-ir`.
 - `--reject-secrets` is available only for `config export-ir`; it prevents output when any secret marker is present.
 - `--check` is available for `schema fmt` and `config fmt`; it checks formatting without writing the file.
-- `--language en|zh-CN` selects the language for CLI messages and detailed diagnostics, and must appear before the command. `TYPOL_LANG` can set the same preference.
+- `--language en|zh-CN` selects the language for CLI messages and diagnostics, and must appear before the command. `TYPOL_LANG` can set the same preference.
+- `--format text|json` selects human-readable diagnostics (the default) or versioned JSON diagnostics. Put this global option before the command.
+- `--diagnostic-detail` adds captured internal `DiagnosticContext` fields to JSON diagnostics. It requires `--format=json` and must appear before the command.
 - `-h` and `--help` print command help. For example, use `typol --help`, `typol schema check --help`, or `typol config export-ir --help`.
 - Put `--` before a Schema or configuration path that begins with `-`, so it is treated as a path rather than an option.
 
@@ -124,7 +126,7 @@ The CLI accepts file paths; it does not read Schema or configuration text from s
 
 ## Output and exit status
 
-Successful check commands and format commands are quiet. `schema fmt --check` and `config fmt --check` write a localized message to standard error when formatting is needed. `config export-ir` writes JSON to standard output. Diagnostics and command-line errors go to standard error.
+Successful check commands and format commands are quiet. `schema fmt --check` and `config fmt --check` write a localized message to standard error when formatting is needed. `config export-ir` writes JSON to standard output. Diagnostics go to standard error in either format; `--format=json` never changes the IR output stream. A JSON diagnostic document has `schema_version: 1`, a machine diagnostic `kind` (independent of translation catalog keys), category, operation and diagnostic stages, and status-bearing location, path, and value-source fields. Standard mode omits internal context; detailed mode adds it only when the error captured it. JSON `reason` strings are the completed diagnostic text produced during the operation, so they reflect the `--language` passed before the command and cannot be changed during serialization.
 
 | Status | Meaning |
 | ---: | --- |

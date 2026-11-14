@@ -1,4 +1,6 @@
-use super::{AstAccessError, BuiltinType, Declaration, Id, ListId, Name, Storage, TextRef};
+use super::{
+    AstAccessError, BuiltinType, Declaration, Id, ListId, Name, Storage, StorageOptions, TextRef,
+};
 use crate::{
     SyntaxLimits,
     ast::{ModuleDecl, Name as NameView},
@@ -8,6 +10,7 @@ use typol_core::{
     BudgetError, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits,
     SourceId, SourceSpan, Span, SpanError,
 };
+use typol_i18n::{Language, Translator};
 use typol_test_support::TestSlot;
 
 #[derive(Debug)]
@@ -76,8 +79,20 @@ fn construction_rejects_foreign_and_out_of_bounds_spans_without_mutation() -> Te
             .access(|out| Span::new(0, 3, out))
             .test_value()?,
     );
+    let limits = SyntaxLimits::default();
     let mut storage = diagnostic_errors
-        .access(|out| Storage::new(source_id, 3, &SyntaxLimits::default(), &execution, out))
+        .access(|out| {
+            Storage::new(
+                StorageOptions {
+                    source_id,
+                    source_limit: 3,
+                    limits: &limits,
+                    execution: &execution,
+                    translator: Translator::new(Language::English),
+                },
+                out,
+            )
+        })
         .test_value()?;
     let name = diagnostic_errors
         .access(|out| storage.name_try_new("abc", valid, out))
@@ -104,14 +119,14 @@ fn construction_rejects_foreign_and_out_of_bounds_spans_without_mutation() -> Te
                 .access(|out| storage.name_try_new("bad", invalid, out))
                 .test_error()?
                 .code(),
-            DiagnosticCode::SCHEMA_SYNTAX_ERROR
+            DiagnosticCode::INTERNAL_ERROR
         );
         test_assert_eq!(
             diagnostic_errors
                 .access(|out| storage.expr_set_span(expression, invalid, out))
                 .test_error()?
                 .code(),
-            DiagnosticCode::SCHEMA_SYNTAX_ERROR
+            DiagnosticCode::INTERNAL_ERROR
         );
         test_assert_eq!(
             access_errors
@@ -133,7 +148,7 @@ fn construction_rejects_foreign_and_out_of_bounds_spans_without_mutation() -> Te
             .access(|out| TypeBuilder::type_path_new(&mut storage, empty_segments, valid, out))
             .test_error()?
             .code(),
-        DiagnosticCode::SCHEMA_SYNTAX_ERROR
+        DiagnosticCode::INTERNAL_ERROR
     );
     test_assert!(storage.type_path.is_empty());
     test_assert!(storage.name_edges.is_empty());
@@ -161,7 +176,18 @@ fn rejected_node_growth_does_not_mutate_tables_text_or_counter() -> TestResult {
     let mut limits = SyntaxLimits::default();
     limits.set_max_schema_ast_nodes(1);
     let mut storage = diagnostic_errors
-        .access(|out| Storage::new(source, 3, &limits, &execution, out))
+        .access(|out| {
+            Storage::new(
+                StorageOptions {
+                    source_id: source,
+                    source_limit: 3,
+                    limits: &limits,
+                    execution: &execution,
+                    translator: Translator::new(Language::English),
+                },
+                out,
+            )
+        })
         .test_value()?;
     let name = diagnostic_errors
         .access(|out| storage.name_try_new("abc", span, out))
@@ -184,7 +210,18 @@ fn rejected_node_growth_does_not_mutate_tables_text_or_counter() -> TestResult {
     limits.set_max_schema_ast_nodes(10);
     limits.set_max_nesting_depth(usize::MAX);
     let mut storage = diagnostic_errors
-        .access(|out| Storage::new(source, 3, &limits, &execution, out))
+        .access(|out| {
+            Storage::new(
+                StorageOptions {
+                    source_id: source,
+                    source_limit: 3,
+                    limits: &limits,
+                    execution: &execution,
+                    translator: Translator::new(Language::English),
+                },
+                out,
+            )
+        })
         .test_value()?;
     let child = diagnostic_errors
         .access(|mut out| {
@@ -231,8 +268,20 @@ fn invalid_node_ids_fail_reads_and_writes_without_mutating_live_nodes() -> TestR
             .access(|out| Span::new(0, 2, out))
             .test_value()?,
     );
+    let limits = SyntaxLimits::default();
     let mut storage = diagnostic_errors
-        .access(|out| Storage::new(source_id, 3, &SyntaxLimits::default(), &execution, out))
+        .access(|out| {
+            Storage::new(
+                StorageOptions {
+                    source_id,
+                    source_limit: 3,
+                    limits: &limits,
+                    execution: &execution,
+                    translator: Translator::new(Language::English),
+                },
+                out,
+            )
+        })
         .test_value()?;
     let name = diagnostic_errors
         .access(|out| storage.name_try_new("abc", span, out))
@@ -286,8 +335,20 @@ fn invalid_list_ranges_return_access_errors() -> TestResult {
             .access(|out| Span::new(0, 1, out))
             .test_value()?,
     );
+    let limits = SyntaxLimits::default();
     let mut storage = diagnostic_errors
-        .access(|out| Storage::new(source_id, 1, &SyntaxLimits::default(), &execution, out))
+        .access(|out| {
+            Storage::new(
+                StorageOptions {
+                    source_id,
+                    source_limit: 1,
+                    limits: &limits,
+                    execution: &execution,
+                    translator: Translator::new(Language::English),
+                },
+                out,
+            )
+        })
         .test_value()?;
     let out_of_bounds = ListId::<Id<Name>>::new(0, 1);
     let reversed = ListId::<Id<Name>>::new(1, 0);
@@ -349,8 +410,20 @@ fn invalid_text_ranges_and_decoded_indices_return_access_errors() -> TestResult 
             .access(|out| Span::new(0, 3, out))
             .test_value()?,
     );
+    let limits = SyntaxLimits::default();
     let mut storage = diagnostic_errors
-        .access(|out| Storage::new(source_id, 3, &SyntaxLimits::default(), &execution, out))
+        .access(|out| {
+            Storage::new(
+                StorageOptions {
+                    source_id,
+                    source_limit: 3,
+                    limits: &limits,
+                    execution: &execution,
+                    translator: Translator::new(Language::English),
+                },
+                out,
+            )
+        })
         .test_value()?;
     let name = diagnostic_errors
         .access(|out| storage.name_try_new("abc", span, out))

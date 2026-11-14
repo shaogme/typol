@@ -1,5 +1,10 @@
+mod json;
+
 use std::{
+    borrow::Cow,
     boxed::Box,
+    error::Error,
+    fmt,
     fs::File,
     io::{self, Read as IoRead, Write},
     path::Path,
@@ -12,8 +17,8 @@ use typol::{
     SchemaParser, SourceExpectation, SourceWriter, SyntaxErrors, TypolError, TypolOptions,
     ValidatedConfigValue,
     core::{
-        DiagnosticCode, ExcerptLimits, ExecutionBudget, ExecutionLimits, SourceCapture,
-        SourceExcerptSet, SourceId, SourceLocation, SourceSpan,
+        DiagnosticCode, DiagnosticFailure, ExecutionBudget, ExecutionLimits, SourceId,
+        SourceLocation, SourceSpan,
     },
     host::{
         DiagnosticContext, DiagnosticRenderError, DiagnosticRenderer, DiagnosticReport,
@@ -26,27 +31,83 @@ use typol::{
 use typol_i18n::{Translator, t};
 use u18n::RenderError;
 
-use crate::arguments::{Command, ConfigRequest, EnvironmentMode, SchemaFormatRequest};
+use crate::{
+    arguments::{Command, ConfigRequest, EnvironmentMode, OutputFormat, SchemaFormatRequest},
+    commands::json::{DiagnosticJson, SchemaExcerptCapture, SyntaxJsonRequest},
+};
+
+#[derive(Debug)]
+pub enum CommandError {
+    Translation(RenderError),
+    Diagnostic(DiagnosticFailure),
+}
+
+impl From<RenderError> for CommandError {
+    fn from(error: RenderError) -> Self {
+        Self::Translation(error)
+    }
+}
+
+impl From<DiagnosticFailure> for CommandError {
+    fn from(error: DiagnosticFailure) -> Self {
+        Self::Diagnostic(error)
+    }
+}
+
+impl fmt::Display for CommandError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Translation(error) => fmt::Display::fmt(error, formatter),
+            Self::Diagnostic(error) => fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for CommandError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Translation(error) => Some(error),
+            Self::Diagnostic(error) => Some(error),
+        }
+    }
+}
 
 type LoadResult<T> = Result<T, Box<TypolError>>;
-type TranslationResult<T> = Result<T, RenderError>;
+type TranslationResult<T> = Result<T, CommandError>;
+type LocalizedText = Result<Cow<'static, str>, RenderError>;
+
+struct SchemaSyntaxFailure<'a> {
+    errors: &'a SyntaxErrors,
+    path: &'a Path,
+    source: &'a str,
+    budget: &'a ExecutionBudget,
+    translator: Translator,
+    output_format: OutputFormat,
+    detailed_diagnostics: bool,
+}
 
 pub struct Commands;
 
 impl Commands {
-    pub fn help(translator: Translator) -> TranslationResult<ExitCode> {
-        let help = t!("cli.help", locale = translator)?;
+    pub fn help(
+        translator: Translator,
+        output_format: OutputFormat,
+    ) -> TranslationResult<ExitCode> {
+        let help = t! { name: "cli.help", locale: translator }?;
         let mut stdout = io::stdout().lock();
         if stdout.write_all(help.as_bytes()).is_ok() {
             Ok(ExitCode::SUCCESS)
         } else {
-            Self::operation_failure(t!("cli.write_stdout_error", locale = translator))
+            Self::operation_failure(
+                t! { name: "cli.write_stdout_error", locale: translator },
+                output_format,
+            )
         }
     }
 
     pub fn usage_error(message: &str, translator: Translator) -> TranslationResult<ExitCode> {
-        let help = t!("cli.help", locale = translator)?;
-        let prefix = t!("cli.error_prefix", locale = translator)?;
+        let help = t! { name: "cli.help", locale: translator }?;
+        let prefix = t! { name: "cli.error_prefix", locale: translator }?;
         let mut stderr = io::stderr().lock();
         let write_result = stderr
             .write_all(prefix.as_bytes())
@@ -56,37 +117,66 @@ impl Commands {
         Ok(Self::result_code(2, write_result.is_ok()))
     }
 
-    pub fn run(command: &Command, translator: Translator) -> TranslationResult<ExitCode> {
+    pub fn run(
+        command: &Command,
+        translator: Translator,
+        output_format: OutputFormat,
+        detailed_diagnostics: bool,
+    ) -> TranslationResult<ExitCode> {
         match command {
-            Command::Help => Self::help(translator),
-            Command::SchemaCheck(path) => Self::schema_check(path, translator),
-            Command::SchemaFmt(request) => Self::schema_fmt(request, translator),
-            Command::ConfigCheck(request) => Self::config_check(request, translator),
-            Command::ConfigExportIr(request) => Self::config_export_ir(request, translator),
-            Command::ConfigFmt(request) => Self::config_fmt(request, translator),
+            Command::Help => Self::help(translator, output_format),
+            Command::SchemaCheck(path) => {
+                Self::schema_check(path, translator, output_format, detailed_diagnostics)
+            }
+            Command::SchemaFmt(request) => {
+                Self::schema_fmt(request, translator, output_format, detailed_diagnostics)
+            }
+            Command::ConfigCheck(request) => {
+                Self::config_check(request, translator, output_format, detailed_diagnostics)
+            }
+            Command::ConfigExportIr(request) => {
+                Self::config_export_ir(request, translator, output_format, detailed_diagnostics)
+            }
+            Command::ConfigFmt(request) => {
+                Self::config_fmt(request, translator, output_format, detailed_diagnostics)
+            }
         }
     }
 
-    fn write_ir(bytes: &[u8], translator: Translator) -> TranslationResult<ExitCode> {
+    fn write_ir(
+        bytes: &[u8],
+        translator: Translator,
+        output_format: OutputFormat,
+    ) -> TranslationResult<ExitCode> {
         let mut stdout = io::stdout().lock();
         if stdout.write_all(bytes).is_ok() {
             Ok(ExitCode::SUCCESS)
         } else {
-            Self::operation_failure(t!("cli.write_stdout_error", locale = translator))
+            Self::operation_failure(
+                t! { name: "cli.write_stdout_error", locale: translator },
+                output_format,
+            )
         }
     }
 
-    fn load_failure(errors: &TypolError, translator: Translator) -> TranslationResult<ExitCode> {
+    fn load_failure(
+        errors: &TypolError,
+        translator: Translator,
+        output_format: OutputFormat,
+        detailed_diagnostics: bool,
+    ) -> TranslationResult<ExitCode> {
         let status = Self::load_status(errors);
-        let prefix = t!("cli.diagnostic_prefix", locale = translator)?;
+        if output_format == OutputFormat::Json {
+            let written = DiagnosticJson::write_diagnostics(errors, detailed_diagnostics)?;
+            return Ok(Self::result_code(status, written));
+        }
+        let prefix = t! { name: "cli.diagnostic_prefix", locale: translator }?;
         let mut render_errors = ErrSlot::<DiagnosticRenderError>::new();
-        let rendered = match render_errors
-            .call(|out| errors.render(translator, RenderOptions::default(), out))
+        let rendered = match render_errors.call(|out| errors.render(RenderOptions::default(), out))
         {
             Ok(rendered) => rendered,
-            Err(DiagnosticRenderError::Translation(_)) => {
-                return Err(RenderError::MessageOutOfRange);
-            }
+            Err(DiagnosticRenderError::Translation(error)) => return Err(error.into()),
+            Err(DiagnosticRenderError::Diagnostic(error)) => return Err(error.into()),
             Err(DiagnosticRenderError::Display(_)) => {
                 return Ok(ExitCode::from(3));
             }
@@ -99,16 +189,24 @@ impl Commands {
         Ok(Self::result_code(status, write_result.is_ok()))
     }
 
-    fn operation_failure(message: TranslationResult<&'static str>) -> TranslationResult<ExitCode> {
-        Self::report_failure(message, 3)
+    fn operation_failure(
+        message: LocalizedText,
+        output_format: OutputFormat,
+    ) -> TranslationResult<ExitCode> {
+        Self::report_failure(message, 3, output_format)
     }
 
     fn report_failure(
-        message: TranslationResult<&'static str>,
+        message: LocalizedText,
         status: u8,
+        output_format: OutputFormat,
     ) -> TranslationResult<ExitCode> {
         let message = message?;
-        Ok(Self::result_code(status, Self::write_stderr(message)))
+        let written = match output_format {
+            OutputFormat::Text => Self::write_stderr(message.as_ref()),
+            OutputFormat::Json => DiagnosticJson::write_operation_failure(message.as_ref()),
+        };
+        Ok(Self::result_code(status, written))
     }
 
     fn load_status(errors: &TypolError) -> u8 {
@@ -131,23 +229,35 @@ impl Commands {
         message.ends_with('\n') || stderr.write_all(b"\n").is_ok()
     }
 
-    fn schema_check(path: &Path, translator: Translator) -> TranslationResult<ExitCode> {
-        match Self::load_schema(path) {
+    fn schema_check(
+        path: &Path,
+        translator: Translator,
+        output_format: OutputFormat,
+        detailed_diagnostics: bool,
+    ) -> TranslationResult<ExitCode> {
+        match Self::load_schema(path, translator) {
             Ok(_) => Ok(ExitCode::SUCCESS),
-            Err(errors) => Self::load_failure(&errors, translator),
+            Err(errors) => {
+                Self::load_failure(&errors, translator, output_format, detailed_diagnostics)
+            }
         }
     }
 
     fn schema_fmt(
         request: &SchemaFormatRequest,
         translator: Translator,
+        output_format: OutputFormat,
+        detailed_diagnostics: bool,
     ) -> TranslationResult<ExitCode> {
-        let options = SchemaParseOptions::default();
+        let options = SchemaParseOptions::default().with_translator(translator);
         let max_bytes = options.syntax().max_source_bytes();
         let source = match read_schema_source(request.schema_path(), max_bytes) {
             Ok(source) => source,
             Err(()) => {
-                return Self::operation_failure(t!("cli.schema_format_error", locale = translator));
+                return Self::operation_failure(
+                    t! { name: "cli.schema_format_error", locale: translator },
+                    output_format,
+                );
             }
         };
         let mut budget_errors = ErrSlot::new();
@@ -156,7 +266,10 @@ impl Commands {
         {
             Ok(budget) => budget,
             Err(_) => {
-                return Self::operation_failure(t!("cli.schema_format_error", locale = translator));
+                return Self::operation_failure(
+                    t! { name: "cli.schema_format_error", locale: translator },
+                    output_format,
+                );
             }
         };
         let mut syntax_errors = ErrSlot::<SyntaxErrors>::new();
@@ -176,18 +289,20 @@ impl Commands {
                     )
                 });
                 if terminal {
-                    return Self::operation_failure(t!(
-                        "cli.schema_format_error",
-                        locale = translator
-                    ));
+                    return Self::operation_failure(
+                        t! { name: "cli.schema_format_error", locale: translator },
+                        output_format,
+                    );
                 }
-                return Self::schema_syntax_failure(
-                    &errors,
-                    request.schema_path(),
-                    &source,
-                    &budget,
+                return Self::schema_syntax_failure(SchemaSyntaxFailure {
+                    errors: &errors,
+                    path: request.schema_path(),
+                    source: &source,
+                    budget: &budget,
                     translator,
-                );
+                    output_format,
+                    detailed_diagnostics,
+                });
             }
         };
         let mut format_errors = ErrSlot::<SchemaFormatError>::new();
@@ -196,7 +311,10 @@ impl Commands {
         {
             Ok(formatted) => formatted,
             Err(_) => {
-                return Self::operation_failure(t!("cli.schema_format_error", locale = translator));
+                return Self::operation_failure(
+                    t! { name: "cli.schema_format_error", locale: translator },
+                    output_format,
+                );
             }
         };
         if request.check() {
@@ -204,8 +322,9 @@ impl Commands {
                 return Ok(ExitCode::SUCCESS);
             }
             return Self::report_failure(
-                t!("cli.schema_format_check_failed", locale = translator),
+                t! { name: "cli.schema_format_check_failed", locale: translator },
                 1,
+                output_format,
             );
         }
         let limits = FileConfigInputLimits::default();
@@ -217,17 +336,32 @@ impl Commands {
             max_bytes,
         ) {
             Ok(_) => Ok(ExitCode::SUCCESS),
-            Err(_) => Self::operation_failure(t!("cli.schema_format_error", locale = translator)),
+            Err(_) => Self::operation_failure(
+                t! { name: "cli.schema_format_error", locale: translator },
+                output_format,
+            ),
         }
     }
 
-    fn schema_syntax_failure(
-        errors: &SyntaxErrors,
-        path: &Path,
-        source: &str,
-        budget: &ExecutionBudget,
-        translator: Translator,
-    ) -> TranslationResult<ExitCode> {
+    fn schema_syntax_failure(failure: SchemaSyntaxFailure<'_>) -> TranslationResult<ExitCode> {
+        let SchemaSyntaxFailure {
+            errors,
+            path,
+            source,
+            budget,
+            translator,
+            output_format,
+            detailed_diagnostics,
+        } = failure;
+        if output_format == OutputFormat::Json {
+            let written = DiagnosticJson::write_syntax_diagnostics(SyntaxJsonRequest {
+                errors,
+                source,
+                budget,
+                detailed_diagnostics,
+            })?;
+            return Ok(Self::result_code(1, written));
+        }
         let source_label = path.to_str().unwrap_or("<schema>");
         let source_name = |source_id| (source_id == SourceId::new(0)).then_some(source_label);
         let span_location = |span: SourceSpan| {
@@ -236,13 +370,13 @@ impl Commands {
                 end: source_location(source, span.span().end())?,
             })
         };
-        let excerpts = schema_excerpts(errors, source, budget);
+        let excerpts = SchemaExcerptCapture::capture(errors, source, budget);
         let context = DiagnosticContext {
             source_name: &source_name,
             span_location: &span_location,
             excerpts: &excerpts,
         };
-        let prefix = t!("cli.diagnostic_prefix", locale = translator)?;
+        let prefix = t! { name: "cli.diagnostic_prefix", locale: translator }?;
         let mut render_errors = ErrSlot::<DiagnosticRenderError>::new();
         let rendered = match render_errors.try_call(|out| {
             DiagnosticRenderer::render_report(
@@ -260,9 +394,8 @@ impl Commands {
         }) {
             Ok(rendered) => rendered,
             Err(caught) => match caught.take() {
-                DiagnosticRenderError::Translation(_) => {
-                    return Err(RenderError::MessageOutOfRange);
-                }
+                DiagnosticRenderError::Translation(error) => return Err(error.into()),
+                DiagnosticRenderError::Diagnostic(error) => return Err(error.into()),
                 DiagnosticRenderError::Display(_) => return Ok(ExitCode::from(3)),
             },
         };
@@ -278,28 +411,55 @@ impl Commands {
     fn config_check(
         request: &ConfigRequest,
         translator: Translator,
+        output_format: OutputFormat,
+        detailed_diagnostics: bool,
     ) -> TranslationResult<ExitCode> {
-        let loaded = match Self::load_schema(request.schema_path()) {
+        let loaded = match Self::load_schema(request.schema_path(), translator) {
             Ok(loaded) => loaded,
-            Err(errors) => return Self::load_failure(&errors, translator),
+            Err(errors) => {
+                return Self::load_failure(
+                    &errors,
+                    translator,
+                    output_format,
+                    detailed_diagnostics,
+                );
+            }
         };
         match Self::load_config(&loaded, request) {
             Ok(_) => Ok(ExitCode::SUCCESS),
-            Err(errors) => Self::load_failure(&errors, translator),
+            Err(errors) => {
+                Self::load_failure(&errors, translator, output_format, detailed_diagnostics)
+            }
         }
     }
 
     fn config_export_ir(
         request: &ConfigRequest,
         translator: Translator,
+        output_format: OutputFormat,
+        detailed_diagnostics: bool,
     ) -> TranslationResult<ExitCode> {
-        let loaded = match Self::load_schema(request.schema_path()) {
+        let loaded = match Self::load_schema(request.schema_path(), translator) {
             Ok(loaded) => loaded,
-            Err(errors) => return Self::load_failure(&errors, translator),
+            Err(errors) => {
+                return Self::load_failure(
+                    &errors,
+                    translator,
+                    output_format,
+                    detailed_diagnostics,
+                );
+            }
         };
         let value = match Self::load_config(&loaded, request) {
             Ok(value) => value,
-            Err(errors) => return Self::load_failure(&errors, translator),
+            Err(errors) => {
+                return Self::load_failure(
+                    &errors,
+                    translator,
+                    output_format,
+                    detailed_diagnostics,
+                );
+            }
         };
         let bytes = match ConfigIr::serialize_validated(
             loaded.schema(),
@@ -310,23 +470,48 @@ impl Commands {
         ) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == ConfigIrErrorKind::SecretValueRejected => {
-                return Self::operation_failure(t!("cli.ir_secret_rejected", locale = translator));
+                return Self::operation_failure(
+                    t! { name: "cli.ir_secret_rejected", locale: translator },
+                    output_format,
+                );
             }
             Err(_) => {
-                return Self::operation_failure(t!("cli.ir_error", locale = translator));
+                return Self::operation_failure(
+                    t! { name: "cli.ir_error", locale: translator },
+                    output_format,
+                );
             }
         };
-        Self::write_ir(&bytes, translator)
+        Self::write_ir(&bytes, translator, output_format)
     }
 
-    fn config_fmt(request: &ConfigRequest, translator: Translator) -> TranslationResult<ExitCode> {
-        let loaded = match Self::load_schema(request.schema_path()) {
+    fn config_fmt(
+        request: &ConfigRequest,
+        translator: Translator,
+        output_format: OutputFormat,
+        detailed_diagnostics: bool,
+    ) -> TranslationResult<ExitCode> {
+        let loaded = match Self::load_schema(request.schema_path(), translator) {
             Ok(loaded) => loaded,
-            Err(errors) => return Self::load_failure(&errors, translator),
+            Err(errors) => {
+                return Self::load_failure(
+                    &errors,
+                    translator,
+                    output_format,
+                    detailed_diagnostics,
+                );
+            }
         };
         let document = match Self::load_document(&loaded, request) {
             Ok(document) => document,
-            Err(errors) => return Self::load_failure(&errors, translator),
+            Err(errors) => {
+                return Self::load_failure(
+                    &errors,
+                    translator,
+                    output_format,
+                    detailed_diagnostics,
+                );
+            }
         };
         if request.format_check() {
             let mut format_errors = ErrSlot::new();
@@ -335,13 +520,20 @@ impl Commands {
             }) {
                 Ok(formatted) => formatted,
                 Err(_) => {
-                    return Self::operation_failure(t!("cli.format_error", locale = translator));
+                    return Self::operation_failure(
+                        t! { name: "cli.format_error", locale: translator },
+                        output_format,
+                    );
                 }
             };
             return if formatted {
                 Ok(ExitCode::SUCCESS)
             } else {
-                Self::report_failure(t!("cli.format_check_failed", locale = translator), 1)
+                Self::report_failure(
+                    t! { name: "cli.format_check_failed", locale: translator },
+                    1,
+                    output_format,
+                )
             };
         }
         let mut format_errors = ErrSlot::new();
@@ -349,7 +541,12 @@ impl Commands {
             .try_call(|out| ConfigFormatter::format(&document, ConfigFormatOptions::default(), out))
         {
             Ok(formatted) => formatted,
-            Err(_) => return Self::operation_failure(t!("cli.format_error", locale = translator)),
+            Err(_) => {
+                return Self::operation_failure(
+                    t! { name: "cli.format_error", locale: translator },
+                    output_format,
+                );
+            }
         };
         let limits = loaded.options().file_input_limits();
         let max_bytes = loaded
@@ -366,12 +563,15 @@ impl Commands {
             max_bytes,
         ) {
             Ok(_) => Ok(ExitCode::SUCCESS),
-            Err(_) => Self::operation_failure(t!("cli.format_error", locale = translator)),
+            Err(_) => Self::operation_failure(
+                t! { name: "cli.format_error", locale: translator },
+                output_format,
+            ),
         }
     }
 
-    fn load_schema(path: &Path) -> LoadResult<LoadedSchema> {
-        let loader = SchemaLoader::new(TypolOptions::default());
+    fn load_schema(path: &Path, translator: Translator) -> LoadResult<LoadedSchema> {
+        let loader = SchemaLoader::new(TypolOptions::default().with_translator(translator));
         let mut errors = ErrSlot::<TypolError>::new();
         match errors.try_call(|out| loader.compile_file(path, out)) {
             Ok(loaded) => Ok(loaded),
@@ -463,44 +663,6 @@ fn read_schema_source(path: &Path, max_bytes: usize) -> Result<String, ()> {
         return Err(());
     }
     String::from_utf8(bytes).map_err(|_| ())
-}
-
-fn schema_excerpts(
-    errors: &SyntaxErrors,
-    source: &str,
-    budget: &ExecutionBudget,
-) -> SourceExcerptSet {
-    let source_id = SourceId::new(0);
-    let limits = ExcerptLimits::default();
-    let mut capture = SourceCapture::new(source_id, limits, Some(budget));
-    for diagnostic in errors.diagnostics() {
-        for located in diagnostic
-            .located_primary()
-            .into_iter()
-            .chain(diagnostic.labels().iter().map(|label| label.located_span()))
-        {
-            let span = located.source_span();
-            let location = source_location(source, span.span().start())
-                .zip(source_location(source, span.span().end()))
-                .map(|(start, end)| SpanLocation { start, end });
-            capture.pin(span, location);
-        }
-    }
-    // Syntax failure cannot prove secret-default spans, so excerpts publish only fully redacted source.
-    let Some(secret) = capture.begin_secret(0) else {
-        return SourceExcerptSet::unavailable();
-    };
-    capture.feed(source.as_bytes());
-    capture.end_secret(secret, source.len());
-    capture.end_input();
-    let mut excerpts = SourceExcerptSet::new(limits, Some(budget));
-    capture.finish_iter_with_locations(&mut excerpts, errors.diagnostics(), |located| {
-        let span = located.source_span().span();
-        source_location(source, span.start())
-            .zip(source_location(source, span.end()))
-            .map(|(start, end)| SpanLocation { start, end })
-    });
-    excerpts
 }
 
 fn source_location(source: &str, offset: usize) -> Option<SourceLocation> {

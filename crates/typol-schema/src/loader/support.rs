@@ -1,13 +1,14 @@
-use opeo::ErrSlot;
+use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, Diagnostic, DiagnosticCode, ExcerptLimits, ExecutionBudget, SourceId, SourceSpan,
     Span,
 };
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 use typol_syntax::{AstAccessError, SchemaAst};
 
 use crate::{
-    ResolverError, SchemaLimits, SourceObserverError,
+    ResolverError, SchemaLimits, SchemaResolveRequest, SchemaResolver, SchemaSource,
+    SourceObserverError,
     diagnostics::{DiagnosticCollector, EmergencyDiagnostics},
 };
 
@@ -24,6 +25,23 @@ pub(super) struct ImportRequest {
 pub(super) struct LoaderSupport;
 
 impl LoaderSupport {
+    pub(super) fn budget_call<T>(
+        errors: &mut ErrSlot<BudgetError>,
+        operation: impl for<'slot> FnOnce(Out<'slot, 'slot, BudgetError>) -> OResult<'slot, T>,
+    ) -> Result<T, BudgetError> {
+        errors.try_call(operation).map_err(|caught| caught.take())
+    }
+
+    pub(super) fn resolver_call<'src, R: SchemaResolver + ?Sized>(
+        errors: &mut ErrSlot<ResolverError>,
+        resolver: &'src mut R,
+        request: SchemaResolveRequest<'_>,
+    ) -> Result<SchemaSource<'src>, ResolverError> {
+        errors
+            .try_call(|out| resolver.resolve(request, out))
+            .map_err(|caught| caught.take())
+    }
+
     pub(super) fn source_excerpt_limits(limits: &SchemaLimits) -> ExcerptLimits {
         let excerpts = limits.excerpts();
         let files = limits.max_schema_files().max(1);
@@ -89,13 +107,20 @@ impl LoaderSupport {
         diagnostics: &DiagnosticCollector,
     ) -> Diagnostic {
         match error {
-            SourceObserverError::ResourceLimitExceeded => EmergencyDiagnostics::resource(span),
-            SourceObserverError::AllocationFailed => EmergencyDiagnostics::allocation(span),
-            SourceObserverError::CapacityExceeded => EmergencyDiagnostics::capacity(span),
+            SourceObserverError::ResourceLimitExceeded => {
+                EmergencyDiagnostics::resource(span, diagnostics.translator())
+            }
+            SourceObserverError::AllocationFailed => {
+                EmergencyDiagnostics::allocation(span, diagnostics.translator())
+            }
+            SourceObserverError::CapacityExceeded => {
+                EmergencyDiagnostics::capacity(span, diagnostics.translator())
+            }
             SourceObserverError::InternalInvariantFailure => EmergencyDiagnostics::internal(
                 span,
                 schema_context!("source-observer", "source-loaded-invariant")
                     .with_object_id(span.source_id().get() as u64),
+                diagnostics.translator(),
             ),
             SourceObserverError::HostFailure => {
                 let mut diagnostic = diagnostics.make(
@@ -119,20 +144,33 @@ impl LoaderSupport {
     ) -> Diagnostic {
         match error {
             ResolverError::NotFound => diagnostics.make_semantic(
-                diagnostic_message!("diagnostic.schema.imported_file_not_found", "imported schema file does not exist"),
+                t! {
+                    name: "diagnostic.schema.imported_file_not_found",
+                    locale: diagnostics.translator(),
+                },
                 span,
             ),
             ResolverError::ImportsNotSupported => diagnostics.make_semantic(
-                diagnostic_message!("diagnostic.schema.imports_require_resolver", "this schema compile entry point does not support extern mod; provide a SchemaResolver"),
+                t! {
+                    name: "diagnostic.schema.imports_require_resolver",
+                    locale: diagnostics.translator(),
+                },
                 span,
             ),
-            ResolverError::ResourceLimitExceeded => EmergencyDiagnostics::resource(span),
-            ResolverError::AllocationFailed => EmergencyDiagnostics::allocation(span),
-            ResolverError::CapacityExceeded => EmergencyDiagnostics::capacity(span),
+            ResolverError::ResourceLimitExceeded => {
+                EmergencyDiagnostics::resource(span, diagnostics.translator())
+            }
+            ResolverError::AllocationFailed => {
+                EmergencyDiagnostics::allocation(span, diagnostics.translator())
+            }
+            ResolverError::CapacityExceeded => {
+                EmergencyDiagnostics::capacity(span, diagnostics.translator())
+            }
             ResolverError::InternalInvariantFailure => EmergencyDiagnostics::internal(
                 span,
                 schema_context!("resolver-callback", "resolve-invariant")
                     .with_object_id(span.source_id().get() as u64),
+                diagnostics.translator(),
             ),
             ResolverError::HostFailure | ResolverError::ContextMismatch => {
                 let context = if error == ResolverError::ContextMismatch {

@@ -2,11 +2,18 @@ use typol_core::{
     BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read, SliceSource,
     SourceId,
 };
+use typol_i18n::{Language, Translator};
 use typol_syntax::{InputConfig, LexEvent, StreamLimits, SyntaxLimits, TokenCursor, TokenKind};
-use typol_test_support::TestSlot;
+use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
 
 #[derive(Debug)]
 struct TestFailure;
+
+impl From<OpeoTestFailure> for TestFailure {
+    fn from(_: OpeoTestFailure) -> Self {
+        Self
+    }
+}
 
 macro_rules! test_assert {
     ($condition:expr $(, $($message:tt)*)?) => {{
@@ -64,10 +71,10 @@ impl<'source> TestCursor<'source> {
         limits: &SyntaxLimits,
         stream: StreamLimits,
         execution: &ExecutionBudget,
-    ) -> Result<Self, Diagnostic> {
+    ) -> TestOpeoOutcome<Self, Diagnostic> {
         let input_limits = limits.input_limits();
         let mut errors = TestSlot::default();
-        let cursor = errors.access(|out| {
+        match errors.run(|out| {
             TokenCursor::new(
                 InputConfig {
                     source_id,
@@ -76,22 +83,25 @@ impl<'source> TestCursor<'source> {
                     stream,
                     budget: execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
-        })?;
-        Ok(Self { cursor, errors })
+        }) {
+            TestOpeoOutcome::Value(cursor) => TestOpeoOutcome::Value(Self { cursor, errors }),
+            TestOpeoOutcome::Error(error) => TestOpeoOutcome::Error(error),
+        }
     }
 
-    fn peek(&mut self) -> Result<&LexEvent, Diagnostic> {
-        self.errors.access(|out| self.cursor.peek(out))
+    fn peek(&mut self) -> TestOpeoOutcome<&LexEvent, Diagnostic> {
+        self.errors.run(|out| self.cursor.peek(out))
     }
 
-    fn peek_next(&mut self) -> Result<&LexEvent, Diagnostic> {
-        self.errors.access(|out| self.cursor.peek_next(out))
+    fn peek_next(&mut self) -> TestOpeoOutcome<&LexEvent, Diagnostic> {
+        self.errors.run(|out| self.cursor.peek_next(out))
     }
 
-    fn bump(&mut self) -> Result<LexEvent, Diagnostic> {
-        self.errors.access(|out| self.cursor.bump(out))
+    fn bump(&mut self) -> TestOpeoOutcome<LexEvent, Diagnostic> {
+        self.errors.run(|out| self.cursor.bump(out))
     }
 }
 

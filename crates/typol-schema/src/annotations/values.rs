@@ -20,7 +20,7 @@ use typol_core::{
     BudgetError, ChargedVec, DiagnosticContext, DiagnosticMessage, NumericLiteral,
     NumericTokenKind, SourceSpan,
 };
-use typol_i18n::diagnostic_message;
+use typol_i18n::{Translator, t};
 use typol_semantic::VariantRestrictionMode;
 use typol_syntax::{AstAccessError, BuiltinType, NumberKind, NumberLiteral};
 
@@ -127,16 +127,22 @@ impl AnnotationValues {
         while let Some(link_id) = link {
             context.consume(1, span, diagnostics, out.reborrow())?;
             let Some(next_depth) = depth.checked_add(1) else {
-                diagnostics.push(EmergencyDiagnostics::resource(span));
+                diagnostics.push(EmergencyDiagnostics::resource(
+                    span,
+                    diagnostics.translator(),
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             };
             depth = next_depth;
             if depth > context.limits().max_nesting_depth() {
-                diagnostics.push(EmergencyDiagnostics::resource(span));
+                diagnostics.push(EmergencyDiagnostics::resource(
+                    span,
+                    diagnostics.translator(),
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             }
             let Some(alias) = types.alias_link(link_id) else {
-                diagnostics.push(schema_internal!(span));
+                diagnostics.push(schema_internal!(diagnostics.translator(), span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             let constraints = diagnostics.require(
@@ -183,7 +189,7 @@ impl AnnotationValues {
         }
 
         let Some(target) = Self::resolved_kind(types, task.target) else {
-            diagnostics.push(schema_internal!(span));
+            diagnostics.push(schema_internal!(diagnostics.translator(), span));
             return Err(out.fail(BuildFailure::empty()));
         };
         if let ResolvedTypeKind::Array {
@@ -196,10 +202,10 @@ impl AnnotationValues {
             if size_min.is_some_and(|min| length < min) || size_max.is_some_and(|max| length > max)
             {
                 diagnostics.push(diagnostics.make_semantic(
-                    diagnostic_message!(
-                        "diagnostic.schema.annotation_size_fixed_array_conflict",
-                        "fixed-size array length is incompatible with the @size bounds"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.annotation_size_fixed_array_conflict",
+                        locale: diagnostics.translator(),
+                    },
                     summary.size_span().unwrap_or(span),
                 ));
             }
@@ -234,12 +240,13 @@ impl AnnotationValues {
             Some(ResolvedTypeKind::Option(inner)) => Some(inner),
             _ => None,
         };
-        let Ok((ResolvedTypeKind::User(enum_owner), _)) = Self::unwrap_option(types, task.target)
+        let Ok((ResolvedTypeKind::User(enum_owner), _)) =
+            Self::unwrap_option(types, task.target, context.translator())
         else {
             return Ok(());
         };
         let Some(owner_symbol) = symbols.type_symbol(enum_owner) else {
-            diagnostics.abort(schema_internal!(task.span));
+            diagnostics.abort(schema_internal!(diagnostics.translator(), task.span));
             return Err(out.fail(BuildFailure::empty()));
         };
         if !matches!(owner_symbol.declaration(), TypeDeclarationKind::Enum(_)) {
@@ -260,7 +267,7 @@ impl AnnotationValues {
                 };
                 context.consume(1, task.span, diagnostics, out.reborrow())?;
                 let Some(link) = types.alias_link(link_id) else {
-                    diagnostics.abort(schema_internal!(task.span));
+                    diagnostics.abort(schema_internal!(diagnostics.translator(), task.span));
                     return Err(out.fail(BuildFailure::empty()));
                 };
                 let constraints = diagnostics.require(
@@ -321,7 +328,7 @@ impl AnnotationValues {
                 };
                 context.consume(1, task.span, diagnostics, out.reborrow())?;
                 let Some(link) = types.alias_link(link_id) else {
-                    diagnostics.abort(schema_internal!(task.span));
+                    diagnostics.abort(schema_internal!(diagnostics.translator(), task.span));
                     return Err(out.fail(BuildFailure::empty()));
                 };
                 let constraints = diagnostics.require(
@@ -370,10 +377,10 @@ impl AnnotationValues {
             }
             if index + 1 == candidates.len() {
                 diagnostics.push(diagnostics.make_semantic(
-                    diagnostic_message!(
-                        "diagnostic.schema.annotation_variants_combination_empty",
-                        "combined @variants restrictions reject every enum variant"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.annotation_variants_combination_empty",
+                        locale: diagnostics.translator(),
+                    },
                     first_span.unwrap_or(task.span),
                 ));
             }
@@ -451,10 +458,13 @@ impl AnnotationValues {
                 .execution()
                 .consume(segment.len() + 1, out.reborrow())?;
             if !Self::valid_identifier(segment) {
-                return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                    "diagnostic.schema.annotation_unique_path_invalid",
-                    "@unique(by=...) path format is invalid"
-                ))));
+                return Err(out.fail(AnnotationError::Invalid(
+                    t! {
+                        name: "diagnostic.schema.annotation_unique_path_invalid",
+                        locale: context.translator(),
+                    }
+                    .into(),
+                )));
             }
             let field_id = match symbols.lookup_field::<AnnotationError>(
                 current_owner,
@@ -463,10 +473,13 @@ impl AnnotationValues {
             )? {
                 LookupResult::Found(id) => id,
                 LookupResult::Missing | LookupResult::Ambiguous => {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_unique_path_field_missing",
-                        "@unique(by=...) refers to a missing or ambiguous field"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_unique_path_field_missing",
+                            locale: context.translator(),
+                        }
+                        .into(),
+                    )));
                 }
             };
             fields.try_push(field_id, out.reborrow())?;
@@ -477,15 +490,18 @@ impl AnnotationValues {
                 ))));
             };
             if index + 1 == segment_count {
-                let (kind, _) = match Self::unwrap_option(types, field_type) {
+                let (kind, _) = match Self::unwrap_option(types, field_type, context.translator()) {
                     Ok(value) => value,
                     Err(error) => return Err(out.fail(error)),
                 };
                 if !Self::is_scalar_or_enum(types, kind, symbols, out.reborrow())? {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_unique_path_final_field",
-                        "the final field in @unique(by=...) must be a scalar or enum"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_unique_path_final_field",
+                            locale: context.translator(),
+                        }
+                        .into(),
+                    )));
                 }
             } else {
                 let Some(kind) = Self::resolved_kind(types, field_type) else {
@@ -495,10 +511,13 @@ impl AnnotationValues {
                     ))));
                 };
                 let ResolvedTypeKind::User(next_owner) = kind else {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_unique_path_intermediate_field",
-                        "intermediate fields in @unique(by=...) must be non-optional structs"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_unique_path_intermediate_field",
+                            locale: context.translator(),
+                        }
+                        .into(),
+                    )));
                 };
                 let Some(owner_symbol) = symbols.type_symbol(next_owner) else {
                     return Err(out.fail(AnnotationError::internal(schema_context!(
@@ -507,10 +526,13 @@ impl AnnotationValues {
                     ))));
                 };
                 if !matches!(owner_symbol.declaration(), TypeDeclarationKind::Struct(_)) {
-                    return Err(out.fail(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_unique_path_intermediate_field",
-                        "intermediate fields in @unique(by=...) must be non-optional structs"
-                    ))));
+                    return Err(out.fail(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_unique_path_intermediate_field",
+                            locale: context.translator(),
+                        }
+                        .into(),
+                    )));
                 }
                 current_owner = next_owner;
             }
@@ -521,8 +543,9 @@ impl AnnotationValues {
     pub(crate) fn effective_builtin(
         types: &ResolvedTypeGraph,
         target: TypeUseId,
+        translator: Translator,
     ) -> Result<Option<(BuiltinType, bool)>, AnnotationError> {
-        let (kind, optional) = match Self::unwrap_option(types, target) {
+        let (kind, optional) = match Self::unwrap_option(types, target, translator) {
             Ok(result) => result,
             Err(AnnotationError::Invalid(_)) => return Ok(None),
             Err(error) => return Err(error),
@@ -536,6 +559,7 @@ impl AnnotationValues {
     pub(crate) fn unwrap_option(
         types: &ResolvedTypeGraph,
         target: TypeUseId,
+        translator: Translator,
     ) -> Result<(ResolvedTypeKind, bool), AnnotationError> {
         match Self::resolved_kind(types, target).ok_or_else(|| {
             AnnotationError::internal(schema_context!("annotation-values", "target-kind-missing"))
@@ -548,10 +572,13 @@ impl AnnotationValues {
                     ))
                 })?;
                 if matches!(kind, ResolvedTypeKind::Option(_)) {
-                    return Err(AnnotationError::Invalid(diagnostic_message!(
-                        "diagnostic.schema.annotation_nested_options_unsupported",
-                        "annotation target does not support nested options"
-                    )));
+                    return Err(AnnotationError::Invalid(
+                        t! {
+                            name: "diagnostic.schema.annotation_nested_options_unsupported",
+                            locale: translator,
+                        }
+                        .into(),
+                    ));
                 }
                 Ok((kind, true))
             }

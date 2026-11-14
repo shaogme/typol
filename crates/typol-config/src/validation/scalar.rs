@@ -2,18 +2,19 @@ use crate::{
     context::{AssignmentContext, SemanticStatus},
     diagnostics::{
         DetailedDiagnosticRequest, DiagnosticBuffer, DiagnosticFactory, ExecutionDiagnostic,
-        RuleFailureLocation, RuleFailureMessage,
+        LabelMessageRequest, RuleFailureLocation, RuleFailureMessage,
     },
-    secret::SecretPolicy,
+    secret::{SecretPathContext, SecretPolicy},
     session::ValidationResources,
     validation::Validator,
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage, DiagnosticMessageKey,
-    InstancePath, LocatedSpan, ValueKind, ValueView, diagnostic_context,
+    Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticKind, DiagnosticMessage,
+    DiagnosticStage, InstancePath, LocatedSpan, RelatedLocationRole, ValueKind, ValueView,
+    diagnostic_context,
 };
-use typol_i18n::{diagnostic_key, diagnostic_message};
+use typol_i18n::t;
 use typol_regex::{RegexMatchError, RegexScratchError};
 use typol_semantic::{
     Constraint, ConstraintData, EvalError, RegexExecutionError, RegexExecutionFailure,
@@ -39,8 +40,8 @@ static SCALAR_REGEX_ALLOCATION: DiagnosticContext = diagnostic_context!(
 struct RegexLabelRequest<'work, 'schema> {
     diagnostic: &'work mut Diagnostic,
     span: LocatedSpan,
-    text: &'work str,
-    key: DiagnosticMessageKey,
+    message: DiagnosticMessage<'static>,
+    role: RelatedLocationRole,
     context: Option<DiagnosticContext>,
     metadata: &'work AssignmentContext<'schema>,
 }
@@ -57,11 +58,22 @@ fn string<'a, 'slot, 'borrow>(
 }
 
 fn internal(metadata: &AssignmentContext<'_>) -> Diagnostic {
-    DiagnosticFactory::internal(SCALAR_VALUE_SHAPE, metadata.span, None, metadata.source)
+    DiagnosticFactory::internal(
+        SCALAR_VALUE_SHAPE,
+        metadata.span,
+        None,
+        metadata.source,
+        metadata.translator,
+    )
 }
 
 fn allocation(metadata: &AssignmentContext<'_>) -> Diagnostic {
-    DiagnosticFactory::allocation_diagnostic(metadata.span, None, metadata.source)
+    DiagnosticFactory::allocation_diagnostic(
+        metadata.span,
+        None,
+        metadata.source,
+        metadata.translator,
+    )
 }
 
 fn failure<'slot>(
@@ -72,69 +84,74 @@ fn failure<'slot>(
 ) -> OResult<'slot, Diagnostic> {
     let data = Validator::schema_call(
         &mut resources.schema_access_errors,
+        resources.translator,
         |access_out| constraint.data(access_out),
         out.reborrow(),
     )?;
-    let (key, message) = match data {
-        ConstraintData::NumberBounds { .. } => (
-            diagnostic_key!("diagnostic.validation.numeric_boundary_failed"),
-            "value does not satisfy the numeric boundary constraint",
-        ),
-        ConstraintData::LengthBounds { .. } => (
-            diagnostic_key!("diagnostic.validation.length_constraint_failed"),
-            "string does not satisfy the length constraint",
-        ),
-        ConstraintData::Regex { .. } => (
-            diagnostic_key!("diagnostic.validation.regex_constraint_failed"),
-            "string does not satisfy the regex constraint",
-        ),
-        ConstraintData::Host => (
-            diagnostic_key!("diagnostic.validation.host_format_constraint_failed"),
-            "string does not satisfy the host format constraint",
-        ),
-        ConstraintData::Email => (
-            diagnostic_key!("diagnostic.validation.email_format_constraint_failed"),
-            "string does not satisfy the email format constraint",
-        ),
-        ConstraintData::Cidr { .. } => (
-            diagnostic_key!("diagnostic.validation.cidr_format_constraint_failed"),
-            "string does not satisfy the CIDR format constraint",
-        ),
-        ConstraintData::VariantRestriction { .. } => (
-            diagnostic_key!("diagnostic.validation.variants_restriction_failed"),
-            "the selected enum variant is rejected by @variants",
-        ),
+    let translator = metadata.translator;
+    let message: DiagnosticMessage<'static> = match data {
+        ConstraintData::NumberBounds { .. } => {
+            t! { name: "diagnostic.validation.numeric_boundary_failed", locale: translator }.into()
+        }
+        ConstraintData::LengthBounds { .. } => {
+            t! { name: "diagnostic.validation.length_constraint_failed", locale: translator }.into()
+        }
+        ConstraintData::Regex { .. } => {
+            t! { name: "diagnostic.validation.regex_constraint_failed", locale: translator }.into()
+        }
+        ConstraintData::Host => {
+            t! { name: "diagnostic.validation.host_format_constraint_failed", locale: translator }
+                .into()
+        }
+        ConstraintData::Email => {
+            t! { name: "diagnostic.validation.email_format_constraint_failed", locale: translator }
+                .into()
+        }
+        ConstraintData::Cidr { .. } => {
+            t! { name: "diagnostic.validation.cidr_format_constraint_failed", locale: translator }
+                .into()
+        }
+        ConstraintData::VariantRestriction { .. } => {
+            t! { name: "diagnostic.validation.variants_restriction_failed", locale: translator }
+                .into()
+        }
         _ => return Err(out.fail(internal(metadata))),
     };
     let hidden = SecretPolicy::hides(
         metadata.schema,
         metadata.path,
-        metadata.span,
-        metadata.source,
+        SecretPathContext {
+            primary: metadata.span,
+            value_source: metadata.source,
+            translator,
+        },
         out.reborrow(),
     )?;
     let message = if hidden {
-        diagnostic_message!("diagnostic.validation.value_hidden", "value is hidden")
+        t! { name: "diagnostic.validation.value_hidden", locale: translator }.into()
     } else {
-        DiagnosticMessage::localized(message, key)
+        message
     };
-    let mut diagnostic = DiagnosticFactory::make_diagnostic(
-        DiagnosticCode::CONFIG_VALIDATION_ERROR,
+    let mut diagnostic = DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+        code: DiagnosticCode::CONFIG_VALIDATION_ERROR,
         message,
-        metadata.span,
-        Some(ScalarValidator::copy_path(metadata, out.reborrow())?),
-        metadata.source,
-    );
+        primary: metadata.span,
+        path: Some(ScalarValidator::copy_path(metadata, out.reborrow())?),
+        value_source: metadata.source,
+        context: None,
+        translator,
+    });
     if diagnostic.code() == DiagnosticCode::ALLOCATION_FAILED {
         return Err(out.fail(diagnostic));
     }
     DiagnosticFactory::add_label_message(
         &mut diagnostic,
-        constraint.span(),
-        diagnostic_message!(
-            "diagnostic.label.constraint_defined_here",
-            "constraint defined here"
-        ),
+        LabelMessageRequest {
+            span: constraint.span(),
+            message: t! { name: "diagnostic.label.constraint_defined_here", locale: translator },
+            role: RelatedLocationRole::ConstraintDefinition,
+            translator,
+        },
         out.reborrow(),
     )?;
     Ok(diagnostic)
@@ -169,8 +186,11 @@ fn regex_failure<'slot>(
     let hidden = SecretPolicy::hides(
         metadata.schema,
         metadata.path,
-        metadata.span,
-        metadata.source,
+        SecretPathContext {
+            primary: metadata.span,
+            value_source: metadata.source,
+            translator: metadata.translator,
+        },
         out.reborrow(),
     )?;
     let context = if code == DiagnosticCode::INTERNAL_ERROR {
@@ -180,22 +200,25 @@ fn regex_failure<'slot>(
     };
     let mut diagnostic = DiagnosticFactory::detailed_diagnostic(DetailedDiagnosticRequest {
         code,
-        key: Some(if hidden {
-            diagnostic_key!("diagnostic.validation.value_hidden")
-        } else {
-            diagnostic_key!("diagnostic.validation.regex_execution_failed")
-        }),
         message: if hidden {
-            "value is hidden"
+            t! { name: "diagnostic.validation.value_hidden", locale: metadata.translator }.into()
         } else {
-            "regex execution failed"
+            t! { name: "diagnostic.validation.regex_execution_failed", locale: metadata.translator }
+                .into()
         },
         primary: metadata.span,
         path: Some(path),
         value_source: metadata.source,
         context,
+        translator: metadata.translator,
     });
-    if diagnostic.code() == DiagnosticCode::ALLOCATION_FAILED || diagnostic.message().is_empty() {
+    if hidden {
+        diagnostic.set_kind(DiagnosticKind::new(
+            "typol.validation.regex_execution_failed",
+            DiagnosticStage::ConstraintValidation,
+        ));
+    }
+    if diagnostic.code() == DiagnosticCode::ALLOCATION_FAILED || diagnostic.is_emergency() {
         return Ok(diagnostic);
     }
     if code == DiagnosticCode::INTERNAL_ERROR {
@@ -208,8 +231,8 @@ fn regex_failure<'slot>(
                 RegexLabelRequest {
                     diagnostic: &mut diagnostic,
                     span: source_span,
-                    text: "regex execution failed here",
-                    key: diagnostic_key!("diagnostic.validation.regex_execution_failed_here"),
+                    message: t! { name: "diagnostic.validation.regex_execution_failed_here", locale: metadata.translator }.into(),
+                    role: RelatedLocationRole::AssociatedInput,
                     context,
                     metadata,
                 },
@@ -224,8 +247,10 @@ fn regex_failure<'slot>(
         RegexLabelRequest {
             diagnostic: &mut diagnostic,
             span: constraint.span().into(),
-            text: "constraint defined here",
-            key: diagnostic_key!("diagnostic.label.constraint_defined_here"),
+            message:
+                t! { name: "diagnostic.label.constraint_defined_here", locale: metadata.translator }
+                    .into(),
+            role: RelatedLocationRole::ConstraintDefinition,
             context,
             metadata,
         },
@@ -241,8 +266,8 @@ fn add_regex_label<'slot, 'borrow>(
     let RegexLabelRequest {
         diagnostic,
         span,
-        text,
-        key,
+        message,
+        role,
         context,
         metadata,
     } = request;
@@ -250,8 +275,12 @@ fn add_regex_label<'slot, 'borrow>(
     match errors.try_call(|diagnostic_out| {
         DiagnosticFactory::add_label_message(
             diagnostic,
-            span,
-            DiagnosticMessage::localized(text, key),
+            LabelMessageRequest {
+                span,
+                message,
+                role,
+                translator: metadata.translator,
+            },
             diagnostic_out,
         )
     }) {
@@ -317,9 +346,9 @@ fn report_evaluation_error<'slot>(
     let diagnostic = ExecutionDiagnostic::failure(
         Err(error),
         RuleFailureMessage {
-            text: "scalar constraint evaluation failed",
+            message: DiagnosticMessage::custom("scalar constraint evaluation failed"),
             redacted: false,
-            key: None,
+            translator: metadata.translator,
         },
         RuleFailureLocation {
             span: metadata.span,
@@ -367,11 +396,13 @@ impl ScalarValidator {
         for &constraint in constraints {
             Validator::budget_call(
                 &mut resources.budget_errors,
+                resources.translator,
                 |budget_out| resources.budget.consume(1, budget_out),
                 out.reborrow(),
             )?;
             let data = Validator::schema_call(
                 &mut resources.schema_access_errors,
+                resources.translator,
                 |access_out| constraint.data(access_out),
                 out.reborrow(),
             )?;
@@ -382,6 +413,7 @@ impl ScalarValidator {
                     };
                     let selected = Validator::budget_call(
                         &mut resources.budget_errors,
+                        resources.translator,
                         |budget_out| {
                             metadata.expected.variant_named_budgeted(
                                 variant,
@@ -396,6 +428,7 @@ impl ScalarValidator {
                     };
                     Validator::budget_call(
                         &mut resources.budget_errors,
+                        resources.translator,
                         |budget_out| resources.budget.consume(variants.len(), budget_out),
                         out.reborrow(),
                     )?;
@@ -485,8 +518,11 @@ impl ScalarValidator {
         SecretPolicy::copy_path(
             metadata.schema,
             metadata.path,
-            metadata.span,
-            metadata.source,
+            SecretPathContext {
+                primary: metadata.span,
+                value_source: metadata.source,
+                translator: metadata.translator,
+            },
             out,
         )
     }

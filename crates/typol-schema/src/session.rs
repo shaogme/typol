@@ -1,17 +1,18 @@
-use opeo::{OResult, Out, ResultOutExt};
+use opeo::{ErrSlot, OResult, Out};
 use typol_semantic::SourceLookup;
 
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, Read,
-    RegexExecutionBudget, SourceId, SourceReadError, SourceSpan, Span,
+    BudgetError, ChargedVec, DiagnosticCode, ExecutionBudget, Read, RegexExecutionBudget, SourceId,
+    SourceReadError, SourceSpan, Span,
 };
+use typol_i18n::{Translator, t};
 use typol_policy::{RegexLimits, RegexOptions};
 
 use crate::{
     SchemaCompileContext, SchemaCompileStage, SchemaLimits,
     compiled::{SchemaCompileContextFailure, SchemaCompileErrors},
-    diagnostics::DiagnosticCollector,
-    loader::{LoadedFile, SourceLoader},
+    diagnostics::{DiagnosticCollector, EmergencyDiagnostics},
+    loader::{LoadedFile, SourceLoadRequest, SourceLoader},
     resolver::{SchemaResolver, SchemaSource, SourceObserver},
 };
 
@@ -65,6 +66,7 @@ pub(crate) enum ObjectState {
 pub(crate) struct CompileBudget {
     limits: SchemaLimits,
     regex_options: RegexOptions,
+    translator: Translator,
     source_bytes: usize,
     source_files: usize,
     execution: ExecutionBudget,
@@ -101,6 +103,7 @@ impl CompileSession {
         mut out: Out<'slot, '_, SchemaCompileErrors>,
     ) -> OResult<'slot, Self> {
         let span = root_span(root.known_len().unwrap_or(0));
+        let translator = context.translator();
         let failure = if !root.matches_context(context) {
             Some(SchemaCompileContextFailure::RootContextMismatch)
         } else if context.execution().finished() {
@@ -109,16 +112,22 @@ impl CompileSession {
             None
         };
         if let Some(failure) = failure {
-            let code = match failure {
-                SchemaCompileContextFailure::RootContextMismatch => {
-                    DiagnosticCode::SCHEMA_CONTEXT_MISMATCH
-                }
-                SchemaCompileContextFailure::SessionFinished => {
-                    DiagnosticCode::SCHEMA_SESSION_FINISHED
-                }
+            let (code, message) = match failure {
+                SchemaCompileContextFailure::RootContextMismatch => (
+                    DiagnosticCode::SCHEMA_CONTEXT_MISMATCH,
+                    t! {
+                        name: "diagnostic.schema.root_context_mismatch",
+                        locale: translator,
+                    },
+                ),
+                SchemaCompileContextFailure::SessionFinished => (
+                    DiagnosticCode::SCHEMA_SESSION_FINISHED,
+                    t! {
+                        name: "diagnostic.schema.session_finished",
+                        locale: translator,
+                    },
+                ),
             };
-            let mut diagnostic = Diagnostic::emergency(code);
-            diagnostic.set_primary(Some(span));
             let context = match failure {
                 SchemaCompileContextFailure::RootContextMismatch => {
                     schema_context!("source-loading", "root-context-mismatch")
@@ -127,27 +136,64 @@ impl CompileSession {
                     schema_context!("source-loading", "execution-context-finished")
                 }
             };
+            let mut diagnostic = EmergencyDiagnostics::translated(code, message, Some(span));
             diagnostic.set_context(Some(context));
             return Err(out.fail(SchemaCompileErrors::with_context_failure(
-                diagnostic, failure,
+                diagnostic, failure, translator,
             )));
         }
         let execution = context.execution();
-        execution.consume(0, out.reborrow())?;
+        let mut execution_errors = ErrSlot::new();
+        if let Err(caught) =
+            execution_errors.try_call(|execution_out| execution.consume(0, execution_out))
+        {
+            return Err(out.fail(SchemaCompileErrors::budget_failure(
+                caught.take(),
+                translator,
+            )));
+        }
         context.set_stage(SchemaCompileStage::SourceLoading);
         let limits = context.resources();
-        let mut diagnostics =
-            DiagnosticCollector::new(limits.max_diagnostics(), span, execution, out.reborrow())?;
-        let mut budget = CompileBudget::new(
-            *limits,
-            context.regex(),
-            execution,
-            context.regex_execution(),
+        let mut diagnostic_errors = ErrSlot::new();
+        let mut diagnostics = match diagnostic_errors.try_call(|diagnostic_out| {
+            DiagnosticCollector::new(
+                limits.max_diagnostics(),
+                span,
+                execution,
+                translator,
+                diagnostic_out,
+            )
+        }) {
+            Ok(diagnostics) => diagnostics,
+            Err(caught) => {
+                return Err(out.fail(SchemaCompileErrors::budget_failure(
+                    caught.take(),
+                    translator,
+                )));
+            }
+        };
+        let mut budget_errors = ErrSlot::new();
+        let mut budget =
+            match budget_errors.try_call(|budget_out| CompileBudget::new(context, budget_out)) {
+                Ok(budget) => budget,
+                Err(caught) => {
+                    return Err(out.fail(SchemaCompileErrors::budget_failure(
+                        caught.take(),
+                        translator,
+                    )));
+                }
+            };
+        let sources = SourceLoader::load(
+            SourceLoadRequest {
+                root,
+                resolver,
+                budget: &mut budget,
+                diagnostics: &mut diagnostics,
+                observer,
+            },
             out.reborrow(),
+            |diagnostic| SchemaCompileErrors::inline(diagnostic, translator),
         )?;
-        let sources = SourceLoader::load(root, resolver, &mut budget, &mut diagnostics, observer)
-            .map_err(SchemaCompileErrors::inline)
-            .store_err_into(out.reborrow())?;
         Ok(Self {
             sources,
             diagnostics,
@@ -158,20 +204,18 @@ impl CompileSession {
 
 impl CompileBudget {
     pub(crate) fn new<'slot, E>(
-        limits: SchemaLimits,
-        regex_options: &RegexOptions,
-        execution: &ExecutionBudget,
-        regex_execution: &RegexExecutionBudget,
+        context: &SchemaCompileContext,
         mut out: Out<'slot, '_, E>,
     ) -> OResult<'slot, Self>
     where
         E: From<BudgetError>,
     {
-        let execution = execution.try_clone(out.reborrow())?;
-        let regex_execution = regex_execution.try_clone(out.reborrow())?;
+        let execution = context.execution().try_clone(out.reborrow())?;
+        let regex_execution = context.regex_execution().try_clone(out.reborrow())?;
         Ok(Self {
-            limits,
-            regex_options: *regex_options,
+            limits: *context.resources(),
+            regex_options: *context.regex(),
+            translator: context.translator(),
             source_bytes: 0,
             source_files: 0,
             execution,
@@ -193,6 +237,10 @@ impl CompileBudget {
 
     pub(crate) fn regex_execution(&self) -> &RegexExecutionBudget {
         &self.regex_execution
+    }
+
+    pub(crate) const fn translator(&self) -> Translator {
+        self.translator
     }
 
     pub(crate) const fn limits(&self) -> &SchemaLimits {

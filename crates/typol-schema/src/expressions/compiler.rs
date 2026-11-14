@@ -14,7 +14,7 @@ use crate::{
 
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{ChargedVec, SourceSpan};
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 use typol_syntax::{
     Annotation, Assertion, AstAccessError, TypeExpr, TypeExprKind, VariantPayloadKind,
 };
@@ -119,7 +119,10 @@ impl ExpressionCompiler {
                             assertions.get(index, ast_out)
                         })?;
                         let Some(assertion) = assertion else {
-                            diagnostics.push(schema_internal!(declaration.span()));
+                            diagnostics.push(schema_internal!(
+                                diagnostics.translator(),
+                                declaration.span()
+                            ));
                             return Err(out.fail(BuildFailure::empty()));
                         };
                         context.consume(1, assertion.span(), diagnostics, out.reborrow())?;
@@ -141,7 +144,10 @@ impl ExpressionCompiler {
                             Ok(compiled) => {
                                 let Some(assertions) = output.type_assertions_mut(symbol.id())
                                 else {
-                                    diagnostics.push(schema_internal!(assertion.span()));
+                                    diagnostics.push(schema_internal!(
+                                        diagnostics.translator(),
+                                        assertion.span()
+                                    ));
                                     return Err(out.fail(BuildFailure::empty()));
                                 };
                                 assertions.try_reserve(1, out.reborrow())?;
@@ -167,11 +173,17 @@ impl ExpressionCompiler {
                     let Some(variant_ids) =
                         symbols.type_symbol(symbol.id()).map(|item| item.variants())
                     else {
-                        diagnostics.push(schema_internal!(declaration.span()));
+                        diagnostics.push(schema_internal!(
+                            diagnostics.translator(),
+                            declaration.span()
+                        ));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     if variant_ids.len() != variants.len() {
-                        diagnostics.push(schema_internal!(declaration.span()));
+                        diagnostics.push(schema_internal!(
+                            diagnostics.translator(),
+                            declaration.span()
+                        ));
                         return Err(out.fail(BuildFailure::empty()));
                     }
                     for (variant_index, variant_id) in variant_ids.iter().copied().enumerate() {
@@ -179,7 +191,10 @@ impl ExpressionCompiler {
                             variants.get(variant_index, ast_out)
                         })?;
                         let Some(variant) = variant else {
-                            diagnostics.push(schema_internal!(declaration.span()));
+                            diagnostics.push(schema_internal!(
+                                diagnostics.translator(),
+                                declaration.span()
+                            ));
                             return Err(out.fail(BuildFailure::empty()));
                         };
                         context.consume(1, variant.span(), diagnostics, out.reborrow())?;
@@ -219,7 +234,10 @@ impl ExpressionCompiler {
                                 assertions.get(assertion_index, ast_out)
                             })?;
                             let Some(assertion) = assertion else {
-                                diagnostics.push(schema_internal!(variant.span()));
+                                diagnostics.push(schema_internal!(
+                                    diagnostics.translator(),
+                                    variant.span()
+                                ));
                                 return Err(out.fail(BuildFailure::empty()));
                             };
                             context.consume(1, assertion.span(), diagnostics, out.reborrow())?;
@@ -242,7 +260,10 @@ impl ExpressionCompiler {
                                     let Some(assertions) =
                                         output.variant_assertions_mut(variant_id)
                                     else {
-                                        diagnostics.push(schema_internal!(assertion.span()));
+                                        diagnostics.push(schema_internal!(
+                                            diagnostics.translator(),
+                                            assertion.span()
+                                        ));
                                         return Err(out.fail(BuildFailure::empty()));
                                     };
                                     assertions.try_reserve(1, out.reborrow())?;
@@ -273,7 +294,10 @@ impl ExpressionCompiler {
             .checked_add(symbols.fields().len())
             .and_then(|count| count.checked_add(symbols.variants().len()));
         let Some(all_task_capacity) = all_task_capacity else {
-            diagnostics.push(EmergencyDiagnostics::resource(fallback));
+            diagnostics.push(EmergencyDiagnostics::resource(
+                fallback,
+                diagnostics.translator(),
+            ));
             return Err(out.fail(BuildFailure::empty()));
         };
         all_tasks.try_reserve_exact(all_task_capacity, out.reborrow())?;
@@ -330,7 +354,7 @@ impl ExpressionCompiler {
                 out.reborrow(),
             )?
             else {
-                diagnostics.push(schema_internal!(alias.span()));
+                diagnostics.push(schema_internal!(diagnostics.translator(), alias.span()));
                 return Err(out.fail(BuildFailure::empty()));
             };
             all_tasks.try_push(AllTask { annotation, target }, out.reborrow())?;
@@ -385,7 +409,10 @@ impl ExpressionCompiler {
                 out.reborrow(),
             )?
             else {
-                diagnostics.push(schema_internal!(field.declaration().span()));
+                diagnostics.push(schema_internal!(
+                    diagnostics.translator(),
+                    field.declaration().span()
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             };
             all_tasks.try_push(
@@ -449,7 +476,10 @@ impl ExpressionCompiler {
                 out.reborrow(),
             )?
             else {
-                diagnostics.push(schema_internal!(variant.declaration().span()));
+                diagnostics.push(schema_internal!(
+                    diagnostics.translator(),
+                    variant.declaration().span()
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             };
             all_tasks.try_push(AllTask { annotation, target }, out.reborrow())?;
@@ -475,10 +505,10 @@ impl ExpressionCompiler {
                 ExpressionCompileSupport::all_arguments(task.annotation, context, out.reborrow())?
             else {
                 diagnostics.push(diagnostics.make_semantic(
-                    diagnostic_message!(
-                        "diagnostic.schema.annotation_all_arguments_invalid",
-                        "@all requires two positional arguments: an expression and a string message"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.annotation_all_arguments_invalid",
+                        locale: diagnostics.translator(),
+                    },
                     task.annotation.span(),
                 ));
                 record_invalid_all(&mut output, task.annotation.span(), out.reborrow())?;
@@ -493,10 +523,10 @@ impl ExpressionCompiler {
                 }
                 _ => {
                     diagnostics.push(diagnostics.make_semantic(
-                        diagnostic_message!(
-                            "diagnostic.schema.annotation_all_requires_collection",
-                            "@all applies only to arrays or maps"
-                        ),
+                        t! {
+                            name: "diagnostic.schema.annotation_all_requires_collection",
+                            locale: diagnostics.translator(),
+                        },
                         task.annotation.span(),
                     ));
                     record_invalid_all(&mut output, task.annotation.span(), out.reborrow())?;
@@ -596,7 +626,10 @@ fn collect_nested_type_alls<'slot, 'tree>(
                     out.reborrow(),
                 )?
                 else {
-                    diagnostics.push(schema_internal!(frame.expression.span()));
+                    diagnostics.push(schema_internal!(
+                        diagnostics.translator(),
+                        frame.expression.span()
+                    ));
                     return Err(out.fail(BuildFailure::empty()));
                 };
                 tasks.try_push(
@@ -627,7 +660,10 @@ fn collect_nested_type_alls<'slot, 'tree>(
             (TypeExprKind::Builtin(_), Some(ResolvedTypeKind::Builtin(_)))
             | (TypeExprKind::Path(_), Some(_)) => None,
             _ => {
-                diagnostics.push(schema_internal!(frame.expression.span()));
+                diagnostics.push(schema_internal!(
+                    diagnostics.translator(),
+                    frame.expression.span()
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             }
         };

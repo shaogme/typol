@@ -1,7 +1,9 @@
 mod support;
 
 pub(crate) use support::PreparedRecordCompilation;
+
 pub(super) use support::RecordCompilation;
+
 use support::{QualifiedNameInput, RecordSupport, TypeIdRequest};
 
 use crate::{
@@ -67,7 +69,7 @@ impl RecordBuilder {
             let record = match ty {
                 ExpressionType::User(symbol) => {
                     let Some(symbol) = symbols.type_symbol(symbol) else {
-                        diagnostics.push(schema_internal!(fallback));
+                        diagnostics.push(schema_internal!(diagnostics.translator(), fallback));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     let (kind, type_span) = match symbol.declaration() {
@@ -157,7 +159,7 @@ impl RecordBuilder {
                 }
                 ExpressionType::VariantStructure(variant) => {
                     let Some(variant) = symbols.variant_symbol(variant) else {
-                        diagnostics.push(schema_internal!(fallback));
+                        diagnostics.push(schema_internal!(diagnostics.translator(), fallback));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     let span = variant.declaration().span();
@@ -195,7 +197,7 @@ impl RecordBuilder {
                 }
                 ExpressionType::Resolved(use_id) => {
                     let Some(use_) = types.type_use(use_id) else {
-                        diagnostics.push(schema_internal!(fallback));
+                        diagnostics.push(schema_internal!(diagnostics.translator(), fallback));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     let span = use_.span();
@@ -259,7 +261,8 @@ impl RecordBuilder {
                                     length,
                                 },
                                 ResolvedTypeKind::Builtin(_) | ResolvedTypeKind::User(_) => {
-                                    diagnostics.abort(schema_internal!(span));
+                                    diagnostics
+                                        .abort(schema_internal!(diagnostics.translator(), span));
                                     return Err(out.fail(BuildFailure::empty()));
                                 }
                             };
@@ -297,7 +300,7 @@ impl RecordBuilder {
             execution.consume(1, out.reborrow())?;
             if let TypeDeclarationKind::Alias(alias) = symbol.declaration() {
                 let Some(alias_target) = types.alias_target(symbol.id()) else {
-                    diagnostics.push(schema_internal!(alias.span()));
+                    diagnostics.push(schema_internal!(diagnostics.translator(), alias.span()));
                     return Err(out.fail(BuildFailure::empty()));
                 };
                 let target = RecordSupport::type_id(

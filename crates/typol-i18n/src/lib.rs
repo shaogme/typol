@@ -3,11 +3,7 @@
 extern crate alloc;
 
 use alloc::string::String;
-use core::fmt;
 
-use typol_core::DiagnosticTranslationError;
-#[doc(hidden)]
-pub use typol_core::{DiagnosticMessage, DiagnosticMessageKey};
 use u18n::{Locale, LocaleProvider};
 
 #[cfg(feature = "std")]
@@ -21,7 +17,7 @@ pub enum Language {
     Chinese,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Translator {
     language: Language,
 }
@@ -84,5 +80,3 @@ impl LocaleProvider for Translator {
         }
     }
 }
-
-include!(concat!(env!("OUT_DIR"), "/typol_diagnostic_messages.rs"));

@@ -266,6 +266,304 @@ impl<'a> ValueFingerprintHasher<'a> {
     }
 }
 
+struct FingerprintState<'e, 'schema, 'values> {
+    evaluator: &'e Evaluator<'schema>,
+    pending: ChargedVec<Work<'values>>,
+    hash: ValueFingerprintHasher<'e>,
+}
+
+impl<'e, 'schema, 'values> FingerprintState<'e, 'schema, 'values> {
+    fn new<'slot>(
+        evaluator: &'e Evaluator<'schema>,
+        value: EvalValue<'values>,
+        mut out: Out<'slot, '_, EvalError>,
+    ) -> OResult<'slot, Self> {
+        let mut pending = ChargedVec::new(evaluator.budget(), out.reborrow())?;
+        EvaluationStack::push(&mut pending, Work::Value(value, 0), out.reborrow())?;
+        Ok(Self {
+            evaluator,
+            pending,
+            hash: ValueFingerprintHasher::new(evaluator.budget()),
+        })
+    }
+
+    fn run<'slot>(mut self, mut out: Out<'slot, '_, EvalError>) -> OResult<'slot, (u64, u64)> {
+        while let Some(work) = self.pending.pop() {
+            self.evaluator.step(out.reborrow())?;
+            match work {
+                Work::Bytes(text) => self.hash.write_bytes(text.as_bytes(), out.reborrow())?,
+                Work::Value(value, depth) => {
+                    self.fingerprint_value(value, depth, out.reborrow())?;
+                }
+            }
+        }
+        Ok(self.hash.finish())
+    }
+
+    fn fingerprint_value<'slot>(
+        &mut self,
+        value: EvalValue<'values>,
+        depth: usize,
+        mut out: Out<'slot, '_, EvalError>,
+    ) -> OResult<'slot, ()> {
+        if depth >= self.evaluator.limits().max_nesting_depth() {
+            return Err(out.fail(EvalError::Resource));
+        }
+        self.evaluator.checked(value, false, out.reborrow())?;
+        let next = depth
+            .checked_add(1)
+            .ok_or(EvalError::Resource)
+            .store_err_into(out.reborrow())?;
+        match value.kind() {
+            EvalKind::Signed(value) => {
+                self.hash.write_byte(1);
+                self.hash.write_wide(value.to_le_bytes());
+            }
+            EvalKind::Unsigned(value) => {
+                self.hash.write_byte(2);
+                self.hash.write_wide(value.to_le_bytes());
+            }
+            EvalKind::Float(value) => {
+                self.hash.write_byte(3);
+                self.hash
+                    .write_u64(if value == 0.0 { 0 } else { value.to_bits() });
+            }
+            EvalKind::Boolean(value) => {
+                self.hash.write_byte(4);
+                self.hash.write_bool(value);
+            }
+            EvalKind::String(value) => {
+                self.hash.write_byte(5);
+                self.hash.write_bytes(value.as_bytes(), out.reborrow())?;
+            }
+            EvalKind::None => {
+                self.hash.write_byte(6);
+                self.hash.write_bool(false);
+            }
+            EvalKind::Structure(fields) => {
+                self.fingerprint_structure(value, fields, next, out.reborrow())?;
+            }
+            EvalKind::Value(config) => {
+                self.fingerprint_config(value, config, next, out.reborrow())?;
+            }
+            EvalKind::Magnitude(_) => {
+                return Err(out.fail(EvalError::internal(RULE_EVALUATION_INTERNAL)));
+            }
+        }
+        Ok(())
+    }
+
+    fn fingerprint_structure<'slot>(
+        &mut self,
+        value: EvalValue<'values>,
+        fields: ValueView<'values>,
+        next: usize,
+        mut out: Out<'slot, '_, EvalError>,
+    ) -> OResult<'slot, ()> {
+        self.hash.write_byte(7);
+        let type_info = self
+            .evaluator
+            .schema()
+            .type_info(value.ty(), out.reborrow())?;
+        let type_info = type_info
+            .ok_or(EvalError::internal(RULE_EVALUATION_INTERNAL))
+            .store_err_into(out.reborrow())?;
+        let StoredTypeKind::Struct { fields: ids } = type_info.kind() else {
+            return Err(out.fail(EvalError::internal(RULE_EVALUATION_INTERNAL)));
+        };
+        let ValueKind::Structure(fields) = fields.as_ref() else {
+            return Err(out.fail(EvalError::internal(RULE_EVALUATION_INTERNAL)));
+        };
+        hash_fields(
+            self.evaluator,
+            &mut self.pending,
+            HashFields {
+                values: fields,
+                ids,
+            },
+            next,
+            out,
+        )
+    }
+
+    fn fingerprint_config<'slot>(
+        &mut self,
+        value: EvalValue<'values>,
+        config: ValueView<'values>,
+        next: usize,
+        mut out: Out<'slot, '_, EvalError>,
+    ) -> OResult<'slot, ()> {
+        let type_info = self
+            .evaluator
+            .schema()
+            .type_info(value.ty(), out.reborrow())?;
+        let type_info = type_info
+            .ok_or(EvalError::internal(RULE_EVALUATION_INTERNAL))
+            .store_err_into(out.reborrow())?;
+        match type_info.kind() {
+            StoredTypeKind::Option { inner } => self.fingerprint_option(config, inner, next, out),
+            StoredTypeKind::Array { element, .. } => {
+                self.fingerprint_array(config, element, next, out)
+            }
+            StoredTypeKind::Map { value } => self.fingerprint_map(config, value, next, out),
+            StoredTypeKind::Enum { .. } => self.fingerprint_enum(value, config, next, out),
+            _ => Err(out.fail(EvalError::internal(RULE_EVALUATION_INTERNAL))),
+        }
+    }
+
+    fn fingerprint_option<'slot>(
+        &mut self,
+        config: ValueView<'values>,
+        inner: TypeId,
+        next: usize,
+        out: Out<'slot, '_, EvalError>,
+    ) -> OResult<'slot, ()> {
+        let ValueKind::Optional(value) = config.as_ref() else {
+            return Err(out.fail(EvalError::internal(RULE_EVALUATION_INTERNAL)));
+        };
+        self.hash.write_byte(6);
+        self.hash.write_bool(value.is_some());
+        if let Some(value) = value {
+            EvaluationStack::push(
+                &mut self.pending,
+                Work::Value(EvalValue::config(value, inner, false), next),
+                out,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn fingerprint_array<'slot>(
+        &mut self,
+        config: ValueView<'values>,
+        element: TypeId,
+        next: usize,
+        mut out: Out<'slot, '_, EvalError>,
+    ) -> OResult<'slot, ()> {
+        let ValueKind::Array(values) = config.as_ref() else {
+            return Err(out.fail(EvalError::internal(RULE_EVALUATION_INTERNAL)));
+        };
+        self.hash.write_byte(8);
+        let value_count = values.len();
+        self.hash.write_u64(value_count as u64);
+        let mut ordered = ChargedVec::new(self.evaluator.budget(), out.reborrow())?;
+        ordered.try_reserve_exact(value_count, out.reborrow())?;
+        for entry in values {
+            self.evaluator.step(out.reborrow())?;
+            ordered.try_push(entry.value(), out.reborrow())?;
+        }
+        for value in ordered.iter().rev() {
+            self.evaluator.step(out.reborrow())?;
+            EvaluationStack::push(
+                &mut self.pending,
+                Work::Value(EvalValue::config(*value, element, false), next),
+                out.reborrow(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn fingerprint_map<'slot>(
+        &mut self,
+        config: ValueView<'values>,
+        value_type: TypeId,
+        next: usize,
+        mut out: Out<'slot, '_, EvalError>,
+    ) -> OResult<'slot, ()> {
+        let ValueKind::Map(entries) = config.as_ref() else {
+            return Err(out.fail(EvalError::internal(RULE_EVALUATION_INTERNAL)));
+        };
+        self.hash.write_byte(9);
+        let entry_count = entries.len();
+        self.hash.write_u64(entry_count as u64);
+        let mut sorted = ChargedVec::new(self.evaluator.budget(), out.reborrow())?;
+        sorted.try_reserve_exact(entry_count, out.reborrow())?;
+        for entry in entries {
+            self.evaluator.step(out.reborrow())?;
+            sorted.try_push(entry, out.reborrow())?;
+        }
+        sorted.sort_by(
+            |a, b, mut sort_out| {
+                self.evaluator.step(sort_out.reborrow())?;
+                let a_name = a
+                    .name()
+                    .ok_or(EvalError::internal(RULE_EVALUATION_INTERNAL))
+                    .store_err_into(sort_out.reborrow())?;
+                let b_name = b
+                    .name()
+                    .ok_or(EvalError::internal(RULE_EVALUATION_INTERNAL))
+                    .store_err_into(sort_out.reborrow())?;
+                self.evaluator
+                    .compare_text(a_name, b_name, sort_out.reborrow())
+            },
+            out.reborrow(),
+        )?;
+        for entry in sorted.iter().rev() {
+            let name = entry
+                .name()
+                .ok_or(EvalError::internal(RULE_EVALUATION_INTERNAL))
+                .store_err_into(out.reborrow())?;
+            EvaluationStack::push(
+                &mut self.pending,
+                Work::Value(EvalValue::config(entry.value(), value_type, false), next),
+                out.reborrow(),
+            )?;
+            EvaluationStack::push(&mut self.pending, Work::Bytes(name), out.reborrow())?;
+        }
+        Ok(())
+    }
+
+    fn fingerprint_enum<'slot>(
+        &mut self,
+        value: EvalValue<'values>,
+        config: ValueView<'values>,
+        next: usize,
+        mut out: Out<'slot, '_, EvalError>,
+    ) -> OResult<'slot, ()> {
+        let ValueKind::Enumeration { variant, payload } = config.as_ref() else {
+            return Err(out.fail(EvalError::internal(RULE_EVALUATION_INTERNAL)));
+        };
+        self.hash.write_byte(10);
+        self.hash.write_bytes(variant.as_bytes(), out.reborrow())?;
+        let variant_id = self
+            .evaluator
+            .variant_id(value.ty(), variant, out.reborrow())?;
+        let variant_info = self
+            .evaluator
+            .schema()
+            .variant_info(variant_id, out.reborrow())?;
+        let variant = variant_info
+            .ok_or(EvalError::internal(RULE_EVALUATION_INTERNAL))
+            .store_err_into(out.reborrow())?;
+        match (variant.payload(), payload) {
+            (StoredPayloadInfo::Unit, ValuePayloadView::Unit) => self.hash.write_byte(0),
+            (StoredPayloadInfo::Single { ty }, ValuePayloadView::Single(value)) => {
+                self.hash.write_byte(1);
+                EvaluationStack::push(
+                    &mut self.pending,
+                    Work::Value(EvalValue::config(value, ty, false), next),
+                    out.reborrow(),
+                )?;
+            }
+            (StoredPayloadInfo::Structure { fields: ids }, ValuePayloadView::Structure(fields)) => {
+                self.hash.write_byte(2);
+                hash_fields(
+                    self.evaluator,
+                    &mut self.pending,
+                    HashFields {
+                        values: fields,
+                        ids,
+                    },
+                    next,
+                    out.reborrow(),
+                )?;
+            }
+            _ => return Err(out.fail(EvalError::internal(RULE_EVALUATION_INTERNAL))),
+        }
+        Ok(())
+    }
+}
+
 pub struct ValueRules;
 
 impl ValueRules {
@@ -463,212 +761,7 @@ impl ValueRules {
         value: EvalValue<'_>,
         mut out: Out<'slot, '_, EvalError>,
     ) -> OResult<'slot, (u64, u64)> {
-        let mut pending = ChargedVec::new(evaluator.budget(), out.reborrow())?;
-        EvaluationStack::push(&mut pending, Work::Value(value, 0), out.reborrow())?;
-        let mut hash = ValueFingerprintHasher::new(evaluator.budget());
-        while let Some(work) = pending.pop() {
-            evaluator.step(out.reborrow())?;
-            let (value, depth) = match work {
-                Work::Bytes(text) => {
-                    hash.write_bytes(text.as_bytes(), out.reborrow())?;
-                    continue;
-                }
-                Work::Value(value, depth) => (value, depth),
-            };
-            if depth >= evaluator.limits().max_nesting_depth() {
-                return Err(out.fail(EvalError::Resource));
-            }
-            evaluator.checked(value, false, out.reborrow())?;
-            let next = depth
-                .checked_add(1)
-                .ok_or(EvalError::Resource)
-                .store_err_into(out.reborrow())?;
-            match value.kind() {
-                EvalKind::Signed(v) => {
-                    hash.write_byte(1);
-                    hash.write_wide(v.to_le_bytes());
-                }
-                EvalKind::Unsigned(v) => {
-                    hash.write_byte(2);
-                    hash.write_wide(v.to_le_bytes());
-                }
-                EvalKind::Float(v) => {
-                    hash.write_byte(3);
-                    hash.write_u64(if v == 0.0 { 0 } else { v.to_bits() });
-                }
-                EvalKind::Boolean(v) => {
-                    hash.write_byte(4);
-                    hash.write_bool(v);
-                }
-                EvalKind::String(v) => {
-                    hash.write_byte(5);
-                    hash.write_bytes(v.as_bytes(), out.reborrow())?;
-                }
-                EvalKind::None => {
-                    hash.write_byte(6);
-                    hash.write_bool(false);
-                }
-                EvalKind::Structure(fields) => {
-                    hash.write_byte(7);
-                    let type_info = evaluator.schema().type_info(value.ty(), out.reborrow())?;
-                    let type_info = type_info
-                        .ok_or(EvalError::internal(RULE_EVALUATION_INTERNAL))
-                        .store_err_into(out.reborrow())?;
-                    let StoredTypeKind::Struct { fields: ids } = type_info.kind() else {
-                        return Err(out.fail(EvalError::internal(RULE_EVALUATION_INTERNAL)));
-                    };
-                    let ValueKind::Structure(fields) = fields.as_ref() else {
-                        return Err(out.fail(EvalError::internal(RULE_EVALUATION_INTERNAL)));
-                    };
-                    hash_fields(
-                        evaluator,
-                        &mut pending,
-                        HashFields {
-                            values: fields,
-                            ids,
-                        },
-                        next,
-                        out.reborrow(),
-                    )?;
-                }
-                EvalKind::Value(config) => {
-                    let type_info = evaluator.schema().type_info(value.ty(), out.reborrow())?;
-                    let type_info = type_info
-                        .ok_or(EvalError::internal(RULE_EVALUATION_INTERNAL))
-                        .store_err_into(out.reborrow())?;
-                    match (type_info.kind(), config.as_ref()) {
-                        (StoredTypeKind::Option { inner }, ValueKind::Optional(v)) => {
-                            hash.write_byte(6);
-                            hash.write_bool(v.is_some());
-                            if let Some(v) = v {
-                                EvaluationStack::push(
-                                    &mut pending,
-                                    Work::Value(EvalValue::config(v, inner, false), next),
-                                    out.reborrow(),
-                                )?;
-                            }
-                        }
-                        (StoredTypeKind::Array { element, .. }, ValueKind::Array(values)) => {
-                            hash.write_byte(8);
-                            let value_count = values.len();
-                            hash.write_u64(value_count as u64);
-                            let mut ordered = ChargedVec::new(evaluator.budget(), out.reborrow())?;
-                            ordered.try_reserve_exact(value_count, out.reborrow())?;
-                            for entry in values {
-                                evaluator.step(out.reborrow())?;
-                                ordered.try_push(entry.value(), out.reborrow())?;
-                            }
-                            for v in ordered.iter().rev() {
-                                evaluator.step(out.reborrow())?;
-                                EvaluationStack::push(
-                                    &mut pending,
-                                    Work::Value(EvalValue::config(*v, element, false), next),
-                                    out.reborrow(),
-                                )?;
-                            }
-                        }
-                        (StoredTypeKind::Map { value: ty }, ValueKind::Map(entries)) => {
-                            hash.write_byte(9);
-                            let entry_count = entries.len();
-                            hash.write_u64(entry_count as u64);
-                            let mut sorted = ChargedVec::new(evaluator.budget(), out.reborrow())?;
-                            sorted.try_reserve_exact(entry_count, out.reborrow())?;
-                            for entry in entries {
-                                evaluator.step(out.reborrow())?;
-                                sorted.try_push(entry, out.reborrow())?;
-                            }
-                            sorted.sort_by(
-                                |a, b, mut sort_out| {
-                                    evaluator.step(sort_out.reborrow())?;
-                                    let a_name = a
-                                        .name()
-                                        .ok_or(EvalError::internal(RULE_EVALUATION_INTERNAL))
-                                        .store_err_into(sort_out.reborrow())?;
-                                    let b_name = b
-                                        .name()
-                                        .ok_or(EvalError::internal(RULE_EVALUATION_INTERNAL))
-                                        .store_err_into(sort_out.reborrow())?;
-                                    evaluator.compare_text(a_name, b_name, sort_out.reborrow())
-                                },
-                                out.reborrow(),
-                            )?;
-                            for entry in sorted.iter().rev() {
-                                let name = entry
-                                    .name()
-                                    .ok_or(EvalError::internal(RULE_EVALUATION_INTERNAL))
-                                    .store_err_into(out.reborrow())?;
-                                EvaluationStack::push(
-                                    &mut pending,
-                                    Work::Value(EvalValue::config(entry.value(), ty, false), next),
-                                    out.reborrow(),
-                                )?;
-                                EvaluationStack::push(
-                                    &mut pending,
-                                    Work::Bytes(name),
-                                    out.reborrow(),
-                                )?;
-                            }
-                        }
-                        (
-                            StoredTypeKind::Enum { .. },
-                            ValueKind::Enumeration { variant, payload },
-                        ) => {
-                            hash.write_byte(10);
-                            hash.write_bytes(variant.as_bytes(), out.reborrow())?;
-                            let variant_id =
-                                evaluator.variant_id(value.ty(), variant, out.reborrow())?;
-                            let variant_info = evaluator
-                                .schema()
-                                .variant_info(variant_id, out.reborrow())?;
-                            let variant = variant_info
-                                .ok_or(EvalError::internal(RULE_EVALUATION_INTERNAL))
-                                .store_err_into(out.reborrow())?;
-                            match (variant.payload(), payload) {
-                                (StoredPayloadInfo::Unit, ValuePayloadView::Unit) => {
-                                    hash.write_byte(0)
-                                }
-                                (StoredPayloadInfo::Single { ty }, ValuePayloadView::Single(v)) => {
-                                    hash.write_byte(1);
-                                    EvaluationStack::push(
-                                        &mut pending,
-                                        Work::Value(EvalValue::config(v, ty, false), next),
-                                        out.reborrow(),
-                                    )?;
-                                }
-                                (
-                                    StoredPayloadInfo::Structure { fields: ids },
-                                    ValuePayloadView::Structure(fields),
-                                ) => {
-                                    hash.write_byte(2);
-                                    hash_fields(
-                                        evaluator,
-                                        &mut pending,
-                                        HashFields {
-                                            values: fields,
-                                            ids,
-                                        },
-                                        next,
-                                        out.reborrow(),
-                                    )?;
-                                }
-                                _ => {
-                                    return Err(
-                                        out.fail(EvalError::internal(RULE_EVALUATION_INTERNAL))
-                                    );
-                                }
-                            }
-                        }
-                        _ => {
-                            return Err(out.fail(EvalError::internal(RULE_EVALUATION_INTERNAL)));
-                        }
-                    }
-                }
-                EvalKind::Magnitude(_) => {
-                    return Err(out.fail(EvalError::internal(RULE_EVALUATION_INTERNAL)));
-                }
-            }
-        }
-        Ok(hash.finish())
+        FingerprintState::new(evaluator, value, out.reborrow())?.run(out)
     }
 
     /// Each call returns only the current element’s structured execution result; the caller chooses the report location and message.

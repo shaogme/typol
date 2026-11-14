@@ -3,6 +3,7 @@ use crate::TypolStage;
 use typol_core::{
     DiagnosticContext, SourceId, SourceReadError, SourceReadErrorKind, diagnostic_context,
 };
+use typol_i18n::{Language, Translator};
 use typol_std::{HostError, HostErrorKind, HostOperation};
 use typol_test_support::{
     TestExpect, TestExtract, TestResult, test_verify as assert, test_verify_eq as assert_eq,
@@ -13,7 +14,7 @@ static READER_FAILURE_CONTEXT: DiagnosticContext =
 
 fn host_error(kind: SourceReadErrorKind) -> TestResult<HostError> {
     let source_error = SourceReadError::new(kind).with_input(SourceId::new(7), 19);
-    let error = LoadSupport::read_source_error(source_error);
+    let error = LoadSupport::read_source_error(source_error, Translator::new(Language::English));
     assert_eq!(error.stage(), TypolStage::ConfigRead);
     Ok(*error.host_error().test_value()?)
 }
@@ -53,7 +54,7 @@ fn source_read_errors_keep_their_host_categories_and_location() -> TestResult {
 fn source_read_invariant_uses_source_or_generic_context() -> TestResult {
     let source_error = SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
         .with_context(READER_FAILURE_CONTEXT);
-    let mapped = LoadSupport::read_source_error(source_error);
+    let mapped = LoadSupport::read_source_error(source_error, Translator::new(Language::English));
     let host = mapped.host_error().test_value()?;
     assert_eq!(
         host.source_context()

@@ -1,5 +1,5 @@
 use crate::{
-    diagnostics::{BudgetDiagnostic, DiagnosticFactory},
+    diagnostics::{BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticFactory},
     value::ValueFactory,
 };
 use opeo::{ErrSlot, OResult, Out};
@@ -7,12 +7,16 @@ use typol_core::{
     BudgetError, ConfigValue, Diagnostic, DiagnosticCode, DiagnosticMessage, ExecutionBudget,
     LocatedSpan, NumericLiteral, ValueSource,
 };
-use typol_i18n::diagnostic_key;
+use typol_i18n::{Translator, t};
 use typol_syntax::BuiltinType;
+
+#[cfg(test)]
+use typol_i18n::Language;
 
 pub(crate) struct Scalar;
 
 pub(crate) struct ScalarRequest<'a> {
+    pub(crate) translator: Translator,
     pub(crate) text: &'a str,
     pub(crate) builtin: BuiltinType,
     pub(crate) span: LocatedSpan,
@@ -105,6 +109,7 @@ impl Scalar {
     ) -> OResult<'slot, ConfigValue> {
         Self::convert_budgeted(
             ScalarRequest {
+                translator: Translator::new(Language::English),
                 text,
                 builtin,
                 span,
@@ -121,6 +126,7 @@ impl Scalar {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ConfigValue> {
         let ScalarRequest {
+            translator,
             text,
             builtin,
             span,
@@ -137,6 +143,7 @@ impl Scalar {
                     caught.take(),
                     Some(span),
                     Some(ValueSource::EnvironmentVariable),
+                    translator,
                 ))),
             };
         }
@@ -157,12 +164,18 @@ impl Scalar {
                             caught.take(),
                             Some(span),
                             Some(ValueSource::EnvironmentVariable),
+                            translator,
                         ))),
                     };
                 }
             }
-            let diagnostic =
-                Self::invalid_scalar_budgeted(span, budget, budget_errors, out.reborrow())?;
+            let diagnostic = Self::invalid_scalar_budgeted(
+                span,
+                budget,
+                budget_errors,
+                translator,
+                out.reborrow(),
+            )?;
             return Err(out.fail(diagnostic));
         }
         if !text.is_empty() {
@@ -242,12 +255,18 @@ impl Scalar {
                         caught.take(),
                         Some(span),
                         Some(ValueSource::EnvironmentVariable),
+                        translator,
                     ))),
                 }
             }
             None => {
-                let diagnostic =
-                    Self::invalid_scalar_budgeted(span, budget, budget_errors, out.reborrow())?;
+                let diagnostic = Self::invalid_scalar_budgeted(
+                    span,
+                    budget,
+                    budget_errors,
+                    translator,
+                    out.reborrow(),
+                )?;
                 Err(out.fail(diagnostic))
             }
         }
@@ -290,25 +309,24 @@ impl Scalar {
         span: LocatedSpan,
         budget: Option<&ExecutionBudget>,
         budget_errors: &mut ErrSlot<BudgetError>,
+        translator: Translator,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, Diagnostic> {
         let Some(budget) = budget else {
-            let mut diagnostic = Self::environment_error(
+            return Ok(Self::environment_error(
                 DiagnosticCode::CONFIG_VALUE_ERROR,
-                "environment text is incompatible with the target scalar type or range",
+                DiagnosticMessage::from(
+                    t! { name: "diagnostic.environment.value_invalid", locale: translator },
+                ),
                 span,
-            );
-            diagnostic.set_message_key(Some(diagnostic_key!(
-                "diagnostic.environment.value_invalid"
-            )));
-            return Ok(diagnostic);
+                translator,
+            ));
         };
         let mut diagnostic = match budget_errors.try_call(|budget_out| {
             Diagnostic::try_new(
                 DiagnosticCode::CONFIG_VALUE_ERROR,
-                DiagnosticMessage::localized(
-                    "environment text is incompatible with the target scalar type or range",
-                    diagnostic_key!("diagnostic.environment.value_invalid"),
+                DiagnosticMessage::from(
+                    t! { name: "diagnostic.environment.value_invalid", locale: translator },
                 ),
                 Some(budget),
                 budget_out,
@@ -316,25 +334,29 @@ impl Scalar {
         }) {
             Ok(diagnostic) => diagnostic,
             Err(caught) => {
-                return Err(out.fail(BudgetDiagnostic::from_error(caught.take())));
+                return Err(out.fail(BudgetDiagnostic::from_error(caught.take(), translator)));
             }
         };
-        diagnostic.set_message_key(Some(diagnostic_key!(
-            "diagnostic.environment.value_invalid"
-        )));
         diagnostic.set_located_primary(Some(span));
         diagnostic.set_value_source(Some(ValueSource::EnvironmentVariable));
         Ok(diagnostic)
     }
 
-    fn environment_error(code: DiagnosticCode, message: &str, span: LocatedSpan) -> Diagnostic {
-        DiagnosticFactory::make_diagnostic(
+    fn environment_error(
+        code: DiagnosticCode,
+        message: DiagnosticMessage<'_>,
+        span: LocatedSpan,
+        translator: Translator,
+    ) -> Diagnostic {
+        DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
             code,
             message,
-            Some(span),
-            None,
-            Some(ValueSource::EnvironmentVariable),
-        )
+            primary: Some(span),
+            path: None,
+            value_source: Some(ValueSource::EnvironmentVariable),
+            context: None,
+            translator,
+        })
     }
 }
 #[cfg(test)]

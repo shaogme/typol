@@ -15,7 +15,7 @@ use crate::{
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{ChargedVec, Diagnostic, SourceSpan};
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 
 struct ModuleFrame {
     start: SourceSpan,
@@ -47,11 +47,11 @@ impl DeclarationParser {
         let mut frames =
             ParserControl::new_vec(parser, ParserControl::eof_span(parser), out.reborrow())?;
         let first = DeclarationParser::open_module(parser, start, out.reborrow())?;
-        ParserControl::try_push(&mut frames, first, start, out.reborrow())?;
+        ParserControl::try_push(parser, &mut frames, first, start, out.reborrow())?;
 
         loop {
             parser.execution.consume_with(1, out.reborrow(), |error| {
-                SyntaxDiagnostic::budget(error, ParserControl::eof_span(parser))
+                SyntaxDiagnostic::budget(error, ParserControl::eof_span(parser), parser.translator)
             })?;
 
             if parser.stopped {
@@ -62,18 +62,21 @@ impl DeclarationParser {
                 ParserControl::bump(parser, out.reborrow())?;
                 let Some(frame) = frames.pop() else {
                     return Err(out.reborrow().fail(parser_internal_error!(
+                        parser,
                         "module-frame-stack-underflow",
                         info.span,
                     )));
                 };
                 let Some(expected_depth) = frame.depth.checked_sub(1) else {
                     return Err(out.reborrow().fail(parser_internal_error!(
+                        parser,
                         "module-frame-depth-underflow",
                         info.span,
                     )));
                 };
                 if ParserControl::current_depth(parser) != expected_depth {
                     return Err(out.reborrow().fail(parser_internal_error!(
+                        parser,
                         "module-frame-depth-mismatch",
                         info.span,
                     )));
@@ -90,6 +93,7 @@ impl DeclarationParser {
                     break Ok(declaration);
                 };
                 ParserControl::try_push(
+                    parser,
                     &mut parent.declarations,
                     declaration,
                     frame.start,
@@ -101,10 +105,10 @@ impl DeclarationParser {
                 return ParserControl::syntax_failure(
                     parser,
                     info.span,
-                    diagnostic_message!(
-                        "diagnostic.syntax.module_missing_closing_brace",
-                        "module declaration is missing a closing brace"
-                    ),
+                    t! {
+                        name: "diagnostic.syntax.module_missing_closing_brace",
+                        locale: parser.translator,
+                    },
                     out.reborrow(),
                 );
             }
@@ -129,7 +133,7 @@ impl DeclarationParser {
                 else {
                     continue;
                 };
-                ParserControl::try_push(&mut frames, frame, info.span, out.reborrow())?;
+                ParserControl::try_push(parser, &mut frames, frame, info.span, out.reborrow())?;
             } else if !matches!(
                 info.kind,
                 TokenKind::Keyword(Keyword::Type | Keyword::Struct | Keyword::Enum)
@@ -138,15 +142,16 @@ impl DeclarationParser {
                 let diagnostic = ParserControl::syntax_error(
                     parser,
                     info.span,
-                    diagnostic_message!(
-                        "diagnostic.syntax.expected_schema_declaration",
-                        "expected a Schema declaration here in the module"
-                    ),
+                    t! {
+                        name: "diagnostic.syntax.expected_schema_declaration",
+                        locale: parser.translator,
+                    },
                     out.reborrow(),
                 )?;
                 ParserControl::push_diagnostic(parser, diagnostic, out.reborrow())?;
                 let Some(frame) = frames.last() else {
                     return Err(out.reborrow().fail(parser_internal_error!(
+                        parser,
                         "module-recovery-frame-missing",
                         info.span,
                     )));
@@ -179,11 +184,13 @@ impl DeclarationParser {
                 };
                 let Some(parent) = frames.last_mut() else {
                     return Err(out.reborrow().fail(parser_internal_error!(
+                        parser,
                         "module-parent-frame-missing",
                         info.span,
                     )));
                 };
                 ParserControl::try_push(
+                    parser,
                     &mut parent.declarations,
                     declaration,
                     info.span,
@@ -238,10 +245,10 @@ impl DeclarationParser {
             _ => ParserControl::syntax_failure(
                 parser,
                 info.span,
-                diagnostic_message!(
-                    "diagnostic.syntax.expected_schema_declaration",
-                    "expected a Schema declaration here"
-                ),
+                t! {
+                    name: "diagnostic.syntax.expected_schema_declaration",
+                    locale: parser.translator,
+                },
                 out.reborrow(),
             ),
         }
@@ -295,7 +302,7 @@ impl DeclarationParser {
 
         loop {
             parser.execution.consume_with(1, out.reborrow(), |error| {
-                SyntaxDiagnostic::budget(error, ParserControl::eof_span(parser))
+                SyntaxDiagnostic::budget(error, ParserControl::eof_span(parser), parser.translator)
             })?;
 
             if parser.stopped {
@@ -310,30 +317,20 @@ impl DeclarationParser {
                 return ParserControl::syntax_failure(
                     parser,
                     info.span,
-                    diagnostic_message!(
-                        "diagnostic.syntax.field_list_missing_closing_brace",
-                        "field list is missing a closing brace"
-                    ),
+                    t! {
+                        name: "diagnostic.syntax.field_list_missing_closing_brace",
+                        locale: parser.translator,
+                    },
                     out.reborrow(),
                 );
             }
 
-            let mut member_errors = ErrSlot::<Diagnostic>::new();
-            let attempt =
-                match member_errors.try_call(|out| DeclarationParser::parse_field(parser, out)) {
-                    Ok(field) => Ok(field),
-                    Err(caught) => Err(caught.take()),
-                };
-            let Some(field) = RecoveryParser::recover_member(
-                parser,
-                RecoveryBoundary::Separated { depth: base_depth },
-                attempt,
-                out.reborrow(),
-            )?
+            let Some(field) =
+                DeclarationParser::parse_field_member(parser, base_depth, out.reborrow())?
             else {
                 continue;
             };
-            ParserControl::try_push(&mut fields, field, info.span, out.reborrow())?;
+            ParserControl::try_push(parser, &mut fields, field, info.span, out.reborrow())?;
             let separator = ParserControl::peek(parser, out.reborrow())?;
             match separator.kind {
                 TokenKind::Symbol(Symbol::Comma | Symbol::RightBrace) => {}
@@ -341,10 +338,10 @@ impl DeclarationParser {
                     let diagnostic = ParserControl::syntax_error(
                         parser,
                         separator.span,
-                        diagnostic_message!(
-                            "diagnostic.syntax.fields_require_commas",
-                            "fields must be separated by commas"
-                        ),
+                        t! {
+                            name: "diagnostic.syntax.fields_require_commas",
+                            locale: parser.translator,
+                        },
                         out.reborrow(),
                     )?;
                     ParserControl::push_diagnostic(parser, diagnostic, out.reborrow())?;
@@ -359,6 +356,25 @@ impl DeclarationParser {
                 return Err(out.reborrow().fail(ParserControl::stopped_error(parser)));
             }
         }
+    }
+
+    fn parse_field_member<'slot>(
+        parser: &mut ParserState<'_>,
+        base_depth: usize,
+        mut out: Out<'slot, '_, Diagnostic>,
+    ) -> OResult<'slot, Option<Id<FieldDecl>>> {
+        let mut member_errors = ErrSlot::<Diagnostic>::new();
+        let attempt =
+            match member_errors.try_call(|out| DeclarationParser::parse_field(parser, out)) {
+                Ok(field) => Ok(field),
+                Err(caught) => Err(caught.take()),
+            };
+        RecoveryParser::recover_member(
+            parser,
+            RecoveryBoundary::Separated { depth: base_depth },
+            attempt,
+            out.reborrow(),
+        )
     }
 
     fn parse_field<'slot>(
@@ -402,7 +418,7 @@ impl DeclarationParser {
 
         loop {
             parser.execution.consume_with(1, out.reborrow(), |error| {
-                SyntaxDiagnostic::budget(error, ParserControl::eof_span(parser))
+                SyntaxDiagnostic::budget(error, ParserControl::eof_span(parser), parser.translator)
             })?;
 
             if parser.stopped {
@@ -414,10 +430,10 @@ impl DeclarationParser {
                     return ParserControl::syntax_failure(
                         parser,
                         info.span,
-                        diagnostic_message!(
-                            "diagnostic.syntax.enum_requires_variant",
-                            "an enum must have at least one variant"
-                        ),
+                        t! {
+                            name: "diagnostic.syntax.enum_requires_variant",
+                            locale: parser.translator,
+                        },
                         out.reborrow(),
                     );
                 }
@@ -428,10 +444,10 @@ impl DeclarationParser {
                 return ParserControl::syntax_failure(
                     parser,
                     info.span,
-                    diagnostic_message!(
-                        "diagnostic.syntax.enum_missing_closing_brace",
-                        "enum declaration is missing a closing brace"
-                    ),
+                    t! {
+                        name: "diagnostic.syntax.enum_missing_closing_brace",
+                        locale: parser.translator,
+                    },
                     out.reborrow(),
                 );
             }
@@ -452,7 +468,7 @@ impl DeclarationParser {
                 variant_failed = true;
                 continue;
             };
-            ParserControl::try_push(&mut variants, variant, info.span, out.reborrow())?;
+            ParserControl::try_push(parser, &mut variants, variant, info.span, out.reborrow())?;
             let separator = ParserControl::peek(parser, out.reborrow())?;
             match separator.kind {
                 TokenKind::Symbol(Symbol::Comma | Symbol::RightBrace) => {}
@@ -460,10 +476,10 @@ impl DeclarationParser {
                     let diagnostic = ParserControl::syntax_error(
                         parser,
                         separator.span,
-                        diagnostic_message!(
-                            "diagnostic.syntax.enum_variants_require_commas",
-                            "enum variants must be separated by commas"
-                        ),
+                        t! {
+                            name: "diagnostic.syntax.enum_variants_require_commas",
+                            locale: parser.translator,
+                        },
                         out.reborrow(),
                     )?;
                     ParserControl::push_diagnostic(parser, diagnostic, out.reborrow())?;
@@ -538,7 +554,7 @@ impl DeclarationParser {
             ParserControl::new_vec(parser, ParserControl::eof_span(parser), out.reborrow())?;
         loop {
             parser.execution.consume_with(1, out.reborrow(), |error| {
-                SyntaxDiagnostic::budget(error, ParserControl::eof_span(parser))
+                SyntaxDiagnostic::budget(error, ParserControl::eof_span(parser), parser.translator)
             })?;
 
             let info = ParserControl::peek(parser, out.reborrow())?;
@@ -550,20 +566,21 @@ impl DeclarationParser {
                 return ParserControl::syntax_failure(
                     parser,
                     next.span,
-                    diagnostic_message!(
-                        "diagnostic.syntax.assertion_annotation_name_required",
-                        "assertion annotation requires a name"
-                    ),
+                    t! {
+                        name: "diagnostic.syntax.assertion_annotation_name_required",
+                        locale: parser.translator,
+                    },
                     out.reborrow(),
                 );
             }
             let execution = parser.execution.try_clone_with(out.reborrow(), |error| {
-                SyntaxDiagnostic::budget(error, info.span)
+                SyntaxDiagnostic::budget(error, info.span, parser.translator)
             })?;
             let token = ParserControl::next_token(parser, out.reborrow())?;
             let token_span = token.span();
             let Some(name) = token.text() else {
                 return Err(out.reborrow().fail(parser_internal_error!(
+                    parser,
                     "assertion-name-token-text-missing",
                     token_span,
                 )));
@@ -575,7 +592,13 @@ impl DeclarationParser {
                 break Ok(assertions);
             }
             let assertion = DeclarationParser::parse_assertion(parser, out.reborrow())?;
-            ParserControl::try_push(&mut assertions, assertion, info.span, out.reborrow())?;
+            ParserControl::try_push(
+                parser,
+                &mut assertions,
+                assertion,
+                info.span,
+                out.reborrow(),
+            )?;
         }
     }
 
@@ -590,10 +613,10 @@ impl DeclarationParser {
             return ParserControl::syntax_failure(
                 parser,
                 span,
-                diagnostic_message!(
-                    "diagnostic.syntax.expected_assert_annotation",
-                    "expected @assert here"
-                ),
+                t! {
+                    name: "diagnostic.syntax.expected_assert_annotation",
+                    locale: parser.translator,
+                },
                 out.reborrow(),
             );
         }

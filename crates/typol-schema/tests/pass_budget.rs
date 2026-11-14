@@ -105,7 +105,7 @@ fn duplicate_names_keep_first_labels_and_declaration_order() -> TestResult {
         let mut last_start = 0;
         for diagnostic in errors.diagnostics() {
             test_verify_eq!(diagnostic.code(), DiagnosticCode::SCHEMA_SEMANTIC_ERROR);
-            test_verify_eq!(diagnostic.message(), message);
+            test_verify_eq!(diagnostic.message().test_value()?, message);
             let primary = diagnostic.primary().test_value()?.span();
             test_verify!(primary.start() > last_start);
             last_start = primary.start();
@@ -145,7 +145,12 @@ fn variant_and_payload_duplicates_keep_diagnostic_limit_trigger_order() -> TestR
     .test_error()?;
     test_verify_eq!(errors.diagnostics().len(), 2);
     test_verify_eq!(
-        errors.diagnostics().first().test_value()?.message(),
+        errors
+            .diagnostics()
+            .first()
+            .test_value()?
+            .message()
+            .test_value()?,
         "duplicate field name in the same struct"
     );
     let terminal = errors.diagnostics().last().test_value()?;

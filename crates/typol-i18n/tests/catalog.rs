@@ -1,6 +1,6 @@
-use std::{error::Error, fmt, io};
+use std::fmt;
 
-use typol_i18n::{DiagnosticMessageKey, Language, Translator, diagnostic_message, t};
+use typol_i18n::{Language, Translator, t};
 
 struct FailingWriter;
 
@@ -10,12 +10,36 @@ impl fmt::Write for FailingWriter {
     }
 }
 
+struct PartialWriter {
+    output: String,
+    writes_left: usize,
+}
+
+impl fmt::Write for PartialWriter {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        if self.writes_left == 0 {
+            return Err(fmt::Error);
+        }
+        self.output.push_str(text);
+        self.writes_left -= 1;
+        Ok(())
+    }
+}
+
 #[test]
 fn renders_catalog_messages_with_the_translation_macro() {
     let english_translator = Translator::new(Language::English);
     let chinese_translator = Translator::new(Language::Chinese);
-    let english: Result<&'static str, _> = t!("cli.help", locale = english_translator);
-    let chinese: Result<&'static str, _> = t!("cli.help", locale = chinese_translator);
+    let english = t! {
+        name: "cli.help",
+        locale: english_translator,
+    }
+    .map(|text| text.into_owned());
+    let chinese = t! {
+        name: "cli.help",
+        locale: chinese_translator,
+    }
+    .map(|text| text.into_owned());
 
     assert!(matches!(english.as_ref(), Ok(text) if text.starts_with("Usage:")));
     assert!(matches!(chinese.as_ref(), Ok(text) if text.starts_with("用法：")));
@@ -23,73 +47,46 @@ fn renders_catalog_messages_with_the_translation_macro() {
 }
 
 #[test]
-fn translates_schema_generated_diagnostic_keys() -> Result<(), Box<dyn Error>> {
-    let message = diagnostic_message!(
-        "diagnostic.schema.root_missing_entry",
-        "root schema must declare an entry struct",
-    );
-    let key = message
-        .key()
-        .ok_or_else(|| io::Error::other("generated messages have a key"))?;
-    let english = Translator::new(Language::English)
-        .translate_diagnostic(key)
-        .map_err(|_| io::Error::other("English diagnostic entry is present"))?;
-    let chinese = Translator::new(Language::Chinese)
-        .translate_diagnostic(key)
-        .map_err(|_| io::Error::other("Chinese diagnostic entry is present"))?;
+fn translates_diagnostic_messages_at_the_call_site() {
+    let english = t! {
+        name: "diagnostic.schema.root_missing_entry",
+        locale: Translator::new(Language::English),
+    };
+    let chinese = t! {
+        name: "diagnostic.schema.root_missing_entry",
+        locale: Translator::new(Language::Chinese),
+    };
 
-    if message.text() != "root schema must declare an entry struct"
-        || english != "root schema must declare an entry struct"
-        || chinese != "根 Schema 必须声明 entry 结构体"
-    {
-        return Err(io::Error::other("diagnostic catalog output did not match").into());
-    }
-    if Translator::new(Language::English)
-        .translate_diagnostic(DiagnosticMessageKey::__from_index(u16::MAX))
-        .is_ok()
-    {
-        return Err(io::Error::other("invalid diagnostic key was accepted").into());
-    }
-    Ok(())
+    assert_eq!(
+        english.as_deref(),
+        Ok("root schema must declare an entry struct")
+    );
+    assert_eq!(chinese.as_deref(), Ok("根 Schema 必须声明 entry 结构体"));
 }
 
 #[test]
-fn writes_diagnostic_text_without_owning_the_translation() -> Result<(), Box<dyn Error>> {
-    let message = diagnostic_message!(
-        "diagnostic.schema.root_missing_entry",
-        "root schema must declare an entry struct",
-    );
-    let key = message
-        .key()
-        .ok_or_else(|| io::Error::other("generated messages have a key"))?;
+fn returns_sink_failures_without_a_text_fallback() {
     let translator = Translator::new(Language::English);
-    let mut output = String::new();
-    translator
-        .write_diagnostic(key, &mut output)
-        .map_err(|_| io::Error::other("English diagnostic entry is present"))?;
-    if output != "root schema must declare an entry struct" {
-        return Err(io::Error::other("diagnostic writer output did not match").into());
-    }
-
     let mut failing_writer = FailingWriter;
-    if translator
-        .write_diagnostic(key, &mut failing_writer)
-        .is_ok()
-    {
-        return Err(io::Error::other("writer failure was ignored").into());
-    }
-    let mut invalid_output = String::new();
-    if translator
-        .write_diagnostic(
-            DiagnosticMessageKey::__from_index(u16::MAX),
-            &mut invalid_output,
-        )
-        .is_ok()
-        || !invalid_output.is_empty()
-    {
-        return Err(io::Error::other("invalid translation wrote partial output").into());
-    }
-    Ok(())
+    let failure = t! {
+        name: "diagnostic.schema.root_missing_entry",
+        locale: translator,
+        sink: &mut failing_writer,
+    };
+    assert!(failure.is_err());
+
+    let mut partial_writer = PartialWriter {
+        output: String::new(),
+        writes_left: 1,
+    };
+    let failure = t! {
+        name: "diagnostic.config.fixed_array_length_mismatch",
+        locale: translator,
+        args: { expected: 4usize, actual: 3usize },
+        sink: &mut partial_writer,
+    };
+    assert!(failure.is_err());
+    assert!(!partial_writer.output.is_empty());
 }
 
 #[test]

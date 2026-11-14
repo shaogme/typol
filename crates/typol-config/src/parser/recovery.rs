@@ -4,14 +4,14 @@ use super::{
 };
 use crate::{
     ConfigLimits,
-    diagnostics::{BudgetDiagnostic, DiagnosticFactory},
+    diagnostics::{BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticFactory},
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, ExecutionBudget,
     LocatedSpan, Read, SourceId, SourceSpan, diagnostic_context,
 };
-use typol_i18n::diagnostic_key;
+use typol_i18n::{Translator, t};
 use typol_semantic::SchemaAccessError;
 use typol_syntax::{InputConfig, LexEvent, StreamLimits, Symbol, Token, TokenCursor, TokenKind};
 
@@ -58,33 +58,71 @@ impl<'token> ConfigToken<'token> {
     }
 }
 
-pub(super) enum ParseFailure {
-    Diagnostic(Diagnostic),
+#[derive(Clone, Copy)]
+enum ParseFailureKind {
+    Diagnostic,
     Reported,
     Stopped,
     DeferredField,
 }
 
+pub(super) struct ParseFailure {
+    kind: ParseFailureKind,
+    diagnostic: Option<Diagnostic>,
+}
+
+impl ParseFailure {
+    pub(super) const fn reported() -> Self {
+        Self {
+            kind: ParseFailureKind::Reported,
+            diagnostic: None,
+        }
+    }
+
+    pub(super) const fn stopped() -> Self {
+        Self {
+            kind: ParseFailureKind::Stopped,
+            diagnostic: None,
+        }
+    }
+
+    pub(super) const fn deferred_field() -> Self {
+        Self {
+            kind: ParseFailureKind::DeferredField,
+            diagnostic: None,
+        }
+    }
+
+    pub(super) const fn is_deferred_field(&self) -> bool {
+        matches!(self.kind, ParseFailureKind::DeferredField)
+    }
+
+    pub(super) fn into_diagnostic(self) -> Option<Diagnostic> {
+        self.diagnostic
+    }
+}
+
 impl From<Diagnostic> for ParseFailure {
     fn from(diagnostic: Diagnostic) -> Self {
-        Self::Diagnostic(diagnostic)
+        Self {
+            kind: ParseFailureKind::Diagnostic,
+            diagnostic: Some(diagnostic),
+        }
     }
 }
 
 impl From<BudgetError> for ParseFailure {
     fn from(error: BudgetError) -> Self {
-        Self::Diagnostic(BudgetDiagnostic::from_error(error))
+        Self::from(Diagnostic::from(error))
     }
 }
 
 impl From<SchemaAccessError> for ParseFailure {
     fn from(error: SchemaAccessError) -> Self {
-        Self::Diagnostic(DiagnosticFactory::internal(
-            PARSER_SCHEMA_ACCESS.with_object_id(error.index() as u64),
-            None,
-            None,
-            None,
-        ))
+        let _index = error.index();
+        Self::from(Diagnostic::from(BudgetError::invariant(
+            &PARSER_SCHEMA_ACCESS,
+        )))
     }
 }
 
@@ -94,6 +132,7 @@ pub(super) struct RecoveryCursor<'source> {
     delimiters: ChargedVec<Symbol>,
     trusted: bool,
     stopped: bool,
+    translator: Translator,
     depth_limit: usize,
     consumed_end: usize,
     budget_errors: ErrSlot<BudgetError>,
@@ -106,6 +145,7 @@ pub(super) struct RecoveryCursorRequest<'source, 'limits, 'budget> {
     pub(super) limits: &'limits ConfigLimits,
     pub(super) stream: StreamLimits,
     pub(super) budget: &'budget ExecutionBudget,
+    pub(super) translator: Translator,
 }
 
 enum RecoveryEvent {
@@ -125,6 +165,7 @@ impl<'source> RecoveryCursor<'source> {
             limits,
             stream,
             budget,
+            translator,
         } = request;
         let input_limits = limits.input_limits();
         let mut budget_errors = ErrSlot::new();
@@ -132,7 +173,7 @@ impl<'source> RecoveryCursor<'source> {
             match budget_errors.try_call(|budget_out| ChargedVec::new(Some(budget), budget_out)) {
                 Ok(delimiters) => delimiters,
                 Err(caught) => {
-                    return Err(out.fail(BudgetDiagnostic::from_error(caught.take())));
+                    return Err(out.fail(BudgetDiagnostic::from_error(caught.take(), translator)));
                 }
             };
         Ok(Self {
@@ -144,11 +185,13 @@ impl<'source> RecoveryCursor<'source> {
                     stream,
                     budget,
                 },
+                translator,
                 out.reborrow(),
             )?,
             delimiters,
             trusted: true,
             stopped: false,
+            translator,
             depth_limit: limits.max_nesting_depth().saturating_add(1),
             consumed_end: 0,
             budget_errors,
@@ -187,7 +230,9 @@ impl<'source> RecoveryCursor<'source> {
                 };
                 match current.token() {
                     Some(token) => Ok(ConfigToken { token }),
-                    None => Err(out.fail(ParseFailure::from(Self::invalid_event_diagnostic()))),
+                    None => Err(out.fail(ParseFailure::from(Self::invalid_event_diagnostic(
+                        self.translator,
+                    )))),
                 }
             }
             RecoveryEvent::Diagnostic => {
@@ -200,24 +245,34 @@ impl<'source> RecoveryCursor<'source> {
                         Err(out.fail(ParseFailure::from(diagnostic)))
                     }
                     Err(caught) => Err(out.fail(ParseFailure::from(caught.take()))),
-                    Ok(LexEvent::Token(_) | LexEvent::Eof(_) | LexEvent::Halted(_)) => {
-                        Err(out.fail(ParseFailure::from(Self::invalid_event_diagnostic())))
-                    }
+                    Ok(LexEvent::Token(_) | LexEvent::Eof(_) | LexEvent::Halted(_)) => Err(out
+                        .fail(ParseFailure::from(Self::invalid_event_diagnostic(
+                            self.translator,
+                        )))),
                 }
             }
             RecoveryEvent::Halted(span) => {
                 self.stopped = true;
-                Err(out.fail(ParseFailure::from(Self::halted_diagnostic(span))))
+                Err(out.fail(ParseFailure::from(Self::halted_diagnostic(
+                    span,
+                    self.translator,
+                ))))
             }
         }
     }
 
-    fn halted_diagnostic(span: SourceSpan) -> Diagnostic {
-        DiagnosticFactory::internal(PARSER_RECOVERY_HALTED, Some(span.into()), None, None)
+    fn halted_diagnostic(span: SourceSpan, translator: Translator) -> Diagnostic {
+        DiagnosticFactory::internal(
+            PARSER_RECOVERY_HALTED,
+            Some(span.into()),
+            None,
+            None,
+            translator,
+        )
     }
 
-    fn invalid_event_diagnostic() -> Diagnostic {
-        DiagnosticFactory::internal(PARSER_RECOVERY_INVALID_EVENT, None, None, None)
+    fn invalid_event_diagnostic(translator: Translator) -> Diagnostic {
+        DiagnosticFactory::internal(PARSER_RECOVERY_INVALID_EVENT, None, None, None, translator)
     }
 
     pub(super) fn bump<'slot>(
@@ -234,11 +289,19 @@ impl<'source> RecoveryCursor<'source> {
                     self.stopped = true;
                     return Err(
                         out.fail(ParseFailure::from(DiagnosticFactory::make_diagnostic(
-                            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                            "configuration delimiter nesting depth exceeded the limit",
-                            Some(span),
-                            None,
-                            None,
+                            DetailedDiagnosticRequest {
+                                code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                                message: t! {
+                                    name: "diagnostic.config.delimiter_nesting_limit",
+                                    locale: self.translator,
+                                }
+                                .into(),
+                                primary: Some(span),
+                                path: None,
+                                value_source: None,
+                                context: None,
+                                translator: self.translator,
+                            },
                         ))),
                     );
                 }
@@ -249,6 +312,7 @@ impl<'source> RecoveryCursor<'source> {
                     self.stopped = true;
                     return Err(out.fail(ParseFailure::from(BudgetDiagnostic::from_error(
                         caught.take(),
+                        self.translator,
                     ))));
                 }
             } else if is_closing(symbol) && self.delimiters.pop() != Some(symbol) {
@@ -266,7 +330,9 @@ impl<'source> RecoveryCursor<'source> {
                 return Err(out.fail(ParseFailure::from(caught.take())));
             }
             Ok(_) => {
-                return Err(out.fail(ParseFailure::from(Self::invalid_event_diagnostic())));
+                return Err(out.fail(ParseFailure::from(Self::invalid_event_diagnostic(
+                    self.translator,
+                ))));
             }
         }
         Ok(())
@@ -304,8 +370,12 @@ impl Recovery {
         context: &mut ParserContext<'_, '_, '_>,
         failure: ParseFailure,
     ) -> bool {
-        match failure {
-            ParseFailure::Diagnostic(diagnostic) => {
+        let ParseFailure { kind, diagnostic } = failure;
+        match kind {
+            ParseFailureKind::Diagnostic => {
+                let Some(diagnostic) = diagnostic else {
+                    return false;
+                };
                 if let Some(span) = diagnostic.located_primary() {
                     context.session.pin(span.source_span(), span.location());
                     if span.source_id() == context.source_id
@@ -318,7 +388,7 @@ impl Recovery {
                 }
                 context.diagnostics.push(diagnostic) && !context.cursor.stopped
             }
-            ParseFailure::DeferredField => {
+            ParseFailureKind::DeferredField => {
                 let primary = context
                     .current_node
                     .and_then(|node| context.locations.get(node))
@@ -328,11 +398,12 @@ impl Recovery {
                     primary,
                     None,
                     None,
+                    context.session.translator(),
                 ));
                 false
             }
-            ParseFailure::Stopped => false,
-            ParseFailure::Reported => !context.diagnostics.stopped() && !context.cursor.stopped,
+            ParseFailureKind::Stopped => false,
+            ParseFailureKind::Reported => !context.diagnostics.stopped() && !context.cursor.stopped,
         }
     }
 
@@ -345,11 +416,11 @@ impl Recovery {
         mut out: Out<'slot, '_, ParseFailure>,
     ) -> OResult<'slot, ()> {
         if !Recovery::record_failure(context, failure) {
-            return Err(out.fail(ParseFailure::Reported));
+            return Err(out.fail(ParseFailure::reported()));
         }
         loop {
             if !context.cursor.trusted || context.cursor.depth() < depth {
-                return Err(out.fail(ParseFailure::Reported));
+                return Err(out.fail(ParseFailure::reported()));
             }
             let (kind, span) = {
                 let token = context.cursor.peek(out.reborrow())?;
@@ -376,10 +447,11 @@ impl Recovery {
                             ContextDiagnosticRequest {
                                 context,
                                 code: DiagnosticCode::CONFIG_SYNTAX_ERROR,
-                                message: "container is unclosed or its closing delimiter does not match",
-                                key: Some(diagnostic_key!(
-                                    "diagnostic.syntax.mismatched_closing_delimiter"
-                                )),
+                                message: t! {
+                                    name: "diagnostic.syntax.mismatched_closing_delimiter",
+                                    locale: context.session.translator(),
+                                }
+                                .into(),
                                 span,
                                 value_source: None,
                             },
@@ -400,7 +472,7 @@ impl Recovery {
                 if !already_reported {
                     context.diagnostics.push(diagnostic);
                 }
-                return Err(out.fail(ParseFailure::Reported));
+                return Err(out.fail(ParseFailure::reported()));
             }
             context.cursor.bump(out.reborrow())?;
         }

@@ -145,6 +145,7 @@ impl RecoveryParser {
                     LexEvent::Token(_) => {}
                     _ => {
                         return Err(out.reborrow().fail(parser_internal_error!(
+                            parser,
                             "unexpected-event-while-recovering-top-level-brace",
                             info.span,
                         )));
@@ -159,7 +160,7 @@ impl RecoveryParser {
                     let mut matched = None;
                     for (index, frame) in parser.delimiters.iter().enumerate().rev() {
                         parser.execution.consume_with(1, out.reborrow(), |error| {
-                            SyntaxDiagnostic::budget(error, info.span)
+                            SyntaxDiagnostic::budget(error, info.span, parser.translator)
                         })?;
                         if frame.close == Symbol::RightBrace {
                             matched = Some(index);
@@ -173,6 +174,7 @@ impl RecoveryParser {
             if closes_context {
                 let Some(released) = parser.delimiters.len().checked_sub(base_depth) else {
                     return Err(out.reborrow().fail(parser_internal_error!(
+                        parser,
                         "module-recovery-delimiter-depth-underflow",
                         info.span,
                     )));
@@ -233,19 +235,27 @@ mod tests {
         BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, SliceSource,
         SourceId,
     };
+    use typol_i18n::{Language, Translator};
+    use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome};
 
     #[derive(Debug)]
     struct TestFailure;
+
+    impl From<OpeoTestFailure> for TestFailure {
+        fn from(_: OpeoTestFailure) -> Self {
+            Self
+        }
+    }
 
     type TestResult<T = ()> = Result<T, TestFailure>;
 
     fn call<T>(
         slot: &mut ErrSlot<Diagnostic>,
         operation: impl for<'slot> FnOnce(Out<'slot, 'slot, Diagnostic>) -> OResult<'slot, T>,
-    ) -> Result<T, Diagnostic> {
+    ) -> TestOpeoOutcome<T, Diagnostic> {
         match slot.try_call(operation) {
-            Ok(value) => Ok(value),
-            Err(caught) => Err(caught.take()),
+            Ok(value) => TestOpeoOutcome::Value(value),
+            Err(caught) => TestOpeoOutcome::Error(caught.take()),
         }
     }
 
@@ -306,6 +316,7 @@ mod tests {
                     budget: &execution,
                 },
                 &SyntaxLimits::default(),
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -317,8 +328,8 @@ mod tests {
         let recovery_error = match call(&mut errors, |out| {
             RecoveryParser::recover_top_level(&mut parser, 0, out)
         }) {
-            Ok(()) => return Err(TestFailure),
-            Err(error) => error,
+            TestOpeoOutcome::Value(()) => return Err(TestFailure),
+            TestOpeoOutcome::Error(error) => error,
         };
         test_assert_eq!(
             recovery_error.code(),

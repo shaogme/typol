@@ -12,6 +12,8 @@ use std::{fmt, path::Path};
 #[cfg(feature = "std")]
 use typol_core::ExecutionBudget;
 #[cfg(feature = "std")]
+use typol_i18n::Translator;
+#[cfg(feature = "std")]
 use typol_std::{
     FileSchemaCompileOptions, FileSchemaCompiler, HostError, HostOperation,
     SourceNames as HostSourceNames,
@@ -33,10 +35,11 @@ impl LoadSupport {
     }
 
     #[cfg(feature = "std")]
-    pub(crate) fn read_source_error(error: SourceReadError) -> TypolError {
+    pub(crate) fn read_source_error(error: SourceReadError, translator: Translator) -> TypolError {
         TypolError::host(
             HostError::from_source_read_error(HostOperation::ConfigRead, error),
             TypolStage::ConfigRead,
+            translator,
         )
     }
 }
@@ -94,7 +97,7 @@ impl SchemaLoader {
                     file_out,
                 )
             },
-            TypolError::file,
+            |errors| TypolError::file(errors, self.options.translator()),
             out.reborrow(),
         )?;
         Ok(LoadedSchema::from_file(file, self.options))
@@ -120,17 +123,17 @@ impl SchemaLoader {
     ) -> OResult<'slot, LoadedSchema> {
         let compiler = LoadSupport::capture(
             |schema_out| SchemaCompiler::new(*self.options.schema(), schema_out),
-            TypolError::schema_initialization,
+            |errors| TypolError::schema_initialization(errors, self.options.translator()),
             out.reborrow(),
         )?;
         let context = LoadSupport::capture(
             |budget_out| compiler.context(budget_out),
-            TypolError::schema_budget,
+            |error| TypolError::schema_budget(error, self.options.translator()),
             out.reborrow(),
         )?;
         let names = LoadSupport::capture(
             |budget_out| HostSourceNames::new(self.options.names(), &context, budget_out),
-            TypolError::schema_budget,
+            |error| TypolError::schema_budget(error, self.options.translator()),
             out.reborrow(),
         )?;
         self.compile_resolved(
@@ -153,10 +156,14 @@ impl SchemaLoader {
         } = request;
         let context = LoadSupport::capture(
             |budget_out| compiler.context(budget_out),
-            TypolError::schema_budget,
+            |error| TypolError::schema_budget(error, self.options.translator()),
             out.reborrow(),
         )?;
-        let error_slot = self.error_slot(context.execution(), out.reborrow())?;
+        let error_slot = self.error_slot(
+            context.execution(),
+            self.options.translator(),
+            out.reborrow(),
+        )?;
         let mut schema_errors = ErrSlot::new();
         let result = schema_errors
             .try_call(|schema_out| compiler.compile(root, resolver, Some(&mut names), schema_out));
@@ -174,20 +181,24 @@ impl SchemaLoader {
     ) -> OResult<'slot, LoadedSchema> {
         let compiler = LoadSupport::capture(
             |schema_out| SchemaCompiler::new(*self.options.schema(), schema_out),
-            TypolError::schema_initialization,
+            |errors| TypolError::schema_initialization(errors, self.options.translator()),
             out.reborrow(),
         )?;
         let context = LoadSupport::capture(
             |budget_out| compiler.context(budget_out),
-            TypolError::schema_budget,
+            |error| TypolError::schema_budget(error, self.options.translator()),
             out.reborrow(),
         )?;
         let names = LoadSupport::capture(
             |budget_out| HostSourceNames::new(self.options.names(), &context, budget_out),
-            TypolError::schema_budget,
+            |error| TypolError::schema_budget(error, self.options.translator()),
             out.reborrow(),
         )?;
-        let error_slot = self.error_slot(context.execution(), out.reborrow())?;
+        let error_slot = self.error_slot(
+            context.execution(),
+            self.options.translator(),
+            out.reborrow(),
+        )?;
         let mut names = names;
         let mut schema_errors = ErrSlot::new();
         let result = schema_errors.try_call(|schema_out| {
@@ -203,11 +214,18 @@ impl SchemaLoader {
     fn error_slot<'slot>(
         &self,
         budget: &ExecutionBudget,
+        translator: Translator,
         mut out: Out<'slot, '_, TypolError>,
     ) -> OResult<'slot, ErrorSlot> {
         LoadSupport::capture(
-            |budget_out| ErrorSlot::in_budget(budget, budget_out),
-            |error| TypolError::host(HostError::from_budget(error), TypolStage::SourceNames),
+            |budget_out| ErrorSlot::in_budget(budget, translator, budget_out),
+            |error| {
+                TypolError::host(
+                    HostError::from_budget(error),
+                    TypolStage::SourceNames,
+                    translator,
+                )
+            },
             out.reborrow(),
         )
     }

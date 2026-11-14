@@ -1,13 +1,14 @@
 mod serializer;
 
-use alloc::vec::Vec;
-use core::{error::Error, fmt};
-use opeo::ErrSlot;
 pub use typol_config::{
     ConfigValidationOptions, ConfigValidationRequest, ConfigValueErrors, ConfigValueProcessor,
     ValidatedConfigValue,
 };
-use typol_core::{ConfigValue, Write};
+
+use alloc::vec::Vec;
+use core::{error::Error, fmt, ops::Deref};
+use opeo::ErrSlot;
+use typol_core::{BudgetError, ChargedBox, ConfigValue, Write};
 use typol_semantic::CompiledSchema;
 
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 16_777_216;
@@ -44,6 +45,46 @@ pub enum ConfigIrErrorKind {
     ValidationFailed,
 }
 
+pub struct RetainedConfigValueErrors {
+    errors: ChargedBox<ConfigValueErrors>,
+}
+
+impl RetainedConfigValueErrors {
+    fn new(errors: ChargedBox<ConfigValueErrors>) -> Self {
+        Self { errors }
+    }
+
+    fn as_errors(&self) -> &ConfigValueErrors {
+        &self.errors
+    }
+}
+
+impl Deref for RetainedConfigValueErrors {
+    type Target = ConfigValueErrors;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_errors()
+    }
+}
+
+impl fmt::Debug for RetainedConfigValueErrors {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_errors(), formatter)
+    }
+}
+
+impl fmt::Display for RetainedConfigValueErrors {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.as_errors(), formatter)
+    }
+}
+
+impl Error for RetainedConfigValueErrors {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.as_errors())
+    }
+}
+
 #[derive(Debug)]
 pub enum ConfigIrError {
     SchemaAccess,
@@ -57,8 +98,8 @@ pub enum ConfigIrError {
     SecretValueRejected,
     AllocationFailed,
     SerializationFailed,
-    NormalizationFailed(ConfigValueErrors),
-    ValidationFailed(ConfigValueErrors),
+    NormalizationFailed(RetainedConfigValueErrors),
+    ValidationFailed(RetainedConfigValueErrors),
 }
 
 impl ConfigIrError {
@@ -153,8 +194,21 @@ impl ConfigIr {
             )
         }) {
             Ok(value) => Ok(value),
-            Err(caught) => Err(ConfigIrError::ValidationFailed(caught.take())),
+            Err(caught) => match retain_value_errors(caught.take()) {
+                Ok(errors) => Err(ConfigIrError::ValidationFailed(errors)),
+                Err(error) => Err(error),
+            },
         }
+    }
+}
+
+fn retain_value_errors(
+    errors: ConfigValueErrors,
+) -> Result<RetainedConfigValueErrors, ConfigIrError> {
+    let mut storage_errors = ErrSlot::<BudgetError>::new();
+    match storage_errors.try_call(|out| ChargedBox::new(errors, None, out)) {
+        Ok(errors) => Ok(RetainedConfigValueErrors::new(errors)),
+        Err(_) => Err(ConfigIrError::AllocationFailed),
     }
 }
 
@@ -282,7 +336,9 @@ impl fmt::Display for ConfigIrError {
 impl Error for ConfigIrError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::NormalizationFailed(errors) | Self::ValidationFailed(errors) => Some(errors),
+            Self::NormalizationFailed(errors) | Self::ValidationFailed(errors) => {
+                Some(errors.as_errors())
+            }
             _ => None,
         }
     }

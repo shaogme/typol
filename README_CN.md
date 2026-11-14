@@ -75,6 +75,8 @@ Schema 和 Rust 声明中的字段名及类型必须匹配。[快速上手](docs
 
 可能失败的操作接收 OPEO `Out` 错误上下文并返回 OPEO 结果。快速上手教程展示如何通过 `opeo::ErrSlot::try_call` 捕获并报告 `TypolError`。
 
+`TypolError` 的 `Display` 会写出非空诊断报告。其索引诊断查询 API 在 std 和 no_std 构建中都可用。Schema 编译、配置解析或校验开始时会生成并翻译诊断文本，之后 `Display` 和 JSON 输出都使用这份固定文本。库选项默认使用英文。CLI 会将 `--language` 传入操作，因此带版本号的 JSON `reason` 会遵循所选语言，序列化阶段不会重新翻译。
+
 配置输入同样是显式提供的：`BoundSchema::read` 接收包含 `Read` 源的 `ReadRequest`，例如 `SliceSource`。启用 `std` 后，可用 `read_file` 和 `read_io` 适配宿主文件和 reader。每次读取还会接收 `Environment` provider；Typol 不会隐式查询进程环境变量。
 
 ## 工作区结构

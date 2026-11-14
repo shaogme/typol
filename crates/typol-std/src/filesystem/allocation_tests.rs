@@ -1,5 +1,7 @@
+mod allocator;
+
+use self::allocator::Scope;
 use std::{
-    alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
     env::{current_exe, temp_dir, var_os},
     error::Error,
@@ -8,7 +10,6 @@ use std::{
     io::{Error as IoError, Write},
     path::{Path, PathBuf},
     process::{Command, id},
-    ptr::null_mut,
     rc::Rc,
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -18,6 +19,7 @@ use typol_core::{
     BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read, SourceId, SourceReadError,
     SourceReadErrorKind,
 };
+use typol_i18n::{Language, Translator};
 use typol_schema::{
     ResolverError, SchemaCompileErrors, SchemaCompileOptions, SchemaCompileStage, SchemaCompiler,
     SchemaResolveRequest, SchemaResolver, SchemaSource, SourceLoadedRequest, SourceObserver,
@@ -43,25 +45,6 @@ use std::{
     fs::{create_dir_all, remove_dir_all},
     os::unix::fs::symlink,
 };
-
-#[derive(Clone, Copy)]
-struct State {
-    active: bool,
-    fail_at: Option<usize>,
-    persistent: bool,
-    attempts: usize,
-    live_bytes: isize,
-    largest_allocation: usize,
-}
-
-thread_local! {
-    static STATE: Cell<State> = const { Cell::new(State {
-        active: false, fail_at: None, persistent: false, attempts: 0, live_bytes: 0,
-        largest_allocation: 0,
-    }) };
-}
-
-struct CheckedAllocator;
 
 macro_rules! ensure {
     ($condition:expr $(,)?) => {
@@ -96,110 +79,6 @@ macro_rules! ensure_eq {
     }};
 }
 
-fn should_fail() -> bool {
-    STATE
-        .try_with(|state| {
-            let mut current = state.get();
-            if !current.active {
-                return false;
-            }
-            let fail = current.fail_at.is_some_and(|index| {
-                index == current.attempts || (current.persistent && index < current.attempts)
-            });
-            current.attempts += 1;
-            state.set(current);
-            fail
-        })
-        .unwrap_or(false)
-}
-
-fn account(bytes: isize) {
-    let _ = STATE.try_with(|state| {
-        let mut current = state.get();
-        if current.active {
-            current.live_bytes += bytes;
-            state.set(current);
-        }
-    });
-}
-
-fn record_allocation(size: usize) {
-    let _ = STATE.try_with(|state| {
-        let mut current = state.get();
-        if current.active {
-            current.largest_allocation = current.largest_allocation.max(size);
-            state.set(current);
-        }
-    });
-}
-
-// SAFETY: Returns a null pointer only during the failure window on the current test thread; all other allocations are delegated to `System` with their original layouts.
-unsafe impl GlobalAlloc for CheckedAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        record_allocation(layout.size());
-        if should_fail() {
-            return null_mut();
-        }
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() {
-            account(layout.size() as isize);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        account(-(layout.size() as isize));
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        record_allocation(size);
-        if should_fail() {
-            return null_mut();
-        }
-        let pointer = unsafe { System.realloc(pointer, layout, size) };
-        if !pointer.is_null() {
-            account(size as isize - layout.size() as isize);
-        }
-        pointer
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: CheckedAllocator = CheckedAllocator;
-
-struct Scope;
-
-impl Scope {
-    fn start(fail_at: Option<usize>, persistent: bool) -> Self {
-        STATE.with(|state| {
-            state.set(State {
-                active: true,
-                fail_at,
-                persistent,
-                attempts: 0,
-                live_bytes: 0,
-                largest_allocation: 0,
-            })
-        });
-        Self
-    }
-
-    fn finish(self) -> State {
-        STATE.with(Cell::get)
-    }
-}
-
-impl Drop for Scope {
-    fn drop(&mut self) {
-        STATE.with(|state| {
-            let mut current = state.get();
-            current.active = false;
-            state.set(current);
-        });
-    }
-}
-
 fn regex_budget_state_bytes() -> Result<usize, Box<dyn Error>> {
     let scope = Scope::start(None, false);
     let compiler = ErrSlot::<SchemaCompileErrors>::new()
@@ -208,7 +87,7 @@ fn regex_budget_state_bytes() -> Result<usize, Box<dyn Error>> {
     let context = ErrSlot::<BudgetError>::new()
         .call(|out| compiler.context(out))
         .map_err(|error| HostError::budget(HostOperation::SourceNames, error))?;
-    let bytes = STATE.with(Cell::get).live_bytes as usize - context.usage().workspace_bytes;
+    let bytes = Scope::current().live_bytes as usize - context.usage().workspace_bytes;
     drop(context);
     drop(compiler);
     ensure_eq!(scope.finish().live_bytes, 0);
@@ -562,6 +441,7 @@ fn first_diagnostic_code(errors: &SchemaCompileErrors) -> Option<DiagnosticCode>
 #[test]
 fn core_initialization_and_root_copy_failures_do_not_invent_source_names()
 -> Result<(), Box<dyn Error>> {
+    let translator = Translator::new(Language::English);
     let calls = Rc::new(Cell::new(0));
     for index in 0..4 {
         calls.set(0);
@@ -572,21 +452,26 @@ fn core_initialization_and_root_copy_failures_do_not_invent_source_names()
             name_missing: true,
             failure_missing: true,
         };
-        match ErrSlot::<SchemaCompileErrors>::new()
-            .call(|out| SchemaCompiler::new(SchemaCompileOptions::default(), out))
-        {
+        match ErrSlot::<SchemaCompileErrors>::new().call(|out| {
+            SchemaCompiler::new(
+                SchemaCompileOptions::default().with_translator(translator),
+                out,
+            )
+        }) {
             Err(error) => outcome.code = first_diagnostic_code(&error),
             Ok(compiler) => match ErrSlot::<BudgetError>::new().call(|out| compiler.context(out)) {
                 Err(error) => {
-                    outcome.code =
-                        first_diagnostic_code(&SchemaCompileErrors::budget_failure(error));
+                    outcome.code = first_diagnostic_code(&SchemaCompileErrors::budget_failure(
+                        error, translator,
+                    ));
                 }
                 Ok(context) => match ErrSlot::<BudgetError>::new()
                     .call(|out| SourceNames::new(SourceNameLimits::default(), &context, out))
                 {
                     Err(error) => {
-                        outcome.code =
-                            first_diagnostic_code(&SchemaCompileErrors::budget_failure(error));
+                        outcome.code = first_diagnostic_code(&SchemaCompileErrors::budget_failure(
+                            error, translator,
+                        ));
                     }
                     Ok(mut names) => {
                         let mut resolver = NoResolver {
@@ -809,7 +694,7 @@ fn shared_host_storage_matches_live_layout_payloads() -> Result<(), Box<dyn Erro
                 IoError::other(format!("source name registration failed: {error:?}"))
             })?;
         ensure_eq!(
-            STATE.with(Cell::get).live_bytes as usize,
+            Scope::current().live_bytes as usize,
             context.usage().workspace_bytes + regex_state_bytes
         );
     }
@@ -825,14 +710,14 @@ fn shared_host_storage_matches_live_layout_payloads() -> Result<(), Box<dyn Erro
     input.claim();
     ensure_eq!(stream_source_len(&mut input)?, 32_769);
     ensure_eq!(
-        STATE.with(Cell::get).live_bytes as usize,
+        Scope::current().live_bytes as usize,
         context.usage().workspace_bytes + regex_state_bytes
     );
     let held = context.usage().workspace_bytes;
     drop(input);
     ensure_eq!(context.usage().workspace_bytes, held);
     ensure_eq!(
-        STATE.with(Cell::get).live_bytes as usize,
+        Scope::current().live_bytes as usize,
         context.usage().workspace_bytes + regex_state_bytes
     );
     drop(names);

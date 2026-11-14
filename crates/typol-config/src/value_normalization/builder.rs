@@ -18,7 +18,7 @@ impl NormalizeBuilder {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ConfigValue> {
         if children.len() != plan.children.len() {
-            return Err(out.fail(NormalizeOps::invariant_error()));
+            return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         }
         let source = if plan.input.schema_default {
             ValueSource::SchemaDefault
@@ -71,7 +71,7 @@ impl NormalizeBuilder {
         out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ConfigValue> {
         if !plan.children.is_empty() {
-            return Err(out.fail(NormalizeOps::invariant_error()));
+            return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         }
         NormalizeOps::value_call(
             &mut state.errors.value,
@@ -86,10 +86,10 @@ impl NormalizeBuilder {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ConfigValue> {
         if !plan.children.is_empty() {
-            return Err(out.fail(NormalizeOps::invariant_error()));
+            return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         }
         let Some(value) = plan.input.value else {
-            return Err(out.fail(NormalizeOps::invariant_error()));
+            return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         };
         let source = if plan.input.schema_default {
             ValueSource::SchemaDefault
@@ -118,10 +118,11 @@ impl NormalizeBuilder {
             plan.children.first().map(|child| child.role),
             Some(ChildRole::OptionalContent)
         ) {
-            return Err(out.fail(NormalizeOps::invariant_error()));
+            return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         }
         let mut children = children.into_iter();
-        let single = NormalizeOps::take_single(&mut children, out.reborrow())?;
+        let single =
+            NormalizeOps::take_single(&mut children, state.request.translator, out.reborrow())?;
         NormalizeOps::value_call(
             &mut state.errors.value,
             |value_out| ValueFactory::optional_owned(single, source, Some(state.budget), value_out),
@@ -141,7 +142,7 @@ impl NormalizeBuilder {
             .iter()
             .any(|child| !matches!(child.role, ChildRole::ArrayItem(_)))
         {
-            return Err(out.fail(NormalizeOps::invariant_error()));
+            return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         }
         let budget = Some(state.budget);
         NormalizeOps::value_call(
@@ -172,7 +173,7 @@ impl NormalizeBuilder {
         )?;
         for (child, value) in plan.children.iter().zip(children) {
             let ChildRole::MapItem(key) = child.role else {
-                return Err(out.fail(NormalizeOps::invariant_error()));
+                return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
             };
             let entry = NormalizeOps::budget_call(
                 &mut state.errors.budget,
@@ -222,10 +223,10 @@ impl NormalizeBuilder {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ConfigValue> {
         let PlanKind::EnumUnit(variant) = plan.kind else {
-            return Err(out.fail(NormalizeOps::invariant_error()));
+            return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         };
         if !plan.children.is_empty() {
-            return Err(out.fail(NormalizeOps::invariant_error()));
+            return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         }
         NormalizePlanner::text(state, variant, out.reborrow())?;
         NormalizeOps::value_call(
@@ -251,15 +252,16 @@ impl NormalizeBuilder {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ConfigValue> {
         let PlanKind::EnumSingle(variant) = plan.kind else {
-            return Err(out.fail(NormalizeOps::invariant_error()));
+            return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         };
         NormalizePlanner::text(state, variant, out.reborrow())?;
         if !matches!(plan.children.first().map(|child| child.role), Some(ChildRole::EnumPayload(name)) if name == variant)
         {
-            return Err(out.fail(NormalizeOps::invariant_error()));
+            return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         }
         let mut children = children.into_iter();
-        let single = NormalizeOps::take_single(&mut children, out.reborrow())?;
+        let single =
+            NormalizeOps::take_single(&mut children, state.request.translator, out.reborrow())?;
         let payload = EnumPayload::single(single, Some(state.budget), out.reborrow())?;
         NormalizeOps::value_call(
             &mut state.errors.value,
@@ -278,7 +280,7 @@ impl NormalizeBuilder {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ConfigValue> {
         let PlanKind::EnumStructure(variant) = plan.kind else {
-            return Err(out.fail(NormalizeOps::invariant_error()));
+            return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         };
         NormalizePlanner::text(state, variant, out.reborrow())?;
         let fields = Self::finish_fields(
@@ -327,10 +329,10 @@ impl NormalizeBuilder {
                         field,
                     },
                 ) if expected == actual => field,
-                _ => return Err(out.fail(NormalizeOps::invariant_error())),
+                _ => return Err(out.fail(NormalizeOps::invariant_error(state.request.translator))),
             };
             let Some(value) = values.next() else {
-                return Err(out.fail(NormalizeOps::invariant_error()));
+                return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
             };
             let name = NormalizeOps::schema_call(
                 &mut state.errors.schema,
@@ -350,7 +352,7 @@ impl NormalizeBuilder {
             )?;
         }
         if values.next().is_some() {
-            return Err(out.fail(NormalizeOps::invariant_error()));
+            return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         }
         Ok(output)
     }

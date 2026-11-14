@@ -10,13 +10,14 @@ use typol_core::{
     BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, SliceSource,
     SourceId,
 };
+use typol_i18n::{Language, Translator};
 use typol_syntax::{
     AnnotationData, AstAccessError, DefaultValueKind, InputConfig, LexEvent, ScalarLiteral,
     SchemaAst, SchemaParseOptions, SchemaParser, StreamLimits, SyntaxErrors, SyntaxLimits,
     TokenCursor,
     opeo::{OResult, Out},
 };
-use typol_test_support::TestSlot;
+use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
 
 struct ParserErrors {
     budget: Option<TestSlot<BudgetError>>,
@@ -33,7 +34,7 @@ impl ParserErrors {
 
     fn execution(&mut self, limits: ExecutionLimits) -> Result<ExecutionBudget, BudgetError> {
         let slot = self.budget.get_or_insert_with(TestSlot::new);
-        Self::run(slot, |out| ExecutionBudget::new(limits, out))
+        slot.access(|out| ExecutionBudget::new(limits, out))
     }
 
     fn parse(
@@ -42,7 +43,7 @@ impl ParserErrors {
         source: &str,
         limits: &SyntaxLimits,
         budget: &ExecutionBudget,
-    ) -> Result<SchemaAst, SyntaxErrors> {
+    ) -> TestOpeoOutcome<SchemaAst, SyntaxErrors> {
         let slot = self.syntax.get_or_insert_with(TestSlot::new);
         let options = SchemaParseOptions::with_syntax(*limits);
         Self::run(slot, |out| {
@@ -53,11 +54,8 @@ impl ParserErrors {
     fn run<T, E>(
         slot: &mut TestSlot<E>,
         operation: impl for<'slot> FnOnce(Out<'slot, 'slot, E>) -> OResult<'slot, T>,
-    ) -> Result<T, E> {
-        match slot.access(operation) {
-            Ok(value) => Ok(value),
-            Err(error) => Err(error),
-        }
+    ) -> TestOpeoOutcome<T, E> {
+        slot.run(operation)
     }
 }
 
@@ -82,6 +80,12 @@ struct CheckedAllocator;
 
 #[derive(Debug)]
 struct TestFailure;
+
+impl From<OpeoTestFailure> for TestFailure {
+    fn from(_: OpeoTestFailure) -> Self {
+        Self
+    }
+}
 
 macro_rules! test_assert {
     ($condition:expr $(, $($message:tt)*)?) => {{
@@ -108,7 +112,7 @@ fn parse(
     source: &str,
     limits: &SyntaxLimits,
     execution: &ExecutionBudget,
-) -> Result<SchemaAst, SyntaxErrors> {
+) -> TestOpeoOutcome<SchemaAst, SyntaxErrors> {
     errors.parse(SourceId::new(7), source, limits, execution)
 }
 
@@ -276,8 +280,7 @@ fn schema_allocation_failures_are_nonempty_and_release_all_storage() -> TestResu
                 });
                 let result = parse(&mut errors, source, &limits, &execution);
                 let code = result
-                    .as_ref()
-                    .err()
+                    .error()
                     .and_then(|errors| errors.diagnostics().next_back())
                     .map(|diagnostic| diagnostic.code());
                 drop(result);
@@ -313,7 +316,7 @@ fn initialization_failure_needs_exactly_one_allocation_attempt() -> TestResult {
             state.set(current);
         });
         let result = parse(&mut errors, "", &limits, &execution);
-        let code = result.as_ref().err().and_then(|errors| {
+        let code = result.error().and_then(|errors| {
             errors
                 .diagnostics()
                 .first()
@@ -351,6 +354,7 @@ fn consuming_a_cached_token_does_not_allocate_for_the_next_string() -> TestResul
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })
@@ -396,6 +400,7 @@ fn plain_and_escaped_strings_own_payloads_and_move_into_the_ast() -> TestResult 
                     stream: StreamLimits::default(),
                     budget: &execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
         })

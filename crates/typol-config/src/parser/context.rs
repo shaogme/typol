@@ -4,7 +4,9 @@ use super::{
 };
 use crate::{
     ConfigLimits,
-    diagnostics::{BudgetDiagnostic, DiagnosticBuffer, DiagnosticFactory},
+    diagnostics::{
+        BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticBuffer, DiagnosticFactory,
+    },
     instance::{LocationIndex, LocationNode, Member, NodeId},
     session::ConfigSession,
 };
@@ -18,12 +20,19 @@ use typol_core::{
     BudgetError, ChargedBox, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, InstancePath,
     LocatedSpan, Read, SourceId, ValueError, ValueSource,
 };
+use typol_i18n::Translator;
 use typol_semantic::{
     CompiledSchema, ConstraintList, FieldView, SchemaAccessError, TypeView, VariantView,
 };
 
 #[cfg(test)]
 use typol_semantic::SpanLocation;
+
+pub(crate) struct ValueCallContext {
+    pub(crate) span: LocatedSpan,
+    pub(crate) source: ValueSource,
+    pub(crate) translator: Translator,
+}
 
 pub(super) struct ParserContext<'schema, 'source, 'limits> {
     #[cfg(test)]
@@ -110,12 +119,14 @@ impl ParserControl {
             limits,
             mut session,
         } = request;
+        let translator = session.translator();
         let budget = session.budget().try_clone(out.reborrow())?;
         let config_limits = session.config_limits();
         let diagnostics = DiagnosticBuffer::new_budgeted(
             schema,
             limits.max_diagnostics(),
             &budget,
+            translator,
             out.reborrow(),
         )?;
         let cursor = RecoveryCursor::new(
@@ -125,12 +136,13 @@ impl ParserControl {
                 limits,
                 stream: session.stream(),
                 budget: &budget,
+                translator,
             },
             out.reborrow(),
         )?;
 
         let owned_budget = budget.try_clone(out.reborrow())?;
-        let locations = LocationIndex::new_budgeted(&budget, out.reborrow())?;
+        let locations = LocationIndex::new_budgeted(&budget, session.translator(), out.reborrow())?;
         let inherited_constraints = ChargedVec::new(Some(&budget), out.reborrow())?;
         let path = match session
             .validation()
@@ -139,7 +151,7 @@ impl ParserControl {
         {
             Ok(path) => path,
             Err(caught) => {
-                return Err(out.fail(BudgetDiagnostic::from_error(caught.take())));
+                return Err(out.fail(BudgetDiagnostic::from_error(caught.take(), translator)));
             }
         };
         ParserContextStorage::new(
@@ -367,11 +379,15 @@ impl ParserControl {
             out.reborrow(),
         )?;
         Ok(DiagnosticFactory::make_diagnostic(
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-            message,
-            Some(span),
-            Some(path),
-            value_source,
+            DetailedDiagnosticRequest {
+                code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                message: message.into(),
+                primary: Some(span),
+                path: Some(path),
+                value_source,
+                context: None,
+                translator: context.session.translator(),
+            },
         ))
     }
 }

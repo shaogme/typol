@@ -119,7 +119,7 @@ impl ReadStrategy for ConfigValueParser<'_> {
     ) -> TypolError {
         #[cfg(feature = "std")]
         if let Some(source_error) = error.source_read_error() {
-            return LoadSupport::read_source_error(source_error);
+            return LoadSupport::read_source_error(source_error, self.loaded.options.translator());
         }
         slot.config(error, names)
     }
@@ -154,7 +154,7 @@ impl<'loaded> ReadStrategy for ConfigDocumentParser<'loaded> {
     ) -> TypolError {
         #[cfg(feature = "std")]
         if let Some(source_error) = error.source_read_error() {
-            return LoadSupport::read_source_error(source_error);
+            return LoadSupport::read_source_error(source_error, self.loaded.options.translator());
         }
         slot.config(error, names)
     }
@@ -215,7 +215,7 @@ impl LoadedSchema {
         let options = self.options.name_edits();
         LoadSupport::capture(
             |host_out| self.names.set_name(source_id, name, options, host_out),
-            |error| TypolError::host(error, TypolStage::SourceNames),
+            |error| TypolError::host(error, TypolStage::SourceNames, self.options.translator()),
             out,
         )
     }
@@ -255,6 +255,7 @@ impl LoadedSchema {
         let result = codec_errors.try_call(|mut codec_out| {
             let mut session = SessionBudget::codec_from_budget(
                 CodecStage::Encoding,
+                self.options.validation().translator(),
                 |budget_out| {
                     SessionBudget::default_config(
                         self.options.validation(),
@@ -276,6 +277,7 @@ impl LoadedSchema {
                 return Err(codec_out.fail(CodecErrors::emergency(
                     CodecStage::Encoding,
                     Failure::SecretOutput,
+                    session.translator(),
                 )));
             }
             value.encode(output, options.layout(), codec_out.reborrow())
@@ -482,7 +484,7 @@ impl LoadedSchema {
         let slot = self.error_slot(out.reborrow())?;
         let mut source = LoadSupport::capture(
             |source_out| ReadSource::new(reader, &budget, source_out),
-            LoadSupport::read_source_error,
+            |error| LoadSupport::read_source_error(error, self.options.translator()),
             out.reborrow(),
         )?;
         self.run_source(
@@ -542,6 +544,7 @@ impl LoadedSchema {
                 TypolError::host(
                     HostError::budget(HostOperation::ConfigRead, error),
                     TypolStage::ConfigRead,
+                    self.options.translator(),
                 )
             },
             #[cfg(not(feature = "std"))]
@@ -557,12 +560,24 @@ impl LoadedSchema {
     ) -> OResult<'slot, ErrorSlot> {
         let budget = LoadSupport::capture(
             |budget_out| ExecutionBudget::new(ERROR_STORAGE_LIMITS, budget_out),
-            |error| TypolError::host(HostError::from_budget(error), TypolStage::SourceNames),
+            |error| {
+                TypolError::host(
+                    HostError::from_budget(error),
+                    TypolStage::SourceNames,
+                    self.options.translator(),
+                )
+            },
             out.reborrow(),
         )?;
         LoadSupport::capture(
-            |budget_out| ErrorSlot::in_budget(&budget, budget_out),
-            |error| TypolError::host(HostError::from_budget(error), TypolStage::SourceNames),
+            |budget_out| ErrorSlot::in_budget(&budget, self.options.translator(), budget_out),
+            |error| {
+                TypolError::host(
+                    HostError::from_budget(error),
+                    TypolStage::SourceNames,
+                    self.options.translator(),
+                )
+            },
             out.reborrow(),
         )
     }

@@ -151,7 +151,10 @@ impl<'a, 'src, 'd> TypeConstructibility<'a, 'src, 'd> {
                     out.reborrow(),
                 )?;
                 let Some(remaining) = clause.unresolved.checked_sub(1) else {
-                    self.diagnostics.push(schema_internal!(self.root_span));
+                    self.diagnostics.push(schema_internal!(
+                        self.diagnostics.translator(),
+                        self.root_span
+                    ));
                     return Err(out.fail(BuildFailure::empty()));
                 };
                 clause.unresolved = remaining;
@@ -258,7 +261,10 @@ impl<'a, 'src, 'd> ConstructibilityPlanBuilder<'a, 'src, 'd> {
                 TypeDeclarationKind::Alias(_) => {
                     let clause = self.add_clause(symbol.id(), out.reborrow())?;
                     let Some(target) = self.graph.alias_target(symbol.id()) else {
-                        self.diagnostics.push(schema_internal!(symbol.name_span()));
+                        self.diagnostics.push(schema_internal!(
+                            self.diagnostics.translator(),
+                            symbol.name_span()
+                        ));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     self.add_type_use_dependency(clause, target, out.reborrow())?;
@@ -276,7 +282,10 @@ impl<'a, 'src, 'd> ConstructibilityPlanBuilder<'a, 'src, 'd> {
                             out.reborrow(),
                         )?;
                         let Some(variant) = self.symbols.variant_symbol(*variant_id) else {
-                            self.diagnostics.push(schema_internal!(symbol.name_span()));
+                            self.diagnostics.push(schema_internal!(
+                                self.diagnostics.translator(),
+                                symbol.name_span()
+                            ));
                             return Err(out.fail(BuildFailure::empty()));
                         };
                         let clause = self.add_clause(symbol.id(), out.reborrow())?;
@@ -295,8 +304,10 @@ impl<'a, 'src, 'd> ConstructibilityPlanBuilder<'a, 'src, 'd> {
                                 let Some(payload_type) =
                                     self.graph.variant_payload_type(variant.id())
                                 else {
-                                    self.diagnostics
-                                        .push(schema_internal!(variant.declaration().span()));
+                                    self.diagnostics.push(schema_internal!(
+                                        self.diagnostics.translator(),
+                                        variant.declaration().span()
+                                    ));
                                     return Err(out.fail(BuildFailure::empty()));
                                 };
                                 self.add_type_use_dependency(clause, payload_type, out.reborrow())?;
@@ -345,7 +356,10 @@ impl<'a, 'src, 'd> ConstructibilityPlanBuilder<'a, 'src, 'd> {
             self.context
                 .consume(1, owner.name_span(), self.diagnostics, out.reborrow())?;
             let Some(field_type) = self.graph.field_type(*field_id) else {
-                self.diagnostics.push(schema_internal!(owner.name_span()));
+                self.diagnostics.push(schema_internal!(
+                    self.diagnostics.translator(),
+                    owner.name_span()
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             };
             self.add_type_use_dependency(clause, field_type, out.reborrow())?;
@@ -363,7 +377,10 @@ impl<'a, 'src, 'd> ConstructibilityPlanBuilder<'a, 'src, 'd> {
             self.context
                 .consume(1, self.root_span, self.diagnostics, out.reborrow())?;
             let Some(type_use) = self.graph.type_use(type_use_id) else {
-                self.diagnostics.push(schema_internal!(self.root_span));
+                self.diagnostics.push(schema_internal!(
+                    self.diagnostics.translator(),
+                    self.root_span
+                ));
                 return Err(out.fail(BuildFailure::empty()));
             };
             match type_use.kind() {
@@ -382,7 +399,10 @@ impl<'a, 'src, 'd> ConstructibilityPlanBuilder<'a, 'src, 'd> {
                         out.reborrow(),
                     )?;
                     let Some(unresolved) = clause.unresolved.checked_add(1) else {
-                        self.diagnostics.push(schema_internal!(self.root_span));
+                        self.diagnostics.push(schema_internal!(
+                            self.diagnostics.translator(),
+                            self.root_span
+                        ));
                         return Err(out.fail(BuildFailure::empty()));
                     };
                     clause.unresolved = unresolved;

@@ -2,7 +2,7 @@ use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
     DiagnosticMessage, FloatConversionError, NumericLiteral, NumericTokenKind, SourceSpan,
 };
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 use typol_syntax::{BuiltinType, NumberKind, NumberLiteral};
 
 use crate::{
@@ -102,38 +102,42 @@ impl ExpressionNumbers {
                 Err(FloatConversionError::Invalid) if kind == NumericTokenKind::Integer => {
                     fail_number(
                         diagnostics,
-                        diagnostic_message!(
-                            "diagnostic.schema.numeric_integer_unrepresentable",
-                            "integer literal is out of the representable range"
-                        ),
+                        t! {
+                            name: "diagnostic.schema.numeric_integer_unrepresentable",
+                            locale: diagnostics.translator(),
+                        }
+                        .into(),
                         span,
                         out.reborrow(),
                     )
                 }
                 Err(FloatConversionError::Invalid) => fail_number(
                     diagnostics,
-                    diagnostic_message!(
-                        "diagnostic.schema.numeric_float_unrepresentable",
-                        "floating-point literal cannot be represented"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.numeric_float_unrepresentable",
+                        locale: diagnostics.translator(),
+                    }
+                    .into(),
                     span,
                     out.reborrow(),
                 ),
                 Err(FloatConversionError::NonFinite) if target == BuiltinType::F32 => fail_number(
                     diagnostics,
-                    diagnostic_message!(
-                        "diagnostic.schema.numeric_float_f32_out_of_range",
-                        "floating-point literal is out of f32 range"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.numeric_float_f32_out_of_range",
+                        locale: diagnostics.translator(),
+                    }
+                    .into(),
                     span,
                     out.reborrow(),
                 ),
                 Err(FloatConversionError::NonFinite) => fail_number(
                     diagnostics,
-                    diagnostic_message!(
-                        "diagnostic.schema.numeric_float_not_finite",
-                        "floating-point literal must be finite"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.numeric_float_not_finite",
+                        locale: diagnostics.translator(),
+                    }
+                    .into(),
                     span,
                     out.reborrow(),
                 ),
@@ -142,10 +146,11 @@ impl ExpressionNumbers {
             if number.kind() != NumberKind::Integer {
                 return fail_number(
                     diagnostics,
-                    diagnostic_message!(
-                        "diagnostic.schema.numeric_float_for_integer",
-                        "floating-point literal cannot be used with an integer type"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.numeric_float_for_integer",
+                        locale: diagnostics.translator(),
+                    }
+                    .into(),
                     span,
                     out.reborrow(),
                 );
@@ -153,10 +158,10 @@ impl ExpressionNumbers {
             let magnitude = parse_integer(raw)
                 .ok_or_else(|| {
                     diagnostics.push(diagnostics.make_semantic(
-                        diagnostic_message!(
-                            "diagnostic.schema.numeric_integer_unrepresentable",
-                            "integer literal is out of the representable range"
-                        ),
+                        t! {
+                            name: "diagnostic.schema.numeric_integer_unrepresentable",
+                            locale: diagnostics.translator(),
+                        },
                         span,
                     ));
                     BuildFailure::empty()
@@ -165,10 +170,11 @@ impl ExpressionNumbers {
             if magnitude > integer_magnitude_limit(target, allow_negative_minimum) {
                 return fail_number(
                     diagnostics,
-                    diagnostic_message!(
-                        "diagnostic.schema.numeric_integer_out_of_target_range",
-                        "integer literal is out of the target type's range"
-                    ),
+                    t! {
+                    name: "diagnostic.schema.numeric_integer_out_of_target_range",
+                    locale: diagnostics.translator(),
+                    }
+                    .into(),
                     span,
                     out.reborrow(),
                 );

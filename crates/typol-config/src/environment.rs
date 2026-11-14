@@ -1,25 +1,22 @@
+mod resolver;
+
+pub(crate) use resolver::{
+    EnvironmentAuthorizationRequest, EnvironmentResolveRequest, EnvironmentResolver,
+    EnvironmentTextError,
+};
+
 use crate::{
     ConfigLimits,
-    context::{
-        AssignmentContext, CompletionState, EnvironmentSpans, EnvironmentValue, FallbackValue,
-        ValueOrigin,
-    },
-    diagnostics::{BudgetDiagnostic, DiagnosticFactory},
+    diagnostics::{BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticFactory},
     options::ConfigBudget,
-    scalar::{Scalar, ScalarRequest},
-    session::SessionResources,
-    value::ValueFactory,
 };
-use core::str::from_utf8_unchecked;
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage,
-    DiagnosticMessageKey, ExecutionBudget, LocatedSpan, ValueKind, ValueScalar, ValueSource,
-    diagnostic_context,
+    ExecutionBudget, LocatedSpan, ValueSource, diagnostic_context,
 };
-use typol_i18n::{diagnostic_key, diagnostic_message};
-use typol_model::BuiltinType;
-use typol_semantic::{EnvironmentAuthorization, TypeKind};
+use typol_i18n::{Translator, t};
+use typol_semantic::EnvironmentAuthorization;
 
 #[cfg(test)]
 use core::str::from_utf8;
@@ -52,17 +49,7 @@ static ENVIRONMENT_CACHE_BUDGET: DiagnosticContext = diagnostic_context!(
     "environment-cache",
     "execution-budget-unavailable",
 );
-static ENVIRONMENT_AUTHORIZATION_MISSING: DiagnosticContext = diagnostic_context!(
-    "typol-config",
-    "environment-authorization",
-    "authorized-slot-missing",
-);
-static ENVIRONMENT_TARGET_TYPE: DiagnosticContext = diagnostic_context!(
-    "typol-config",
-    "environment-conversion",
-    "authorized-field-is-not-scalar",
-);
-static ENVIRONMENT_INTERNAL_FALLBACK: DiagnosticContext =
+pub(super) static ENVIRONMENT_INTERNAL_FALLBACK: DiagnosticContext =
     diagnostic_context!("typol-config", "environment", "unclassified-internal-error",);
 
 /// Explicitly reads an authorized variable; returned bytes need only outlive this mutable borrow.
@@ -138,6 +125,7 @@ pub(crate) struct EnvironmentCache {
     entries: ChargedVec<EnvironmentCacheEntry>,
     budget: ConfigBudget,
     provider_errors: ErrSlot<EnvironmentError>,
+    translator: Translator,
 }
 
 pub(crate) struct EnvironmentReadRequest<'a> {
@@ -151,6 +139,7 @@ impl EnvironmentCache {
     pub(crate) fn new<'slot, E>(
         budget: &ExecutionBudget,
         limits: ConfigLimits,
+        translator: Translator,
         mut out: Out<'slot, '_, E>,
     ) -> OResult<'slot, Self>
     where
@@ -162,6 +151,7 @@ impl EnvironmentCache {
             entries,
             budget,
             provider_errors: ErrSlot::new(),
+            translator,
         })
     }
 
@@ -180,10 +170,15 @@ impl EnvironmentCache {
         let name = authorization.name();
         let index = authorization.slot();
         if name.len() > limits.max_string_bytes() {
-            return Err(out.fail(resource(span)));
+            return Err(out.fail(EnvironmentDiagnostics::resource(span, self.translator)));
         }
         if index >= authorization.slot_count() {
-            return Err(out.fail(cache_internal(ENVIRONMENT_CACHE_SLOT, index, span)));
+            return Err(out.fail(cache_internal(
+                ENVIRONMENT_CACHE_SLOT,
+                index,
+                span,
+                self.translator,
+            )));
         }
 
         let position = match self.find_slot(index, span, out.reborrow())? {
@@ -196,30 +191,46 @@ impl EnvironmentCache {
         if let Err(caught) =
             quota_errors.try_call(|quota_out| self.budget.environment_entry(quota_out))
         {
-            return Err(out.fail(located_error(caught.take(), span)));
+            return Err(out.fail(EnvironmentDiagnostics::located_error(caught.take(), span)));
         }
         let mut reserve_errors = ErrSlot::<BudgetError>::new();
         if let Err(caught) =
             reserve_errors.try_call(|reserve_out| self.entries.try_reserve(1, reserve_out))
         {
-            return Err(out.fail(located_error(
-                BudgetDiagnostic::from_error(caught.take()),
+            return Err(out.fail(EnvironmentDiagnostics::located_error(
+                BudgetDiagnostic::from_error(caught.take(), self.translator),
                 span,
             )));
         }
         let Some(shifted_entries) = self.entries.len().checked_sub(position) else {
-            return Err(out.fail(cache_internal(ENVIRONMENT_CACHE_SLOT, index, span)));
+            return Err(out.fail(cache_internal(
+                ENVIRONMENT_CACHE_SLOT,
+                index,
+                span,
+                self.translator,
+            )));
         };
         let Some(insertion_steps) = shifted_entries.checked_add(1) else {
-            return Err(out.fail(located_error(
-                BudgetDiagnostic::from_error(BudgetError::CapacityExceeded),
+            return Err(out.fail(EnvironmentDiagnostics::located_error(
+                BudgetDiagnostic::from_error(BudgetError::CapacityExceeded, self.translator),
                 span,
             )));
         };
         let Some(execution) = self.entries.budget() else {
-            return Err(out.fail(cache_internal(ENVIRONMENT_CACHE_BUDGET, index, span)));
+            return Err(out.fail(cache_internal(
+                ENVIRONMENT_CACHE_BUDGET,
+                index,
+                span,
+                self.translator,
+            )));
         };
-        charge_environment_work(execution, insertion_steps, span, out.reborrow())?;
+        charge_environment_work(
+            execution,
+            insertion_steps,
+            span,
+            self.translator,
+            out.reborrow(),
+        )?;
 
         let read_context = EnvironmentReadContext::new(
             self.budget.execution(),
@@ -238,25 +249,34 @@ impl EnvironmentCache {
                         Some(span),
                         None,
                         None,
+                        self.translator,
                     )));
                 }
                 EnvironmentError::ResourceLimitExceeded => {
-                    return Err(out.fail(resource(span)));
+                    return Err(out.fail(EnvironmentDiagnostics::resource(span, self.translator)));
                 }
                 EnvironmentError::CapacityExceeded => {
-                    return Err(out.fail(located_error(
-                        BudgetDiagnostic::from_error(BudgetError::CapacityExceeded),
+                    return Err(out.fail(EnvironmentDiagnostics::located_error(
+                        BudgetDiagnostic::from_error(
+                            BudgetError::CapacityExceeded,
+                            self.translator,
+                        ),
                         span,
                     )));
                 }
                 EnvironmentError::InternalError => {
-                    return Err(out.fail(cache_internal(ENVIRONMENT_PROVIDER_READ, index, span)));
+                    return Err(out.fail(cache_internal(
+                        ENVIRONMENT_PROVIDER_READ,
+                        index,
+                        span,
+                        self.translator,
+                    )));
                 }
             },
             Ok(None) => CachedEnvironment::Missing,
             Ok(Some(bytes)) => {
                 if bytes.len() > read_context.max_value_bytes() {
-                    return Err(out.fail(resource(span)));
+                    return Err(out.fail(EnvironmentDiagnostics::resource(span, self.translator)));
                 }
                 self.budget.environment_bytes(bytes.len(), out.reborrow())?;
                 let mut copy = ChargedVec::new(self.entries.budget(), out.reborrow())?;
@@ -276,14 +296,19 @@ impl EnvironmentCache {
                 insert_out,
             )
         }) {
-            return Err(out.fail(located_error(
-                BudgetDiagnostic::from_error(caught.take()),
+            return Err(out.fail(EnvironmentDiagnostics::located_error(
+                BudgetDiagnostic::from_error(caught.take(), self.translator),
                 span,
             )));
         }
         let inserted_len = self.entries.len();
         let Some(ordered_entries) = self.entries.get_mut(position..inserted_len) else {
-            return Err(out.fail(cache_internal(ENVIRONMENT_CACHE_SLOT, index, span)));
+            return Err(out.fail(cache_internal(
+                ENVIRONMENT_CACHE_SLOT,
+                index,
+                span,
+                self.translator,
+            )));
         };
         ordered_entries.rotate_right(1);
         self.cached_value(position, index, span, out)
@@ -296,15 +321,25 @@ impl EnvironmentCache {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, CachePosition> {
         let Some(execution) = self.entries.budget() else {
-            return Err(out.fail(cache_internal(ENVIRONMENT_CACHE_BUDGET, slot, span)));
+            return Err(out.fail(cache_internal(
+                ENVIRONMENT_CACHE_BUDGET,
+                slot,
+                span,
+                self.translator,
+            )));
         };
         let mut lower = 0;
         let mut upper = self.entries.len();
         while lower < upper {
-            charge_environment_work(execution, 1, span, out.reborrow())?;
+            charge_environment_work(execution, 1, span, self.translator, out.reborrow())?;
             let middle = lower + (upper - lower) / 2;
             let Some(entry) = self.entries.get(middle) else {
-                return Err(out.fail(cache_internal(ENVIRONMENT_CACHE_SLOT, slot, span)));
+                return Err(out.fail(cache_internal(
+                    ENVIRONMENT_CACHE_SLOT,
+                    slot,
+                    span,
+                    self.translator,
+                )));
             };
             if entry.schema_slot < slot {
                 lower = middle + 1;
@@ -327,7 +362,12 @@ impl EnvironmentCache {
     ) -> OResult<'slot, &CachedEnvironment> {
         match self.entries.get(position) {
             Some(entry) if entry.schema_slot == slot => Ok(&entry.value),
-            _ => Err(out.fail(cache_internal(ENVIRONMENT_CACHE_SLOT, slot, span))),
+            _ => Err(out.fail(cache_internal(
+                ENVIRONMENT_CACHE_SLOT,
+                slot,
+                span,
+                self.translator,
+            ))),
         }
     }
 }
@@ -336,149 +376,97 @@ fn charge_environment_work<'slot>(
     budget: &ExecutionBudget,
     steps: usize,
     span: LocatedSpan,
+    translator: Translator,
     out: Out<'slot, '_, Diagnostic>,
 ) -> OResult<'slot, ()> {
     let mut budget_errors = ErrSlot::<BudgetError>::new();
     match budget_errors.try_call(|budget_out| budget.consume(steps, budget_out)) {
         Ok(()) => Ok(()),
-        Err(caught) => Err(out.fail(located_error(
-            BudgetDiagnostic::from_error(caught.take()),
+        Err(caught) => Err(out.fail(EnvironmentDiagnostics::located_error(
+            BudgetDiagnostic::from_error(caught.take(), translator),
             span,
         ))),
     }
 }
 
-fn cache_internal(context: DiagnosticContext, slot: usize, span: LocatedSpan) -> Diagnostic {
-    DiagnosticFactory::internal(context.with_object_id(slot as u64), Some(span), None, None)
-}
-
-fn located_error(mut diagnostic: Diagnostic, span: LocatedSpan) -> Diagnostic {
-    if diagnostic.located_primary().is_none() {
-        diagnostic.set_located_primary(Some(span));
-    }
-    diagnostic
-}
-
-fn resource(span: LocatedSpan) -> Diagnostic {
-    DiagnosticFactory::make_diagnostic(
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-        diagnostic_message!(
-            "diagnostic.environment.resource_limit",
-            "environment read exceeded the resource limit"
-        ),
+fn cache_internal(
+    context: DiagnosticContext,
+    slot: usize,
+    span: LocatedSpan,
+    translator: Translator,
+) -> Diagnostic {
+    DiagnosticFactory::internal(
+        context.with_object_id(slot as u64),
         Some(span),
         None,
         None,
+        translator,
     )
 }
 
-struct EnvironmentDiagnosticRequest<'a> {
-    code: DiagnosticCode,
-    key: Option<DiagnosticMessageKey>,
-    message: &'a str,
-    span: LocatedSpan,
-    budget: &'a ExecutionBudget,
-    context: Option<DiagnosticContext>,
+pub(super) struct EnvironmentDiagnosticRequest<'a> {
+    pub(super) code: DiagnosticCode,
+    pub(super) message: DiagnosticMessage<'a>,
+    pub(super) span: LocatedSpan,
+    pub(super) budget: &'a ExecutionBudget,
+    pub(super) context: Option<DiagnosticContext>,
+    pub(super) translator: Translator,
 }
 
-fn environment_diagnostic(
-    request: EnvironmentDiagnosticRequest<'_>,
-    budget_errors: &mut ErrSlot<BudgetError>,
-) -> Diagnostic {
-    let EnvironmentDiagnosticRequest {
-        code,
-        key,
-        message,
-        span,
-        budget,
-        context,
-    } = request;
-    let mut diagnostic = match budget_errors.try_call(|budget_out| {
-        Diagnostic::try_new(
+pub(super) struct EnvironmentDiagnostics;
+
+impl EnvironmentDiagnostics {
+    pub(super) fn located_error(mut diagnostic: Diagnostic, span: LocatedSpan) -> Diagnostic {
+        if diagnostic.located_primary().is_none() {
+            diagnostic.set_located_primary(Some(span));
+        }
+        diagnostic
+    }
+
+    pub(super) fn resource(span: LocatedSpan, translator: Translator) -> Diagnostic {
+        DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+            code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+            message: DiagnosticMessage::from(
+                t! { name: "diagnostic.environment.resource_limit", locale: translator },
+            ),
+            primary: Some(span),
+            path: None,
+            value_source: None,
+            context: None,
+            translator,
+        })
+    }
+
+    pub(super) fn environment(
+        request: EnvironmentDiagnosticRequest<'_>,
+        budget_errors: &mut ErrSlot<BudgetError>,
+    ) -> Diagnostic {
+        let EnvironmentDiagnosticRequest {
             code,
-            match key {
-                Some(key) => DiagnosticMessage::localized(message, key),
-                None => DiagnosticMessage::custom(message),
-            },
-            Some(budget),
-            budget_out,
-        )
-    }) {
-        Ok(diagnostic) => diagnostic,
-        Err(caught) => {
-            return located_error(BudgetDiagnostic::from_error(caught.take()), span);
-        }
-    };
-    diagnostic.set_located_primary(Some(span));
-    diagnostic.set_value_source(Some(ValueSource::EnvironmentVariable));
-    diagnostic.set_context(context);
-    if code == DiagnosticCode::INTERNAL_ERROR {
-        diagnostic.set_context(Some(context.unwrap_or(ENVIRONMENT_INTERNAL_FALLBACK)));
-    }
-    diagnostic
-}
-
-#[derive(Debug)]
-pub(crate) enum EnvironmentTextError {
-    Budget(BudgetError),
-    Utf8,
-}
-
-impl From<BudgetError> for EnvironmentTextError {
-    fn from(error: BudgetError) -> Self {
-        Self::Budget(error)
-    }
-}
-
-struct EnvironmentText;
-
-impl EnvironmentText {
-    fn decode<'bytes, 'slot>(
-        bytes: &'bytes [u8],
-        budget: &ExecutionBudget,
-        mut out: Out<'slot, '_, EnvironmentTextError>,
-    ) -> OResult<'slot, &'bytes str> {
-        let mut index = 0;
-        while index < bytes.len() {
-            budget.consume(1, out.reborrow())?;
-            let Some(first) = bytes.get(index) else {
-                return Err(out.fail(EnvironmentTextError::Utf8));
-            };
-            let first = *first;
-            let width = match first {
-                0x00..=0x7f => 1,
-                0xc2..=0xdf => 2,
-                0xe0..=0xef => 3,
-                0xf0..=0xf4 => 4,
-                _ => return Err(out.fail(EnvironmentTextError::Utf8)),
-            };
-            for offset in 1..width {
-                let Some(byte_index) = index.checked_add(offset) else {
-                    return Err(out.fail(EnvironmentTextError::Utf8));
-                };
-                budget.consume(1, out.reborrow())?;
-                let Some(byte) = bytes.get(byte_index) else {
-                    return Err(out.fail(EnvironmentTextError::Utf8));
-                };
-                let byte = *byte;
-                let valid = match (first, offset) {
-                    (0xe0, 1) => (0xa0..=0xbf).contains(&byte),
-                    (0xed, 1) => (0x80..=0x9f).contains(&byte),
-                    (0xf0, 1) => (0x90..=0xbf).contains(&byte),
-                    (0xf4, 1) => (0x80..=0x8f).contains(&byte),
-                    _ => (0x80..=0xbf).contains(&byte),
-                };
-                if !valid {
-                    return Err(out.fail(EnvironmentTextError::Utf8));
-                }
+            message,
+            span,
+            budget,
+            context,
+            translator,
+        } = request;
+        let mut diagnostic = match budget_errors
+            .try_call(|budget_out| Diagnostic::try_new(code, message, Some(budget), budget_out))
+        {
+            Ok(diagnostic) => diagnostic,
+            Err(caught) => {
+                return Self::located_error(
+                    BudgetDiagnostic::from_error(caught.take(), translator),
+                    span,
+                );
             }
-            let Some(next_index) = index.checked_add(width) else {
-                return Err(out.fail(EnvironmentTextError::Utf8));
-            };
-            index = next_index;
+        };
+        diagnostic.set_located_primary(Some(span));
+        diagnostic.set_value_source(Some(ValueSource::EnvironmentVariable));
+        diagnostic.set_context(context);
+        if code == DiagnosticCode::INTERNAL_ERROR {
+            diagnostic.set_context(Some(context.unwrap_or(ENVIRONMENT_INTERNAL_FALLBACK)));
         }
-        // SAFETY: Each byte is checked for ASCII, continuation-byte form, shortest encoding, surrogate range, and the Unicode upper bound.
-        Ok(unsafe { from_utf8_unchecked(bytes) })
+        diagnostic
     }
 }
 
@@ -495,7 +483,7 @@ fn metered_utf8_validation_matches_core_for_boundaries_and_two_byte_inputs() -> 
             let bytes = [first, second];
             test_eq!(
                 decode_errors
-                    .run(|out| EnvironmentText::decode(&bytes, &budget, out))
+                    .run(|out| resolver::EnvironmentText::decode(&bytes, &budget, out))
                     .value()
                     .copied(),
                 from_utf8(&bytes).ok()
@@ -522,7 +510,7 @@ fn metered_utf8_validation_matches_core_for_boundaries_and_two_byte_inputs() -> 
     for bytes in cases {
         test_eq!(
             decode_errors
-                .run(|out| EnvironmentText::decode(bytes, &budget, out))
+                .run(|out| resolver::EnvironmentText::decode(bytes, &budget, out))
                 .value()
                 .copied(),
             from_utf8(bytes).ok()
@@ -538,7 +526,7 @@ fn metered_utf8_validation_matches_core_for_boundaries_and_two_byte_inputs() -> 
             let bytes = bytes.get(..length).test_value()?;
             test_eq!(
                 decode_errors
-                    .run(|out| EnvironmentText::decode(bytes, &budget, out))
+                    .run(|out| resolver::EnvironmentText::decode(bytes, &budget, out))
                     .value()
                     .copied(),
                 from_utf8(bytes).ok()
@@ -559,319 +547,11 @@ fn utf8_validator_stops_at_exact_byte_boundary() -> TestResult<()> {
         let budget = budget_errors
             .run(|out| ExecutionBudget::new(ExecutionLimits::new(steps, 1_048_576), out))
             .test_value()?;
-        let result = decode_errors.run(|out| EnvironmentText::decode(&bytes, &budget, out));
+        let result =
+            decode_errors.run(|out| resolver::EnvironmentText::decode(&bytes, &budget, out));
         test_eq!(result.is_ok(), steps == 4)?;
         test_eq!(budget.steps(), steps)?;
     }
 
     Ok(())
-}
-
-pub(crate) struct EnvironmentResolver;
-
-pub(crate) struct EnvironmentAuthorizationRequest<'name, 'auth> {
-    pub(crate) name: &'name str,
-    pub(crate) authorization: Option<EnvironmentAuthorization<'auth>>,
-    pub(crate) span: LocatedSpan,
-    pub(crate) budget: &'name ExecutionBudget,
-}
-
-pub(crate) struct EnvironmentResolveRequest<'schema, 'auth, 'resources, 'limits> {
-    pub(crate) metadata: AssignmentContext<'schema>,
-    pub(crate) authorization: EnvironmentAuthorization<'auth>,
-    pub(crate) fallback: Option<FallbackValue>,
-    pub(crate) spans: EnvironmentSpans,
-    pub(crate) resources: &'resources mut SessionResources<'limits>,
-}
-
-impl EnvironmentResolver {
-    /// Names and authorization are checked before parsing a fallback, and the cache entry point performs the same checks.
-    pub(crate) fn authorize<'auth, 'slot, 'borrow>(
-        request: EnvironmentAuthorizationRequest<'_, 'auth>,
-        budget_errors: &mut ErrSlot<BudgetError>,
-        out: Out<'slot, 'borrow, Diagnostic>,
-    ) -> OResult<'slot, EnvironmentAuthorization<'auth>> {
-        let EnvironmentAuthorizationRequest {
-            name,
-            authorization,
-            span,
-            budget,
-        } = request;
-        let mut valid = !name.is_empty();
-        for (index, byte) in name.bytes().enumerate() {
-            if let Err(caught) = budget_errors.try_call(|budget_out| budget.consume(1, budget_out))
-            {
-                return Err(out.fail(located_error(
-                    BudgetDiagnostic::from_error(caught.take()),
-                    span,
-                )));
-            }
-            if !(byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit()))
-            {
-                valid = false;
-                break;
-            }
-        }
-        let authorized = match authorization {
-            Some(authorization) => match budget_errors
-                .try_call(|budget_out| budget.compare_text(authorization.name(), name, budget_out))
-            {
-                Ok(ordering) => ordering.is_eq(),
-                Err(caught) => {
-                    return Err(out.fail(located_error(
-                        BudgetDiagnostic::from_error(caught.take()),
-                        span,
-                    )));
-                }
-            },
-            None => false,
-        };
-        if valid && authorized {
-            match authorization {
-                Some(authorization) => Ok(authorization),
-                None => Err(out.fail(DiagnosticFactory::internal(
-                    ENVIRONMENT_AUTHORIZATION_MISSING,
-                    Some(span),
-                    None,
-                    Some(ValueSource::EnvironmentVariable),
-                ))),
-            }
-        } else {
-            Err(out.fail(environment_diagnostic(
-                EnvironmentDiagnosticRequest {
-                    code: DiagnosticCode::CONFIG_VALUE_ERROR,
-                    key: Some(diagnostic_key!("diagnostic.environment.name_invalid")),
-                    message: "environment name is invalid or does not match field authorization",
-                    span,
-                    budget,
-                    context: None,
-                },
-                budget_errors,
-            )))
-        }
-    }
-
-    pub(crate) fn resolve_environment<'slot>(
-        request: EnvironmentResolveRequest<'_, '_, '_, '_>,
-        mut out: Out<'slot, '_, Diagnostic>,
-    ) -> OResult<'slot, Option<EnvironmentValue>> {
-        let EnvironmentResolveRequest {
-            metadata,
-            authorization,
-            fallback,
-            spans,
-            resources,
-        } = request;
-        let expected_kind = match resources
-            .validation
-            .schema_access_errors
-            .try_call(|access_out| metadata.expected.kind(access_out))
-        {
-            Ok(kind) => kind,
-            Err(caught) => {
-                return Err(out.fail(DiagnosticFactory::schema_access(caught.take())));
-            }
-        };
-        let (builtin, optional) = match expected_kind {
-            TypeKind::Builtin(builtin) => (builtin, false),
-            TypeKind::Option { inner } => {
-                let inner_kind = match resources
-                    .validation
-                    .schema_access_errors
-                    .try_call(|access_out| inner.kind(access_out))
-                {
-                    Ok(kind) => kind,
-                    Err(caught) => {
-                        return Err(out.fail(DiagnosticFactory::schema_access(caught.take())));
-                    }
-                };
-                match inner_kind {
-                    TypeKind::Builtin(builtin) => (builtin, true),
-                    _ => {
-                        return Err(out.fail(environment_diagnostic(
-                            EnvironmentDiagnosticRequest {
-                                code: DiagnosticCode::INTERNAL_ERROR,
-                                key: None,
-                                message: "environment target is not a scalar",
-                                span: spans.call,
-                                budget: &resources.budget,
-                                context: Some(
-                                    ENVIRONMENT_TARGET_TYPE
-                                        .with_object_id(authorization.slot() as u64),
-                                ),
-                            },
-                            &mut resources.validation.budget_errors,
-                        )));
-                    }
-                }
-            }
-            _ => {
-                return Err(out.fail(environment_diagnostic(
-                    EnvironmentDiagnosticRequest {
-                        code: DiagnosticCode::INTERNAL_ERROR,
-                        key: None,
-                        message: "environment target is not a scalar",
-                        span: spans.call,
-                        budget: &resources.budget,
-                        context: Some(
-                            ENVIRONMENT_TARGET_TYPE.with_object_id(authorization.slot() as u64),
-                        ),
-                    },
-                    &mut resources.validation.budget_errors,
-                )));
-            }
-        };
-        let name = authorization.name();
-        let cached = resources.cache.read(
-            EnvironmentReadRequest {
-                provider: resources.environment,
-                authorization,
-                limits: &resources.config_limits,
-                span: spans.call,
-            },
-            out.reborrow(),
-        )?;
-        let bytes = match cached {
-            CachedEnvironment::Missing => {
-                return Ok(fallback.map(|fallback| EnvironmentValue {
-                    value: fallback.value,
-                    origin: ValueOrigin::ExplicitFallback {
-                        value: fallback.span,
-                    },
-                    completion: CompletionState::Validated(fallback.proof),
-                }));
-            }
-            CachedEnvironment::HostFailure => {
-                return Err(out.fail(environment_diagnostic(
-                    EnvironmentDiagnosticRequest {
-                        code: DiagnosticCode::CONFIG_ENVIRONMENT_ERROR,
-                        key: Some(diagnostic_key!("diagnostic.environment.read_failed")),
-                        message: "environment read failed",
-                        span: spans.call,
-                        budget: &resources.budget,
-                        context: None,
-                    },
-                    &mut resources.validation.budget_errors,
-                )));
-            }
-            CachedEnvironment::Bytes(bytes) => bytes,
-        };
-        let text = match resources
-            .validation
-            .environment_text_errors
-            .try_call(|text_out| EnvironmentText::decode(bytes, &resources.budget, text_out))
-        {
-            Ok(text) => text,
-            Err(caught) => match caught.take() {
-                EnvironmentTextError::Budget(error) => {
-                    return Err(out.fail(located_error(
-                        BudgetDiagnostic::from_error(error),
-                        spans.call,
-                    )));
-                }
-                EnvironmentTextError::Utf8 => {
-                    return Err(out.fail(environment_diagnostic(
-                        EnvironmentDiagnosticRequest {
-                            code: DiagnosticCode::CONFIG_ENVIRONMENT_ERROR,
-                            key: Some(diagnostic_key!("diagnostic.environment.value_invalid_utf8")),
-                            message: "environment value is not valid UTF-8",
-                            span: spans.call,
-                            budget: &resources.budget,
-                            context: None,
-                        },
-                        &mut resources.validation.budget_errors,
-                    )));
-                }
-            },
-        };
-        if builtin == BuiltinType::String {
-            ConfigBudget::construct_text(
-                &resources.budget,
-                resources.config_limits,
-                text.len(),
-                out.reborrow(),
-            )?;
-        }
-        let value = Scalar::convert_budgeted(
-            ScalarRequest {
-                text,
-                builtin,
-                span: spans.call,
-                budget: Some(&resources.budget),
-            },
-            &mut resources.validation.budget_errors,
-            out.reborrow(),
-        )?;
-        let fallback_scalar = match fallback.as_ref() {
-            Some(fallback) => {
-                let value = match (optional, fallback.value.root().as_ref()) {
-                    (true, ValueKind::Optional(Some(value))) => value,
-                    (false, _) => fallback.value.root(),
-                    _ => {
-                        return Err(out.fail(DiagnosticFactory::internal(
-                            ENVIRONMENT_INTERNAL_FALLBACK,
-                            Some(fallback.span),
-                            None,
-                            Some(ValueSource::ExplicitFallback),
-                        )));
-                    }
-                };
-                Some(match value.as_ref() {
-                    ValueKind::Signed(value) => ValueScalar::Signed(value),
-                    ValueKind::Unsigned(value) => ValueScalar::Unsigned(value),
-                    ValueKind::Float32(value) => ValueScalar::Float32(value),
-                    ValueKind::Float64(value) => ValueScalar::Float64(value),
-                    ValueKind::String(value) => ValueScalar::String(value),
-                    ValueKind::Bool(value) => ValueScalar::Bool(value),
-                    _ => {
-                        return Err(out.fail(DiagnosticFactory::internal(
-                            ENVIRONMENT_INTERNAL_FALLBACK,
-                            Some(fallback.span),
-                            None,
-                            Some(ValueSource::ExplicitFallback),
-                        )));
-                    }
-                })
-            }
-            None => None,
-        };
-        let budget = &resources.budget;
-        let value = if optional {
-            let mut value_errors = ErrSlot::new();
-            match value_errors.try_call(move |value_out| {
-                ValueFactory::optional_owned(value, ValueSource::RustValue, Some(budget), value_out)
-            }) {
-                Ok(value) => value,
-                Err(caught) => {
-                    return Err(out.fail(ValueFactory::failure(
-                        caught.take(),
-                        Some(spans.call),
-                        Some(ValueSource::EnvironmentVariable),
-                    )));
-                }
-            }
-        } else {
-            value
-        };
-        let value = {
-            let mut value_errors = ErrSlot::new();
-            match value_errors.try_call(|value_out| {
-                ValueFactory::environment(value, name, fallback_scalar, Some(budget), value_out)
-            }) {
-                Ok(value) => value,
-                Err(caught) => {
-                    return Err(out.fail(ValueFactory::failure(
-                        caught.take(),
-                        Some(spans.call),
-                        Some(ValueSource::EnvironmentVariable),
-                    )));
-                }
-            }
-        };
-        Ok(Some(EnvironmentValue {
-            value,
-            origin: ValueOrigin::Environment { call: spans.call },
-            completion: CompletionState::NeedsTraversal,
-        }))
-    }
 }

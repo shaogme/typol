@@ -1,8 +1,9 @@
 use alloc::{format, string::String, vec::Vec};
 use typol_core::{
-    BudgetError, ChargedVec, DiagnosticCode, ExecutionBudget, ExecutionLimits,
+    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits,
     RegexExecutionBudget, SourceId, SourceSpan, Span,
 };
+use typol_i18n::{Language, Translator};
 use typol_policy::{RegexExecutionLimits, RegexOptions};
 use typol_semantic::{EvalError, ExecutionModel};
 
@@ -10,18 +11,19 @@ use crate::{
     ResolverError, SchemaCompileOptions, SchemaLimits, SchemaResolveRequest, SchemaResolver,
     SchemaSource,
     annotations::{AnnotationCompilation, AnnotationCompileInput, AnnotationCompiler},
-    context::CompileContext,
+    compiler::SchemaCompileContext,
+    context::{CompileContext, CompileContextOptions},
     diagnostics::DiagnosticCollector,
     execution::CompileModel,
     expressions::{ExpressionCompilation, ExpressionCompileInput, ExpressionCompiler},
-    loader::SourceLoader,
+    loader::{SourceLoadRequest, SourceLoader},
     module_tree::ModuleTree,
     session::{CompileBudget, SourceCatalog},
     symbols::{LookupResult, SymbolTable},
     test_support::{SchemaCompileTestSupport, TestOperation},
     types::{ResolvedTypeGraph, TypeGraphCompiler},
 };
-use opeo::{OResult, Out};
+use opeo::{ErrSlot, OResult, Out};
 use typol_test_support::*;
 
 const LIMIT: usize = 67_108_864;
@@ -84,10 +86,13 @@ fn context(
     operations
         .budget(|out| {
             CompileContext::new(
-                limits,
-                regex_options.limits(),
-                execution,
-                &regex_execution,
+                CompileContextOptions {
+                    limits,
+                    regex_limits: regex_options.limits(),
+                    execution,
+                    regex_execution: &regex_execution,
+                    translator: Translator::new(Language::English),
+                },
                 out,
             )
         })
@@ -101,7 +106,15 @@ fn diagnostics(
     execution: &ExecutionBudget,
 ) -> TestResult<DiagnosticCollector> {
     operations
-        .diagnostic(|out| DiagnosticCollector::new(limit, span, execution, out))
+        .diagnostic(|out| {
+            DiagnosticCollector::new(
+                limit,
+                span,
+                execution,
+                Translator::new(Language::English),
+                out,
+            )
+        })
         .into_test_value()
 }
 
@@ -123,7 +136,14 @@ fn compile_budget(
         })
         .into_test_value()?;
     operations
-        .budget(|out| CompileBudget::new(limits, &regex_options, execution, &regex_execution, out))
+        .budget(|mut out| {
+            let options = SchemaCompileOptions::new(limits)
+                .with_regex(regex_options)
+                .with_translator(Translator::new(Language::English));
+            let context =
+                SchemaCompileContext::new(options, execution, &regex_execution, out.reborrow())?;
+            CompileBudget::new(&context, out)
+        })
         .into_test_value()
 }
 
@@ -200,14 +220,22 @@ fn load(
     let span = source_span(operations, 0, source.len())?;
     let mut diagnostics = diagnostics(operations, limits.max_diagnostics(), span, execution)?;
     let mut budget = compile_budget(operations, limits, execution)?;
-    let sources = SourceLoader::load(
-        SchemaSource::from_str(b"root", source),
-        &mut NoImports,
-        &mut budget,
-        &mut diagnostics,
-        None,
-    )
-    .into_test_value()?;
+    let mut load_errors = ErrSlot::<Diagnostic>::new();
+    let sources = load_errors
+        .call(|out| {
+            SourceLoader::load(
+                SourceLoadRequest {
+                    root: SchemaSource::from_str(b"root", source),
+                    resolver: &mut NoImports,
+                    budget: &mut budget,
+                    diagnostics: &mut diagnostics,
+                    observer: None,
+                },
+                out,
+                |diagnostic| diagnostic,
+            )
+        })
+        .into_test_value()?;
     test_verify!(!diagnostics.has_diagnostics());
     Ok((sources, diagnostics))
 }

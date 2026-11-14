@@ -71,13 +71,7 @@ fn compile_loaded(text: &str) -> TestResult<LoadedSchema> {
     match TestOpeo::outcome(|out| loader.compile_text(b"default-config", text, out)) {
         TestOpeoOutcome::Value(schema) => Ok(schema),
         TestOpeoOutcome::Error(error) => {
-            let rendered = TestOpeo::value(|out| {
-                error.render(
-                    Translator::new(Language::English),
-                    RenderOptions::default(),
-                    out,
-                )
-            })?;
+            let rendered = TestOpeo::value(|out| error.render(RenderOptions::default(), out))?;
             Err(TestFailure::new(rendered))
         }
     }
@@ -262,7 +256,12 @@ fn public_binding_errors_expose_reason_path_and_shapes() -> TestResult {
         .diagnostics()
         .first()
         .test_expect("public binding errors should include readable diagnostics")?;
-    assert!(diagnostic.message().contains("field shape mismatch"));
+    assert!(
+        diagnostic
+            .message()
+            .test_value()?
+            .contains("field shape mismatch")
+    );
     Ok(())
 }
 
@@ -353,7 +352,7 @@ fn full_validation_errors_own_schema_snapshots_and_safe_diagnostics() -> TestRes
     assert_eq!(diagnostic.code(), DiagnosticCode::CONFIG_VALIDATION_ERROR);
     assert_eq!(diagnostic.primary(), None);
     assert_eq!(diagnostic.value_source(), Some(ValueSource::RustValue));
-    assert_eq!(diagnostic.message(), "value is hidden");
+    assert_eq!(diagnostic.message().test_value()?, "value is hidden");
     assert!(!format!("{errors:?} {errors}").contains("99"));
     for label in diagnostic.labels() {
         assert!(errors.span_location(label.span()).is_some());
@@ -920,9 +919,8 @@ fn default_generation_requires_explicit_nested_values_and_runs_assertions() -> T
 
 #[test]
 fn secret_default_output_can_be_rejected_before_writing() -> TestResult {
-    let loaded = compile_loaded(
-        r#"type Secret = string @secret; struct Nested { token: Secret = "PRIVATE-DEFAULT" } entry struct Root { nested: Nested = {} }"#,
-    )?;
+    let schema = r#"type Secret = string @secret; struct Nested { token: Secret = "PRIVATE-DEFAULT" } entry struct Root { nested: Nested = {} }"#;
+    let loaded = compile_loaded(schema)?;
     let allowed = TestOpeo::value(|out| {
         loaded.default_config_to_string(DefaultConfigOptions::default(), out)
     })?;
@@ -948,23 +946,27 @@ fn secret_default_output_can_be_rejected_before_writing() -> TestResult {
             .map(|context| context.failure_point()),
         Some("secret-output-rejected")
     );
-    let english_report = TestOpeo::value(|out| {
-        errors.render(
-            Translator::new(Language::English),
-            RenderOptions::default(),
-            out,
-        )
-    })?;
+    let english_report = TestOpeo::value(|out| errors.render(RenderOptions::default(), out))?;
     assert!(
         english_report.contains("secret values are not allowed in generated configuration output")
     );
-    let chinese_report = TestOpeo::value(|out| {
-        errors.render(
-            Translator::new(Language::Chinese),
-            RenderOptions::default(),
+    let chinese_loaded = TestOpeo::value(|out| {
+        SchemaLoader::new(
+            TypolOptions::default().with_translator(Translator::new(Language::Chinese)),
+        )
+        .compile_text(b"chinese-default", schema, out)
+    })?;
+    let mut chinese_sink = String::new();
+    let chinese_errors = TestOpeo::error(|out| {
+        chinese_loaded.write_default_config(
+            &mut chinese_sink,
+            DefaultConfigOptions::default().with_reject_secret_values(true),
             out,
         )
     })?;
+    assert_eq!(chinese_sink, "");
+    let chinese_report =
+        TestOpeo::value(|out| chinese_errors.render(RenderOptions::default(), out))?;
     assert!(chinese_report.contains("生成配置中不允许包含秘密值"));
     assert!(!format!("{errors:?} {errors}").contains("PRIVATE-DEFAULT"));
 

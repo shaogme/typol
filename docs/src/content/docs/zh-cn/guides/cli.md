@@ -7,7 +7,7 @@ sidebar:
 
 `typol` 命令行工具可以检查和格式化 `.tschem` Schema、校验和格式化 `.tconf` 配置文件，并将配置值导出为类型化 JSON。它与 [Rust 快速上手教程](../quickstart/)互为补充：可直接用 CLI 检查或格式化文件，也可在应用中使用 Rust 库读取配置。
 
-CLI 支持英文和简体中文。帮助、命令行错误、操作提示以及详细的 Schema 和配置诊断都会使用同一种选定语言，并由 `typol-i18n` 中通过 `u18n` 在构建期生成的翻译目录渲染。
+CLI 支持英文和简体中文。帮助、命令行错误、操作提示以及详细的 Schema 和配置诊断都会使用同一种选定语言。CLI 会在 Schema 编译和配置读取开始前设置所选语言。每条诊断会保存生成时已翻译的原因文本，文本报告和 JSON 序列化都会直接使用它。消息目录在构建期生成。
 
 ## 构建和运行
 
@@ -116,7 +116,9 @@ typol config fmt --schema <schema.tschem> [--environment inherit|empty] [--check
 - `--pretty` 仅适用于 `config export-ir`。
 - `--reject-secrets` 仅适用于 `config export-ir`；检测到任意秘密标记时会阻止输出。
 - `--check` 适用于 `schema fmt` 和 `config fmt`；它检查格式但不写入文件。
-- `--language en|zh-CN` 选择 CLI 消息和详细诊断的语言，必须放在命令前；也可通过 `TYPOL_LANG` 设置。
+- `--language en|zh-CN` 选择 CLI 消息和诊断的语言，必须放在命令前；也可通过 `TYPOL_LANG` 设置。
+- `--format text|json` 选择人类可读诊断（默认）或带版本号的 JSON 诊断。此全局选项必须放在命令前。
+- `--diagnostic-detail` 在 JSON 诊断中添加已捕获的内部 `DiagnosticContext` 字段。它必须与 `--format=json` 一起使用，并放在命令前。
 - `-h` 和 `--help` 会显示命令帮助。例如：`typol --help`、`typol schema check --help` 或 `typol config export-ir --help`。
 - 如果 Schema 或配置文件路径以 `-` 开头，可在路径前加 `--`，将其作为路径而非选项解析。
 
@@ -124,7 +126,7 @@ CLI 接受文件路径，不会从标准输入读取 Schema 或配置文本。Sc
 
 ## 输出和退出状态
 
-检查和格式化命令成功时不会输出内容。`schema fmt --check` 或 `config fmt --check` 发现需要格式化时会向标准错误写入本地化提示。`config export-ir` 会将 JSON 写入标准输出。诊断和命令行错误会写入标准错误。
+检查和格式化命令成功时不会输出内容。`schema fmt --check` 或 `config fmt --check` 发现需要格式化时会向标准错误写入本地化提示。`config export-ir` 会将 JSON 写入标准输出。两种格式的诊断都会写入标准错误；`--format=json` 不改变 IR 输出流。JSON 诊断文档包含 `schema_version: 1`、与翻译目录 key 无关的机器诊断 `kind`、类别、操作阶段和诊断阶段，以及带状态的位置信息、路径和值来源。标准模式不包含内部上下文；详细模式仅在错误已捕获上下文时添加该字段。JSON `reason` 是操作执行期间生成的完整诊断文本，因此使用命令前传入的 `--language`，序列化阶段不会重新选择语言。
 
 | 状态码 | 含义 |
 | ---: | --- |

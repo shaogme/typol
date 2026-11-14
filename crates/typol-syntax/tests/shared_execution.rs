@@ -2,11 +2,12 @@ use typol_core::{
     BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read, SliceSource,
     SourceId,
 };
+use typol_i18n::{Language, Translator};
 use typol_syntax::{
     AnnotationData, AstAccessError, InputConfig, LexEvent, SchemaAst, SchemaParseOptions,
     SchemaParser, StreamLimits, SyntaxErrors, SyntaxLimits, TokenCursor,
 };
-use typol_test_support::TestSlot;
+use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
 
 struct TestCursor<'source> {
     cursor: TokenCursor<'source>,
@@ -20,10 +21,10 @@ impl<'source> TestCursor<'source> {
         limits: &SyntaxLimits,
         stream: StreamLimits,
         execution: &ExecutionBudget,
-    ) -> Result<Self, Diagnostic> {
+    ) -> TestOpeoOutcome<Self, Diagnostic> {
         let input_limits = limits.input_limits();
         let mut errors = TestSlot::default();
-        let cursor = errors.access(|out| {
+        match errors.run(|out| {
             TokenCursor::new(
                 InputConfig {
                     source_id,
@@ -32,19 +33,28 @@ impl<'source> TestCursor<'source> {
                     stream,
                     budget: execution,
                 },
+                Translator::new(Language::English),
                 out,
             )
-        })?;
-        Ok(Self { cursor, errors })
+        }) {
+            TestOpeoOutcome::Value(cursor) => TestOpeoOutcome::Value(Self { cursor, errors }),
+            TestOpeoOutcome::Error(error) => TestOpeoOutcome::Error(error),
+        }
     }
 
-    fn bump(&mut self) -> Result<LexEvent, Diagnostic> {
-        self.errors.access(|out| self.cursor.bump(out))
+    fn bump(&mut self) -> TestOpeoOutcome<LexEvent, Diagnostic> {
+        self.errors.run(|out| self.cursor.bump(out))
     }
 }
 
 #[derive(Debug)]
 struct TestFailure;
+
+impl From<OpeoTestFailure> for TestFailure {
+    fn from(_: OpeoTestFailure) -> Self {
+        Self
+    }
+}
 
 macro_rules! test_assert {
     ($condition:expr $(, $($message:tt)*)?) => {{
@@ -82,16 +92,6 @@ impl<T> TestValue<T> for Option<T> {
     }
 }
 
-trait TestError<T> {
-    fn test_error(self) -> TestResult<T>;
-}
-
-impl<T, E> TestError<E> for Result<T, E> {
-    fn test_error(self) -> TestResult<E> {
-        self.err().ok_or(TestFailure)
-    }
-}
-
 const LIMIT: usize = 67_108_864;
 
 fn execution(steps: usize, bytes: usize) -> TestResult<ExecutionBudget> {
@@ -106,9 +106,9 @@ fn parse_with_slot(
     source: &str,
     limits: &SyntaxLimits,
     budget: &ExecutionBudget,
-) -> Result<SchemaAst, SyntaxErrors> {
+) -> TestOpeoOutcome<SchemaAst, SyntaxErrors> {
     let options = SchemaParseOptions::with_syntax(*limits);
-    errors.access(|out| SchemaParser::parse_str(source_id, source, &options, budget, out))
+    errors.run(|out| SchemaParser::parse_str(source_id, source, &options, budget, out))
 }
 
 #[test]

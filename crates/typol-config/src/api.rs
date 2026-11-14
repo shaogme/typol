@@ -1,26 +1,26 @@
+mod processing;
+
+pub use processing::ConfigValueProcessor;
+
 use crate::{
     ConfigLimits,
-    diagnostics::{
-        BudgetDiagnostic, ConfigFailureStage, ConfigParseErrors, ConfigValueErrors,
-        DiagnosticBuffer, DiagnosticFactory,
-    },
+    diagnostics::{BudgetDiagnostic, ConfigFailureStage, ConfigParseErrors, DiagnosticFactory},
     document::{ConfigDocument, ConfigDocumentInput},
     environment::Environment,
     instance::LocationIndex,
-    options::{ConfigParseRequest, ConfigValidationRequest, RequestParts},
+    options::{ConfigParseRequest, RequestParts},
     parser::Parser,
     secret::SecretPolicy,
     session::{ConfigSession, TrackingInput},
-    value::{NormalizedConfigValue, ValidatedConfigValue},
-    value_normalization::{NormalizeRequest, ValueNormalizer},
-    value_validation::{ValueValidation, ValueValidationRequest},
+    value::ValidatedConfigValue,
 };
 use ::opeo::{ErrSlot, OResult, Out};
 use core::cell::RefCell;
 use typol_core::{
-    BudgetError, ChargedVec, ConfigValue, Diagnostic, DiagnosticCode, DiagnosticContext,
-    ExcerptLimits, ExecutionBudget, Read, SourceCapture, SourceId, diagnostic_context,
+    BudgetError, ChargedVec, Diagnostic, DiagnosticContext, ExcerptLimits, ExecutionBudget, Read,
+    SourceCapture, SourceId, diagnostic_context,
 };
+use typol_i18n::Translator;
 use typol_semantic::CompiledSchema;
 
 /// Parses configuration text against one compiled Schema.
@@ -28,14 +28,10 @@ pub struct ConfigParser<'schema> {
     schema: &'schema CompiledSchema,
 }
 
-/// Normalizes and validates external values against one compiled Schema.
-pub struct ConfigValueProcessor<'schema> {
-    schema: &'schema CompiledSchema,
-}
-
 /// Redacts Rust conversion diagnostics using one compiled Schema's secret boundaries.
 pub struct ConfigDiagnosticRedactor<'schema> {
     schema: &'schema CompiledSchema,
+    translator: Translator,
 }
 
 struct ParseSourceRequest<'schema, 'input, 'environment, 'budget, R: Read + ?Sized> {
@@ -81,6 +77,11 @@ static CONFIG_PARSE_BUDGET_MISMATCH: DiagnosticContext = diagnostic_context!(
     "config-parse-entry",
     "execution-budget-does-not-match-options",
 );
+static CONFIG_MISSING_TERMINAL_DIAGNOSTIC: DiagnosticContext = diagnostic_context!(
+    "typol-config",
+    "config-document-entry",
+    "source-retention-result-missing",
+);
 
 impl<'schema> ConfigParser<'schema> {
     pub const fn new(schema: &'schema CompiledSchema) -> Self {
@@ -115,6 +116,7 @@ impl<'schema> ConfigParser<'schema> {
         environment: &mut dyn Environment,
         mut out: Out<'slot, '_, ConfigParseErrors>,
     ) -> OResult<'slot, ConfigDocument<'schema>> {
+        let translator = request.options().translator();
         check_source(self.schema, &request, out.reborrow())?;
         let mut budget_errors = ErrSlot::new();
         let budget = match budget_errors
@@ -123,8 +125,9 @@ impl<'schema> ConfigParser<'schema> {
             Ok(budget) => budget,
             Err(caught) => {
                 return Err(out.fail(ConfigParseErrors::emergency(
-                    BudgetDiagnostic::from_error(caught.take()),
+                    BudgetDiagnostic::from_error(caught.take(), translator),
                     self.schema.next_source_id(),
+                    translator,
                 )));
             }
         };
@@ -140,6 +143,7 @@ impl<'schema> ConfigParser<'schema> {
         mut out: Out<'slot, 'borrow, ConfigParseErrors>,
     ) -> OResult<'slot, ConfigDocument<'schema>> {
         let options = *request.options();
+        let translator = options.translator();
         let display_name = request.display_name();
         let parsed = self.parse_document_parts_with_budget(
             DocumentPartsRequest {
@@ -152,8 +156,15 @@ impl<'schema> ConfigParser<'schema> {
         )?;
         let source = parsed.source.ok_or_else(|| {
             out.reborrow().fail(ConfigParseErrors::emergency(
-                Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR),
+                DiagnosticFactory::internal(
+                    CONFIG_MISSING_TERMINAL_DIAGNOSTIC,
+                    None,
+                    None,
+                    None,
+                    translator,
+                ),
                 self.schema.next_source_id(),
+                translator,
             ))
         })?;
         ConfigDocument::from_parse(
@@ -206,18 +217,27 @@ impl<'schema> ConfigParser<'schema> {
             budget,
             retain_source,
         } = request;
+        let translator = request.options().translator();
         if budget.limits() != *request.options().execution() {
             return Err(out.fail(ConfigParseErrors::emergency(
-                DiagnosticFactory::internal(CONFIG_PARSE_BUDGET_MISMATCH, None, None, None),
+                DiagnosticFactory::internal(
+                    CONFIG_PARSE_BUDGET_MISMATCH,
+                    None,
+                    None,
+                    None,
+                    translator,
+                ),
                 self.schema.next_source_id(),
+                translator,
             )));
         }
         check_source(self.schema, &request, out.reborrow())?;
         let parts = request.into_parts();
         let Some(source_id) = self.schema.next_source_id() else {
             return Err(out.fail(ConfigParseErrors::emergency(
-                BudgetDiagnostic::from_error(BudgetError::Resource),
+                BudgetDiagnostic::from_error(BudgetError::Resource, translator),
                 None,
+                translator,
             )));
         };
         let parsed = parse_document_source(
@@ -235,71 +255,9 @@ impl<'schema> ConfigParser<'schema> {
     }
 }
 
-impl<'schema> ConfigValueProcessor<'schema> {
-    pub const fn new(schema: &'schema CompiledSchema) -> Self {
-        Self { schema }
-    }
-
-    /// Normalize an owned external value with Schema defaults, without evaluating constraints.
-    /// Values carrying environment origins are rejected because normalization alone does not
-    /// perform the complete authorization and fallback checks required for those references.
-    pub fn normalize<'slot>(
-        &self,
-        value: ConfigValue,
-        request: ConfigValidationRequest,
-        out: Out<'slot, '_, ConfigValueErrors>,
-    ) -> OResult<'slot, NormalizedConfigValue> {
-        normalize_for_schema(self.schema, value, request, out)
-    }
-
-    /// Normalize an owned external value while sharing the caller's execution budget.
-    pub fn normalize_with_budget<'slot, 'borrow>(
-        &self,
-        value: ConfigValue,
-        request: ConfigValidationRequest,
-        budget: &ExecutionBudget,
-        out: Out<'slot, 'borrow, ConfigValueErrors>,
-    ) -> OResult<'slot, NormalizedConfigValue> {
-        normalize_for_schema_with_budget(self.schema, value, request, budget, out)
-    }
-
-    /// Normalize an owned external value and apply complete Schema validation.
-    pub fn validate<'slot>(
-        &self,
-        value: ConfigValue,
-        request: ConfigValidationRequest,
-        out: Out<'slot, '_, ConfigValueErrors>,
-    ) -> OResult<'slot, ValidatedConfigValue> {
-        validate_for_schema(self.schema, value, request, out)
-    }
-
-    /// Validate an owned external value while sharing the caller's execution budget.
-    pub fn validate_with_budget<'slot, 'borrow>(
-        &self,
-        value: ConfigValue,
-        request: ConfigValidationRequest,
-        budget: &ExecutionBudget,
-        out: Out<'slot, 'borrow, ConfigValueErrors>,
-    ) -> OResult<'slot, ValidatedConfigValue> {
-        validate_for_schema_with_budget(self.schema, value, request, budget, out)
-    }
-
-    /// Fully validate a Schema-complete value without rebuilding its value tree.
-    #[doc(hidden)]
-    pub fn validate_schema_complete_with_budget<'slot, 'borrow>(
-        &self,
-        value: ConfigValue,
-        request: ConfigValidationRequest,
-        budget: &ExecutionBudget,
-        out: Out<'slot, 'borrow, ConfigValueErrors>,
-    ) -> OResult<'slot, ValidatedConfigValue> {
-        validate_complete_for_schema_with_budget(self.schema, value, request, budget, out)
-    }
-}
-
 impl<'schema> ConfigDiagnosticRedactor<'schema> {
-    pub const fn new(schema: &'schema CompiledSchema) -> Self {
-        Self { schema }
+    pub const fn new(schema: &'schema CompiledSchema, translator: Translator) -> Self {
+        Self { schema, translator }
     }
 
     /// Redact a Rust value conversion diagnostic according to this Schema's `@secret` boundary.
@@ -308,20 +266,9 @@ impl<'schema> ConfigDiagnosticRedactor<'schema> {
         diagnostic: &mut Diagnostic,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, ()> {
-        SecretPolicy::redact_conversion(self.schema, diagnostic, out)
+        SecretPolicy::redact_conversion(self.schema, diagnostic, self.translator, out)
     }
 }
-
-static CONFIG_VALUE_BUDGET_MISMATCH: DiagnosticContext = diagnostic_context!(
-    "typol-config",
-    "config-value-validation-entry",
-    "execution-budget-does-not-match-options",
-);
-static CONFIG_VALUE_NORMALIZATION_BUDGET_MISMATCH: DiagnosticContext = diagnostic_context!(
-    "typol-config",
-    "config-value-normalization-entry",
-    "execution-budget-does-not-match-options",
-);
 
 fn parse_source<'slot, R: Read + ?Sized>(
     request: ParseSourceRequest<'_, '_, '_, '_, R>,
@@ -340,10 +287,26 @@ fn parse_source<'slot, R: Read + ?Sized>(
         *options.excerpts(),
         Some(budget),
     )));
-    let session = ConfigSession::with_budget(environment, options, budget, out.reborrow())?
-        .with_capture(&capture);
-    let mut input =
-        TrackingInput::new(parts.input, options.config().max_source_bytes()).with_capture(&capture);
+    let mut session_errors = ErrSlot::new();
+    let session = match session_errors.try_call(|session_out| {
+        ConfigSession::with_budget(environment, options, budget, session_out)
+    }) {
+        Ok(session) => session,
+        Err(caught) => {
+            return Err(out.fail(ConfigParseErrors::emergency(
+                caught.take(),
+                Some(source_id),
+                options.translator(),
+            )));
+        }
+    }
+    .with_capture(&capture);
+    let mut input = TrackingInput::new(
+        parts.input,
+        options.config().max_source_bytes(),
+        options.translator(),
+    )
+    .with_capture(&capture);
     let mut parser_slot = None;
     prepare_parser(
         ParserSetupRequest {
@@ -357,8 +320,14 @@ fn parse_source<'slot, R: Read + ?Sized>(
         out.reborrow(),
     )?;
     let mut parse_errors = ErrSlot::new();
-    let parse_result = parse_errors
-        .try_call(|parse_out| Parser::parse_slot(parser_slot.take(), source_id, parse_out));
+    let parse_result = parse_errors.try_call(|parse_out| {
+        Parser::parse_slot(
+            parser_slot.take(),
+            source_id,
+            options.translator(),
+            parse_out,
+        )
+    });
     drop(parser_slot);
     match parse_result {
         Ok(value) => Ok(ValidatedConfigValue::from_config_value(schema, value)),
@@ -394,10 +363,26 @@ fn parse_document_source<'slot, 'schema, R: Read + ?Sized>(
         *options.excerpts(),
         Some(budget),
     )));
-    let session = ConfigSession::with_budget(environment, options, budget, out.reborrow())?
-        .with_capture(&capture);
-    let input =
-        TrackingInput::new(parts.input, options.config().max_source_bytes()).with_capture(&capture);
+    let mut session_errors = ErrSlot::new();
+    let session = match session_errors.try_call(|session_out| {
+        ConfigSession::with_budget(environment, options, budget, session_out)
+    }) {
+        Ok(session) => session,
+        Err(caught) => {
+            return Err(out.fail(ConfigParseErrors::emergency(
+                caught.take(),
+                Some(source_id),
+                options.translator(),
+            )));
+        }
+    }
+    .with_capture(&capture);
+    let input = TrackingInput::new(
+        parts.input,
+        options.config().max_source_bytes(),
+        options.translator(),
+    )
+    .with_capture(&capture);
     let mut input = input;
     if retain_source {
         let mut retention_errors = ErrSlot::<Diagnostic>::new();
@@ -406,7 +391,11 @@ fn parse_document_source<'slot, 'schema, R: Read + ?Sized>(
         {
             Ok(input) => input,
             Err(caught) => {
-                return Err(out.fail(ConfigParseErrors::emergency(caught.take(), Some(source_id))));
+                return Err(out.fail(ConfigParseErrors::emergency(
+                    caught.take(),
+                    Some(source_id),
+                    options.translator(),
+                )));
             }
         };
     }
@@ -424,7 +413,12 @@ fn parse_document_source<'slot, 'schema, R: Read + ?Sized>(
     )?;
     let mut parse_errors = ErrSlot::new();
     let parse_result = parse_errors.try_call(|parse_out| {
-        Parser::parse_slot_with_locations(parser_slot.take(), source_id, parse_out)
+        Parser::parse_slot_with_locations(
+            parser_slot.take(),
+            source_id,
+            options.translator(),
+            parse_out,
+        )
     });
     drop(parser_slot);
     match parse_result {
@@ -499,6 +493,7 @@ fn parse_for_schema<'slot, R: Read + ?Sized>(
     environment: &mut dyn Environment,
     mut out: Out<'slot, '_, ConfigParseErrors>,
 ) -> OResult<'slot, ValidatedConfigValue> {
+    let translator = request.options().translator();
     check_source(schema, &request, out.reborrow())?;
     let mut budget_errors = ErrSlot::new();
     let budget = match budget_errors
@@ -507,8 +502,9 @@ fn parse_for_schema<'slot, R: Read + ?Sized>(
         Ok(budget) => budget,
         Err(caught) => {
             return Err(out.fail(ConfigParseErrors::emergency(
-                BudgetDiagnostic::from_error(caught.take()),
+                BudgetDiagnostic::from_error(caught.take(), translator),
                 schema.next_source_id(),
+                translator,
             )));
         }
     };
@@ -523,20 +519,23 @@ fn parse_for_schema_with_budget<'slot, R: Read + ?Sized>(
     budget: &ExecutionBudget,
     mut out: Out<'slot, '_, ConfigParseErrors>,
 ) -> OResult<'slot, ValidatedConfigValue> {
+    let translator = request.options().translator();
     if budget.limits() != *request.options().execution() {
         let diagnostic =
-            DiagnosticFactory::internal(CONFIG_PARSE_BUDGET_MISMATCH, None, None, None);
+            DiagnosticFactory::internal(CONFIG_PARSE_BUDGET_MISMATCH, None, None, None, translator);
         return Err(out.fail(ConfigParseErrors::emergency(
             diagnostic,
             schema.next_source_id(),
+            translator,
         )));
     }
     check_source(schema, &request, out.reborrow())?;
     let parts = request.into_parts();
     let Some(source_id) = schema.next_source_id() else {
         return Err(out.fail(ConfigParseErrors::emergency(
-            BudgetDiagnostic::from_error(BudgetError::Resource),
+            BudgetDiagnostic::from_error(BudgetError::Resource, translator),
             None,
+            translator,
         )));
     };
     parse_source(
@@ -551,202 +550,6 @@ fn parse_for_schema_with_budget<'slot, R: Read + ?Sized>(
     )
 }
 
-/// Normalize an owned external value and apply complete Schema validation.
-fn validate_for_schema<'slot>(
-    schema: &CompiledSchema,
-    value: ConfigValue,
-    request: ConfigValidationRequest,
-    mut out: Out<'slot, '_, ConfigValueErrors>,
-) -> OResult<'slot, ValidatedConfigValue> {
-    let mut budget_errors = ErrSlot::new();
-    let budget = match budget_errors
-        .try_call(|budget_out| ExecutionBudget::new(*request.options().execution(), budget_out))
-    {
-        Ok(budget) => budget,
-        Err(caught) => {
-            return Err(out.fail(ConfigValueErrors::from_errors(
-                ConfigParseErrors::emergency(BudgetDiagnostic::from_error(caught.take()), None),
-            )));
-        }
-    };
-    validate_for_schema_with_budget(schema, value, request, &budget, out.reborrow())
-}
-
-/// Normalize an owned external value with Schema defaults, without evaluating constraints.
-fn normalize_for_schema<'slot>(
-    schema: &CompiledSchema,
-    value: ConfigValue,
-    request: ConfigValidationRequest,
-    mut out: Out<'slot, '_, ConfigValueErrors>,
-) -> OResult<'slot, NormalizedConfigValue> {
-    let mut budget_errors = ErrSlot::new();
-    let budget = match budget_errors
-        .try_call(|budget_out| ExecutionBudget::new(*request.options().execution(), budget_out))
-    {
-        Ok(budget) => budget,
-        Err(caught) => {
-            return Err(out.fail(ConfigValueErrors::from_errors(
-                ConfigParseErrors::emergency(BudgetDiagnostic::from_error(caught.take()), None),
-            )));
-        }
-    };
-    normalize_for_schema_with_budget(schema, value, request, &budget, out.reborrow())
-}
-
-/// Shared-budget entry point that normalizes an owned value without validation.
-fn normalize_for_schema_with_budget<'slot, 'borrow>(
-    schema: &CompiledSchema,
-    value: ConfigValue,
-    request: ConfigValidationRequest,
-    budget: &ExecutionBudget,
-    out: Out<'slot, 'borrow, ConfigValueErrors>,
-) -> OResult<'slot, NormalizedConfigValue> {
-    if budget.limits() != *request.options().execution() {
-        return Err(out.fail(ConfigValueErrors::from_errors(
-            ConfigParseErrors::emergency(
-                DiagnosticFactory::internal(
-                    CONFIG_VALUE_NORMALIZATION_BUDGET_MISMATCH,
-                    None,
-                    None,
-                    None,
-                ),
-                None,
-            ),
-        )));
-    }
-    let mut operation_errors = ErrSlot::new();
-    let mut diagnostics = match operation_errors.try_call(|diagnostic_out| {
-        DiagnosticBuffer::new_budgeted(
-            schema,
-            request.options().config().max_diagnostics(),
-            budget,
-            diagnostic_out,
-        )
-    }) {
-        Ok(diagnostics) => diagnostics,
-        Err(caught) => {
-            return Err(out.fail(ConfigValueErrors::from_errors(
-                ConfigParseErrors::emergency(caught.take(), None),
-            )));
-        }
-    };
-    let mut nodes = 0;
-    let result = operation_errors.try_call(|diagnostic_out| {
-        ValueNormalizer::copy(
-            NormalizeRequest {
-                expected: schema.entry(),
-                value: value.root(),
-                depth: 0,
-                primary: None,
-                text_limit: request.options().config().max_constructed_text_bytes(),
-                schema_default: false,
-                allow_unvalidated_environment_sources: false,
-            },
-            &mut nodes,
-            request.options().config().values(),
-            budget,
-            diagnostic_out,
-        )
-    });
-    match result {
-        Ok(value) => Ok(NormalizedConfigValue::from_config_value(
-            value.into_config_value(),
-        )),
-        Err(caught) => {
-            diagnostics.push(caught.take());
-            let errors = ConfigParseErrors::finish(diagnostics, schema, None, None);
-            let excerpts = errors.schema_excerpts(schema, *request.options().excerpts(), budget);
-            Err(out.fail(ConfigValueErrors::from_errors(
-                errors.with_excerpts(excerpts),
-            )))
-        }
-    }
-}
-
-/// Internal session seam that reuses the call budget to normalize and fully validate an owned tree.
-fn validate_for_schema_with_budget<'slot, 'borrow>(
-    schema: &CompiledSchema,
-    value: ConfigValue,
-    request: ConfigValidationRequest,
-    budget: &ExecutionBudget,
-    out: Out<'slot, 'borrow, ConfigValueErrors>,
-) -> OResult<'slot, ValidatedConfigValue> {
-    if budget.limits() != *request.options().execution() {
-        return Err(out.fail(ConfigValueErrors::from_errors(
-            ConfigParseErrors::emergency(
-                DiagnosticFactory::internal(CONFIG_VALUE_BUDGET_MISMATCH, None, None, None),
-                None,
-            ),
-        )));
-    }
-    let mut validation_errors = ErrSlot::new();
-    match validation_errors.try_call(|validation_out| {
-        ValueValidation::value(
-            ValueValidationRequest {
-                schema,
-                external_value: Some(&value),
-                schema_complete_value: None,
-                options: request.options(),
-                budget,
-            },
-            validation_out,
-        )
-    }) {
-        Ok(value) => Ok(ValidatedConfigValue::from_config_value(schema, value)),
-        Err(caught) => {
-            let errors = caught.take();
-            let excerpts = errors.schema_excerpts(schema, *request.options().excerpts(), budget);
-            Err(out.fail(ConfigValueErrors::from_errors(
-                errors.with_excerpts(excerpts),
-            )))
-        }
-    }
-}
-
-/// Fully validate a schema-complete value without rebuilding its value tree.
-///
-/// Binding encoders use this entry point; external values should use
-/// the budgeted validation method instead.
-#[doc(hidden)]
-fn validate_complete_for_schema_with_budget<'slot, 'borrow>(
-    schema: &CompiledSchema,
-    value: ConfigValue,
-    request: ConfigValidationRequest,
-    budget: &ExecutionBudget,
-    out: Out<'slot, 'borrow, ConfigValueErrors>,
-) -> OResult<'slot, ValidatedConfigValue> {
-    if budget.limits() != *request.options().execution() {
-        return Err(out.fail(ConfigValueErrors::from_errors(
-            ConfigParseErrors::emergency(
-                DiagnosticFactory::internal(CONFIG_VALUE_BUDGET_MISMATCH, None, None, None),
-                None,
-            ),
-        )));
-    }
-    let mut validation_errors = ErrSlot::new();
-    match validation_errors.try_call(|validation_out| {
-        ValueValidation::value(
-            ValueValidationRequest {
-                schema,
-                external_value: None,
-                schema_complete_value: Some(value),
-                options: request.options(),
-                budget,
-            },
-            validation_out,
-        )
-    }) {
-        Ok(value) => Ok(ValidatedConfigValue::from_config_value(schema, value)),
-        Err(caught) => {
-            let errors = caught.take();
-            let excerpts = errors.schema_excerpts(schema, *request.options().excerpts(), budget);
-            Err(out.fail(ConfigValueErrors::from_errors(
-                errors.with_excerpts(excerpts),
-            )))
-        }
-    }
-}
-
 fn check_source<'slot, 'borrow, R: Read + ?Sized>(
     schema: &CompiledSchema,
     request: &ConfigParseRequest<'_, R>,
@@ -755,8 +558,9 @@ fn check_source<'slot, 'borrow, R: Read + ?Sized>(
     let options = request.options();
     if request.display_name().len() > options.config().max_display_name_bytes() {
         return Err(out.fail(ConfigParseErrors::emergency(
-            BudgetDiagnostic::from_error(BudgetError::Resource),
+            BudgetDiagnostic::from_error(BudgetError::Resource, options.translator()),
             schema.next_source_id(),
+            options.translator(),
         )));
     }
     Ok(())

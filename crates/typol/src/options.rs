@@ -1,6 +1,7 @@
 use core::{error::Error, fmt};
 use typol_config::{ConfigLimits, ConfigParseOptions, ConfigValidationOptions};
 use typol_core::{ExecutionLimits, TextLayout};
+use typol_i18n::{Language, Translator};
 use typol_schema::SchemaCompileOptions;
 
 #[cfg(feature = "std")]
@@ -287,11 +288,16 @@ impl Default for BindingLimits {
 pub struct BindOptions {
     limits: BindingLimits,
     execution: ExecutionLimits,
+    translator: Translator,
 }
 
 impl BindOptions {
     pub const fn new(limits: BindingLimits, execution: ExecutionLimits) -> Self {
-        Self { limits, execution }
+        Self {
+            limits,
+            execution,
+            translator: Translator::new(Language::English),
+        }
     }
 
     pub const fn limits(self) -> BindingLimits {
@@ -300,6 +306,10 @@ impl BindOptions {
 
     pub const fn execution(self) -> ExecutionLimits {
         self.execution
+    }
+
+    pub const fn translator(self) -> Translator {
+        self.translator
     }
 
     pub const fn with_limits(mut self, limits: BindingLimits) -> Self {
@@ -325,6 +335,11 @@ impl BindOptions {
 
     pub const fn with_execution(mut self, execution: ExecutionLimits) -> Self {
         self.execution = execution;
+        self
+    }
+
+    pub const fn with_translator(mut self, translator: Translator) -> Self {
+        self.translator = translator;
         self
     }
 }
@@ -472,6 +487,10 @@ impl TypolOptions {
         self.config
     }
 
+    pub const fn translator(&self) -> Translator {
+        self.config.translator()
+    }
+
     pub const fn validation(&self) -> ConfigValidationOptions {
         ConfigValidationOptions::new(
             *self.config.excerpts(),
@@ -479,6 +498,7 @@ impl TypolOptions {
             *self.config.config(),
             *self.config.execution(),
         )
+        .with_translator(self.config.translator())
     }
 
     pub const fn conversion(&self) -> ConversionLimits {
@@ -497,6 +517,13 @@ impl TypolOptions {
 
     pub const fn with_config(mut self, config: ConfigParseOptions) -> Self {
         self.config = config;
+        self
+    }
+
+    pub const fn with_translator(mut self, translator: Translator) -> Self {
+        self.schema = self.schema.with_translator(translator);
+        self.bind = self.bind.with_translator(translator);
+        self.config = self.config.with_translator(translator);
         self
     }
 

@@ -22,18 +22,18 @@ macro_rules! rejected_typol_impl {
 
             fn to_config_value<'slot, 'borrow>(
                 &self,
-                _: &mut ConversionContext<'_>,
+                context: &mut ConversionContext<'_>,
                 out: Out<'slot, 'borrow, CodecErrors>,
             ) -> OResult<'slot, ValueId> {
-                ConversionContext::reject(out)
+                ConversionContext::reject(context.session().translator(), out)
             }
 
             fn from_config_value<'slot, 'borrow>(
                 _: ConversionValue<'_>,
-                _: &mut ConversionContext<'_>,
+                context: &mut ConversionContext<'_>,
                 out: Out<'slot, 'borrow, CodecErrors>,
             ) -> OResult<'slot, Self> {
-                ConversionContext::reject(out)
+                ConversionContext::reject(context.session().translator(), out)
             }
         }
     };

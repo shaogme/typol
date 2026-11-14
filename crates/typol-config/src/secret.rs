@@ -1,10 +1,12 @@
-use crate::diagnostics::{BudgetDiagnostic, DiagnosticFactory};
+use crate::diagnostics::{
+    BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticFactory, LabelMessageRequest,
+};
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 use typol_core::{
     BudgetError, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage, ExecutionBudget,
     InstancePath, LocatedSpan, PathSegment, ValueSource, diagnostic_context,
 };
-use typol_i18n::diagnostic_key;
+use typol_i18n::{Translator, t};
 use typol_semantic::{
     CompiledSchema, SchemaAccessError, TypeKind, TypeView, VariantPayloadInfo, VariantView,
 };
@@ -61,6 +63,19 @@ enum BoundaryError {
     UnresolvedPath,
 }
 
+pub(crate) struct SecretPathContext {
+    pub(crate) primary: Option<LocatedSpan>,
+    pub(crate) value_source: Option<ValueSource>,
+    pub(crate) translator: Translator,
+}
+
+pub(crate) struct SecretTypeContext<'a> {
+    pub(crate) budget: Option<&'a ExecutionBudget>,
+    pub(crate) schema_errors: &'a mut ErrSlot<SchemaAccessError>,
+    pub(crate) budget_errors: &'a mut ErrSlot<BudgetError>,
+    pub(crate) translator: Translator,
+}
+
 impl From<BudgetError> for BoundaryError {
     fn from(error: BudgetError) -> Self {
         Self::Budget(error)
@@ -82,19 +97,23 @@ impl BoundaryError {
         self,
         primary: Option<LocatedSpan>,
         value_source: Option<ValueSource>,
+        translator: Translator,
     ) -> Diagnostic {
         match self {
-            Self::Budget(error) => {
-                located_error(BudgetDiagnostic::from_error(error), primary, value_source)
-            }
+            Self::Budget(error) => located_error(
+                BudgetDiagnostic::from_error(error, translator),
+                primary,
+                value_source,
+            ),
             Self::Internal(context) => {
-                DiagnosticFactory::internal(context, primary, None, value_source)
+                DiagnosticFactory::internal(context, primary, None, value_source, translator)
             }
             Self::UnresolvedPath => DiagnosticFactory::internal(
                 SECRET_UNRESOLVED_DYNAMIC_PATH,
                 primary,
                 None,
                 value_source,
+                translator,
             ),
         }
     }
@@ -124,23 +143,25 @@ fn budget_call<'slot, 'borrow, T>(
 
 fn schema_diagnostic_call<'slot, 'borrow, T>(
     errors: &mut ErrSlot<SchemaAccessError>,
+    translator: Translator,
     operation: impl for<'call> FnOnce(Out<'call, 'call, SchemaAccessError>) -> OResult<'call, T>,
     out: Out<'slot, 'borrow, Diagnostic>,
 ) -> OResult<'slot, T> {
     match errors.try_call(operation) {
         Ok(value) => Ok(value),
-        Err(caught) => Err(out.fail(DiagnosticFactory::schema_access(caught.take()))),
+        Err(caught) => Err(out.fail(DiagnosticFactory::schema_access(caught.take(), translator))),
     }
 }
 
 fn budget_diagnostic_call<'slot, 'borrow, T>(
     errors: &mut ErrSlot<BudgetError>,
+    translator: Translator,
     operation: impl for<'call> FnOnce(Out<'call, 'call, BudgetError>) -> OResult<'call, T>,
     out: Out<'slot, 'borrow, Diagnostic>,
 ) -> OResult<'slot, T> {
     match errors.try_call(operation) {
         Ok(value) => Ok(value),
-        Err(caught) => Err(out.fail(BudgetDiagnostic::from_error(caught.take()))),
+        Err(caught) => Err(out.fail(BudgetDiagnostic::from_error(caught.take(), translator))),
     }
 }
 
@@ -432,16 +453,20 @@ impl SecretPolicy {
     pub(crate) fn hides<'slot, 'borrow>(
         schema: &CompiledSchema,
         path: &InstancePath,
-        primary: Option<LocatedSpan>,
-        value_source: Option<ValueSource>,
+        context: SecretPathContext,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, bool> {
+        let SecretPathContext {
+            primary,
+            value_source,
+            translator,
+        } = context;
         let mut errors = ErrSlot::new();
         match errors.try_call(|boundary_out| boundary(schema, path, boundary_out)) {
             Ok(value) => Ok(value.is_some()),
             Err(caught) => match caught.take() {
                 BoundaryError::UnresolvedPath => Ok(false),
-                error => Err(out.fail(error.diagnostic(primary, value_source))),
+                error => Err(out.fail(error.diagnostic(primary, value_source, translator))),
             },
         }
     }
@@ -449,10 +474,14 @@ impl SecretPolicy {
     pub(crate) fn copy_path<'slot, 'borrow>(
         schema: &CompiledSchema,
         path: &InstancePath,
-        primary: Option<LocatedSpan>,
-        value_source: Option<ValueSource>,
+        context: SecretPathContext,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, InstancePath> {
+        let SecretPathContext {
+            primary,
+            value_source,
+            translator,
+        } = context;
         let mut boundary_errors = ErrSlot::new();
         let mut budget_errors = ErrSlot::new();
         let length =
@@ -466,7 +495,7 @@ impl SecretPolicy {
                                     .try_call(|budget_out| budget.consume(1, budget_out))
                                 {
                                     return Err(out.fail(located_error(
-                                        BudgetDiagnostic::from_error(caught.take()),
+                                        BudgetDiagnostic::from_error(caught.take(), translator),
                                         primary,
                                         value_source,
                                     )));
@@ -478,13 +507,14 @@ impl SecretPolicy {
                                     primary,
                                     None,
                                     value_source,
+                                    translator,
                                 )));
                             }
                         }
                         path.len()
                     }
                     error => {
-                        return Err(out.fail(error.diagnostic(primary, value_source)));
+                        return Err(out.fail(error.diagnostic(primary, value_source, translator)));
                     }
                 },
             };
@@ -492,7 +522,7 @@ impl SecretPolicy {
         {
             Ok(path) => Ok(path),
             Err(caught) => Err(out.fail(located_error(
-                BudgetDiagnostic::from_error(caught.take()),
+                BudgetDiagnostic::from_error(caught.take(), translator),
                 primary,
                 value_source,
             ))),
@@ -528,15 +558,20 @@ impl SecretPolicy {
 
     pub(crate) fn secret_type<'slot>(
         mut ty: TypeView<'_>,
-        budget: Option<&ExecutionBudget>,
-        schema_errors: &mut ErrSlot<SchemaAccessError>,
-        budget_errors: &mut ErrSlot<BudgetError>,
+        context: SecretTypeContext<'_>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, bool> {
+        let SecretTypeContext {
+            budget,
+            schema_errors,
+            budget_errors,
+            translator,
+        } = context;
         loop {
             if let Some(budget) = budget {
                 budget_diagnostic_call(
                     budget_errors,
+                    translator,
                     |budget_out| budget.consume(1, budget_out),
                     out.reborrow(),
                 )?;
@@ -544,6 +579,7 @@ impl SecretPolicy {
             let info = ty;
             let is_secret = schema_diagnostic_call(
                 schema_errors,
+                translator,
                 |schema_out| info.is_secret(schema_out),
                 out.reborrow(),
             )?;
@@ -552,6 +588,7 @@ impl SecretPolicy {
             }
             let kind = schema_diagnostic_call(
                 schema_errors,
+                translator,
                 |schema_out| info.kind(schema_out),
                 out.reborrow(),
             )?;
@@ -567,23 +604,26 @@ impl SecretPolicy {
     pub(crate) fn redact<'slot, 'borrow>(
         schema: &CompiledSchema,
         diagnostic: &mut Diagnostic,
+        translator: Translator,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, ()> {
-        Self::redact_with_policy(schema, diagnostic, false, out)
+        Self::redact_with_policy(schema, diagnostic, false, translator, out)
     }
 
     pub(crate) fn redact_conversion<'slot, 'borrow>(
         schema: &CompiledSchema,
         diagnostic: &mut Diagnostic,
+        translator: Translator,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, ()> {
-        Self::redact_with_policy(schema, diagnostic, true, out)
+        Self::redact_with_policy(schema, diagnostic, true, translator, out)
     }
 
     fn redact_with_policy<'slot, 'borrow>(
         schema: &CompiledSchema,
         diagnostic: &mut Diagnostic,
         fail_closed_on_unresolved_path: bool,
+        translator: Translator,
         mut out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, ()> {
         if matches!(
@@ -598,59 +638,63 @@ impl SecretPolicy {
         };
         let mut boundary_errors = ErrSlot::new();
         let mut budget_errors = ErrSlot::new();
-        let length = match boundary_errors
-            .try_call(|boundary_out| boundary(schema, path, boundary_out))
-        {
-            Ok(Some(length)) => length,
-            Ok(None) => return Ok(()),
-            // Syntax errors may contain field or variant names that are not yet bound to a Schema; dynamic keys cannot use this fallback.
-            Err(caught) => match caught.take() {
-                BoundaryError::UnresolvedPath => {
-                    let mut dynamic = false;
-                    for segment in path.segments() {
-                        if let Some(budget) = path.budget() {
-                            if let Err(caught) =
-                                budget_errors.try_call(|budget_out| budget.consume(1, budget_out))
-                            {
-                                return Err(out.fail(located_error(
-                                    BudgetDiagnostic::from_error(caught.take()),
-                                    diagnostic.located_primary(),
-                                    diagnostic.value_source(),
-                                )));
+        let length =
+            match boundary_errors.try_call(|boundary_out| boundary(schema, path, boundary_out)) {
+                Ok(Some(length)) => length,
+                Ok(None) => return Ok(()),
+                // Syntax errors may contain field or variant names that are not yet bound to a Schema; dynamic keys cannot use this fallback.
+                Err(caught) => match caught.take() {
+                    BoundaryError::UnresolvedPath => {
+                        let mut dynamic = false;
+                        for segment in path.segments() {
+                            if let Some(budget) = path.budget() {
+                                if let Err(caught) = budget_errors
+                                    .try_call(|budget_out| budget.consume(1, budget_out))
+                                {
+                                    return Err(out.fail(located_error(
+                                        BudgetDiagnostic::from_error(caught.take(), translator),
+                                        diagnostic.located_primary(),
+                                        diagnostic.value_source(),
+                                    )));
+                                }
+                            }
+                            if matches!(segment, PathSegment::MapKey(_)) {
+                                dynamic = true;
+                                break;
                             }
                         }
-                        if matches!(segment, PathSegment::MapKey(_)) {
-                            dynamic = true;
-                            break;
+                        if !dynamic {
+                            if fail_closed_on_unresolved_path {
+                                DiagnosticFactory::clear_path(diagnostic);
+                            }
+                            return Ok(());
                         }
+                        return Err(out.fail(DiagnosticFactory::internal(
+                            diagnostic
+                                .context()
+                                .unwrap_or(SECRET_UNRESOLVED_DYNAMIC_PATH),
+                            diagnostic.located_primary(),
+                            None,
+                            diagnostic.value_source(),
+                            translator,
+                        )));
                     }
-                    if !dynamic {
-                        if fail_closed_on_unresolved_path {
-                            DiagnosticFactory::clear_path(diagnostic);
-                        }
-                        return Ok(());
+                    error => {
+                        return Err(out.fail(error.diagnostic(
+                            diagnostic.located_primary(),
+                            diagnostic.value_source(),
+                            translator,
+                        )));
                     }
-                    return Err(out.fail(DiagnosticFactory::internal(
-                        diagnostic
-                            .context()
-                            .unwrap_or(SECRET_UNRESOLVED_DYNAMIC_PATH),
-                        diagnostic.located_primary(),
-                        None,
-                        diagnostic.value_source(),
-                    )));
-                }
-                error => {
-                    return Err(out.fail(
-                        error.diagnostic(diagnostic.located_primary(), diagnostic.value_source()),
-                    ));
-                }
-            },
-        };
+                },
+            };
         let span = diagnostic.located_primary();
         let source = diagnostic.value_source();
         let context = diagnostic.context();
+        let original_kind = diagnostic.kind();
         let allocation = || {
-            let mut diagnostic = DiagnosticFactory::allocation_diagnostic(span, None, source);
+            let mut diagnostic =
+                DiagnosticFactory::allocation_diagnostic(span, None, source, translator);
             diagnostic.set_context(Some(SECRET_REDACTION_ALLOCATION));
             diagnostic
         };
@@ -659,7 +703,7 @@ impl SecretPolicy {
         {
             Ok(path) => path,
             Err(caught) => {
-                let mut error = BudgetDiagnostic::from_error(caught.take());
+                let mut error = BudgetDiagnostic::from_error(caught.take(), translator);
                 if error.code() == DiagnosticCode::ALLOCATION_FAILED {
                     error.set_context(Some(SECRET_REDACTION_ALLOCATION));
                     error.set_located_primary(span);
@@ -667,15 +711,19 @@ impl SecretPolicy {
                 return Err(out.fail(error));
             }
         };
-        let mut safe = DiagnosticFactory::make_diagnostic(
-            diagnostic.code(),
-            "value is hidden",
-            span,
-            Some(safe_path),
-            source,
-        );
+        let mut safe = DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+            code: diagnostic.code(),
+            message: DiagnosticMessage::from(
+                t! { name: "diagnostic.validation.value_hidden", locale: translator },
+            ),
+            primary: span,
+            path: Some(safe_path),
+            value_source: source,
+            context: None,
+            translator,
+        });
         safe.set_context(context);
-        safe.set_message_key(Some(diagnostic_key!("diagnostic.validation.value_hidden")));
+        safe.set_kind(original_kind);
         if safe.code() == DiagnosticCode::ALLOCATION_FAILED {
             return Err(out.fail(allocation()));
         }
@@ -684,15 +732,16 @@ impl SecretPolicy {
                 if let Err(caught) =
                     budget_errors.try_call(|budget_out| budget.consume(1, budget_out))
                 {
-                    return Err(out.fail(BudgetDiagnostic::from_error(caught.take())));
+                    return Err(out.fail(BudgetDiagnostic::from_error(caught.take(), translator)));
                 }
             }
             DiagnosticFactory::add_label_message(
                 &mut safe,
-                label.located_span(),
-                match label.key() {
-                    Some(key) => DiagnosticMessage::localized(label.message(), key),
-                    None => DiagnosticMessage::custom(label.message()),
+                LabelMessageRequest {
+                    span: label.located_span(),
+                    message: DiagnosticMessage::custom(label.message()),
+                    role: label.role(),
+                    translator,
                 },
                 out.reborrow(),
             )?;

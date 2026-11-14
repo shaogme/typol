@@ -6,6 +6,7 @@ use core::{
 };
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{DiagnosticContext, diagnostic_context};
+use typol_i18n::Translator;
 
 static LITERAL_INVARIANT: DiagnosticContext =
     diagnostic_context!("typol", "encoding", "numeric-literal-invariant");
@@ -25,9 +26,7 @@ impl Literal {
             length: 0,
         };
         write!(&mut result, "{value}")
-            .map_err(|_| {
-                CodecErrors::emergency(CodecStage::Encoding, Failure::internal(LITERAL_INVARIANT))
-            })
+            .map_err(|_| Failure::internal(LITERAL_INVARIANT))
             .store_err_into(out.reborrow())?;
         Ok(result)
     }
@@ -204,6 +203,7 @@ impl Literal {
 
     pub(crate) fn escape<'slot, 'borrow>(
         character: char,
+        translator: Translator,
         out: Out<'slot, 'borrow, CodecErrors>,
     ) -> OResult<'slot, Option<&'static str>> {
         match character {
@@ -215,6 +215,7 @@ impl Literal {
             '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}' => Err(out.fail(CodecErrors::emergency(
                 CodecStage::Encoding,
                 Failure::Encoding,
+                translator,
             ))),
             _ => Ok(None),
         }

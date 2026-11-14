@@ -1,3 +1,4 @@
+use alloc::borrow::Cow;
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, ConfigValue, ConfigValueBuilder, Diagnostic,
@@ -5,7 +6,9 @@ use typol_core::{
     ValueEntries, ValueError, ValueErrorKind, ValueId, ValueKind, ValuePayload, ValueScalar,
     ValueSource, ValueView, diagnostic_context,
 };
+use typol_i18n::{Translator, t};
 use typol_semantic::{CompiledSchema, SchemaIdentity};
+use u18n::RenderError;
 
 /// A schema-shaped value with defaults applied, before constraints and assertions run.
 #[derive(Debug)]
@@ -225,8 +228,38 @@ impl ValueFactory {
         error: ValueError,
         primary: Option<LocatedSpan>,
         source: Option<ValueSource>,
+        translator: Translator,
     ) -> Diagnostic {
-        let mut diagnostic = Diagnostic::emergency(Self::failure_code(error));
+        let code = Self::failure_code(error);
+        let message = match error.kind() {
+            ValueErrorKind::AllocationFailed => t! {
+                name: "diagnostic.emergency.allocation_failed",
+                locale: translator,
+            },
+            ValueErrorKind::ResourceLimitExceeded => t! {
+                name: "diagnostic.emergency.resource_limit_exceeded",
+                locale: translator,
+            },
+            ValueErrorKind::CapacityExceeded => t! {
+                name: "diagnostic.emergency.capacity_exceeded",
+                locale: translator,
+            },
+            ValueErrorKind::EnvironmentReferenceRequired => t! {
+                name: "diagnostic.config.environment_reference_metadata_required",
+                locale: translator,
+            },
+            ValueErrorKind::DuplicateMapKey
+            | ValueErrorKind::DuplicateFieldName
+            | ValueErrorKind::InternalInvariantFailure => t! {
+                name: "diagnostic.emergency.internal_error",
+                locale: translator,
+            },
+        };
+        let mut diagnostic = match message {
+            Ok(Cow::Borrowed(message)) => Diagnostic::emergency(code, message),
+            Ok(Cow::Owned(_)) => Diagnostic::translation_failure(code, RenderError::InvalidCatalog),
+            Err(error) => Diagnostic::translation_failure(code, error),
+        };
         diagnostic.set_context(Self::failure_context(error));
         diagnostic.set_located_primary(primary);
         diagnostic.set_value_source(source);
@@ -627,6 +660,7 @@ mod test {
         BudgetError, ConfigValueBuilder, DiagnosticCode, DiagnosticContext, LocatedSpan,
         NamedValue, SourceId, SourceSpan, Span, ValueError, ValueErrorKind, ValueSource,
     };
+    use typol_i18n::{Language, Translator};
     use typol_test_support::{TestFailure, TestResult, test_eq};
 
     fn duplicate_value_error(map: bool) -> TestResult<ValueError> {
@@ -693,7 +727,12 @@ mod test {
             },
         ];
         for case in errors {
-            let diagnostic = ValueFactory::failure(case.error, Some(primary), Some(source));
+            let diagnostic = ValueFactory::failure(
+                case.error,
+                Some(primary),
+                Some(source),
+                Translator::new(Language::English),
+            );
             test_eq!(ValueFactory::failure_code(case.error), case.code)?;
             test_eq!(diagnostic.code(), case.code)?;
             test_eq!(diagnostic.context(), case.context)?;
@@ -741,7 +780,8 @@ mod test {
             "scalar-constructor-received-container"
         )?;
         test_eq!(ValueFactory::failure_context(error), Some(context))?;
-        let diagnostic = ValueFactory::failure(error, None, None);
+        let diagnostic =
+            ValueFactory::failure(error, None, None, Translator::new(Language::English));
         test_eq!(diagnostic.context(), Some(context))?;
 
         Ok(())

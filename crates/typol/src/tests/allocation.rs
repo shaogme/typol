@@ -162,7 +162,11 @@ fn allocation_workload<'slot>(mut out: Out<'slot, '_, CodecErrors>) -> OResult<'
     }) {
         TestOpeoOutcome::Value(call) => call,
         TestOpeoOutcome::Error(error) => {
-            return Err(out.fail(CodecErrors::emergency(CodecStage::Binding, error.into())));
+            return Err(out.fail(CodecErrors::emergency(
+                CodecStage::Binding,
+                error.into(),
+                BindOptions::default().translator(),
+            )));
         }
     };
     let mut ctx = DescribeContext::new(BindingLimits::default(), &call, out.reborrow())?;

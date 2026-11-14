@@ -4,6 +4,7 @@ mod environment;
 mod execution;
 mod foundation;
 mod indexes;
+mod nesting;
 mod scalar;
 mod secret;
 
@@ -34,18 +35,6 @@ use typol_schema::{
 };
 use typol_semantic::{CompiledSchema, SchemaAccessError};
 use typol_test_support::*;
-
-struct NodeLimitCase {
-    schema: &'static str,
-    source: &'static str,
-    nodes: usize,
-}
-
-struct NestingCase {
-    schema: &'static str,
-    source: &'static str,
-    depth: usize,
-}
 
 fn access<T>(
     errors: &mut TestSlot<SchemaAccessError>,
@@ -97,7 +86,12 @@ fn compile(text: &str) -> TestResult<CompiledSchema> {
             errors
                 .diagnostics()
                 .iter()
-                .map(|error| (error.code(), error.message()))
+                .map(|error| {
+                    (
+                        error.code(),
+                        error.message().unwrap_or("diagnostic rendering failed"),
+                    )
+                })
                 .collect::<Vec<_>>()
         ))),
     }
@@ -463,86 +457,6 @@ fn resource_failure_is_fatal_and_shares_the_budget() -> TestResult<()> {
 }
 
 #[test]
-fn omitted_optional_and_map_keys_count_as_nodes() -> TestResult<()> {
-    for case in [
-        NodeLimitCase {
-            schema: "entry struct Root { a: option<u8>, }",
-            source: "{}",
-            nodes: 2,
-        },
-        NodeLimitCase {
-            schema: "entry struct Root { m: map<string, u8>, }",
-            source: r#"{ m: { "x": 1 } }"#,
-            nodes: 4,
-        },
-        NodeLimitCase {
-            schema: "entry struct Root { a: option<u8>, }",
-            source: "{ a: 1 }",
-            nodes: 3,
-        },
-        NodeLimitCase {
-            schema: "entry struct Root { a: [u8] = [1, 2], }",
-            source: "{}",
-            nodes: 4,
-        },
-    ] {
-        let schema = compile(case.schema)?;
-        let mut limits = ConfigLimits::default();
-        limits = limits.with_max_value_nodes(case.nodes);
-        test_assert!(parse(&schema, case.source, &limits).is_ok())?;
-        limits = limits.with_max_value_nodes(case.nodes - 1);
-        let errors = parse(&schema, case.source, &limits).test_error()?;
-        test_eq!(codes(&errors), [1])?;
-    }
-
-    Ok(())
-}
-
-#[test]
-fn nesting_counts_optional_wrappers_and_default_containers() -> TestResult<()> {
-    for case in [
-        NestingCase {
-            schema: "entry struct Root { a: option<[u8]>, }",
-            source: "{ a: [1] }",
-            depth: 3,
-        },
-        NestingCase {
-            schema: "entry struct Root { a: [[u8]] = [[1]], }",
-            source: "{}",
-            depth: 3,
-        },
-        NestingCase {
-            schema: "enum E { S { a: [u8], }, } entry struct Root { e: E, }",
-            source: "{ e: .S { a: [1] } }",
-            depth: 4,
-        },
-    ] {
-        let schema = compile(case.schema)?;
-        let mut limits = ConfigLimits::default();
-        limits = limits.with_max_nesting_depth(case.depth);
-        test_assert!(parse(&schema, case.source, &limits).is_ok())?;
-        limits = limits.with_max_nesting_depth(case.depth - 1);
-        test_eq!(
-            codes(&parse(&schema, case.source, &limits).test_error()?),
-            [1]
-        )?;
-    }
-
-    Ok(())
-}
-
-#[test]
-fn recovery_scanning_also_obeys_nesting_limit() -> TestResult<()> {
-    let schema = compile("entry struct Root { a: u8, b: u8, }")?;
-    let mut limits = ConfigLimits::default();
-    limits = limits.with_max_nesting_depth(2);
-    let errors = parse(&schema, "{ a: [[[1]]], b: 999 }", &limits).test_error()?;
-    test_eq!(codes(&errors), [11, 1])?;
-
-    Ok(())
-}
-
-#[test]
 fn source_and_string_limits_apply_before_value_publication() -> TestResult<()> {
     let schema = compile("entry struct Root { name: string = \"long\", }")?;
     let mut limits = ConfigLimits::default();
@@ -607,7 +521,11 @@ fn validation_errors_recover_and_skip_root_assertions() -> TestResult<()> {
         compile(r#"entry struct Root { a: u8 @min(3), b: u8 @min(3) } @assert(false, "root")"#)?;
     let errors = parse(&schema, "{a: 1, b: 2}", &ConfigLimits::default()).test_error()?;
     test_eq!(codes(&errors), [12, 12])?;
-    test_assert!(errors.iter().all(|error| error.message() != "root"))?;
+    test_assert!(
+        errors
+            .iter()
+            .all(|error| { error.message().unwrap_or("diagnostic rendering failed") != "root" })
+    )?;
 
     Ok(())
 }
@@ -648,11 +566,12 @@ fn diagnostics_and_debug_do_not_contain_failed_text() -> TestResult<()> {
         &ConfigLimits::default(),
     )
     .test_error()?;
-    test_assert!(
-        errors
-            .iter()
-            .all(|error| !error.message().contains("secret-content"))
-    )?;
+    test_assert!(errors.iter().all(|error| {
+        !error
+            .message()
+            .unwrap_or("diagnostic rendering failed")
+            .contains("secret-content")
+    }))?;
     test_assert!(!format!("{errors:?}").contains("secret-content"))?;
 
     Ok(())
@@ -702,25 +621,6 @@ fn missing_environment_defers_to_object_default_optional_and_required_rules() ->
         codes(&parse(&schema, r#"{port: env("PORT"), port: 2}"#, &limits).test_error()?),
         [11, 11]
     )?;
-
-    Ok(())
-}
-
-#[test]
-fn enum_default_and_explicit_structure_share_depth_accounting() -> TestResult<()> {
-    let schema =
-        compile("enum E { Obj { a: [u8], }, } entry struct Root { e: E = .Obj { a: [1] }, }")?;
-    let mut limits = ConfigLimits::default();
-    limits = limits.with_max_nesting_depth(4);
-    for source in ["{}", "{ e: .Obj { a: [1] } }"] {
-        if let TestOpeoOutcome::Error(errors) = parse(&schema, source, &limits) {
-            return Err(TestFailure::new(format!("{source}: {errors}")));
-        }
-    }
-    limits = limits.with_max_nesting_depth(3);
-    for source in ["{}", "{ e: .Obj { a: [1] } }"] {
-        test_eq!(codes(&parse(&schema, source, &limits).test_error()?), [1])?;
-    }
 
     Ok(())
 }

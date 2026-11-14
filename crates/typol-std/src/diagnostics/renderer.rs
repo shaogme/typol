@@ -1,4 +1,4 @@
-use std::str::from_utf8;
+use std::{fmt::Write as FmtWrite, str::from_utf8};
 
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 use typol_core::{BudgetError, ChargedVec, ExecutionBudget, InstancePath, PathSegment};
@@ -140,6 +140,12 @@ pub(super) struct RenderBuffer {
     max_output_bytes: usize,
 }
 
+pub(super) struct FormatterOutput<'writer, W: ?Sized> {
+    writer: &'writer mut W,
+    budget: ExecutionBudget,
+    max_output_bytes: usize,
+}
+
 impl RenderBuffer {
     pub(super) fn new<'slot>(
         options: RenderOptions,
@@ -172,6 +178,27 @@ impl RenderBuffer {
     }
 }
 
+impl<'writer, W: FmtWrite + ?Sized> FormatterOutput<'writer, W> {
+    pub(super) fn new<'slot>(
+        writer: &'writer mut W,
+        options: RenderOptions,
+        out: Out<'slot, '_, DisplayError>,
+    ) -> OResult<'slot, Self> {
+        let mut budget_errors = ErrSlot::<BudgetError>::new();
+        let budget = match budget_errors
+            .try_call(|budget_out| ExecutionBudget::new(options.execution(), budget_out))
+        {
+            Ok(budget) => budget,
+            Err(caught) => return Err(out.fail(DisplayError::from(caught.take()))),
+        };
+        Ok(Self {
+            writer,
+            budget,
+            max_output_bytes: options.max_output_bytes(),
+        })
+    }
+}
+
 impl FormatOutput for RenderBuffer {
     fn step<'slot>(
         &self,
@@ -195,5 +222,30 @@ impl FormatOutput for RenderBuffer {
             self.bytes.try_push(byte, out.reborrow())?;
         }
         Ok(())
+    }
+}
+
+impl<W: FmtWrite + ?Sized> FormatOutput for FormatterOutput<'_, W> {
+    fn step<'slot>(
+        &self,
+        count: usize,
+        mut out: Out<'slot, '_, DisplayError>,
+    ) -> OResult<'slot, ()> {
+        self.budget.consume(count, out.reborrow())?;
+        Ok(())
+    }
+
+    fn append<'slot>(
+        &mut self,
+        text: &str,
+        mut out: Out<'slot, '_, DisplayError>,
+    ) -> OResult<'slot, ()> {
+        self.budget
+            .construct_text(text.len(), self.max_output_bytes, out.reborrow())?;
+        self.budget.consume(text.len(), out.reborrow())?;
+        self.writer
+            .write_str(text)
+            .map_err(|_| DisplayError::internal(DisplayFailurePoint::OutputWrite))
+            .store_err_into(out.reborrow())
     }
 }

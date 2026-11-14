@@ -4,21 +4,24 @@ use typol_core::{
     Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, RegexExecutionBudget, SourceId,
     SourceSpan, Span,
 };
+use typol_i18n::{Language, Translator};
 use typol_policy::RegexOptions;
 
 use crate::{
-    ResolverError, SchemaLimits, SchemaResolveRequest, SchemaResolver, SchemaSource,
-    context::CompileContext,
+    ResolverError, SchemaCompileOptions, SchemaLimits, SchemaResolveRequest, SchemaResolver,
+    SchemaSource,
+    compiler::SchemaCompileContext,
+    context::{CompileContext, CompileContextOptions},
     diagnostics::DiagnosticCollector,
     expressions::ExpressionType,
-    loader::SourceLoader,
+    loader::{SourceLoadRequest, SourceLoader},
     module_tree::ModuleTree,
     session::CompileBudget,
     symbols::SymbolTable,
     test_support::TestOperation,
     types::{ResolvedTypeGraph, ResolvedTypeKind, TypeGraphCompiler, model::AliasLinkId},
 };
-use opeo::{OResult, Out};
+use opeo::{ErrSlot, OResult, Out};
 use typol_test_support::*;
 
 struct EmptyResolver;
@@ -77,18 +80,47 @@ fn type_graph_with_step_budget(
         })
         .into_test_value()?;
     let mut collector = diagnostics(&mut operations, &limits, source, &execution)?;
-    let mut budget = operations
-        .budget(|out| CompileBudget::new(limits, &regex_options, &execution, &regex_execution, out))
+    let schema_context = operations
+        .budget(|out| {
+            SchemaCompileContext::new(
+                SchemaCompileOptions::new(limits)
+                    .with_regex(regex_options)
+                    .with_translator(Translator::new(Language::English)),
+                &execution,
+                &regex_execution,
+                out,
+            )
+        })
         .into_test_value()?;
-    let loaded = SourceLoader::load(root, &mut EmptyResolver, &mut budget, &mut collector, None)
+    let mut budget = operations
+        .budget(|out| CompileBudget::new(&schema_context, out))
+        .into_test_value()?;
+    let mut load_errors = ErrSlot::<Diagnostic>::new();
+    let loaded = load_errors
+        .call(|out| {
+            SourceLoader::load(
+                SourceLoadRequest {
+                    root,
+                    resolver: &mut EmptyResolver,
+                    budget: &mut budget,
+                    diagnostics: &mut collector,
+                    observer: None,
+                },
+                out,
+                |diagnostic| diagnostic,
+            )
+        })
         .into_test_value()?;
     let context = operations
         .budget(|out| {
             CompileContext::new(
-                limits,
-                regex_options.limits(),
-                &execution,
-                &regex_execution,
+                CompileContextOptions {
+                    limits,
+                    regex_limits: regex_options.limits(),
+                    execution: &execution,
+                    regex_execution: &regex_execution,
+                    translator: Translator::new(Language::English),
+                },
                 out,
             )
         })
@@ -123,7 +155,15 @@ fn diagnostics(
             .into_test_value()?,
     );
     operations
-        .diagnostic(|out| DiagnosticCollector::new(limits.max_diagnostics(), span, execution, out))
+        .diagnostic(|out| {
+            DiagnosticCollector::new(
+                limits.max_diagnostics(),
+                span,
+                execution,
+                Translator::new(Language::English),
+                out,
+            )
+        })
         .into_test_value()
 }
 
@@ -281,7 +321,10 @@ fn rejects_recursive_types_without_finite_values() -> TestResult {
     let source = "entry struct Loop { next: Loop, }";
     let diagnostic = single_diagnostic(source).into_test_value()?;
     test_verify_eq!(diagnostic.code(), DiagnosticCode::SCHEMA_SEMANTIC_ERROR);
-    test_verify_eq!(diagnostic.message(), "recursive type has no finite value");
+    test_verify_eq!(
+        diagnostic.message().test_value()?,
+        "recursive type has no finite value"
+    );
     test_verify!(!diagnostic.labels().is_empty());
 
     let fixed = single_diagnostic("entry struct Loop { next: [Loop; 1], }").into_test_value()?;

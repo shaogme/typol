@@ -2,8 +2,8 @@
 use crate::diagnostics::NAMED_ENTRY_NAME_MISSING;
 
 use crate::{
-    diagnostics::{BudgetDiagnostic, DiagnosticFactory},
-    secret::SecretPolicy,
+    diagnostics::{BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticFactory},
+    secret::{SecretPathContext, SecretPolicy},
 };
 use core::cell::RefCell;
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
@@ -12,6 +12,7 @@ use typol_core::{
     ExecutionBudget, InstancePath, LocatedSpan, ValueKind, ValuePayloadView, ValueSource,
     ValueView, diagnostic_context,
 };
+use typol_i18n::{Translator, t};
 use typol_semantic::{CompiledSchema, FieldView, SchemaAccessError, TypeView, VariantView};
 
 static INSTANCE_LOCATION_INVARIANT: DiagnosticContext = diagnostic_context!(
@@ -65,44 +66,50 @@ pub(crate) struct LocationIndex<'schema> {
     nodes: ChargedVec<LocationNode<'schema>>,
     access_errors: RefCell<ErrSlot<SchemaAccessError>>,
     budget_errors: RefCell<ErrSlot<BudgetError>>,
+    translator: Translator,
 }
 
 struct LocationErrorSlots<'a> {
     access: &'a RefCell<ErrSlot<SchemaAccessError>>,
     budget: &'a RefCell<ErrSlot<BudgetError>>,
+    translator: Translator,
 }
 
 fn schema_access<'slot, 'borrow, T>(
     errors: &RefCell<ErrSlot<SchemaAccessError>>,
+    translator: Translator,
     operation: impl for<'call> FnOnce(Out<'call, 'call, SchemaAccessError>) -> OResult<'call, T>,
     out: Out<'slot, 'borrow, Diagnostic>,
 ) -> OResult<'slot, T> {
     match errors.borrow_mut().try_call(operation) {
         Ok(value) => Ok(value),
-        Err(caught) => Err(out.fail(DiagnosticFactory::schema_access(caught.take()))),
+        Err(caught) => Err(out.fail(DiagnosticFactory::schema_access(caught.take(), translator))),
     }
 }
 
 fn budget_error<'slot, 'borrow, T>(
     errors: &RefCell<ErrSlot<BudgetError>>,
+    translator: Translator,
     operation: impl for<'call> FnOnce(Out<'call, 'call, BudgetError>) -> OResult<'call, T>,
     out: Out<'slot, 'borrow, Diagnostic>,
 ) -> OResult<'slot, T> {
     match errors.borrow_mut().try_call(operation) {
         Ok(value) => Ok(value),
-        Err(caught) => Err(out.fail(BudgetDiagnostic::from_error(caught.take()))),
+        Err(caught) => Err(out.fail(BudgetDiagnostic::from_error(caught.take(), translator))),
     }
 }
 
 impl<'schema> LocationIndex<'schema> {
     pub(crate) fn new_budgeted<'slot>(
         budget: &ExecutionBudget,
+        translator: Translator,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Self> {
         Ok(Self {
             nodes: ChargedVec::new(Some(budget), out.reborrow())?,
             access_errors: RefCell::new(ErrSlot::new()),
             budget_errors: RefCell::new(ErrSlot::new()),
+            translator,
         })
     }
 
@@ -123,27 +130,34 @@ impl<'schema> LocationIndex<'schema> {
         }
         if self.nodes.len() >= limit {
             return Err(out.fail(DiagnosticFactory::make_diagnostic(
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                "located node count exceeded the limit",
-                node.span,
-                None,
-                None,
+                DetailedDiagnosticRequest {
+                    code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                    message:
+                        t! { name: "diagnostic.config.located_node_limit", locale: self.translator }
+                            .into(),
+                    primary: node.span,
+                    path: None,
+                    value_source: None,
+                    context: None,
+                    translator: self.translator,
+                },
             )));
         }
         self.nodes.try_reserve(1, out.reborrow())?;
         let id = NodeId(self.nodes.len());
         if let Some(parent) = node.parent {
             let Some(parent) = self.nodes.get_mut(parent.0) else {
-                return Err(out.fail(internal(node.span)));
+                return Err(out.fail(internal(node.span, self.translator)));
             };
             let slot = schema_access(
                 &self.access_errors,
+                self.translator,
                 |access_out| node.member.slot(access_out),
                 out.reborrow(),
             )?;
             let required = slot
                 .checked_add(1)
-                .ok_or_else(|| internal(node.span))
+                .ok_or_else(|| internal(node.span, self.translator))
                 .store_err_into(out.reborrow())?;
             if parent.slots.len() < required {
                 parent
@@ -152,10 +166,10 @@ impl<'schema> LocationIndex<'schema> {
                 parent.slots.resize(required, None, out.reborrow())?;
             }
             let Some(parent_slot) = parent.slots.get_mut(slot) else {
-                return Err(out.fail(internal(node.span)));
+                return Err(out.fail(internal(node.span, self.translator)));
             };
             if parent_slot.is_some() {
-                return Err(out.fail(internal(node.span)));
+                return Err(out.fail(internal(node.span, self.translator)));
             }
             *parent_slot = Some(id);
             parent.children.try_push(id, out.reborrow())?;
@@ -184,7 +198,7 @@ impl<'schema> LocationIndex<'schema> {
     ) -> OResult<'slot, ()> {
         let span = span.into();
         let Some(node) = self.nodes.get_mut(id.0) else {
-            return Err(out.fail(internal(span)));
+            return Err(out.fail(internal(span, self.translator)));
         };
         node.variant = Some(variant);
         Ok(())
@@ -208,7 +222,7 @@ impl<'schema> LocationIndex<'schema> {
     ) -> OResult<'slot, ()> {
         let span = span.into();
         let Some(node) = self.nodes.get_mut(id.0) else {
-            return Err(out.fail(internal(span)));
+            return Err(out.fail(internal(span, self.translator)));
         };
         node.span = span;
         node.complete = true;
@@ -228,6 +242,7 @@ impl<'schema> LocationIndex<'schema> {
                 None,
                 None,
                 None,
+                self.translator,
             )));
         };
         let span = node.span;
@@ -235,10 +250,10 @@ impl<'schema> LocationIndex<'schema> {
         let mut current = Some(id);
         while let Some(id) = current {
             let Some(node) = self.get(id) else {
-                return Err(out.fail(internal(span)));
+                return Err(out.fail(internal(span, self.translator)));
             };
             if !node.complete {
-                return Err(out.fail(internal(span)));
+                return Err(out.fail(internal(span, self.translator)));
             }
             chain.try_push(node.member, out.reborrow())?;
             current = node.parent;
@@ -251,15 +266,16 @@ impl<'schema> LocationIndex<'schema> {
                 Member::Root => {}
                 Member::Field(field) => {
                     let ValueKind::Structure(fields) = value.as_ref() else {
-                        return Err(out.fail(internal(span)));
+                        return Err(out.fail(internal(span, self.translator)));
                     };
                     let slot = schema_access(
                         &self.access_errors,
+                        self.translator,
                         |access_out| field.slot(access_out),
                         out.reborrow(),
                     )?;
                     let Some(field) = fields.get(slot) else {
-                        return Err(out.fail(internal(span)));
+                        return Err(out.fail(internal(span, self.translator)));
                     };
                     let Some(field) = field.as_named() else {
                         return Err(out.fail(DiagnosticFactory::internal(
@@ -267,10 +283,12 @@ impl<'schema> LocationIndex<'schema> {
                             span,
                             None,
                             None,
+                            self.translator,
                         )));
                     };
                     budget_error(
                         &self.budget_errors,
+                        self.translator,
                         |budget_out| path.push_field(field.name(), budget_out),
                         out.reborrow(),
                     )?;
@@ -278,24 +296,25 @@ impl<'schema> LocationIndex<'schema> {
                 }
                 Member::Index(index) => {
                     let ValueKind::Array(values) = value.as_ref() else {
-                        return Err(out.fail(internal(span)));
+                        return Err(out.fail(internal(span, self.translator)));
                     };
                     let Some(item) = values.get(index) else {
-                        return Err(out.fail(internal(span)));
+                        return Err(out.fail(internal(span, self.translator)));
                     };
                     value = item.value();
                     budget_error(
                         &self.budget_errors,
+                        self.translator,
                         |budget_out| path.push_index(index, budget_out),
                         out.reborrow(),
                     )?;
                 }
                 Member::MapItem(index) => {
                     let ValueKind::Map(entries) = value.as_ref() else {
-                        return Err(out.fail(internal(span)));
+                        return Err(out.fail(internal(span, self.translator)));
                     };
                     let Some(entry) = entries.get(index) else {
-                        return Err(out.fail(internal(span)));
+                        return Err(out.fail(internal(span, self.translator)));
                     };
                     let Some(entry) = entry.as_named() else {
                         return Err(out.fail(DiagnosticFactory::internal(
@@ -303,10 +322,12 @@ impl<'schema> LocationIndex<'schema> {
                             span,
                             None,
                             None,
+                            self.translator,
                         )));
                     };
                     budget_error(
                         &self.budget_errors,
+                        self.translator,
                         |budget_out| path.push_map_key(entry.name(), budget_out),
                         out.reborrow(),
                     )?;
@@ -314,7 +335,7 @@ impl<'schema> LocationIndex<'schema> {
                 }
                 Member::Optional => {
                     let ValueKind::Optional(Some(inner)) = value.as_ref() else {
-                        return Err(out.fail(internal(span)));
+                        return Err(out.fail(internal(span, self.translator)));
                     };
                     value = inner;
                 }
@@ -324,19 +345,21 @@ impl<'schema> LocationIndex<'schema> {
                         payload: ValuePayloadView::Single(inner),
                     } = value.as_ref()
                     else {
-                        return Err(out.fail(internal(span)));
+                        return Err(out.fail(internal(span, self.translator)));
                     };
                     let variant_name = schema_access(
                         &self.access_errors,
+                        self.translator,
                         |access_out| variant.name(access_out),
                         out.reborrow(),
                     )?;
                     if name != variant_name {
-                        return Err(out.fail(internal(span)));
+                        return Err(out.fail(internal(span, self.translator)));
                     }
                     value = inner;
                     budget_error(
                         &self.budget_errors,
+                        self.translator,
                         |budget_out| path.push_payload(variant_name, budget_out),
                         out.reborrow(),
                     )?;
@@ -347,28 +370,31 @@ impl<'schema> LocationIndex<'schema> {
                         payload: ValuePayloadView::Structure(fields),
                     } = value.as_ref()
                     else {
-                        return Err(out.fail(internal(span)));
+                        return Err(out.fail(internal(span, self.translator)));
                     };
                     let variant_name = schema_access(
                         &self.access_errors,
+                        self.translator,
                         |access_out| variant.name(access_out),
                         out.reborrow(),
                     )?;
                     if name != variant_name {
-                        return Err(out.fail(internal(span)));
+                        return Err(out.fail(internal(span, self.translator)));
                     }
                     budget_error(
                         &self.budget_errors,
+                        self.translator,
                         |budget_out| path.push_payload(variant_name, budget_out),
                         out.reborrow(),
                     )?;
                     let slot = schema_access(
                         &self.access_errors,
+                        self.translator,
                         |access_out| field.slot(access_out),
                         out.reborrow(),
                     )?;
                     let Some(field) = fields.get(slot) else {
-                        return Err(out.fail(internal(span)));
+                        return Err(out.fail(internal(span, self.translator)));
                     };
                     let Some(field) = field.as_named() else {
                         return Err(out.fail(DiagnosticFactory::internal(
@@ -376,10 +402,12 @@ impl<'schema> LocationIndex<'schema> {
                             span,
                             None,
                             None,
+                            self.translator,
                         )));
                     };
                     budget_error(
                         &self.budget_errors,
+                        self.translator,
                         |budget_out| path.push_field(field.name(), budget_out),
                         out.reborrow(),
                     )?;
@@ -428,12 +456,13 @@ impl<'schema> LocationNode<'schema> {
         slots: &LocationErrorSlots<'_>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ValueView<'a>> {
-        let invalid = || -> Diagnostic { internal(self.span) };
+        let invalid = || -> Diagnostic { internal(self.span, slots.translator) };
         match (self.member, value.as_ref()) {
             (Member::Field(id), ValueKind::Structure(fields)) => {
                 let field = id;
                 let slot = schema_access(
                     slots.access,
+                    slots.translator,
                     |access_out| field.slot(access_out),
                     out.reborrow(),
                 )?;
@@ -461,6 +490,7 @@ impl<'schema> LocationNode<'schema> {
                 if if let Some(budget) = budget {
                     let name = schema_access(
                         slots.access,
+                        slots.translator,
                         |access_out| id.name(access_out),
                         out.reborrow(),
                     )?;
@@ -468,6 +498,7 @@ impl<'schema> LocationNode<'schema> {
                 } else {
                     schema_access(
                         slots.access,
+                        slots.translator,
                         |access_out| id.name(access_out),
                         out.reborrow(),
                     )? != variant
@@ -486,6 +517,7 @@ impl<'schema> LocationNode<'schema> {
                 if if let Some(budget) = budget {
                     let name = schema_access(
                         slots.access,
+                        slots.translator,
                         |access_out| id.name(access_out),
                         out.reborrow(),
                     )?;
@@ -493,6 +525,7 @@ impl<'schema> LocationNode<'schema> {
                 } else {
                     schema_access(
                         slots.access,
+                        slots.translator,
                         |access_out| id.name(access_out),
                         out.reborrow(),
                     )? != variant
@@ -501,6 +534,7 @@ impl<'schema> LocationNode<'schema> {
                 }
                 let slot = schema_access(
                     slots.access,
+                    slots.translator,
                     |access_out| field.slot(access_out),
                     out.reborrow(),
                 )?;
@@ -525,32 +559,36 @@ impl<'schema> LocationNode<'schema> {
             Member::Field(field) => {
                 let name = schema_access(
                     slots.access,
+                    slots.translator,
                     |access_out| field.name(access_out),
                     out.reborrow(),
                 )?;
                 budget_error(
                     slots.budget,
+                    slots.translator,
                     |budget_out| path.push_field(name, budget_out),
                     out.reborrow(),
                 )
             }
             Member::Index(index) => budget_error(
                 slots.budget,
+                slots.translator,
                 |budget_out| path.push_index(index, budget_out),
                 out.reborrow(),
             ),
             Member::MapItem(index) => {
                 let ValueKind::Map(entries) = parent.as_ref() else {
-                    return Err(out.fail(internal(self.span)));
+                    return Err(out.fail(internal(self.span, slots.translator)));
                 };
                 let Some(entry) = entries.get(index) else {
-                    return Err(out.fail(internal(self.span)));
+                    return Err(out.fail(internal(self.span, slots.translator)));
                 };
                 let Some(key) = entry.name() else {
-                    return Err(out.fail(internal(self.span)));
+                    return Err(out.fail(internal(self.span, slots.translator)));
                 };
                 budget_error(
                     slots.budget,
+                    slots.translator,
                     |budget_out| path.push_map_key(key, budget_out),
                     out.reborrow(),
                 )
@@ -558,11 +596,13 @@ impl<'schema> LocationNode<'schema> {
             Member::Payload(variant) => {
                 let name = schema_access(
                     slots.access,
+                    slots.translator,
                     |access_out| variant.name(access_out),
                     out.reborrow(),
                 )?;
                 budget_error(
                     slots.budget,
+                    slots.translator,
                     |budget_out| path.push_payload(name, budget_out),
                     out.reborrow(),
                 )
@@ -570,21 +610,25 @@ impl<'schema> LocationNode<'schema> {
             Member::VariantField { variant, field } => {
                 let variant_name = schema_access(
                     slots.access,
+                    slots.translator,
                     |access_out| variant.name(access_out),
                     out.reborrow(),
                 )?;
                 budget_error(
                     slots.budget,
+                    slots.translator,
                     |budget_out| path.push_payload(variant_name, budget_out),
                     out.reborrow(),
                 )?;
                 let field_name = schema_access(
                     slots.access,
+                    slots.translator,
                     |access_out| field.name(access_out),
                     out.reborrow(),
                 )?;
                 budget_error(
                     slots.budget,
+                    slots.translator,
                     |budget_out| path.push_field(field_name, budget_out),
                     out.reborrow(),
                 )
@@ -613,8 +657,8 @@ impl<'schema> LocationNode<'schema> {
     }
 }
 
-fn internal(span: Option<LocatedSpan>) -> Diagnostic {
-    DiagnosticFactory::internal(INSTANCE_LOCATION_INVARIANT, span, None, None)
+fn internal(span: Option<LocatedSpan>, translator: Translator) -> Diagnostic {
+    DiagnosticFactory::internal(INSTANCE_LOCATION_INVARIANT, span, None, None, translator)
 }
 
 impl Member<'_> {
@@ -671,6 +715,7 @@ impl<'index, 'schema, 'value> InstanceWalk<'index, 'schema, 'value> {
         let path = match locations.budget() {
             Some(budget) => budget_error(
                 &locations.budget_errors,
+                locations.translator,
                 |budget_out| InstancePath::new(Some(budget), budget_out),
                 out.reborrow(),
             )?,
@@ -694,8 +739,11 @@ impl<'index, 'schema, 'value> InstanceWalk<'index, 'schema, 'value> {
         SecretPolicy::hides(
             self.schema,
             &self.path,
-            primary,
-            value_source,
+            SecretPathContext {
+                primary,
+                value_source,
+                translator: self.locations.translator,
+            },
             out.reborrow(),
         )
     }
@@ -709,8 +757,11 @@ impl<'index, 'schema, 'value> InstanceWalk<'index, 'schema, 'value> {
         SecretPolicy::copy_path(
             self.schema,
             &self.path,
-            primary,
-            value_source,
+            SecretPathContext {
+                primary,
+                value_source,
+                translator: self.locations.translator,
+            },
             out.reborrow(),
         )
     }
@@ -724,10 +775,10 @@ impl<'index, 'schema, 'value> InstanceWalk<'index, 'schema, 'value> {
                 budget.consume(1, out.reborrow())?;
             }
             let Some(node) = self.locations.get(frame.id) else {
-                return Err(out.fail(internal_fallback()));
+                return Err(out.fail(internal_fallback(self.locations.translator)));
             };
             if !node.complete {
-                return Err(out.fail(internal(node.span)));
+                return Err(out.fail(internal(node.span, self.locations.translator)));
             }
             if !frame.entered {
                 frame.entered = true;
@@ -741,24 +792,27 @@ impl<'index, 'schema, 'value> InstanceWalk<'index, 'schema, 'value> {
                 if structure_payload
                     && !matches!(frame.depth.checked_add(1), Some(depth) if depth <= self.limit)
                 {
-                    return Err(out.fail(DiagnosticFactory::make_diagnostic(
-                        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                        "assertion instance traversal depth exceeded the limit",
-                        node.span,
-                        None,
-                        None,
-                    )));
+                    return Err(out.fail(DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                        code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                        message: t! { name: "diagnostic.config.assertion_traversal_limit", locale: self.locations.translator }.into(),
+                        primary: node.span,
+                        path: None,
+                        value_source: None,
+                        context: None,
+                        translator: self.locations.translator,
+                    })));
                 }
                 return Ok(Some((node, frame.value)));
             }
             if let Some(id) = node.children.get(frame.next).copied() {
                 frame.next += 1;
                 let Some(child) = self.locations.get(id) else {
-                    return Err(out.fail(internal(node.span)));
+                    return Err(out.fail(internal(node.span, self.locations.translator)));
                 };
                 let slots = LocationErrorSlots {
                     access: &self.locations.access_errors,
                     budget: &self.locations.budget_errors,
+                    translator: self.locations.translator,
                 };
                 let value =
                     child.descend(frame.value, self.locations.budget(), &slots, out.reborrow())?;
@@ -772,22 +826,26 @@ impl<'index, 'schema, 'value> InstanceWalk<'index, 'schema, 'value> {
                     }
                 ));
                 let Some(depth) = frame.depth.checked_add(1 + extra) else {
-                    return Err(out.fail(DiagnosticFactory::make_diagnostic(
-                        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                        "assertion instance traversal depth exceeded the limit",
-                        child.span,
-                        None,
-                        None,
-                    )));
+                    return Err(out.fail(DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                        code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                        message: t! { name: "diagnostic.config.assertion_traversal_limit", locale: self.locations.translator }.into(),
+                        primary: child.span,
+                        path: None,
+                        value_source: None,
+                        context: None,
+                        translator: self.locations.translator,
+                    })));
                 };
                 if depth > self.limit {
-                    return Err(out.fail(DiagnosticFactory::make_diagnostic(
-                        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                        "assertion instance traversal depth exceeded the limit",
-                        child.span,
-                        None,
-                        None,
-                    )));
+                    return Err(out.fail(DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                        code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                        message: t! { name: "diagnostic.config.assertion_traversal_limit", locale: self.locations.translator }.into(),
+                        primary: child.span,
+                        path: None,
+                        value_source: None,
+                        context: None,
+                        translator: self.locations.translator,
+                    })));
                 }
                 self.frames.try_push(
                     WalkFrame {
@@ -810,6 +868,6 @@ impl<'index, 'schema, 'value> InstanceWalk<'index, 'schema, 'value> {
     }
 }
 
-fn internal_fallback() -> Diagnostic {
-    DiagnosticFactory::internal(INSTANCE_LOCATION_NODE_MISSING, None, None, None)
+fn internal_fallback(translator: Translator) -> Diagnostic {
+    DiagnosticFactory::internal(INSTANCE_LOCATION_NODE_MISSING, None, None, None, translator)
 }

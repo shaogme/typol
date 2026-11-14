@@ -506,7 +506,8 @@ impl<'symbols, 'source, 'diagnostics, 'nodes, 'locals>
             .get(id.index())
             .and_then(|node| self.types.expression_type(node.ty()))
         else {
-            self.diagnostics.push(schema_internal!(span));
+            self.diagnostics
+                .push(schema_internal!(self.diagnostics.translator(), span));
             return Err(out.fail(BuildFailure::empty()));
         };
         Ok(ty)
@@ -555,7 +556,8 @@ impl<'symbols, 'source, 'diagnostics, 'nodes, 'locals>
         self.nodes.try_reserve(1, out.reborrow())?;
         let id = ExpressionNodeId::new(self.nodes.len());
         let Some(ty) = self.types.semantic_id(ty) else {
-            self.diagnostics.push(schema_internal!(span));
+            self.diagnostics
+                .push(schema_internal!(self.diagnostics.translator(), span));
             return Err(out.fail(BuildFailure::empty()));
         };
         self.nodes
@@ -652,7 +654,8 @@ impl<'symbols, 'source, 'diagnostics, 'nodes, 'locals>
         span: SourceSpan,
         out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, T> {
-        self.diagnostics.abort(schema_internal!(span));
+        self.diagnostics
+            .abort(schema_internal!(self.diagnostics.translator(), span));
         Err(out.fail(BuildFailure::empty()))
     }
 }

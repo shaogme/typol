@@ -9,22 +9,24 @@ use crate::{
     symbols::{SymbolState, SymbolTable, TypeSymbolId},
     types::model::ResolvedTypeGraph,
 };
+use alloc::borrow::Cow;
 use opeo::{OResult, Out};
-use typol_core::{Diagnostic, DiagnosticCode, DiagnosticMessage, DiagnosticMessageKey, SourceSpan};
-use typol_i18n::diagnostic_key;
+use typol_core::{
+    Diagnostic, DiagnosticCode, DiagnosticLabelInput, RelatedLocationRole, SourceSpan,
+};
+use typol_i18n::t;
 use typol_syntax::{AstAccessError, VariantPayloadKind};
+use u18n::RenderError;
 
 use constructibility::{TypeConstructibility, TypeConstructibilityInput};
 use edges::{GraphState, TypeEdge, TypeEdgeCollectionInput, TypeEdgeCollector, TypeFrame};
 use propagation::{InvalidTypePropagationInput, InvalidTypePropagator};
 
 pub(crate) struct TypeCycleReport<'a> {
-    pub(crate) key: DiagnosticMessageKey,
-    pub(crate) message: &'static str,
+    pub(crate) message: Result<Cow<'static, str>, RenderError>,
     pub(crate) primary: SourceSpan,
     pub(crate) cycle: &'a [TypeSymbolId],
-    pub(crate) label_key: DiagnosticMessageKey,
-    pub(crate) label_message: &'static str,
+    pub(crate) label_message: Result<Cow<'static, str>, RenderError>,
 }
 
 pub(crate) struct TypeCycles<'a, 'src, 'd> {
@@ -115,7 +117,10 @@ impl<'a, 'src, 'd> TypeCycles<'a, 'src, 'd> {
                             out.reborrow(),
                         )?;
                         let Some(field) = self.symbols.field_symbol(*field_id) else {
-                            self.diagnostics.push(schema_internal!(symbol.name_span()));
+                            self.diagnostics.push(schema_internal!(
+                                self.diagnostics.translator(),
+                                symbol.name_span()
+                            ));
                             return Err(out.fail(BuildFailure::empty()));
                         };
                         if let Some(type_use) = self.graph.field_type(*field_id) {
@@ -151,7 +156,10 @@ impl<'a, 'src, 'd> TypeCycles<'a, 'src, 'd> {
                             out.reborrow(),
                         )?;
                         let Some(variant) = self.symbols.variant_symbol(*variant_id) else {
-                            self.diagnostics.push(schema_internal!(symbol.name_span()));
+                            self.diagnostics.push(schema_internal!(
+                                self.diagnostics.translator(),
+                                symbol.name_span()
+                            ));
                             return Err(out.fail(BuildFailure::empty()));
                         };
                         if let Some(type_use) = self.graph.variant_payload_type(*variant_id) {
@@ -161,8 +169,10 @@ impl<'a, 'src, 'd> TypeCycles<'a, 'src, 'd> {
                             let payload_kind =
                                 self.ast_access(out.reborrow(), |ast_out| payload.kind(ast_out))?;
                             let VariantPayloadKind::Single(payload) = payload_kind else {
-                                self.diagnostics
-                                    .push(schema_internal!(variant.declaration().span(),));
+                                self.diagnostics.push(schema_internal!(
+                                    self.diagnostics.translator(),
+                                    variant.declaration().span(),
+                                ));
                                 return Err(out.fail(BuildFailure::empty()));
                             };
                             let payload_type =
@@ -193,8 +203,10 @@ impl<'a, 'src, 'd> TypeCycles<'a, 'src, 'd> {
                                 out.reborrow(),
                             )?;
                             let Some(field) = self.symbols.field_symbol(*field_id) else {
-                                self.diagnostics
-                                    .push(schema_internal!(variant.declaration().span(),));
+                                self.diagnostics.push(schema_internal!(
+                                    self.diagnostics.translator(),
+                                    variant.declaration().span(),
+                                ));
                                 return Err(out.fail(BuildFailure::empty()));
                             };
                             if let Some(type_use) = self.graph.field_type(*field_id) {
@@ -431,7 +443,10 @@ impl<'a, 'src, 'd> TypeCycles<'a, 'src, 'd> {
                             let Some(cycle_start) =
                                 frames.iter().position(|frame| frame.symbol == edge.target)
                             else {
-                                self.diagnostics.push(schema_internal!(edge.span));
+                                self.diagnostics.push(schema_internal!(
+                                    self.diagnostics.translator(),
+                                    edge.span
+                                ));
                                 return Err(out.fail(BuildFailure::empty()));
                             };
                             let mut cycle = self
@@ -482,16 +497,16 @@ impl<'a, 'src, 'd> TypeCycles<'a, 'src, 'd> {
                             }
                             self.report(
                                 TypeCycleReport {
-                                    key: diagnostic_key!(
-                                        "diagnostic.schema.recursive_type_no_finite_value"
-                                    ),
-                                    message: "recursive type has no finite value",
+                                    message: t! {
+                                        name: "diagnostic.schema.recursive_type_no_finite_value",
+                                        locale: self.diagnostics.translator(),
+                                    },
                                     primary: edge.span,
                                     cycle: &cycle,
-                                    label_key: diagnostic_key!(
-                                        "diagnostic.schema.recursive_type_declared_here"
-                                    ),
-                                    label_message: "recursive type is declared here",
+                                    label_message: t! {
+                                        name: "diagnostic.schema.recursive_type_declared_here",
+                                        locale: self.diagnostics.translator(),
+                                    },
                                 },
                                 out.reborrow(),
                             )?;
@@ -525,11 +540,9 @@ impl<'a, 'src, 'd> TypeCycles<'a, 'src, 'd> {
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, ()> {
         let TypeCycleReport {
-            key,
             message,
             primary,
             cycle,
-            label_key,
             label_message,
         } = input;
         let mut diagnostic = self.context.budget_access(
@@ -539,22 +552,38 @@ impl<'a, 'src, 'd> TypeCycles<'a, 'src, 'd> {
             |budget_out| {
                 Diagnostic::try_new(
                     DiagnosticCode::SCHEMA_SEMANTIC_ERROR,
-                    DiagnosticMessage::localized(message, key),
+                    message,
                     Some(self.context.execution()),
                     budget_out,
                 )
             },
         )?;
         diagnostic.set_primary(Some(primary));
+        if diagnostic.message().is_err() {
+            self.diagnostics.push(diagnostic);
+            return Err(out.fail(BuildFailure::empty()));
+        }
+        let label_message = match label_message {
+            Ok(message) => message,
+            Err(error) => {
+                let mut failure =
+                    Diagnostic::translation_failure(DiagnosticCode::SCHEMA_SEMANTIC_ERROR, error);
+                failure.set_primary(Some(primary));
+                self.diagnostics.push(failure);
+                return Err(out.fail(BuildFailure::empty()));
+            }
+        };
         for id in cycle {
             self.context
                 .consume(1, self.tree.root_span(), self.diagnostics, out.reborrow())?;
             let Some(symbol) = self.symbols.type_symbol(*id) else {
-                self.diagnostics.push(schema_internal!(primary));
+                self.diagnostics
+                    .push(schema_internal!(self.diagnostics.translator(), primary));
                 return Err(out.fail(BuildFailure::empty()));
             };
             let Some(declaration) = self.tree.declaration(symbol.declaration_id()) else {
-                self.diagnostics.push(schema_internal!(primary));
+                self.diagnostics
+                    .push(schema_internal!(self.diagnostics.translator(), primary));
                 return Err(out.fail(BuildFailure::empty()));
             };
             self.context.budget_access(
@@ -563,8 +592,11 @@ impl<'a, 'src, 'd> TypeCycles<'a, 'src, 'd> {
                 self.diagnostics,
                 |budget_out| {
                     diagnostic.try_add_label_with_text(
-                        declaration.span(),
-                        DiagnosticMessage::localized(label_message, label_key),
+                        DiagnosticLabelInput {
+                            span: declaration.span(),
+                            text: label_message.as_ref(),
+                            role: RelatedLocationRole::PreviousDeclaration,
+                        },
                         Some(self.context.execution()),
                         budget_out,
                     )

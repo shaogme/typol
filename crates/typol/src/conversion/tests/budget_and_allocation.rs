@@ -11,6 +11,7 @@ use crate::{
 use std::{collections::HashMap, string::String};
 use typol_config::{ConfigLimits, ConfigValidationOptions};
 use typol_core::{BudgetError, ConfigValue, DiagnosticCode, ExecutionLimits, ValueSource};
+use typol_i18n::{Language, Translator};
 use typol_test_support::{
     TestExtract, TestFailure, TestResult, test_verify as assert, test_verify_eq as assert_eq,
 };
@@ -70,6 +71,7 @@ fn session_with_text_limit(max_text_bytes: usize) -> TestResult<SessionBudget> {
             ExecutionLimits::new(16_777_216, 67_108_864),
             max_text_bytes,
             0,
+            Translator::new(Language::English),
             out,
         )
     })
@@ -133,6 +135,7 @@ fn conversions_share_budget_and_check_exact_node_depth_and_live_capacity_boundar
                 ExecutionLimits::new(16_777_216, capacity),
                 16_777_216,
                 0,
+                Translator::new(Language::English),
                 out,
             )
         })?;
@@ -158,7 +161,13 @@ fn conversions_share_budget_and_check_exact_node_depth_and_live_capacity_boundar
         assert_eq!(session.execution().workspace_bytes(), initial);
     }
     let session = TestOpeo::value(|out| {
-        SessionBudget::new(ExecutionLimits::new(steps, 67_108_864), 16_777_216, 0, out)
+        SessionBudget::new(
+            ExecutionLimits::new(steps, 67_108_864),
+            16_777_216,
+            0,
+            Translator::new(Language::English),
+            out,
+        )
     })?;
     let encoded = encode(
         &binding,

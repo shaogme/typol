@@ -7,7 +7,9 @@ use self::{
 };
 use crate::{
     context::{AssignmentContext, RuleContext, SemanticStatus},
-    diagnostics::{BudgetDiagnostic, DiagnosticBuffer, DiagnosticFactory},
+    diagnostics::{
+        BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticBuffer, DiagnosticFactory,
+    },
     instance::LocationIndex,
     scalar::Scalar,
     session::ValidationResources,
@@ -17,6 +19,7 @@ use typol_core::{
     BudgetError, ChargedVec, ConfigValue, Diagnostic, DiagnosticCode, DiagnosticContext, ValueKind,
     ValuePayloadView, ValueView, diagnostic_context,
 };
+use typol_i18n::{Translator, t};
 use typol_model::BuiltinType;
 use typol_semantic::{
     CompiledSchema, Constraint, EffectiveRules, SchemaAccessError, TypeKind, TypeView,
@@ -49,17 +52,19 @@ pub(crate) struct Validator;
 impl Validator {
     pub(crate) fn budget_call<'slot, 'borrow, T>(
         errors: &mut ErrSlot<BudgetError>,
+        translator: Translator,
         operation: impl for<'call> FnOnce(Out<'call, 'call, BudgetError>) -> OResult<'call, T>,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, T> {
         match errors.try_call(operation) {
             Ok(value) => Ok(value),
-            Err(caught) => Err(out.fail(BudgetDiagnostic::from_error(caught.take()))),
+            Err(caught) => Err(out.fail(BudgetDiagnostic::from_error(caught.take(), translator))),
         }
     }
 
     pub(crate) fn schema_call<'slot, 'borrow, T>(
         errors: &mut ErrSlot<SchemaAccessError>,
+        translator: Translator,
         operation: impl for<'call> FnOnce(Out<'call, 'call, SchemaAccessError>) -> OResult<'call, T>,
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, T> {
@@ -70,6 +75,7 @@ impl Validator {
                 None,
                 None,
                 None,
+                translator,
             ))),
         }
     }
@@ -129,6 +135,7 @@ impl Validator {
     ) -> OResult<'slot, ChargedVec<Constraint<'context>>> {
         let expected_constraints = Self::schema_call(
             &mut resources.schema_access_errors,
+            resources.translator,
             |access_out| metadata.expected.constraints(access_out),
             out.reborrow(),
         )?;
@@ -140,10 +147,12 @@ impl Validator {
                 metadata.span,
                 None,
                 metadata.source,
+                metadata.translator,
             )));
         }
         let local = Self::schema_call(
             &mut resources.schema_access_errors,
+            resources.translator,
             |access_out| {
                 RuleContext::constraints(
                     metadata.expected,
@@ -156,6 +165,7 @@ impl Validator {
         )?;
         Self::budget_call(
             &mut resources.budget_errors,
+            resources.translator,
             |budget_out| {
                 resources
                     .budget
@@ -182,11 +192,13 @@ impl Validator {
                     metadata.span,
                     None,
                     metadata.source,
+                    metadata.translator,
                 )));
             }
         };
         let constraints = Self::budget_call(
             &mut resources.budget_errors,
+            resources.translator,
             |budget_out| constraints.collect_budgeted(&resources.budget, budget_out),
             out.reborrow(),
         )?;
@@ -201,6 +213,7 @@ impl Validator {
     ) -> OResult<'slot, bool> {
         let kind = Self::schema_call(
             &mut resources.schema_access_errors,
+            resources.translator,
             |access_out| expected.kind(access_out),
             out.reborrow(),
         )?;
@@ -209,6 +222,7 @@ impl Validator {
             (TypeKind::Enum { .. }, ValueKind::Enumeration { variant, payload }) => {
                 let Some(variant) = Self::budget_call(
                     &mut resources.budget_errors,
+                    resources.translator,
                     |budget_out| {
                         expected.variant_named_budgeted(variant, &resources.budget, budget_out)
                     },
@@ -220,6 +234,7 @@ impl Validator {
                 match (
                     Self::schema_call(
                         &mut resources.schema_access_errors,
+                        resources.translator,
                         |access_out| variant.payload(access_out),
                         out.reborrow(),
                     )?,
@@ -240,6 +255,7 @@ impl Validator {
                 for entry in entries {
                     Self::budget_call(
                         &mut resources.budget_errors,
+                        resources.translator,
                         |budget_out| resources.budget.consume(1, budget_out),
                         out.reborrow(),
                     )?;
@@ -252,6 +268,7 @@ impl Validator {
             _ => {
                 return Self::schema_call(
                     &mut resources.schema_access_errors,
+                    resources.translator,
                     |access_out| Self::shape(expected, value, access_out),
                     out.reborrow(),
                 );
@@ -264,11 +281,13 @@ impl Validator {
             for (field, value) in fields.iter().zip(values) {
                 Self::budget_call(
                     &mut resources.budget_errors,
+                    resources.translator,
                     |budget_out| resources.budget.consume(1, budget_out),
                     out.reborrow(),
                 )?;
                 let field_name = Self::schema_call(
                     &mut resources.schema_access_errors,
+                    resources.translator,
                     |access_out| field.name(access_out),
                     out.reborrow(),
                 )?;
@@ -277,6 +296,7 @@ impl Validator {
                 };
                 if !Self::budget_call(
                     &mut resources.budget_errors,
+                    resources.translator,
                     |budget_out| {
                         resources
                             .budget
@@ -372,6 +392,7 @@ impl Validator {
     ) -> OResult<'slot, Option<ValidatedFallback>> {
         let expected_kind = Self::schema_call(
             &mut resources.schema_access_errors,
+            resources.translator,
             |access_out| metadata.expected.kind(access_out),
             out.reborrow(),
         )?;
@@ -379,6 +400,7 @@ impl Validator {
             (TypeKind::Option { inner }, ValueKind::Optional(Some(leaf))) => {
                 let mut inherited = Self::budget_call(
                     &mut resources.budget_errors,
+                    resources.translator,
                     |budget_out| ChargedVec::new(Some(&resources.budget), budget_out),
                     out.reborrow(),
                 )?;
@@ -386,21 +408,25 @@ impl Validator {
                     .inherited_constraints
                     .len()
                     .checked_add(1)
-                    .ok_or(DiagnosticFactory::make_diagnostic(
-                        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                        "fallback rule count exceeded the limit",
-                        metadata.span,
-                        None,
-                        metadata.source,
-                    ))
+                    .ok_or_else(|| DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                        code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                        message: t! { name: "diagnostic.config.fallback_rule_limit", locale: metadata.translator }.into(),
+                        primary: metadata.span,
+                        path: None,
+                        value_source: metadata.source,
+                        context: None,
+                        translator: metadata.translator,
+                    }))
                     .store_err(out.reborrow())?;
                 Self::budget_call(
                     &mut resources.budget_errors,
+                    resources.translator,
                     |budget_out| inherited.try_reserve_exact(capacity, budget_out),
                     out.reborrow(),
                 )?;
                 Self::budget_call(
                     &mut resources.budget_errors,
+                    resources.translator,
                     |budget_out| {
                         inherited.extend_from_slice(metadata.inherited_constraints, budget_out)
                     },
@@ -408,6 +434,7 @@ impl Validator {
                 )?;
                 let local = Self::schema_call(
                     &mut resources.schema_access_errors,
+                    resources.translator,
                     |access_out| {
                         RuleContext::constraints(
                             metadata.expected,
@@ -421,6 +448,7 @@ impl Validator {
                 inherited.try_push(local, out.reborrow())?;
                 Self::completed(
                     AssignmentContext {
+                        translator: metadata.translator,
                         expected: inner,
                         field: None,
                         variant: None,
@@ -450,6 +478,7 @@ impl Validator {
                     metadata.span,
                     None,
                     metadata.source,
+                    metadata.translator,
                 )));
             }
         };

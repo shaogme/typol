@@ -6,17 +6,9 @@ mod lists;
 mod type_expr;
 mod value;
 
-use crate::storage::{
-    Declaration as StoredDeclaration, Storage, TopLevelItem as StoredTopLevelItem,
-};
 pub use annotation::{
     Annotation, AnnotationData, AnnotationKind, Assertion, NamedArgument, NamedBounds,
     SizeArguments,
-};
-use core::{
-    error::Error,
-    fmt::{Debug, Display, Formatter, Result as FmtResult},
-    mem,
 };
 pub use declaration::{
     Declaration, EnumDecl, ExternModDecl, FieldDecl, ModuleDecl, SingleVariantPayload, StructDecl,
@@ -32,14 +24,23 @@ pub use lists::{
     FieldDeclList, NameIter, NameList, StringLiteralIter, StringLiteralList, TopLevelItemIter,
     TopLevelItemList, VariantDeclIter, VariantDeclList,
 };
-use opeo::{OResult, Out};
 pub use type_expr::{ArrayLength, BuiltinType, TypeExpr, TypeExprKind, TypePath};
-use typol_core::{ChargedVec, SourceSpan};
 pub use value::{
     ArrayDefault, BooleanLiteral, BraceEntry, BraceKey, BracedDefault, DefaultValue,
     DefaultValueKind, EnumDefault, EnumDefaultPayload, EnumDefaultPayloadKind, Name, NumberKind,
     NumberLiteral, ScalarLiteral, StringLiteral,
 };
+
+use crate::storage::{
+    Declaration as StoredDeclaration, Storage, TopLevelItem as StoredTopLevelItem,
+};
+use core::{
+    error::Error,
+    fmt::{Debug, Display, Formatter, Result as FmtResult},
+    mem,
+};
+use opeo::{OResult, Out};
+use typol_core::{ChargedVec, SourceSpan};
 
 /// A corruption state encountered while a read-only tree view resolves an internal reference.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

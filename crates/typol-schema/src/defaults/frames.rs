@@ -7,7 +7,7 @@ use crate::{
 use core::cmp::Ordering;
 use opeo::{OResult, Out};
 use typol_core::{ChargedVec, ConfigValue, SourceSpan};
-use typol_i18n::diagnostic_message;
+use typol_i18n::t;
 use typol_syntax::{AstAccessError, BraceEntry, BraceEntryList, BraceKey};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -99,6 +99,7 @@ impl<'b, 'a, 'd> DefaultFrames<'b, 'a, 'd> {
         input: PrepareMapInput<'a>,
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, MapBuild<'a>> {
+        let translator = self.compiler.context.translator();
         let PrepareMapInput {
             entries,
             target,
@@ -110,7 +111,9 @@ impl<'b, 'a, 'd> DefaultFrames<'b, 'a, 'd> {
         for index in 0..entries.len() {
             let entry = self.ast_access(out.reborrow(), |ast_out| entries.get(index, ast_out))?;
             let Some(entry) = entry else {
-                self.compiler.diagnostics.abort(schema_internal!(span));
+                self.compiler
+                    .diagnostics
+                    .abort(schema_internal!(translator, span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             self.compiler
@@ -135,10 +138,11 @@ impl<'b, 'a, 'd> DefaultFrames<'b, 'a, 'd> {
             let key_valid = self.compiler.check_string(key, key_span, out.reborrow())?;
             if !key_is_string {
                 self.compiler.report_invalid(
-                    diagnostic_message!(
-                        "diagnostic.schema.default_map_key_requires_string",
-                        "map default keys must be strings"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.default_map_key_requires_string",
+                        locale: self.compiler.context.translator(),
+                    }
+                    .into(),
                     key_span,
                     out.reborrow(),
                 )?;
@@ -172,7 +176,9 @@ impl<'b, 'a, 'd> DefaultFrames<'b, 'a, 'd> {
         let mut valid = keys.len() == entries.len();
         for pair in sorted_keys.windows(2) {
             let [left, right] = pair else {
-                self.compiler.diagnostics.abort(schema_internal!(span));
+                self.compiler
+                    .diagnostics
+                    .abort(schema_internal!(translator, span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             if self
@@ -182,10 +188,11 @@ impl<'b, 'a, 'd> DefaultFrames<'b, 'a, 'd> {
                 .is_eq()
             {
                 self.compiler.report_invalid(
-                    diagnostic_message!(
-                        "diagnostic.schema.default_map_duplicate_key",
-                        "map default contains a duplicate key"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.default_map_duplicate_key",
+                        locale: self.compiler.context.translator(),
+                    }
+                    .into(),
                     right.span,
                     out.reborrow(),
                 )?;
@@ -212,6 +219,7 @@ impl<'b, 'a, 'd> DefaultFrames<'b, 'a, 'd> {
         input: PrepareRecordInput<'a>,
         mut out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, RecordBuild<'a>> {
+        let translator = self.compiler.context.translator();
         let PrepareRecordInput {
             entries,
             owner,
@@ -231,7 +239,9 @@ impl<'b, 'a, 'd> DefaultFrames<'b, 'a, 'd> {
                 .map(|variant| variant.fields()),
         };
         let Some(field_ids) = field_ids else {
-            self.compiler.diagnostics.push(schema_internal!(span));
+            self.compiler
+                .diagnostics
+                .push(schema_internal!(translator, span));
             return Err(out.fail(BuildFailure::empty()));
         };
         let mut supplied = self.compiler.new_vec(out.reborrow())?;
@@ -244,7 +254,9 @@ impl<'b, 'a, 'd> DefaultFrames<'b, 'a, 'd> {
             let entry =
                 self.ast_access(out.reborrow(), |ast_out| entries.get(entry_index, ast_out))?;
             let Some(entry) = entry else {
-                self.compiler.diagnostics.abort(schema_internal!(span));
+                self.compiler
+                    .diagnostics
+                    .abort(schema_internal!(translator, span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             self.compiler
@@ -271,10 +283,11 @@ impl<'b, 'a, 'd> DefaultFrames<'b, 'a, 'd> {
             let is_identifier = parsed_key.kind == ParsedBraceKeyKind::Identifier;
             if !is_identifier {
                 self.compiler.report_invalid(
-                    diagnostic_message!(
-                        "diagnostic.schema.default_struct_field_name_invalid",
-                        "struct default field names must be identifiers"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.default_struct_field_name_invalid",
+                        locale: self.compiler.context.translator(),
+                    }
+                    .into(),
                     key_span,
                     out.reborrow(),
                 )?;
@@ -296,10 +309,11 @@ impl<'b, 'a, 'd> DefaultFrames<'b, 'a, 'd> {
                 LookupResult::Found(field_id) => field_id,
                 LookupResult::Missing => {
                     self.compiler.report_invalid(
-                        diagnostic_message!(
-                            "diagnostic.schema.default_struct_field_unknown",
-                            "struct default contains an unknown field"
-                        ),
+                        t! {
+                            name: "diagnostic.schema.default_struct_field_unknown",
+                            locale: self.compiler.context.translator(),
+                        }
+                        .into(),
                         key_span,
                         out.reborrow(),
                     )?;
@@ -308,10 +322,11 @@ impl<'b, 'a, 'd> DefaultFrames<'b, 'a, 'd> {
                 }
                 LookupResult::Ambiguous => {
                     self.compiler.report_invalid(
-                        diagnostic_message!(
-                            "diagnostic.schema.default_struct_field_ambiguous",
-                            "struct default field name is ambiguous"
-                        ),
+                        t! {
+                            name: "diagnostic.schema.default_struct_field_ambiguous",
+                            locale: self.compiler.context.translator(),
+                        }
+                        .into(),
                         key_span,
                         out.reborrow(),
                     )?;
@@ -321,7 +336,9 @@ impl<'b, 'a, 'd> DefaultFrames<'b, 'a, 'd> {
             };
             let Some(index) = self.field_index(field_ids, field_id, key_span, out.reborrow())?
             else {
-                self.compiler.diagnostics.push(schema_internal!(key_span));
+                self.compiler
+                    .diagnostics
+                    .push(schema_internal!(translator, key_span));
                 return Err(out.fail(BuildFailure::empty()));
             };
             let slot = self.compiler.diagnostics.require(
@@ -331,10 +348,11 @@ impl<'b, 'a, 'd> DefaultFrames<'b, 'a, 'd> {
             )?;
             if slot.is_some() {
                 self.compiler.report_invalid(
-                    diagnostic_message!(
-                        "diagnostic.schema.default_struct_duplicate_field",
-                        "struct default contains a duplicate field"
-                    ),
+                    t! {
+                        name: "diagnostic.schema.default_struct_duplicate_field",
+                        locale: self.compiler.context.translator(),
+                    }
+                    .into(),
                     key_span,
                     out.reborrow(),
                 )?;

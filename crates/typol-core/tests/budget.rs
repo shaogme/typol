@@ -2,8 +2,8 @@ use core::mem::size_of;
 use std::{error::Error, io::Error as IoError};
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, ConfigValueBuilder, Diagnostic, DiagnosticCode,
-    ExecutionBudget, ExecutionLimits, InstancePath, NamedValue, PathSegment, SourceId, SourceSpan,
-    Span, ValueErrorKind, ValueKind, ValueSource,
+    DiagnosticLabelInput, ExecutionBudget, ExecutionLimits, InstancePath, NamedValue, PathSegment,
+    RelatedLocationRole, SourceId, SourceSpan, Span, ValueErrorKind, ValueKind, ValueSource,
 };
 use typol_opeo_test_support::TestOpeo;
 
@@ -273,7 +273,7 @@ fn failed_emergency_promotion_preserves_the_original_diagnostic_code() -> Result
     })?;
     let mut path = TestOpeo::call(|out| InstancePath::new(Some(&budget), out))?;
     TestOpeo::call::<BudgetError, _>(|out| path.push_index(0, out))?;
-    let mut diagnostic = Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR);
+    let mut diagnostic = Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR, "internal error");
     ensure!(matches!(
         TestOpeo::call(|out| diagnostic.try_set_path(Some(path), Some(&budget), out)),
         Err(BudgetError::Resource)
@@ -296,7 +296,17 @@ fn diagnostic_body_labels_and_path_share_one_budget() -> Result<(), Box<dyn Erro
         )
     })?;
     let span = SourceSpan::new(SourceId::new(0), Span::point(0));
-    TestOpeo::call(|out| diagnostic.try_add_label(span, "rule explanation", Some(&budget), out))?;
+    TestOpeo::call(|out| {
+        diagnostic.try_add_label_with_text(
+            DiagnosticLabelInput {
+                span,
+                text: "rule explanation",
+                role: RelatedLocationRole::ConstraintDefinition,
+            },
+            Some(&budget),
+            out,
+        )
+    })?;
     let mut path = TestOpeo::call(|out| InstancePath::new(Some(&budget), out))?;
     TestOpeo::call::<BudgetError, _>(|out| path.push_field("field", out))?;
     TestOpeo::call(|out| diagnostic.try_set_path(Some(path), Some(&budget), out))?;

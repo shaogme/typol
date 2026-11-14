@@ -2,19 +2,21 @@ mod errors;
 
 mod records;
 
-use opeo::{ErrSlot, OResult, Out};
-use typol_core::{Read, SourceReadError};
-use typol_semantic::{CompiledSchema, SchemaFreezeInput};
-
 pub use errors::{
     LocationFailure, LocationStatus, SchemaCompileBudgetDomain, SchemaCompileContextFailure,
     SchemaCompileErrors, SchemaInternalCause,
 };
 
+pub(crate) use records::{PreparedRecordCompilation, RecordBuilder};
+
+use opeo::{ErrSlot, OResult, Out};
+use typol_core::{Read, SourceReadError};
+use typol_semantic::{CompiledSchema, SchemaFreezeInput};
+
 use crate::{
     AnnotationCompileInput, AnnotationCompiler, DefaultInputs, DefaultPass, ExpressionCompileInput,
     ExpressionCompiler, SchemaCompileContext, SchemaCompileStage, TypeGraphCompiler,
-    context::CompileContext,
+    context::{CompileContext, CompileContextOptions},
     diagnostics::BuildFailure,
     diagnostics::DiagnosticCollector,
     excerpts::SchemaExcerpts,
@@ -24,9 +26,6 @@ use crate::{
     session::{CompileSession, SessionParts, SourceCatalog},
     symbols::SymbolTable,
 };
-
-pub(crate) use records::{PreparedRecordCompilation, RecordBuilder};
-
 use records::RecordCompilation;
 
 pub(crate) struct SchemaCompilation;
@@ -54,7 +53,7 @@ impl SchemaCompilation {
 
     fn compile_loaded<'slot>(
         parts: SessionParts,
-        mut out: Out<'slot, '_, SchemaCompileErrors>,
+        out: Out<'slot, '_, SchemaCompileErrors>,
     ) -> OResult<'slot, PreparedSchemaCompilation> {
         let SessionParts {
             sources: loaded,
@@ -62,14 +61,30 @@ impl SchemaCompilation {
             budget,
         } = parts;
         let limits = budget.limits();
-        let context = CompileContext::new::<SchemaCompileErrors>(
-            *limits,
-            budget.regex_limits(),
-            budget.execution(),
-            budget.regex_execution(),
-            out.reborrow(),
-        )?;
         let mut stage_errors = ErrSlot::<BuildFailure>::new();
+        let context = match stage_errors.try_call(|build_out| {
+            CompileContext::new::<BuildFailure>(
+                CompileContextOptions {
+                    limits: *limits,
+                    regex_limits: budget.regex_limits(),
+                    execution: budget.execution(),
+                    regex_execution: budget.regex_execution(),
+                    translator: budget.translator(),
+                },
+                build_out,
+            )
+        }) {
+            Ok(context) => context,
+            Err(caught) => {
+                diagnostics.report_failure(caught.take());
+                return Err(out.fail(SourceLocations::errors_for_sources(
+                    diagnostics.into_diagnostics(),
+                    loaded.files(),
+                    budget.execution(),
+                    *limits.excerpts(),
+                )));
+            }
+        };
         if diagnostics.is_stopped()
             || loaded
                 .files()
@@ -364,6 +379,7 @@ impl SchemaCompilation {
             schema.source_locations(),
             *context.limits().excerpts(),
             execution,
+            diagnostics.translator(),
         );
         Ok(schema.with_excerpts(excerpts))
     }

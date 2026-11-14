@@ -23,7 +23,7 @@ fn located(span: SourceSpan, start: usize, end: usize) -> Result<LocatedSpan, Io
 
 fn report(capture: SourceCapture, span: SourceSpan) -> Result<SourceExcerptSet, Box<dyn Error>> {
     let mut excerpts = SourceExcerptSet::new(ExcerptLimits::default(), None);
-    let mut diagnostic = Diagnostic::emergency(DiagnosticCode::CONFIG_VALUE_ERROR);
+    let mut diagnostic = Diagnostic::emergency(DiagnosticCode::CONFIG_VALUE_ERROR, "value error");
     diagnostic.set_located_primary(Some(located(span, 1, 2)?));
     capture.finish(&mut excerpts, &[diagnostic]);
     Ok(excerpts)

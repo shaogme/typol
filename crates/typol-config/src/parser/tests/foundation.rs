@@ -1,7 +1,10 @@
 use super::{Parser, ParserTestSupport};
 use crate::{
     ConfigLimits, ConfigParseOptions, ConfigParseRequest, ConfigParser,
-    diagnostics::{ConfigParseErrors, DiagnosticBuffer, DiagnosticFactory},
+    diagnostics::{
+        ConfigParseErrors, DetailedDiagnosticRequest, DiagnosticBuffer, DiagnosticFactory,
+        LabelMessageRequest,
+    },
     environment::{
         CachedEnvironment, Environment, EnvironmentCache, EnvironmentError, EnvironmentReadContext,
         EnvironmentReadRequest,
@@ -14,11 +17,14 @@ use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     AllocationError, BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticMessage,
     ExecutionBudget, ExecutionLimits, InstancePath, LineIndex, LocatedSpan, LocationError,
-    PathSegment, Read, SliceSource, SourceId, Span, SpanError, SpanLocation,
+    PathSegment, Read, RelatedLocationRole, SliceSource, SourceId, Span, SpanError, SpanLocation,
 };
+use typol_i18n::{Language, Translator};
 use typol_policy::{ExcerptLimits, RegexOptions};
 use typol_semantic::{ConstraintKind, TypeKind};
 use typol_test_support::*;
+
+const ENGLISH_TRANSLATOR: Translator = Translator::new(Language::English);
 
 pub(super) struct Provider {
     calls: usize,
@@ -250,7 +256,14 @@ fn cache_distinguishes_missing_empty_invalid_utf8_and_host_failure() -> TestResu
             .run(|out| ExecutionBudget::new(ExecutionLimits::new(1_000_000, 1_000_000), out))
             .test_value()?;
         let mut cache = budget_errors
-            .run(|out| EnvironmentCache::new(&budget, *session_options(&limits).config(), out))
+            .run(|out| {
+                EnvironmentCache::new(
+                    &budget,
+                    *session_options(&limits).config(),
+                    ENGLISH_TRANSLATOR,
+                    out,
+                )
+            })
             .test_value()?;
         for _ in 0..2 {
             let cached = diagnostic_errors
@@ -305,7 +318,7 @@ fn environment_cache_storage_tracks_only_loaded_schema_slots() -> TestResult<()>
         .run(|out| ExecutionBudget::new(ExecutionLimits::new(1_000_000, 1_048_576), out))
         .test_value()?;
     let mut cache = budget_errors
-        .run(|out| EnvironmentCache::new(&budget, limits, out))
+        .run(|out| EnvironmentCache::new(&budget, limits, ENGLISH_TRANSLATOR, out))
         .test_value()?;
     let before_read = budget.workspace_bytes();
     let mut span_errors = TestSlot::default();
@@ -351,7 +364,7 @@ fn environment_cache_capacity_failure_precedes_provider_reads() -> TestResult<()
         .run(|out| ExecutionBudget::new(execution_limits, out))
         .test_value()?;
     let mut cache = budget_errors
-        .run(|out| EnvironmentCache::new(&budget, limits, out))
+        .run(|out| EnvironmentCache::new(&budget, limits, ENGLISH_TRANSLATOR, out))
         .test_value()?;
     let mut filler = budget_errors
         .run(|out| ChargedVec::<u8>::new(Some(&budget), out))
@@ -476,7 +489,7 @@ fn position_snapshots_cover_config_labels_eof_and_reject_invalid_spans() -> Test
         let index = allocation_errors
             .run(|out| LineIndex::new(&source, out))
             .test_value()?;
-        let mut buffer = DiagnosticBuffer::new(&schema, 4);
+        let mut buffer = DiagnosticBuffer::new(&schema, 4, ENGLISH_TRANSLATOR);
         let primary = primary.with_location(Some(SpanLocation {
             start: location_errors
                 .run(|out| index.location(3, out))
@@ -493,20 +506,26 @@ fn position_snapshots_cover_config_labels_eof_and_reject_invalid_spans() -> Test
                 .run(|out| index.location(9, out))
                 .test_value()?,
         }));
-        let mut diagnostic = DiagnosticFactory::make_diagnostic(
-            DiagnosticCode::CONFIG_VALIDATION_ERROR,
-            "validation failed",
-            Some(primary),
-            None,
-            None,
-        );
+        let mut diagnostic = DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+            code: DiagnosticCode::CONFIG_VALIDATION_ERROR,
+            message: "validation failed".into(),
+            primary: Some(primary),
+            path: None,
+            value_source: None,
+            context: None,
+            translator: ENGLISH_TRANSLATOR,
+        });
         let mut label_errors = TestSlot::<Diagnostic>::default();
         label_errors
             .run(|out| {
                 DiagnosticFactory::add_label_message(
                     &mut diagnostic,
-                    label,
-                    DiagnosticMessage::custom(""),
+                    LabelMessageRequest {
+                        span: label,
+                        message: DiagnosticMessage::custom(""),
+                        role: RelatedLocationRole::AssociatedInput,
+                        translator: ENGLISH_TRANSLATOR,
+                    },
                     out,
                 )
             })
@@ -614,13 +633,17 @@ fn missing_config_snapshots_remain_queryable_without_fabricated_positions() -> T
         test_source_span(source_id, 0, 99, &mut span_errors),
         test_source_span(SourceId::new(99), 0, 0, &mut span_errors),
     ] {
-        let mut buffer = DiagnosticBuffer::new(&schema, 4);
+        let mut buffer = DiagnosticBuffer::new(&schema, 4, ENGLISH_TRANSLATOR);
         test_assert!(buffer.push(DiagnosticFactory::make_diagnostic(
-            DiagnosticCode::CONFIG_VALIDATION_ERROR,
-            "validation failed",
-            Some(span),
-            None,
-            None
+            DetailedDiagnosticRequest {
+                code: DiagnosticCode::CONFIG_VALIDATION_ERROR,
+                message: "validation failed".into(),
+                primary: Some(span),
+                path: None,
+                value_source: None,
+                context: None,
+                translator: ENGLISH_TRANSLATOR,
+            }
         )))?;
         let errors = ConfigParseErrors::from_buffer(buffer, &schema, source_id, None);
         test_eq!(errors.diagnostics().len(), 1)?;
@@ -647,19 +670,23 @@ fn reporter_hides_secret_paths_before_storage_and_rejects_unknown_dynamic_keys()
         path_errors
             .run(|out| path.push_map_key("PRIVATE-KEY", out))
             .test_value()?;
-        let mut buffer = DiagnosticBuffer::new(&schema, 4);
+        let mut buffer = DiagnosticBuffer::new(&schema, 4, ENGLISH_TRANSLATOR);
         let keep_going = buffer.push(DiagnosticFactory::make_diagnostic(
-            DiagnosticCode::CONFIG_VALIDATION_ERROR,
-            "PRIVATE-MESSAGE",
-            None,
-            Some(path),
-            None,
+            DetailedDiagnosticRequest {
+                code: DiagnosticCode::CONFIG_VALIDATION_ERROR,
+                message: "PRIVATE-MESSAGE".into(),
+                primary: None,
+                path: Some(path),
+                value_source: None,
+                context: None,
+                translator: ENGLISH_TRANSLATOR,
+            },
         ));
         let diagnostic = buffer.iter().next().test_value()?;
         test_assert!(!format!("{diagnostic:?}").contains("PRIVATE-"))?;
         if name == "secret" {
             test_assert!(keep_going)?;
-            test_eq!(diagnostic.message(), "value is hidden")?;
+            test_eq!(diagnostic.message().test_value()?, "value is hidden")?;
             test_eq!(diagnostic.path().test_value()?.len(), 1)?;
         } else {
             test_assert!(!keep_going)?;
@@ -690,20 +717,24 @@ fn finish_does_not_repeat_secret_path_redaction() -> TestResult<()> {
         budget_errors
             .run(|out| path.push_map_key("PRIVATE-KEY", out))
             .test_value()?;
-        let mut buffer = DiagnosticBuffer::new(&schema, 4);
+        let mut buffer = DiagnosticBuffer::new(&schema, 4, ENGLISH_TRANSLATOR);
         test_assert!(buffer.push(DiagnosticFactory::make_diagnostic(
-            DiagnosticCode::CONFIG_VALIDATION_ERROR,
-            "PRIVATE-MESSAGE",
-            None,
-            Some(path),
-            None,
+            DetailedDiagnosticRequest {
+                code: DiagnosticCode::CONFIG_VALIDATION_ERROR,
+                message: "PRIVATE-MESSAGE".into(),
+                primary: None,
+                path: Some(path),
+                value_source: None,
+                context: None,
+                translator: ENGLISH_TRANSLATOR,
+            }
         )))?;
         let steps_after_push = budget.steps();
         let source_id = schema.next_source_id().test_value()?;
         let errors = ConfigParseErrors::from_buffer(buffer, &schema, source_id, None);
         let diagnostic = TestCheck::item(errors.diagnostics(), 0)?;
         test_assert!(!format!("{diagnostic:?}").contains("PRIVATE-"))?;
-        test_eq!(diagnostic.message(), "value is hidden")?;
+        test_eq!(diagnostic.message().test_value()?, "value is hidden")?;
         test_eq!(diagnostic.path().test_value()?.len(), 1)?;
         Ok((diagnostic.code(), steps_after_push))
     };

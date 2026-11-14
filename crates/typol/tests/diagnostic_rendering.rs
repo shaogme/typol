@@ -103,7 +103,7 @@ fn codec_parser_errors_render_owned_two_source_snapshots_after_binding_drop() ->
     .test_value()?;
     assert!(text.contains("CONFIG_VALIDATION_ERROR (12): value is hidden"));
     assert!(text.contains("Location: config\\u{1b}:1:"));
-    assert!(text.contains("Rule: schema:1:"));
+    assert!(text.contains("Related location (constraint definition): schema:1:"));
     assert!(!text.contains("private"));
     assert!(
         errors
@@ -164,7 +164,7 @@ fn rust_value_diagnostics_keep_schema_labels_without_fabricated_primary() -> Tes
     })
     .test_value()?;
     assert!(text.contains("Source: RustValue"));
-    assert!(text.contains("Rule: schema:"));
+    assert!(text.contains("Related location (constraint definition): schema:"));
     assert!(!text.contains("Location:"));
     assert!(!text.contains("PRIVATE"));
     assert!(
@@ -187,10 +187,6 @@ fn rust_value_diagnostics_keep_schema_labels_without_fabricated_primary() -> Tes
             .to_string()
             .contains("CONFIG_VALIDATION_ERROR (12)")
     );
-    assert!(
-        validation_errors
-            .to_string()
-            .contains("Location: location unavailable")
-    );
+    assert!(!validation_errors.to_string().contains("Location:"));
     Ok(())
 }

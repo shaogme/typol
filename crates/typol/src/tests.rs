@@ -2,6 +2,11 @@ mod allocation;
 mod api;
 mod profile;
 
+pub(crate) use allocation::TestAssertions;
+
+#[cfg(feature = "serde")]
+pub(crate) use allocation::AllocationScope;
+
 use crate::{
     conversion::ConversionContext,
     descriptor::{
@@ -17,22 +22,21 @@ use opeo::{OResult, Out};
 use std::{any::TypeId, cmp::Ordering, mem::size_of};
 use typol_config::{ConfigLimits, ConfigValidationOptions};
 use typol_core::{BudgetError, DiagnosticContext, ExecutionLimits, diagnostic_context};
+use typol_i18n::{Language, Translator};
 use typol_model::BuiltinType;
 use typol_policy::{ExcerptLimits, RegexOptions};
 use typol_test_support::{
     TestExpect, TestExtract, TestResult, test_verify as assert, test_verify_eq as assert_eq,
 };
 
-pub(crate) use allocation::TestAssertions;
-
-#[cfg(feature = "serde")]
-pub(crate) use allocation::AllocationScope;
-
 static TEST_INTERNAL_CONTEXT: DiagnosticContext =
     diagnostic_context!("typol-test", "binding", "test-invariant");
 
 fn session() -> TestResult<SessionBudget> {
-    TestOpeo::value(|out| SessionBudget::codec(WriteOptions::default(), out))
+    let options = WriteOptions::default().with_validation(
+        ConfigValidationOptions::default().with_translator(Translator::new(Language::English)),
+    );
+    TestOpeo::value(|out| SessionBudget::codec(options, out))
 }
 
 fn context<'session>(
@@ -71,7 +75,15 @@ fn session_with_limits(
     text_limit: usize,
     output_limit: usize,
 ) -> TestResult<SessionBudget> {
-    budget_value(|out| SessionBudget::new(limits, text_limit, output_limit, out))
+    budget_value(|out| {
+        SessionBudget::new(
+            limits,
+            text_limit,
+            output_limit,
+            Translator::new(Language::English),
+            out,
+        )
+    })
 }
 
 fn scalar<'slot, 'borrow>(
@@ -119,7 +131,15 @@ fn defaults_are_finite_and_zero_options_are_preserved() -> TestResult {
     assert_eq!(codec.validation(), ConfigValidationOptions::default());
     assert_eq!(BindingLimits::new(0, 0, 0, 0).test_value()?.max_nodes(), 0);
     assert_eq!(
-        TestOpeo::error(|out| SessionBudget::new(ExecutionLimits::new(0, 0), 0, 0, out,))?,
+        TestOpeo::error(|out| {
+            SessionBudget::new(
+                ExecutionLimits::new(0, 0),
+                0,
+                0,
+                Translator::new(Language::English),
+                out,
+            )
+        })?,
         BudgetError::Resource
     );
     Ok(())
@@ -154,12 +174,20 @@ fn descriptor_node_depth_name_and_length_boundaries_are_checked() -> TestResult 
     assert_eq!(TestOpeo::value(|out| ctx.name("", out))?.text(), "");
     assert_code(TestOpeo::error(|out| scalar(&mut ctx, 0, out))?, 1)?;
     assert_eq!(
-        TestOpeo::value(|out| DescribeContext::array_length(u32::MAX as usize, out))?,
+        TestOpeo::value(|out| {
+            DescribeContext::array_length(
+                u32::MAX as usize,
+                Translator::new(Language::English),
+                out,
+            )
+        })?,
         u32::MAX
     );
     if let Some(too_large) = (u32::MAX as usize).checked_add(1) {
         assert_code(
-            TestOpeo::error(|out| DescribeContext::array_length(too_large, out))?,
+            TestOpeo::error(|out| {
+                DescribeContext::array_length(too_large, Translator::new(Language::English), out)
+            })?,
             14,
         )?;
     };
@@ -179,8 +207,15 @@ fn descriptor_members_preserve_slots_owner_and_workspace_limits() -> TestResult 
         TestOpeo::error(|out| second.members(&[descriptor], out))?,
         9,
     )?;
-    let session =
-        TestOpeo::value(|out| SessionBudget::new(ExecutionLimits::new(1000, 1024), 100, 0, out))?;
+    let session = TestOpeo::value(|out| {
+        SessionBudget::new(
+            ExecutionLimits::new(1000, 1024),
+            100,
+            0,
+            Translator::new(Language::English),
+            out,
+        )
+    })?;
     let mut limited = context(BindingLimits::default(), &session)?;
     assert!(TestOpeo::value(|out| limited.members(&[], out))?.is_empty());
     let descriptor = TestOpeo::value(|out| scalar(&mut limited, 0, out))?;
@@ -193,7 +228,9 @@ fn descriptor_members_preserve_slots_owner_and_workspace_limits() -> TestResult 
 
 #[test]
 fn descriptor_providers_are_lazy_and_preserve_actual_type_identity() -> TestResult {
-    let deferred = DescriptorProvider::new::<u8>(|_, _, out| ConversionContext::reject(out));
+    let deferred = DescriptorProvider::new::<u8>(|context, _, out| {
+        ConversionContext::reject(context.session().translator(), out)
+    });
     assert_eq!(deferred.identity(), TypeId::of::<u8>());
     let session = session()?;
     let mut ctx = context(BindingLimits::default(), &session)?;
@@ -433,7 +470,9 @@ fn conversion_children_share_node_counts_and_restore_parent_depth_on_failure() -
         codec_error(|out| {
             ctx.child_with_path::<()>(
                 None,
-                |_, child_out| ConversionContext::reject(child_out),
+                |child, child_out| {
+                    ConversionContext::reject(child.session().translator(), child_out)
+                },
                 out,
             )
         })?,
@@ -467,6 +506,7 @@ fn conversion_children_share_node_counts_and_restore_parent_depth_on_failure() -
                     Err::<(), _>(child_out.fail(CodecErrors::emergency(
                         CodecStage::Conversion,
                         Failure::Conversion,
+                        call.translator(),
                     )))
                 },
                 out,
