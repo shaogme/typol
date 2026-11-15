@@ -5,9 +5,9 @@ use typol_core::{
 use typol_i18n::{Translator, t};
 use typol_semantic::SchemaAccessError;
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 use opeo::{OResult, Out};
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 use typol_core::ExecutionBudget;
 
 pub static BINDING_MISMATCH_CONTEXT: DiagnosticContext =
@@ -126,7 +126,7 @@ pub enum Failure {
     Allocation,
     Capacity(CapacityExceeded),
     Internal(InternalError),
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     BindingMismatch,
     RecursiveType,
     ArrayLength,
@@ -205,7 +205,7 @@ impl Failure {
             Self::Allocation => DiagnosticCode::ALLOCATION_FAILED,
             Self::Capacity(capacity) => capacity.diagnostic_code(),
             Self::Internal(internal) => internal.diagnostic_code(),
-            #[cfg(all(test, feature = "std"))]
+            #[cfg(test)]
             Self::BindingMismatch => DiagnosticCode::TYPE_BINDING_ERROR,
             Self::RecursiveType | Self::ArrayLength => DiagnosticCode::TYPE_BINDING_ERROR,
             Self::Conversion | Self::ConversionAt(_) => DiagnosticCode::RUST_CONVERSION_ERROR,
@@ -216,7 +216,7 @@ impl Failure {
     pub(crate) const fn context(self) -> Option<DiagnosticContext> {
         match self {
             Self::Internal(internal) => Some(internal.context()),
-            #[cfg(all(test, feature = "std"))]
+            #[cfg(test)]
             Self::BindingMismatch => Some(BINDING_MISMATCH_CONTEXT),
             Self::RecursiveType => Some(RECURSIVE_TYPE_CONTEXT),
             Self::ConversionDepth {
@@ -244,7 +244,7 @@ impl Failure {
             },
             Self::Capacity(capacity) => capacity.emergency_message(translator),
             Self::Internal(internal) => internal.emergency_message(translator),
-            #[cfg(all(test, feature = "std"))]
+            #[cfg(test)]
             Self::BindingMismatch => t! {
                 name: "diagnostic.binding.type_mismatch",
                 locale: translator,
@@ -275,7 +275,7 @@ impl Failure {
         diagnostic
     }
 
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     fn message(self) -> &'static str {
         match self {
             Self::BindingMismatch => "Rust type description is incompatible with the schema",
@@ -289,7 +289,7 @@ impl Failure {
         }
     }
 
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     pub(super) fn terminal(self) -> bool {
         matches!(
             self,
@@ -301,7 +301,7 @@ impl Failure {
         )
     }
 
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     pub(super) fn diagnostic<'slot>(
         self,
         budget: &ExecutionBudget,

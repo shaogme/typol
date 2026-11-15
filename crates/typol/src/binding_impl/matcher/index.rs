@@ -385,7 +385,7 @@ fn index_invariant(translator: Translator) -> CodecErrors {
     )
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
     use super::BindingIndex;
     use crate::BindingTestSupport;

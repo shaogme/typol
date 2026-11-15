@@ -6,7 +6,7 @@ mod model;
 mod serialize_containers;
 mod string;
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests;
 
 use crate::{
@@ -26,7 +26,7 @@ use opeo::{OResult, Out, ResultOutExt};
 use serde::{Serialize, de::DeserializeOwned};
 use typol_core::{ConfigValue, ValueSource, ValueView};
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 use typol_semantic::TypeView;
 
 pub(crate) struct SerdeValue {
@@ -96,7 +96,7 @@ impl SerdeValue {
         self.value
     }
 
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     pub(crate) fn value(&self) -> &ConfigValue {
         &self.value
     }
@@ -122,10 +122,10 @@ impl fmt::Debug for Serde {
 }
 
 // Internal model tests do not forge full validation credentials; production wiring enters only through a matched binding.
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 pub(crate) struct Model;
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 impl Model {
     pub(crate) fn encode<'slot, 'borrow, T: Serialize>(
         ty: TypeView<'_>,

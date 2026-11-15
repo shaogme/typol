@@ -467,7 +467,7 @@ impl ConvertedValue {
         self.value
     }
 
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     pub(crate) fn value(&self) -> &ConfigValue {
         &self.value
     }

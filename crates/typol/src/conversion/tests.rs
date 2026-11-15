@@ -18,10 +18,13 @@ use crate::{
     value::EnumPayload,
 };
 use opeo::{OResult, Out};
-use std::{cell::Cell, collections::HashMap, rc::Rc};
+use std::{cell::Cell, rc::Rc};
 use typol_core::{ConfigValue, DiagnosticCode, ValueId, ValueKind, ValueSource};
 use typol_model::BuiltinType;
 use typol_test_support::{TestExpect, TestExtract, TestResult, test_verify_eq as assert_eq};
+
+#[cfg(feature = "std")]
+use std::collections::HashMap;
 
 pub(crate) struct ConversionTestSupport;
 
@@ -422,6 +425,7 @@ fn renamed_reordered_nested_fields_follow_schema_order() -> TestResult {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn hash_map_uses_unicode_key_order_and_counts_keys_as_nodes() -> TestResult {
     let entries = [("ö", 3u8), ("a", 1), ("é", 2), ("", 0)];
     let hash: HashMap<_, _> = entries
@@ -774,21 +778,24 @@ fn partial_arrays_vectors_and_maps_drop_every_constructed_item() -> TestResult {
             out,
         )
     })?)?;
-    let schema = BindingTestSupport::compile("entry struct Root { value: map<string, u8> }")?;
-    let binding = BindingTestSupport::bind::<Root<HashMap<String, Tracked>>>(
-        &schema,
-        BindOptions::default(),
-    )?;
-    assert_eq!(
-        BindingTestSupport::code(decode_error(
-            &binding,
-            &value,
-            &session,
-            ConversionLimits::default()
-        )?)?,
-        15
-    );
-    assert_eq!(LIVE.with(|live| live.get()), 0);
+    #[cfg(feature = "std")]
+    {
+        let schema = BindingTestSupport::compile("entry struct Root { value: map<string, u8> }")?;
+        let binding = BindingTestSupport::bind::<Root<HashMap<String, Tracked>>>(
+            &schema,
+            BindOptions::default(),
+        )?;
+        assert_eq!(
+            BindingTestSupport::code(decode_error(
+                &binding,
+                &value,
+                &session,
+                ConversionLimits::default()
+            )?)?,
+            15
+        );
+        assert_eq!(LIVE.with(|live| live.get()), 0);
+    }
     let schema = BindingTestSupport::compile("entry struct Root { value: map<string, u8> }")?;
     let binding =
         BindingTestSupport::bind::<Root<OrderedMap<Tracked>>>(&schema, BindOptions::default())?;

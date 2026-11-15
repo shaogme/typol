@@ -1,9 +1,12 @@
 use opeo::{OResult, Out};
 use typol_core::{
-    BudgetError, ChargedBox, ChargedString, ChargedVec, ConfigValue, ConfigValueBuilder,
-    DiagnosticContext, ExecutionBudget, NamedValue, ValueError, ValueId, ValuePayload, ValueSource,
+    BudgetError, ChargedString, ChargedVec, ConfigValue, ConfigValueBuilder, DiagnosticContext,
+    ExecutionBudget, NamedValue, ValueError, ValueId, ValuePayload, ValueSource,
     diagnostic_context,
 };
+
+#[cfg(feature = "serde")]
+use typol_core::ChargedBox;
 
 static VALUE_BUDGET_MISMATCH: DiagnosticContext = diagnostic_context!(
     "typol",
@@ -18,7 +21,9 @@ pub(crate) struct OwnedNamedValue {
 
 enum EnumPayloadKind {
     Unit,
+    #[cfg(feature = "serde")]
     Single(ChargedBox<ConfigValue>),
+    #[cfg(feature = "serde")]
     Structure(ChargedVec<OwnedNamedValue>),
 }
 
@@ -47,6 +52,7 @@ impl OwnedNamedValue {
         Ok(Self { name, value })
     }
 
+    #[cfg(feature = "serde")]
     pub(crate) fn from_name<'slot>(
         name: ChargedString,
         value: ConfigValue,
@@ -73,6 +79,7 @@ impl EnumPayload {
         }
     }
 
+    #[cfg(feature = "serde")]
     pub(crate) fn single<'slot>(
         value: ConfigValue,
         budget: Option<&ExecutionBudget>,
@@ -84,6 +91,7 @@ impl EnumPayload {
         })
     }
 
+    #[cfg(feature = "serde")]
     pub(crate) fn structure(values: ChargedVec<OwnedNamedValue>) -> Self {
         Self {
             kind: EnumPayloadKind::Structure(values),
@@ -164,6 +172,7 @@ impl ValueFactory {
         )
     }
 
+    #[cfg(feature = "serde")]
     pub(crate) fn none<'slot>(
         budget: Option<&ExecutionBudget>,
         out: Out<'slot, '_, ValueError>,
@@ -175,6 +184,7 @@ impl ValueFactory {
         )
     }
 
+    #[cfg(feature = "serde")]
     pub(crate) fn optional<'slot>(
         value: Option<ConfigValue>,
         budget: Option<&ExecutionBudget>,
@@ -233,6 +243,7 @@ impl ValueFactory {
                 ValueSource::RustValue,
                 out.reborrow(),
             )?,
+            #[cfg(feature = "serde")]
             EnumPayloadKind::Single(value) => {
                 let child = builder.append_value(value.into_inner(), out.reborrow())?;
                 builder.add_enumeration(
@@ -242,6 +253,7 @@ impl ValueFactory {
                     out.reborrow(),
                 )?
             }
+            #[cfg(feature = "serde")]
             EnumPayloadKind::Structure(values) => {
                 let (names, fields) =
                     Self::named_values(values, &mut builder, budget, out.reborrow())?;

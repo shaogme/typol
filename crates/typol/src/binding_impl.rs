@@ -1,12 +1,12 @@
 mod errors;
 mod matcher;
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests;
 
 pub use errors::{BindingErrors, BindingMismatch, BindingMismatchKind, BindingShape};
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 pub(crate) use tests::{BindingTestSupport, Root as BindingTestRoot};
 
 use crate::{

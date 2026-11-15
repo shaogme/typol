@@ -12,13 +12,15 @@ use crate::{
     value::EnumPayload,
 };
 use opeo::{OResult, Out};
-use std::collections::HashMap;
 use typol_config::{ConfigParseOptions, ConfigParseRequest, EmptyEnvironment};
 use typol_core::{ConfigValue, DiagnosticCode, InstancePath, PathSegment, SliceSource, ValueId};
 use typol_model::BuiltinType;
 use typol_test_support::{
     TestExpect, TestExtract, TestResult, test_verify as assert, test_verify_eq as assert_eq,
 };
+
+#[cfg(feature = "std")]
+use std::collections::HashMap;
 
 struct RejectingScalar;
 
@@ -224,40 +226,46 @@ fn missing_field_and_map_value_errors_do_not_echo_input_names_or_keys() -> TestR
             .contains("sensitive-input-name")
     );
 
-    let map_schema = BindingTestSupport::compile("entry struct Root { value: map<string, u8> }")?;
-    let map_binding =
-        BindingTestSupport::bind::<Root<HashMap<String, u8>>>(&map_schema, BindOptions::default())?;
-    let map_value = TestOpeo::value(|out| {
-        TestValues::try_map(
-            vec![TestValues::map_entry(
-                "api-secret-key".into(),
-                TestValues::string_unmetered("raw-secret-value".into()),
-            )],
-            out,
-        )
-    })?;
-    let map_input = dynamic(map_value)?;
-    let map_session = BindingTestSupport::codec_session()?;
-    let map_errors = decode_error(
-        &map_binding,
-        &map_input,
-        &map_session,
-        ConversionLimits::default(),
-    )?;
-    let map_diagnostic = map_errors
-        .diagnostics()
-        .first()
-        .test_expect("map value shape errors should have diagnostics")?;
-    assert_eq!(
-        map_errors.conversion_error_kind(),
-        Some(ConversionErrorKind::ValueShapeMismatch)
-    );
-    assert_eq!(path_of(&map_errors)?.len(), 1);
-    let message = map_diagnostic.message().test_value()?;
-    assert!(!message.contains("api-secret-key"));
-    assert!(!message.contains("raw-secret-value"));
-    assert!(!map_errors.to_string().contains("api-secret-key"));
-    assert!(!map_errors.to_string().contains("raw-secret-value"));
+    #[cfg(feature = "std")]
+    {
+        let map_schema =
+            BindingTestSupport::compile("entry struct Root { value: map<string, u8> }")?;
+        let map_binding = BindingTestSupport::bind::<Root<HashMap<String, u8>>>(
+            &map_schema,
+            BindOptions::default(),
+        )?;
+        let map_value = TestOpeo::value(|out| {
+            TestValues::try_map(
+                vec![TestValues::map_entry(
+                    "api-secret-key".into(),
+                    TestValues::string_unmetered("raw-secret-value".into()),
+                )],
+                out,
+            )
+        })?;
+        let map_input = dynamic(map_value)?;
+        let map_session = BindingTestSupport::codec_session()?;
+        let map_errors = decode_error(
+            &map_binding,
+            &map_input,
+            &map_session,
+            ConversionLimits::default(),
+        )?;
+        let map_diagnostic = map_errors
+            .diagnostics()
+            .first()
+            .test_expect("map value shape errors should have diagnostics")?;
+        assert_eq!(
+            map_errors.conversion_error_kind(),
+            Some(ConversionErrorKind::ValueShapeMismatch)
+        );
+        assert_eq!(path_of(&map_errors)?.len(), 1);
+        let message = map_diagnostic.message().test_value()?;
+        assert!(!message.contains("api-secret-key"));
+        assert!(!message.contains("raw-secret-value"));
+        assert!(!map_errors.to_string().contains("api-secret-key"));
+        assert!(!map_errors.to_string().contains("raw-secret-value"));
+    }
     Ok(())
 }
 

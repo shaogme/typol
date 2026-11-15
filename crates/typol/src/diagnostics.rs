@@ -26,11 +26,11 @@ use typol_semantic::{CompiledSchema, SpanLocation};
 
 use conversion::ConversionDiagnostic;
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 use typol_core::{ExecutionBudget, InternalError, diagnostic_context};
 
 static UNAVAILABLE_EXCERPTS: SourceExcerptSet = SourceExcerptSet::unavailable();
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 static ERROR_BUFFER_CONTEXT: DiagnosticContext =
     diagnostic_context!("typol", "diagnostics", "empty-error-buffer");
 
@@ -114,7 +114,7 @@ enum ErrorStorage {
         stage: CodecStage,
         diagnostic: Diagnostic,
     },
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     Collected {
         stage: CodecStage,
         diagnostics: ChargedVec<Diagnostic>,
@@ -179,7 +179,7 @@ impl CodecErrors {
             ErrorStorage::Binding { .. }
             | ErrorStorage::Conversion(_)
             | ErrorStorage::Emergency { .. } => &UNAVAILABLE_EXCERPTS,
-            #[cfg(all(test, feature = "std"))]
+            #[cfg(test)]
             ErrorStorage::Collected { .. } => &UNAVAILABLE_EXCERPTS,
         }
     }
@@ -403,7 +403,7 @@ impl CodecErrors {
             ErrorStorage::Binding { .. } => CodecStage::Binding,
             ErrorStorage::Conversion(_) => CodecStage::Conversion,
             ErrorStorage::Emergency { stage, .. } => *stage,
-            #[cfg(all(test, feature = "std"))]
+            #[cfg(test)]
             ErrorStorage::Collected { stage, .. } => *stage,
         }
     }
@@ -415,7 +415,7 @@ impl CodecErrors {
             ErrorStorage::Binding { diagnostics, .. } => diagnostics.as_slice(),
             ErrorStorage::Conversion(error) => from_ref(error.diagnostic()),
             ErrorStorage::Emergency { diagnostic, .. } => from_ref(diagnostic),
-            #[cfg(all(test, feature = "std"))]
+            #[cfg(test)]
             ErrorStorage::Collected { diagnostics, .. } => diagnostics.as_slice(),
         }
     }
@@ -470,7 +470,7 @@ impl fmt::Display for CodecErrors {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 pub(crate) struct ErrorBuffer {
     stage: CodecStage,
     translator: Translator,
@@ -482,7 +482,7 @@ pub(crate) struct ErrorBuffer {
     budget_errors: ErrSlot<BudgetError>,
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 impl ErrorBuffer {
     pub(crate) fn new<'slot>(
         stage: CodecStage,
@@ -604,7 +604,7 @@ impl Error for CodecErrors {
             ErrorStorage::Binding { .. }
             | ErrorStorage::Conversion(_)
             | ErrorStorage::Emergency { .. } => None,
-            #[cfg(all(test, feature = "std"))]
+            #[cfg(test)]
             ErrorStorage::Collected { .. } => None,
         }
     }
@@ -634,7 +634,7 @@ impl From<Failure> for CodecErrors {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
     use super::{CodecErrors, CodecStage, Failure};
     use crate::test_support::{TestOpeo, TestValues};

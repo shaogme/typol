@@ -46,9 +46,7 @@ pub enum ValueErrorKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ValueError {
     kind: ValueErrorKind,
-    first_index: Option<usize>,
-    second_index: Option<usize>,
-    context: Option<DiagnosticContext>,
+    duplicate_indices: Option<(usize, usize)>,
 }
 
 impl ValueError {
@@ -57,40 +55,39 @@ impl ValueError {
     }
 
     pub const fn duplicate_indices(self) -> Option<(usize, usize)> {
-        match (self.first_index, self.second_index) {
-            (Some(first), Some(second)) => Some((first, second)),
-            _ => None,
-        }
+        self.duplicate_indices
     }
 
     pub const fn context(self) -> Option<DiagnosticContext> {
-        self.context
+        match self.kind {
+            ValueErrorKind::Internal(error) => Some(error.context()),
+            ValueErrorKind::EnvironmentReferenceRequired => Some(ENVIRONMENT_REFERENCE_REQUIRED),
+            ValueErrorKind::DuplicateMapKey
+            | ValueErrorKind::DuplicateFieldName
+            | ValueErrorKind::AllocationFailed
+            | ValueErrorKind::ResourceLimit(_)
+            | ValueErrorKind::CapacityExceeded(_) => None,
+        }
     }
 
     pub(super) const fn duplicate(kind: ValueErrorKind, first: usize, second: usize) -> Self {
         Self {
             kind,
-            first_index: Some(first),
-            second_index: Some(second),
-            context: None,
+            duplicate_indices: Some((first, second)),
         }
     }
 
     pub(super) const fn internal(context: DiagnosticContext) -> Self {
         Self {
             kind: ValueErrorKind::Internal(InternalError::ValueStructureInvariantFailure(context)),
-            first_index: None,
-            second_index: None,
-            context: Some(context),
+            duplicate_indices: None,
         }
     }
 
     pub(super) const fn environment_reference_required() -> Self {
         Self {
             kind: ValueErrorKind::EnvironmentReferenceRequired,
-            first_index: None,
-            second_index: None,
-            context: Some(ENVIRONMENT_REFERENCE_REQUIRED),
+            duplicate_indices: None,
         }
     }
 }
@@ -126,9 +123,7 @@ impl From<BudgetError> for ValueError {
         };
         Self {
             kind,
-            first_index: None,
-            second_index: None,
-            context: error.context(),
+            duplicate_indices: None,
         }
     }
 }

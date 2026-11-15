@@ -6,6 +6,7 @@ use crate::{
     },
     value_walk::{EnumPayloadValue, EnumValue, NAMED_ENTRY_NAME_MISSING, ValueNode, ValueNodeKind},
 };
+use core::cell::Cell;
 use opeo::{OResult, Out, ResultOutExt};
 use serde::de::{DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
 use typol_core::{
@@ -38,7 +39,7 @@ fn collect_entries<'slot, 'de>(
 pub(crate) struct SequenceAccess<'a, 'schema, 'call, 'de> {
     cursor: Cursor<'a, 'schema, 'call>,
     element: TypeView<'schema>,
-    values: ChargedVec<ValueEntryView<'de>>,
+    values: ValueEntries<'de>,
     next: usize,
 }
 
@@ -60,7 +61,6 @@ impl<'a, 'schema, 'call, 'de> SequenceAccess<'a, 'schema, 'call, 'de> {
         else {
             return Err(out.fail(Error::shape_mismatch()));
         };
-        let values = collect_entries(&cursor, values, out.reborrow())?;
         if expected_length.and_then(|value| usize::try_from(value).ok()) != length
             || length.is_some_and(|length| length != values.len())
         {
@@ -84,6 +84,26 @@ impl<'a, 'schema, 'call, 'de> SequenceAccess<'a, 'schema, 'call, 'de> {
             Err(out.fail(Error::shape_mismatch()))
         }
     }
+
+    fn prepare_next<'access>(
+        cursor: &'access mut Cursor<'a, 'schema, 'call>,
+        element: TypeView<'schema>,
+        values: ValueEntries<'de>,
+        next: usize,
+    ) -> Result<Option<(Cursor<'access, 'schema, 'call>, ValueView<'de>)>, Error> {
+        let fault = cursor.fault();
+        fault.run(|mut out| {
+            cursor.session().budget_as(
+                |budget_out| cursor.session().visit(budget_out),
+                out.reborrow(),
+            )?;
+            let Some(value) = values.get(next) else {
+                return Ok(None);
+            };
+            let child = cursor.child(element, out.reborrow())?;
+            Ok(Some((child, value.value())))
+        })
+    }
 }
 
 impl<'de> SeqAccess<'de> for &mut SequenceAccess<'_, '_, '_, 'de> {
@@ -94,19 +114,19 @@ impl<'de> SeqAccess<'de> for &mut SequenceAccess<'_, '_, '_, 'de> {
         seed: S,
     ) -> Result<Option<S::Value>, Error> {
         let fault = self.cursor.fault();
-        fault.run(|mut out| {
-            self.cursor.session().budget_as(
-                |budget_out| self.cursor.session().visit(budget_out),
-                out.reborrow(),
-            )?;
-            let Some(value) = self.values.get(self.next) else {
-                return Ok(None);
-            };
-            let child = self.cursor.child(self.element, out.reborrow())?;
-            let value = Decoder::seed(child, value.value(), seed, out.reborrow())?;
-            self.next += 1;
-            Ok(Some(value))
-        })
+        let Some((child, value)) =
+            SequenceAccess::prepare_next(&mut self.cursor, self.element, self.values, self.next)?
+        else {
+            return Ok(None);
+        };
+        let used = Cell::new(false);
+        let result = seed.deserialize(Decoder::new(child, value, &used));
+        let value = fault.capture(result)?;
+        if !used.get() {
+            return fault.capture(Err(Error::shape_mismatch()));
+        }
+        self.next += 1;
+        Ok(Some(value))
     }
 
     fn size_hint(&self) -> Option<usize> {

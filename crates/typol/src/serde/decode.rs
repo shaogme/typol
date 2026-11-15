@@ -51,6 +51,21 @@ impl<'a, 'schema, 'call, 'de, 'used> Decoder<'a, 'schema, 'call, 'de, 'used> {
         }
     }
 
+    fn sequence_access(
+        self,
+        length: Option<usize>,
+    ) -> Result<SequenceAccess<'a, 'schema, 'call, 'de>, Error> {
+        let fault = self.cursor.fault();
+        fault.run(|out| SequenceAccess::new(self.cursor, self.value, length, out))
+    }
+
+    fn finish_sequence(
+        fault: &Fault,
+        access: &SequenceAccess<'_, '_, '_, '_>,
+    ) -> Result<(), Error> {
+        fault.run(|out| access.finish(out))
+    }
+
     fn scalar<'slot>(
         &self,
         expected: BuiltinType,
@@ -302,31 +317,20 @@ impl<'de> DeTrait<'de> for Decoder<'_, '_, '_, 'de, '_> {
 
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
         let fault = self.cursor.fault();
-        fault.run(|mut out| {
-            let mut access = SequenceAccess::new(self.cursor, self.value, None, out.reborrow())?;
-            self.used.set(true);
-            let result = match visitor.visit_seq(&mut access) {
-                Ok(value) => value,
-                Err(error) => return Err(out.fail(error)),
-            };
-            access.finish(out.reborrow())?;
-            Ok(result)
-        })
+        self.used.set(true);
+        let mut access = self.sequence_access(None)?;
+        let result = fault.capture(visitor.visit_seq(&mut access))?;
+        Self::finish_sequence(fault, &access)?;
+        Ok(result)
     }
 
     fn deserialize_tuple<V: Visitor<'de>>(self, len: usize, visitor: V) -> Result<V::Value, Error> {
         let fault = self.cursor.fault();
-        fault.run(|mut out| {
-            let mut access =
-                SequenceAccess::new(self.cursor, self.value, Some(len), out.reborrow())?;
-            self.used.set(true);
-            let result = match visitor.visit_seq(&mut access) {
-                Ok(value) => value,
-                Err(error) => return Err(out.fail(error)),
-            };
-            access.finish(out.reborrow())?;
-            Ok(result)
-        })
+        self.used.set(true);
+        let mut access = self.sequence_access(Some(len))?;
+        let result = fault.capture(visitor.visit_seq(&mut access))?;
+        Self::finish_sequence(fault, &access)?;
+        Ok(result)
     }
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {

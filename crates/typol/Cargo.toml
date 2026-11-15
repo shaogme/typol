@@ -51,7 +51,6 @@ required-features = ["std"]
 [[test]]
 name = "derive_consumer"
 path = "tests/derive_consumer.rs"
-required-features = ["std"]
 
 [[test]]
 name = "diagnostic_rendering"
@@ -61,7 +60,6 @@ required-features = ["std"]
 [[test]]
 name = "fixture_consumer"
 path = "tests/fixture_consumer.rs"
-required-features = ["std"]
 
 [[test]]
 name = "host_faults"
@@ -96,7 +94,7 @@ required-features = ["std"]
 [[test]]
 name = "serde_consumer"
 path = "tests/serde_consumer.rs"
-required-features = ["std"]
+required-features = ["serde"]
 
 [lints]
 workspace = true

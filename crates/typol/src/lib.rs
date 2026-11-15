@@ -130,17 +130,17 @@ mod loading;
 mod loading_errors;
 mod options;
 mod session;
-#[cfg(any(feature = "serde", all(test, feature = "std")))]
+#[cfg(any(feature = "serde", test))]
 mod value;
 mod value_walk;
 
 #[cfg(feature = "serde")]
 mod serde;
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod test_support;
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests;
 
 pub use conversion::{
@@ -188,13 +188,13 @@ pub use config_ir::{
     ConfigIr, ConfigIrError, ConfigIrErrorKind, ConfigIrOptions, ConfigValueErrors,
 };
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 pub(crate) use self::{
     binding_impl::{BindingTestRoot, BindingTestSupport},
     tests::TestAssertions,
 };
 
-#[cfg(all(test, feature = "std", feature = "serde"))]
+#[cfg(all(test, feature = "serde"))]
 pub(crate) use self::tests::AllocationScope;
 
 pub mod io {

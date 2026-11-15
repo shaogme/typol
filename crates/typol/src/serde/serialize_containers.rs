@@ -56,24 +56,27 @@ impl<'a, 'schema, 'call> Sequence<'a, 'schema, 'call> {
         })
     }
 
-    fn element<'slot, T: Serialize + ?Sized>(
-        &mut self,
-        value: &T,
-        mut out: Out<'slot, '_, Error>,
-    ) -> OResult<'slot, ()> {
-        if self
-            .length
-            .is_some_and(|length| self.values.len() >= length)
-        {
-            return Err(out.fail(Error::shape_mismatch()));
-        }
-        let child = self.cursor.child(self.element, out.reborrow())?;
-        let value = match value.serialize(Encoder::new(child)) {
-            Ok(value) => value,
-            Err(error) => return Err(out.fail(error)),
-        };
-        self.values.try_push(value, out.reborrow())?;
-        Ok(())
+    fn prepare_element(&mut self) -> Result<Cursor<'_, 'schema, 'call>, Error> {
+        let fault = self.cursor.fault();
+        fault.run(|mut out| {
+            if self
+                .length
+                .is_some_and(|length| self.values.len() >= length)
+            {
+                return Err(out.fail(Error::shape_mismatch()));
+            }
+            self.cursor.child(self.element, out.reborrow())
+        })
+    }
+
+    fn store_element(&mut self, value: ConfigValue) -> Result<(), Error> {
+        let fault = self.cursor.fault();
+        fault.run(|out| self.values.try_push(value, out))
+    }
+
+    fn complete_element(&mut self, result: Result<ConfigValue, Error>) -> Result<(), Error> {
+        let fault = self.cursor.fault();
+        self.store_element(fault.capture(result)?)
     }
 
     fn finish<'slot, 'borrow>(
@@ -104,8 +107,9 @@ impl SerializeSeq for Sequence<'_, '_, '_> {
     type Error = Error;
 
     fn serialize_element<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Error> {
-        let fault = self.cursor.fault();
-        fault.run(|out| self.element(value, out))
+        let child = self.prepare_element()?;
+        let result = value.serialize(Encoder::new(child));
+        self.complete_element(result)
     }
 
     fn end(self) -> Result<ConfigValue, Error> {
@@ -119,8 +123,9 @@ impl SerializeTuple for Sequence<'_, '_, '_> {
     type Error = Error;
 
     fn serialize_element<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Error> {
-        let fault = self.cursor.fault();
-        fault.run(|out| self.element(value, out))
+        let child = self.prepare_element()?;
+        let result = value.serialize(Encoder::new(child));
+        self.complete_element(result)
     }
 
     fn end(self) -> Result<ConfigValue, Error> {

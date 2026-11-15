@@ -4,7 +4,7 @@ mod diagnostics;
 mod pipeline;
 mod value_builder;
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests;
 
 pub use containers::OrderedMap;

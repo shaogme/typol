@@ -1,7 +1,7 @@
 mod encoder;
 mod literals;
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests;
 
 use crate::{
@@ -25,7 +25,7 @@ use typol_semantic::{CompiledSchema, FieldList, TypeKind, TypeView, VariantPaylo
 #[cfg(feature = "serde")]
 use crate::serde::SerdeValue;
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 use typol_config::ConfigParseErrors;
 
 enum EncodedValue {
@@ -163,7 +163,7 @@ impl ValidatedValue<'_, '_> {
         Ok(value)
     }
 
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     pub(crate) fn value(&self) -> &ConfigValue {
         self.value.as_config_value()
     }
@@ -442,7 +442,7 @@ impl fmt::Debug for ValidatedValue<'_, '_> {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 impl<'schema, 'call> ValidatedValue<'schema, 'call> {
     pub(crate) fn parse<'slot, R: Read + ?Sized>(
         schema: &'schema CompiledSchema,

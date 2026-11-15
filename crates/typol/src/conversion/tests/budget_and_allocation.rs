@@ -8,13 +8,16 @@ use crate::{
     session::SessionBudget,
     test_support::{TestOpeo, TestOpeoOutcome, TestValues},
 };
-use std::{collections::HashMap, string::String};
+use std::string::String;
 use typol_config::{ConfigLimits, ConfigValidationOptions};
 use typol_core::{BudgetError, ConfigValue, DiagnosticCode, ExecutionLimits, ValueSource};
 use typol_i18n::{Language, Translator};
 use typol_test_support::{
     TestExtract, TestFailure, TestResult, test_verify as assert, test_verify_eq as assert_eq,
 };
+
+#[cfg(feature = "std")]
+use std::collections::HashMap;
 
 fn roundtrip<T: Typol>(dsl: &str, value: T) -> TestResult<T> {
     let schema = BindingTestSupport::compile(dsl)?;
@@ -265,59 +268,62 @@ fn decoded_strings_preserve_unicode_and_exact_text_budget() -> TestResult {
 }
 
 #[test]
-fn binding_tree_and_hashmap_target_allocations_are_recoverable_and_leak_free() -> TestResult {
-    let schema =
-        BindingTestSupport::compile("entry struct Root { value: map<string, [string; 2]> }")?;
-    let value = Root::new(HashMap::from([
-        ("a".into(), ["alpha".into(), "beta".into()]),
-        ("b".into(), ["gamma".into(), "delta".into()]),
-    ]));
-    TestAssertions::assert_atomic_allocations(|| {
-        let binding = match allocation_codec(TestOpeo::outcome(|out| {
-            TypedSchema::<Root<HashMap<String, [String; 2]>>>::bind(
-                &schema,
-                BindOptions::default(),
-                out,
-            )
-        }))? {
-            Some(binding) => binding,
-            None => return Ok(()),
-        };
-        let session =
-            match TestOpeo::outcome(|out| SessionBudget::codec(WriteOptions::default(), out)) {
-                TestOpeoOutcome::Value(session) => session,
-                TestOpeoOutcome::Error(BudgetError::Allocation) => return Ok(()),
-                TestOpeoOutcome::Error(error) => {
-                    return Err(TestFailure::new(format!(
-                        "failed to initialize allocation-test budget: {error:?}"
-                    )));
-                }
+fn binding_tree_and_ordered_map_allocations_are_recoverable_and_leak_free() -> TestResult {
+    #[cfg(feature = "std")]
+    {
+        let schema =
+            BindingTestSupport::compile("entry struct Root { value: map<string, [string; 2]> }")?;
+        let value = Root::new(HashMap::from([
+            ("a".into(), ["alpha".into(), "beta".into()]),
+            ("b".into(), ["gamma".into(), "delta".into()]),
+        ]));
+        TestAssertions::assert_atomic_allocations(|| {
+            let binding = match allocation_codec(TestOpeo::outcome(|out| {
+                TypedSchema::<Root<HashMap<String, [String; 2]>>>::bind(
+                    &schema,
+                    BindOptions::default(),
+                    out,
+                )
+            }))? {
+                Some(binding) => binding,
+                None => return Ok(()),
             };
-        let converted = match allocation_codec(TestOpeo::outcome(|out| {
-            Conversion::encode(&binding, &value, &session, ConversionLimits::default(), out)
-        }))? {
-            Some(converted) => converted,
-            None => return Ok(()),
-        };
-        let decoded = match allocation_codec(TestOpeo::outcome(|out| {
-            Conversion::decode(
-                &binding,
-                converted.value(),
-                &session,
-                ConversionLimits::default(),
-                out,
-            )
-        }))? {
-            Some(decoded) => decoded,
-            None => return Ok(()),
-        };
-        if decoded != value {
-            return Err(TestFailure::new(
-                "round-trip conversion result differs from the input value",
-            ));
-        }
-        Ok(())
-    })?;
+            let session =
+                match TestOpeo::outcome(|out| SessionBudget::codec(WriteOptions::default(), out)) {
+                    TestOpeoOutcome::Value(session) => session,
+                    TestOpeoOutcome::Error(BudgetError::Allocation) => return Ok(()),
+                    TestOpeoOutcome::Error(error) => {
+                        return Err(TestFailure::new(format!(
+                            "failed to initialize allocation-test budget: {error:?}"
+                        )));
+                    }
+                };
+            let converted = match allocation_codec(TestOpeo::outcome(|out| {
+                Conversion::encode(&binding, &value, &session, ConversionLimits::default(), out)
+            }))? {
+                Some(converted) => converted,
+                None => return Ok(()),
+            };
+            let decoded = match allocation_codec(TestOpeo::outcome(|out| {
+                Conversion::decode(
+                    &binding,
+                    converted.value(),
+                    &session,
+                    ConversionLimits::default(),
+                    out,
+                )
+            }))? {
+                Some(decoded) => decoded,
+                None => return Ok(()),
+            };
+            if decoded != value {
+                return Err(TestFailure::new(
+                    "round-trip conversion result differs from the input value",
+                ));
+            }
+            Ok(())
+        })?;
+    }
 
     let ordered_schema =
         BindingTestSupport::compile("entry struct Root { value: map<string, u8> }")?;

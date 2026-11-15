@@ -496,6 +496,17 @@ impl Fault {
         }
     }
 
+    pub(crate) fn capture<T>(&self, result: Result<T, Error>) -> Result<T, Error> {
+        match (self.payload.get(), result) {
+            (Some(payload), _) => Err(Error { payload }),
+            (None, Ok(value)) => Ok(value),
+            (None, Err(error)) => {
+                self.record(error.payload());
+                Err(error)
+            }
+        }
+    }
+
     pub(crate) fn unsupported<T>(&self) -> Result<T, Error> {
         self.run(|out| Err(out.fail(Error::unsupported())))
     }
@@ -536,7 +547,7 @@ impl Fault {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
     use super::{CopyError, Error, Translator};
     use core::error::Error as StdError;
