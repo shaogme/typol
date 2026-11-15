@@ -4,11 +4,10 @@ use crate::{
     input::Input,
     token::{Token, TokenKind},
 };
-use alloc::borrow::Cow;
 use opeo::{OResult, Out};
 use typol_core::{
-    ChargedString, Diagnostic, DiagnosticCode, ExecutionBudget, LocatedSpan, SourceLocation,
-    SourceSpan, Span, SpanLocation, diagnostic_context,
+    ChargedString, Diagnostic, DiagnosticCode, ExecutionBudget, LocatedSpan, ResourceLimit,
+    SourceLocation, SourceSpan, Span, SpanLocation, diagnostic_context,
 };
 use typol_i18n::{Translator, t};
 use u18n::RenderError;
@@ -372,7 +371,9 @@ impl BlockStringDecoder {
             .checked_add(character.len_utf8())
             .is_none_or(|next| next > context.stream.max_token_bytes())
         {
-            return Err(out.reborrow().fail(context.input.resource_failure()));
+            return Err(out
+                .reborrow()
+                .fail(context.input.resource_failure(ResourceLimit::TokenBytes)));
         }
         context.input.advance(out.reborrow())
     }
@@ -390,7 +391,9 @@ impl BlockStringDecoder {
                 .checked_add(character.len_utf8())
                 .is_none_or(|next| next > context.limits.max_string_bytes())
         {
-            return Err(out.reborrow().fail(context.input.resource_failure()));
+            return Err(out
+                .reborrow()
+                .fail(context.input.resource_failure(ResourceLimit::StringBytes)));
         }
         SyntaxDiagnostic::budgeted_with(
             out,
@@ -402,7 +405,7 @@ impl BlockStringDecoder {
     fn diagnostic<'slot>(
         context: &BlockStringContext<'_, '_>,
         start: LocatedSpan,
-        message: Result<Cow<'static, str>, RenderError>,
+        message: Result<&'static str, RenderError>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Diagnostic> {
         let span = context.input.span_from(start, out.reborrow())?;
@@ -412,7 +415,7 @@ impl BlockStringDecoder {
     fn diagnostic_for_raw<'slot>(
         context: &BlockStringContext<'_, '_>,
         position: BlockStringSourcePosition<'_>,
-        message: Result<Cow<'static, str>, RenderError>,
+        message: Result<&'static str, RenderError>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Diagnostic> {
         let span = Self::source_span(context, position, out.reborrow())?;
@@ -440,7 +443,13 @@ impl BlockStringDecoder {
                 ))));
         };
         let Some(end) = offset.checked_add(length) else {
-            return Err(out.reborrow().fail(context.input.resource_failure()));
+            return Err(out
+                .reborrow()
+                .fail(context.input.internal_failure(diagnostic_context!(
+                    "typol-syntax",
+                    "block-string",
+                    "issue-span-end-overflow"
+                ))));
         };
         let Some(issue) = raw.get(offset..end) else {
             return Err(out
@@ -489,10 +498,22 @@ impl BlockStringDecoder {
         }
         let end_location = Self::location(context, location.line, location.column, out.reborrow())?;
         let Some(start_offset) = body_start.span().start().checked_add(offset) else {
-            return Err(out.reborrow().fail(context.input.resource_failure()));
+            return Err(out
+                .reborrow()
+                .fail(context.input.internal_failure(diagnostic_context!(
+                    "typol-syntax",
+                    "block-string",
+                    "body-start-offset-overflow"
+                ))));
         };
         let Some(end_offset) = start_offset.checked_add(length) else {
-            return Err(out.reborrow().fail(context.input.resource_failure()));
+            return Err(out
+                .reborrow()
+                .fail(context.input.internal_failure(diagnostic_context!(
+                    "typol-syntax",
+                    "block-string",
+                    "body-end-offset-overflow"
+                ))));
         };
         let start = LocatedSpan::new(
             SourceSpan::new(body_start.source_id(), Span::point(start_offset)),
@@ -529,13 +550,17 @@ impl BlockStringDecoder {
     ) -> OResult<'slot, ()> {
         if character == '\n' {
             let Some(next_line) = location.line.checked_add(1) else {
-                return Err(out.reborrow().fail(context.input.resource_failure()));
+                return Err(out.reborrow().fail(context.input.internal_failure(
+                    diagnostic_context!("typol-syntax", "block-string", "line-number-overflow"),
+                )));
             };
             location.line = next_line;
             location.column = 1;
         } else if character != '\r' || next != Some('\n') {
             let Some(next_column) = location.column.checked_add(1) else {
-                return Err(out.reborrow().fail(context.input.resource_failure()));
+                return Err(out.reborrow().fail(context.input.internal_failure(
+                    diagnostic_context!("typol-syntax", "block-string", "column-number-overflow"),
+                )));
             };
             location.column = next_column;
         }
@@ -562,7 +587,7 @@ impl BlockStringDecoder {
     fn diagnostic_at<'slot>(
         context: &BlockStringContext<'_, '_>,
         span: LocatedSpan,
-        message: Result<Cow<'static, str>, RenderError>,
+        message: Result<&'static str, RenderError>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Diagnostic> {
         let mut diagnostic = SyntaxDiagnostic::make(

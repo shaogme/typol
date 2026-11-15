@@ -21,7 +21,10 @@ use crate::{
 use opeo::{OResult, Out};
 use std::{any::TypeId, cmp::Ordering, mem::size_of};
 use typol_config::{ConfigLimits, ConfigValidationOptions};
-use typol_core::{BudgetError, DiagnosticContext, ExecutionLimits, diagnostic_context};
+use typol_core::{
+    BudgetError, DiagnosticCode, DiagnosticContext, ExecutionLimits, ResourceLimit,
+    diagnostic_context,
+};
 use typol_i18n::{Language, Translator};
 use typol_model::BuiltinType;
 use typol_policy::{ExcerptLimits, RegexOptions};
@@ -140,7 +143,7 @@ fn defaults_are_finite_and_zero_options_are_preserved() -> TestResult {
                 out,
             )
         })?,
-        BudgetError::Resource
+        BudgetError::ResourceLimit(ResourceLimit::WorkspaceBytes)
     );
     Ok(())
 }
@@ -158,21 +161,30 @@ fn descriptor_node_depth_name_and_length_boundaries_are_checked() -> TestResult 
         }
     ));
     assert_eq!(TestOpeo::value(|out| ctx.name("four", out))?.text(), "four");
-    assert_code(TestOpeo::error(|out| scalar(&mut ctx, 0, out))?, 1)?;
+    assert_code(
+        TestOpeo::error(|out| scalar(&mut ctx, 0, out))?,
+        DiagnosticCode::TYPE_BINDING_NODES_LIMIT_EXCEEDED.get(),
+    )?;
     let other_session = session()?;
     let ctx = context(BindingLimits::new(1, 0, 0, 4).test_value()?, &other_session)?;
-    assert_code(TestOpeo::error(|out| ctx.name("fives", out))?, 1)?;
-    assert!(ctx.session().execution().exhausted());
+    assert_code(
+        TestOpeo::error(|out| ctx.name("fives", out))?,
+        DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED.get(),
+    )?;
+    assert!(!ctx.session().execution().exhausted());
     let other_session = session()?;
     let mut ctx = context(BindingLimits::new(1, 0, 0, 4).test_value()?, &other_session)?;
     assert_code(
         TestOpeo::error(|out| provider().resolve(&mut ctx, 1, out))?,
-        1,
+        DiagnosticCode::TYPE_BINDING_DEPTH_LIMIT_EXCEEDED.get(),
     )?;
     let other_session = session()?;
     let mut ctx = context(BindingLimits::new(0, 0, 0, 0).test_value()?, &other_session)?;
     assert_eq!(TestOpeo::value(|out| ctx.name("", out))?.text(), "");
-    assert_code(TestOpeo::error(|out| scalar(&mut ctx, 0, out))?, 1)?;
+    assert_code(
+        TestOpeo::error(|out| scalar(&mut ctx, 0, out))?,
+        DiagnosticCode::TYPE_BINDING_NODES_LIMIT_EXCEEDED.get(),
+    )?;
     assert_eq!(
         TestOpeo::value(|out| {
             DescribeContext::array_length(
@@ -205,7 +217,7 @@ fn descriptor_members_preserve_slots_owner_and_workspace_limits() -> TestResult 
     assert_eq!(members.as_slice(), &[descriptor, descriptor]);
     assert_code(
         TestOpeo::error(|out| second.members(&[descriptor], out))?,
-        9,
+        DiagnosticCode::TYPE_BINDING_INVARIANT_FAILURE.get(),
     )?;
     let session = TestOpeo::value(|out| {
         SessionBudget::new(
@@ -221,7 +233,7 @@ fn descriptor_members_preserve_slots_owner_and_workspace_limits() -> TestResult 
     let descriptor = TestOpeo::value(|out| scalar(&mut limited, 0, out))?;
     assert_code(
         TestOpeo::error(|out| limited.members(&[descriptor; 128], out))?,
-        1,
+        DiagnosticCode::WORKSPACE_BYTES_LIMIT_EXCEEDED.get(),
     )?;
     Ok(())
 }
@@ -267,7 +279,10 @@ fn descriptor_providers_are_lazy_and_preserve_actual_type_identity() -> TestResu
         })?;
     }
     let wrong = DescriptorProvider::new::<u16>(scalar);
-    assert_code(TestOpeo::error(|out| wrong.resolve(&mut ctx, 0, out))?, 9)?;
+    assert_code(
+        TestOpeo::error(|out| wrong.resolve(&mut ctx, 0, out))?,
+        DiagnosticCode::TYPE_BINDING_INVARIANT_FAILURE.get(),
+    )?;
     Ok(())
 }
 
@@ -278,7 +293,10 @@ fn arena_handles_and_member_storage_cannot_cross_contexts() -> TestResult {
     let second_session = session()?;
     let mut second = context(BindingLimits::default(), &second_session)?;
     let descriptor = TestOpeo::value(|out| scalar(&mut first, 0, out))?;
-    assert_code(TestOpeo::error(|out| second.get(descriptor, out))?, 9)?;
+    assert_code(
+        TestOpeo::error(|out| second.get(descriptor, out))?,
+        DiagnosticCode::TYPE_BINDING_INVARIANT_FAILURE.get(),
+    )?;
     let name = TestOpeo::value(|out| first.name("field", out))?;
     assert_code(
         TestOpeo::error(|out| {
@@ -291,7 +309,7 @@ fn arena_handles_and_member_storage_cannot_cross_contexts() -> TestResult {
                 out,
             )
         })?,
-        9,
+        DiagnosticCode::TYPE_BINDING_INVARIANT_FAILURE.get(),
     )?;
     let name = TestOpeo::value(|out| second.name("field", out))?;
     let field = TestOpeo::value(|out| {
@@ -339,7 +357,7 @@ fn arena_handles_and_member_storage_cannot_cross_contexts() -> TestResult {
                 out,
             )
         })?,
-        9,
+        DiagnosticCode::TYPE_BINDING_INVARIANT_FAILURE.get(),
     )?;
     for shape in [
         VariantShape::Unit,
@@ -384,7 +402,7 @@ fn shared_session_counts_text_reads_writes_and_output_without_resetting() -> Tes
     assert_eq!(shared.constructed_text_bytes(), 4);
     assert_eq!(
         budget_error(|out| shared.consume(1, out))?,
-        BudgetError::Resource
+        BudgetError::ResourceLimit(ResourceLimit::ExecutionSteps)
     );
     let mut call = session_with_limits(ExecutionLimits::new(20, 4096), 2, 2)?;
     codec_value(|out| call.output_codec(2, out))?;
@@ -396,7 +414,7 @@ fn shared_session_counts_text_reads_writes_and_output_without_resetting() -> Tes
     drop(budget_value(|out| call.copy_text("ab", out))?);
     assert_eq!(
         budget_error(|out| call.copy_text("c", out))?,
-        BudgetError::Resource
+        BudgetError::ResourceLimit(ResourceLimit::ConfigTextBytes)
     );
     let mut call = session_with_limits(ExecutionLimits::new(0, 4096), 0, 0)?;
     codec_value(|out| call.output_codec(0, out))?;
@@ -450,7 +468,7 @@ fn workspace_capacity_releases_only_when_storage_is_dropped() -> TestResult {
     budget_value(|out| values.try_push(7, out))?;
     assert_eq!(
         budget_error(|out| values.try_reserve_exact(1, out))?,
-        BudgetError::Resource
+        BudgetError::ResourceLimit(ResourceLimit::WorkspaceBytes)
     );
     assert_eq!(values.as_slice(), [7]);
     Ok(())
@@ -461,7 +479,10 @@ fn conversion_children_share_node_counts_and_restore_parent_depth_on_failure() -
     let call = session()?;
     let mut nodes = ConversionContext::counters(ConversionLimits::new(0, 0).test_value()?);
     let mut ctx = ConversionContext::new(&call, &mut nodes);
-    assert_code(codec_error(|out| ctx.node(out))?, 1)?;
+    assert_code(
+        codec_error(|out| ctx.node(out))?,
+        DiagnosticCode::TYPE_BINDING_NODES_LIMIT_EXCEEDED.get(),
+    )?;
     let call = session()?;
     let mut nodes = ConversionContext::counters(ConversionLimits::new(1, 0).test_value()?);
     let mut ctx = ConversionContext::new(&call, &mut nodes);
@@ -476,7 +497,7 @@ fn conversion_children_share_node_counts_and_restore_parent_depth_on_failure() -
                 out,
             )
         })?,
-        1,
+        DiagnosticCode::TYPE_BINDING_DEPTH_LIMIT_EXCEEDED.get(),
     )?;
     let call = session()?;
     let mut nodes = ConversionContext::counters(ConversionLimits::new(3, 1).test_value()?);
@@ -491,7 +512,7 @@ fn conversion_children_share_node_counts_and_restore_parent_depth_on_failure() -
                 out,
             )
         })?,
-        1,
+        DiagnosticCode::TYPE_BINDING_DEPTH_LIMIT_EXCEEDED.get(),
     )?;
     let call = session()?;
     let mut nodes = NodeBudget::new(3, 1);
@@ -515,7 +536,10 @@ fn conversion_children_share_node_counts_and_restore_parent_depth_on_failure() -
         15,
     )?;
     codec_value(|out| ctx.node(out))?;
-    assert_code(codec_error(|out| ctx.node(out))?, 1)?;
+    assert_code(
+        codec_error(|out| ctx.node(out))?,
+        DiagnosticCode::TYPE_BINDING_NODES_LIMIT_EXCEEDED.get(),
+    )?;
     assert_eq!(nodes.nodes(), 3);
     Ok(())
 }
@@ -568,7 +592,7 @@ fn diagnostic_limits_preserve_nonempty_terminal_and_real_failure_codes() -> Test
         assert_code(errors, 5)?;
     }
     for failure in [
-        Failure::Resource,
+        Failure::ResourceLimit(ResourceLimit::ExecutionSteps),
         Failure::Allocation,
         Failure::internal(TEST_INTERNAL_CONTEXT),
     ] {
@@ -581,7 +605,7 @@ fn diagnostic_limits_preserve_nonempty_terminal_and_real_failure_codes() -> Test
     let call = session()?;
     assert_code(
         budget_value(|out| ErrorBuffer::new(CodecStage::Binding, 0, &call, out))?.finish(),
-        9,
+        DiagnosticCode::DIAGNOSTIC_COLLECTION_INVARIANT_FAILURE.get(),
     )?;
     let options = ConfigValidationOptions::new(
         ExcerptLimits::default(),
@@ -603,6 +627,9 @@ fn diagnostic_limits_preserve_nonempty_terminal_and_real_failure_codes() -> Test
     })?;
     let mut buffer = budget_value(|out| ErrorBuffer::new(CodecStage::Encoding, 2, &call, out))?;
     assert!(!buffer.push(Failure::Encoding));
-    assert_code(buffer.finish(), 1)?;
+    assert_code(
+        buffer.finish(),
+        DiagnosticCode::CONFIG_TEXT_BYTES_LIMIT_EXCEEDED.get(),
+    )?;
     Ok(())
 }

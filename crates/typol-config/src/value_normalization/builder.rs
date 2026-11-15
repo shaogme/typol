@@ -20,16 +20,17 @@ impl NormalizeBuilder {
         if children.len() != plan.children.len() {
             return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         }
-        let source = if plan.input.schema_default {
-            ValueSource::SchemaDefault
-        } else {
-            ValueSource::RustValue
-        };
+        let source = Self::source(state, &plan);
         let environment = plan
             .input
-            .value
-            .and_then(|value| value.environment_reference())
-            .map(|reference| (reference.name(), reference.fallback().copied()));
+            .environment_root
+            .then(|| {
+                plan.input
+                    .value
+                    .and_then(|value| value.environment_reference())
+                    .map(|reference| (reference.name(), reference.fallback().copied()))
+            })
+            .flatten();
         let value = match plan.kind {
             PlanKind::MissingOptional | PlanKind::OptionalNone => {
                 Self::finish_none(state, plan, source, out.reborrow())?
@@ -91,13 +92,11 @@ impl NormalizeBuilder {
         let Some(value) = plan.input.value else {
             return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         };
-        let source = if plan.input.schema_default {
-            ValueSource::SchemaDefault
-        } else {
-            ValueSource::RustValue
-        };
+        let source = Self::source(state, &plan);
         let budget = Some(state.budget);
-        if let ValueKind::String(text) = value.as_ref() {
+        if let ValueKind::String(text) = value.as_ref()
+            && (!state.request.existing_nodes_precounted || plan.input.schema_default)
+        {
             NormalizePlanner::text(state, text, out.reborrow())?;
         }
         NormalizeOps::value_call(
@@ -105,6 +104,25 @@ impl NormalizeBuilder {
             |value_out| ValueFactory::scalar(value, source, budget, value_out),
             out,
         )
+    }
+
+    fn source(state: &NormalizeState<'_, '_>, plan: &Plan<'_>) -> ValueSource {
+        if plan.input.schema_default {
+            ValueSource::SchemaDefault
+        } else if state.request.existing_nodes_precounted {
+            let source = plan
+                .input
+                .value
+                .map(|value| value.source())
+                .unwrap_or(state.request.missing_value_source);
+            if source == ValueSource::EnvironmentVariable {
+                ValueSource::RustValue
+            } else {
+                source
+            }
+        } else {
+            ValueSource::RustValue
+        }
     }
 
     fn finish_optional<'slot>(
@@ -228,7 +246,9 @@ impl NormalizeBuilder {
         if !plan.children.is_empty() {
             return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         }
-        NormalizePlanner::text(state, variant, out.reborrow())?;
+        if !state.request.existing_nodes_precounted || plan.input.schema_default {
+            NormalizePlanner::text(state, variant, out.reborrow())?;
+        }
         NormalizeOps::value_call(
             &mut state.errors.value,
             |value_out| {
@@ -254,7 +274,9 @@ impl NormalizeBuilder {
         let PlanKind::EnumSingle(variant) = plan.kind else {
             return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         };
-        NormalizePlanner::text(state, variant, out.reborrow())?;
+        if !state.request.existing_nodes_precounted || plan.input.schema_default {
+            NormalizePlanner::text(state, variant, out.reborrow())?;
+        }
         if !matches!(plan.children.first().map(|child| child.role), Some(ChildRole::EnumPayload(name)) if name == variant)
         {
             return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
@@ -282,7 +304,9 @@ impl NormalizeBuilder {
         let PlanKind::EnumStructure(variant) = plan.kind else {
             return Err(out.fail(NormalizeOps::invariant_error(state.request.translator)));
         };
-        NormalizePlanner::text(state, variant, out.reborrow())?;
+        if !state.request.existing_nodes_precounted || plan.input.schema_default {
+            NormalizePlanner::text(state, variant, out.reborrow())?;
+        }
         let fields = Self::finish_fields(
             state,
             &plan.children,
@@ -339,7 +363,9 @@ impl NormalizeBuilder {
                 |schema_out| field.name(schema_out),
                 out.reborrow(),
             )?;
-            NormalizePlanner::text(state, name, out.reborrow())?;
+            if !state.request.existing_nodes_precounted || child.input.schema_default {
+                NormalizePlanner::text(state, name, out.reborrow())?;
+            }
             let value = NormalizeOps::budget_call(
                 &mut state.errors.budget,
                 |budget_out| FieldValue::try_new(name, value, Some(state.budget), budget_out),

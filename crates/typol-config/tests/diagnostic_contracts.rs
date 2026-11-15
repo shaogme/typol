@@ -1,18 +1,18 @@
-use typol_i18n::{Language, Translator};
-use typol_test_support::ConfigTestSupport as Support;
-
 use typol_config::{
-    ConfigDiagnosticRedactor, ConfigLimits, ConfigParseOptions, ConfigParseRequest, Environment,
-    EnvironmentError, EnvironmentReadContext,
+    ConfigDiagnosticRedactor, ConfigLimits, ConfigParseOptions, ConfigParseRequest, ConfigParser,
+    Environment, EnvironmentError, EnvironmentReadContext,
     opeo::{OResult, Out},
 };
 use typol_core::{
     BudgetError, Diagnostic, DiagnosticCode, DiagnosticParameterValue, ExcerptLimits,
-    ExecutionBudget, ExecutionLimits, InstancePath, Read, SliceSource, SourceSpan, ValueKind,
-    ValueSource, ValueView,
+    ExecutionBudget, ExecutionLimits, InstancePath, Read, ResourceLimit, SliceSource, SourceSpan,
+    ValueKind, ValueSource, ValueView,
 };
+use typol_i18n::{Language, Translator};
 use typol_policy::{RegexExecutionLimits, RegexOptions};
-use typol_schema::{SchemaCompileOptions, SchemaSource};
+use typol_schema::{
+    SchemaCompileOptions, SchemaCompiler, SchemaResolver, SchemaSource, SourceObserver,
+};
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
 
@@ -95,12 +95,22 @@ impl Environment for Provider {
 }
 
 fn compile(text: &str) -> TestResult<CompiledSchema> {
-    Support::compile_schema(
-        SchemaCompileOptions::default(),
-        SchemaSource::from_str(b"contracts", text),
-        None,
-        None,
-    )
+    TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::default();
+        let source = SchemaSource::from_str(b"contracts", text);
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()
 }
 
@@ -169,7 +179,10 @@ fn fixed_array_mismatch_uses_localized_sink_and_keeps_structured_parameters() ->
             "array-mismatch",
             ConfigParseOptions::default().with_translator(Translator::new(language)),
         );
-        let errors = Support::parse(&schema, request, &mut provider).test_error()?;
+        let errors =
+            TestOpeo::outcome(|out| ConfigParser::new(&schema).parse(request, &mut provider, out))
+                .map(|value| value.into_config_value())
+                .test_error()?;
         let diagnostic = TestCheck::item(errors.diagnostics(), 0)?;
         let parameters = diagnostic.parameters();
         let expected_parameter = parameters.first().test_value()?;
@@ -194,6 +207,31 @@ fn fixed_array_mismatch_uses_localized_sink_and_keeps_structured_parameters() ->
 }
 
 #[test]
+fn fixed_array_mismatch_hides_secret_lengths_and_parameters() -> TestResult<()> {
+    let schema = compile("entry struct Root { values: [u8; 2] @secret }")?;
+    let mut provider = Provider {
+        bytes: None,
+        names: vec![],
+    };
+    let mut source = SliceSource::new(b"{values: [1]}");
+    let request: ConfigParseRequest<'_, dyn Read> = ConfigParseRequest::new(
+        &mut source,
+        "secret-array-mismatch",
+        ConfigParseOptions::default().with_translator(Translator::new(Language::English)),
+    );
+    let errors =
+        TestOpeo::outcome(|out| ConfigParser::new(&schema).parse(request, &mut provider, out))
+            .map(|value| value.into_config_value())
+            .test_error()?;
+    let diagnostic = TestCheck::item(errors.diagnostics(), 0)?;
+
+    test_eq!(diagnostic.message(), Ok("value is hidden"))?;
+    test_assert!(diagnostic.parameters().is_empty())?;
+
+    Ok(())
+}
+
+#[test]
 fn config_regex_diagnostic_hides_secret_map_key() -> TestResult<()> {
     let schema = compile(
         r#"type Item = string @regex("x");
@@ -206,14 +244,20 @@ fn config_regex_diagnostic_hides_secret_map_key() -> TestResult<()> {
         bytes: None,
         names: vec![],
     };
-    let errors = Support::parse(
-        &schema,
-        config_request((&mut SliceSource::new((text).as_bytes()), "probe"), &limits),
-        &mut provider,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            config_request((&mut SliceSource::new((text).as_bytes()), "probe"), &limits),
+            &mut provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     let safe = TestCheck::item(errors.diagnostics(), 0)?;
-    test_eq!(safe.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)?;
+    test_eq!(
+        safe.code(),
+        DiagnosticCode::REGEX_SEARCH_STEPS_LIMIT_EXCEEDED
+    )?;
     test_eq!(safe.kind().id(), "typol.validation.regex_execution_failed")?;
     test_eq!(safe.message().test_value()?, "value is hidden")?;
     test_eq!(safe.path().test_value()?.len(), 1)?;
@@ -259,7 +303,7 @@ fn conversion_redaction_clears_unresolved_paths_and_fails_closed_on_budget() -> 
         }
         Err(error) => error,
     };
-    test_eq!(safe.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)?;
+    test_eq!(safe.code(), DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED)?;
     test_assert!(safe.path().is_none())?;
     Ok(())
 }
@@ -333,14 +377,17 @@ fn fallback_errors_point_to_literal_before_provider_read() -> TestResult<()> {
                 bytes,
                 names: vec![],
             };
-            let errors = Support::parse(
-                &schema,
-                config_request(
-                    (&mut SliceSource::new(text.as_bytes()), "fallback"),
-                    &ExcerptLimits::default(),
-                ),
-                &mut provider,
-            )
+            let errors = TestOpeo::outcome(|out| {
+                ConfigParser::new(&schema).parse(
+                    config_request(
+                        (&mut SliceSource::new(text.as_bytes()), "fallback"),
+                        &ExcerptLimits::default(),
+                    ),
+                    &mut provider,
+                    out,
+                )
+            })
+            .map(|value| value.into_config_value())
             .test_error()?;
             test_eq!(errors.diagnostics().len(), 1)?;
             let diagnostic = TestCheck::item(errors.diagnostics(), 0)?;
@@ -375,11 +422,14 @@ fn environment_bytes_preserve_per_name_limit_and_cache_reuse() -> TestResult<()>
         bytes: Some(vec![b'x'; 64]),
         names: vec![],
     };
-    let value = Support::parse(
-        &schema,
-        config_request((&mut SliceSource::new((text).as_bytes()), "bytes"), &limits),
-        &mut provider,
-    )
+    let value = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            config_request((&mut SliceSource::new((text).as_bytes()), "bytes"), &limits),
+            &mut provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_value()?;
     test_eq!(provider.names, ["A", "B", "C"])?;
     let mut constructed_bytes = 0;
@@ -394,15 +444,18 @@ fn environment_bytes_preserve_per_name_limit_and_cache_reuse() -> TestResult<()>
 
     provider.bytes = Some(vec![b'x'; 65]);
     provider.names.clear();
-    let errors = Support::parse(
-        &schema,
-        config_request((&mut SliceSource::new((text).as_bytes()), "bytes"), &limits),
-        &mut provider,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            config_request((&mut SliceSource::new((text).as_bytes()), "bytes"), &limits),
+            &mut provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_eq!(
         TestCheck::item(errors.diagnostics(), 0)?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED
     )?;
     test_eq!(provider.names, ["A"])?;
 
@@ -421,54 +474,63 @@ fn single_regex_limit_is_independent_of_shared_budget() -> TestResult<()> {
     let minimum = (0..128)
         .find(|steps| {
             limits = limits.with_execution(limits.execution().with_max_search_steps(*steps));
-            Support::parse(
-                &schema,
-                config_request(
-                    (
-                        &mut SliceSource::new((r#"{values: ["x"]}"#).as_bytes()),
-                        "one",
+            TestOpeo::outcome(|out| {
+                ConfigParser::new(&schema).parse(
+                    config_request(
+                        (
+                            &mut SliceSource::new((r#"{values: ["x"]}"#).as_bytes()),
+                            "one",
+                        ),
+                        &limits,
                     ),
-                    &limits,
-                ),
-                &mut provider,
-            )
+                    &mut provider,
+                    out,
+                )
+            })
+            .map(|value| value.into_config_value())
             .is_ok()
         })
         .test_expect("simple mode should finish within a bounded number of steps")?;
     test_assert!(minimum > 0)?;
     limits = limits.with_execution(limits.execution().with_max_search_steps(minimum));
-    let value = Support::parse(
-        &schema,
-        config_request(
-            (
-                &mut SliceSource::new((r#"{values: ["x", "x", "x", "x"]}"#).as_bytes()),
-                "many",
+    let value = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            config_request(
+                (
+                    &mut SliceSource::new((r#"{values: ["x", "x", "x", "x"]}"#).as_bytes()),
+                    "many",
+                ),
+                &limits,
             ),
-            &limits,
-        ),
-        &mut provider,
-    )
+            &mut provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_value()?;
     let ValueKind::Array(items) = field(&value, "values")?.as_ref() else {
         return Err(TestFailure::new("values field should be an array"));
     };
     test_eq!(items.len(), 4)?;
     limits = limits.with_execution(limits.execution().with_max_search_steps(minimum - 1));
-    let errors = Support::parse(
-        &schema,
-        config_request(
-            (
-                &mut SliceSource::new((r#"{values: ["x"]}"#).as_bytes()),
-                "one",
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            config_request(
+                (
+                    &mut SliceSource::new((r#"{values: ["x"]}"#).as_bytes()),
+                    "one",
+                ),
+                &limits,
             ),
-            &limits,
-        ),
-        &mut provider,
-    )
+            &mut provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_eq!(
         TestCheck::item(errors.diagnostics(), 0)?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::REGEX_SEARCH_STEPS_LIMIT_EXCEEDED
     )?;
     test_assert!(provider.names.is_empty())?;
 
@@ -483,25 +545,27 @@ fn maximum_diagnostic_limit_accepts_valid_empty_config() -> TestResult<()> {
         names: vec![],
     };
     test_assert!(
-        Support::parse(
-            &schema,
+        TestOpeo::outcome(|out| ConfigParser::new(&schema).parse(
             config_request(
                 (&mut SliceSource::new(("{}").as_bytes()), "valid"),
                 &ExcerptLimits::default()
             ),
-            &mut provider
-        )
+            &mut provider,
+            out
+        ))
+        .map(|value| value.into_config_value())
         .is_ok()
     )?;
     for budget in [0, 1, usize::MAX] {
         let mut limits = ConfigLimits::default();
         limits = limits.with_max_diagnostics(budget);
         test_assert!(
-            Support::parse(
-                &schema,
+            TestOpeo::outcome(|out| ConfigParser::new(&schema).parse(
                 config_request((&mut SliceSource::new(("{}").as_bytes()), "valid"), &limits),
-                &mut provider
-            )
+                &mut provider,
+                out
+            ))
+            .map(|value| value.into_config_value())
             .is_ok()
         )?;
     }
@@ -521,14 +585,17 @@ fn assertion_diagnostics_follow_source_order_and_keep_terminal_slot_last() -> Te
         bytes: None,
         names: vec![],
     };
-    let errors = Support::parse(
-        &schema,
-        config_request(
-            (&mut SliceSource::new(text.as_bytes()), "order"),
-            &ConfigLimits::default(),
-        ),
-        &mut provider,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            config_request(
+                (&mut SliceSource::new(text.as_bytes()), "order"),
+                &ConfigLimits::default(),
+            ),
+            &mut provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     let first_start = TestCheck::item(errors.diagnostics(), 0)?
         .primary()
@@ -545,11 +612,14 @@ fn assertion_diagnostics_follow_source_order_and_keep_terminal_slot_last() -> Te
     test_assert!(second_start > text.find("first").test_value()?)?;
 
     let limited = ConfigLimits::default().with_max_diagnostics(2);
-    let errors = Support::parse(
-        &schema,
-        config_request((&mut SliceSource::new(text.as_bytes()), "order"), &limited),
-        &mut provider,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            config_request((&mut SliceSource::new(text.as_bytes()), "order"), &limited),
+            &mut provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_eq!(errors.diagnostics().len(), 2)?;
     test_eq!(
@@ -571,14 +641,17 @@ fn inherited_option_rules_keep_identity_order_and_each_instance_runs_once() -> T
         bytes: None,
         names: vec![],
     };
-    let errors = Support::parse(
-        &schema,
-        config_request(
-            (&mut SliceSource::new((text).as_bytes()), "rules"),
-            &ExcerptLimits::default(),
-        ),
-        &mut provider,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            config_request(
+                (&mut SliceSource::new((text).as_bytes()), "rules"),
+                &ExcerptLimits::default(),
+            ),
+            &mut provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_eq!(errors.diagnostics().len(), 6)?;
     for (diagnostics, name) in errors
@@ -626,8 +699,8 @@ fn terminal_resource_and_allocation_causes_take_priority_over_summary() -> TestR
     for budget in [0, 1, 2, 3] {
         for (error, code) in [
             (
-                EnvironmentError::ResourceLimitExceeded,
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                EnvironmentError::ResourceLimit(ResourceLimit::EnvironmentBytes),
+                DiagnosticCode::ENVIRONMENT_BYTES_LIMIT_EXCEEDED,
             ),
             (
                 EnvironmentError::AllocationFailed,
@@ -642,21 +715,24 @@ fn terminal_resource_and_allocation_causes_take_priority_over_summary() -> TestR
             } else {
                 r#"{a: env("A"), b: env("B")}"#
             };
-            let errors = Support::parse(
-                &schema,
-                config_request(
-                    (&mut SliceSource::new((text).as_bytes()), "terminal"),
-                    &limits,
-                ),
-                &mut provider,
-            )
+            let errors = TestOpeo::outcome(|out| {
+                ConfigParser::new(&schema).parse(
+                    config_request(
+                        (&mut SliceSource::new((text).as_bytes()), "terminal"),
+                        &limits,
+                    ),
+                    &mut provider,
+                    out,
+                )
+            })
+            .map(|value| value.into_config_value())
             .test_error()?;
             test_eq!(provider.calls, 1)?;
             test_assert!(!errors.diagnostics().is_empty())?;
             test_assert!(errors.diagnostics().len() <= budget.max(1))?;
             test_eq!(errors.diagnostics().last().test_value()?.code(), code)?;
             test_assert!(errors.diagnostics().iter().all(|diagnostic| diagnostic.code() != DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED))?;
-            if budget > 1 && code == DiagnosticCode::RESOURCE_LIMIT_EXCEEDED {
+            if budget > 1 && code == DiagnosticCode::ENVIRONMENT_BYTES_LIMIT_EXCEEDED {
                 test_eq!(errors.diagnostics().len(), 2)?;
                 test_eq!(
                     TestCheck::item(errors.diagnostics(), 0)?.code(),
@@ -676,14 +752,17 @@ fn schema_label_locations_survive_schema_drop() -> TestResult<()> {
         bytes: None,
         names: vec![],
     };
-    let errors = Support::parse(
-        &schema,
-        config_request(
-            (&mut SliceSource::new(("{value: 1}").as_bytes()), "location"),
-            &ExcerptLimits::default(),
-        ),
-        &mut provider,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            config_request(
+                (&mut SliceSource::new(("{value: 1}").as_bytes()), "location"),
+                &ExcerptLimits::default(),
+            ),
+            &mut provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     let diagnostic = TestCheck::item(errors.diagnostics(), 0)?;
     let primary = diagnostic.primary().test_value()?;

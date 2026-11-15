@@ -15,7 +15,7 @@ use self::{
     frames::ValueParser,
     literals::{ContextDiagnosticRequest, LiteralParser},
     recovery::{ParseFailure, Recovery},
-    semantics::SemanticParser,
+    semantics::{SemanticParser, SubtreeValidator},
 };
 use crate::{
     ConfigLimits,
@@ -28,8 +28,8 @@ use crate::{
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedString, ConfigValue, Diagnostic, DiagnosticCode, DiagnosticContext, Read,
-    SourceId, diagnostic_context,
+    BudgetError, CapacityExceeded, ChargedString, ConfigValue, Diagnostic, DiagnosticCode,
+    DiagnosticContext, Read, ResourceLimit, SourceId, diagnostic_context,
 };
 use typol_i18n::{Translator, t};
 use typol_semantic::{CompiledSchema, TypeKind, TypeView};
@@ -92,7 +92,7 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
         let Some(source_id) = schema.next_source_id() else {
             return Err(out.fail(DiagnosticFactory::make_diagnostic(
                 DetailedDiagnosticRequest {
-                    code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                    code: CapacityExceeded::SourceInput.diagnostic_code(),
                     message: t! {
                         name: "diagnostic.config.source_id_unrepresentable",
                         locale: translator,
@@ -115,7 +115,7 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
         {
             Ok(kind) => kind,
             Err(caught) => {
-                return Err(out.fail(DiagnosticFactory::internal(
+                return Err(out.fail(DiagnosticFactory::parser_internal(
                     PARSER_ROOT_SCHEMA_ACCESS.with_object_id(caught.take().index() as u64),
                     None,
                     None,
@@ -125,7 +125,7 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
             }
         };
         if !matches!(root_kind, TypeKind::Struct { .. }) {
-            return Err(out.fail(DiagnosticFactory::internal(
+            return Err(out.fail(DiagnosticFactory::parser_internal(
                 PARSER_ROOT_TYPE_INVARIANT,
                 None,
                 None,
@@ -161,7 +161,7 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
         if name.len() > self.context.config_limits.max_display_name_bytes() {
             return Err(out.fail(ConfigParseErrors::emergency(
                 BudgetDiagnostic::from_error(
-                    BudgetError::Resource,
+                    BudgetError::ResourceLimit(ResourceLimit::StringBytes),
                     self.context.session.translator(),
                 ),
                 Some(self.context.source_id),
@@ -247,7 +247,7 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
     ) -> OResult<'slot, ConfigValue> {
         let Some(parser) = parser else {
             return Err(out.fail(ConfigParseErrors::emergency(
-                DiagnosticFactory::internal(
+                DiagnosticFactory::parser_internal(
                     PARSER_SETUP_RESULT_MISSING,
                     None,
                     None,
@@ -269,7 +269,7 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
     ) -> OResult<'slot, (ConfigValue, LocationIndex<'schema>)> {
         let Some(parser) = parser else {
             return Err(out.fail(ConfigParseErrors::emergency(
-                DiagnosticFactory::internal(
+                DiagnosticFactory::parser_internal(
                     PARSER_SETUP_RESULT_MISSING,
                     None,
                     None,
@@ -294,10 +294,62 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
             &mut self.item_errors,
             out.reborrow(),
         )?;
-        let (kind, span) = {
-            let token = self.context.cursor.peek(out.reborrow())?;
-            (token.kind(), token.span())
+        let mut peek_errors = ErrSlot::new();
+        let token = match peek_errors.try_call(|peek_out| self.context.cursor.peek(peek_out)) {
+            Ok(token) => token,
+            Err(caught) => {
+                let failure = caught.take();
+                if failure.is_input_failure() && self.context.diagnostics.is_empty() {
+                    let normalized = if self.context.needs_normalization {
+                        let mut normalization_errors = ErrSlot::new();
+                        match normalization_errors.try_call(|normalization_out| {
+                            SubtreeValidator::normalize_complete_root(
+                                &mut self.context,
+                                self.root_type,
+                                parsed.span,
+                                &parsed.value,
+                                normalization_out,
+                            )
+                        }) {
+                            Ok(value) => Some(value),
+                            Err(caught) => {
+                                if let Some(diagnostic) = caught.take().into_diagnostic() {
+                                    self.context.diagnostics.push(diagnostic);
+                                }
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let value = normalized.as_ref().unwrap_or(&parsed.value);
+                    if !self.context.needs_normalization || normalized.is_some() {
+                        let mut validation_errors = ErrSlot::new();
+                        if let Err(caught) = validation_errors.try_call(|validation_out| {
+                            SubtreeValidator::validate_complete_root(
+                                &mut self.context,
+                                self.root_type,
+                                parsed.span,
+                                value,
+                                validation_out,
+                            )
+                        }) {
+                            let validation_failure = caught.take();
+                            if !validation_failure.is_reported()
+                                && let Some(diagnostic) = validation_failure.into_diagnostic()
+                            {
+                                self.context.diagnostics.push(diagnostic);
+                            }
+                        }
+                        self.context
+                            .session
+                            .pin_diagnostics(&self.context.diagnostics);
+                    }
+                }
+                return Err(out.fail(failure));
+            }
         };
+        let (kind, span) = (token.kind(), token.span());
         if kind != TokenKind::Eof {
             let diagnostic = ParserControl::diagnostic_call(
                 &self.context.diagnostic_errors,
@@ -321,9 +373,36 @@ impl<'schema, 'source, 'limits> Parser<'schema, 'source, 'limits> {
             )?;
             return Err(out.fail(diagnostic.into()));
         }
+        let value = if self.context.diagnostics.is_empty() {
+            let value = if self.context.needs_normalization {
+                SubtreeValidator::normalize_complete_root(
+                    &mut self.context,
+                    self.root_type,
+                    parsed.span,
+                    &parsed.value,
+                    out.reborrow(),
+                )?
+            } else {
+                parsed.value
+            };
+            let validation = SubtreeValidator::validate_complete_root(
+                &mut self.context,
+                self.root_type,
+                parsed.span,
+                &value,
+                out.reborrow(),
+            );
+            self.context
+                .session
+                .pin_diagnostics(&self.context.diagnostics);
+            validation?;
+            value
+        } else {
+            parsed.value
+        };
         if self.context.diagnostics.is_empty() {
-            SemanticParser::check_assertions(&mut self.context, &parsed.value, out.reborrow())?;
+            SemanticParser::check_assertions(&mut self.context, &value, out.reborrow())?;
         }
-        Ok(parsed.value)
+        Ok(value)
     }
 }

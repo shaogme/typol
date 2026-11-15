@@ -189,14 +189,10 @@ fn injected_error_code<T>(outcome: TestOpeoOutcome<T, TypolError>) -> Option<Dia
         TestOpeoOutcome::Error(errors) if allocation_code(&errors) => {
             Some(DiagnosticCode::ALLOCATION_FAILED)
         }
-        TestOpeoOutcome::Error(errors) => Some(
-            errors
-                .diagnostics()
-                .first()
-                .map_or(DiagnosticCode::INTERNAL_ERROR, |diagnostic| {
-                    diagnostic.code()
-                }),
-        ),
+        TestOpeoOutcome::Error(errors) => Some(errors.diagnostics().first().map_or(
+            DiagnosticCode::DIAGNOSTIC_COLLECTION_INVARIANT_FAILURE,
+            |diagnostic| diagnostic.code(),
+        )),
     }
 }
 

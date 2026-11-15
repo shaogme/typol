@@ -107,21 +107,18 @@ impl LoaderSupport {
         diagnostics: &DiagnosticCollector,
     ) -> Diagnostic {
         match error {
-            SourceObserverError::ResourceLimitExceeded => {
-                EmergencyDiagnostics::resource(span, diagnostics.translator())
+            SourceObserverError::ResourceLimit(limit) => {
+                EmergencyDiagnostics::resource(limit, span, diagnostics.translator())
             }
             SourceObserverError::AllocationFailed => {
                 EmergencyDiagnostics::allocation(span, diagnostics.translator())
             }
-            SourceObserverError::CapacityExceeded => {
-                EmergencyDiagnostics::capacity(span, diagnostics.translator())
+            SourceObserverError::CapacityExceeded(capacity) => {
+                EmergencyDiagnostics::capacity_error(span, capacity, diagnostics.translator())
             }
-            SourceObserverError::InternalInvariantFailure => EmergencyDiagnostics::internal(
-                span,
-                schema_context!("source-observer", "source-loaded-invariant")
-                    .with_object_id(span.source_id().get() as u64),
-                diagnostics.translator(),
-            ),
+            SourceObserverError::Internal(error) => {
+                EmergencyDiagnostics::internal_error(span, error, diagnostics.translator())
+            }
             SourceObserverError::HostFailure => {
                 let mut diagnostic = diagnostics.make(
                     DiagnosticCode::SCHEMA_RESOLVER_ERROR,
@@ -157,21 +154,18 @@ impl LoaderSupport {
                 },
                 span,
             ),
-            ResolverError::ResourceLimitExceeded => {
-                EmergencyDiagnostics::resource(span, diagnostics.translator())
+            ResolverError::ResourceLimit(limit) => {
+                EmergencyDiagnostics::resource(limit, span, diagnostics.translator())
             }
             ResolverError::AllocationFailed => {
                 EmergencyDiagnostics::allocation(span, diagnostics.translator())
             }
-            ResolverError::CapacityExceeded => {
-                EmergencyDiagnostics::capacity(span, diagnostics.translator())
+            ResolverError::CapacityExceeded(capacity) => {
+                EmergencyDiagnostics::capacity_error(span, capacity, diagnostics.translator())
             }
-            ResolverError::InternalInvariantFailure => EmergencyDiagnostics::internal(
-                span,
-                schema_context!("resolver-callback", "resolve-invariant")
-                    .with_object_id(span.source_id().get() as u64),
-                diagnostics.translator(),
-            ),
+            ResolverError::Internal(error) => {
+                EmergencyDiagnostics::internal_error(span, error, diagnostics.translator())
+            }
             ResolverError::HostFailure | ResolverError::ContextMismatch => {
                 let context = if error == ResolverError::ContextMismatch {
                     schema_context!("resolver-callback", "resolved-source-context-mismatch")

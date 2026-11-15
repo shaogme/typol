@@ -105,8 +105,8 @@ impl fmt::Display for ConfigValueErrors {
         }
         .map_err(|_| fmt::Error)?;
         DiagnosticReport::new(
-            title.as_ref(),
-            Some(stage.as_ref()),
+            title,
+            Some(stage),
             self.diagnostics(),
             ReportContext::new(&source_name, &span_location, self.excerpts()),
             translator,

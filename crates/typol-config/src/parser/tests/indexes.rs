@@ -7,6 +7,7 @@ use crate::{
         context::{ParserControl, ParserControlRequest},
         frames::ValueParser,
         recovery::ParseFailure,
+        semantics::SubtreeValidator,
     },
     session::ConfigSession,
 };
@@ -263,7 +264,7 @@ fn wide_defaults_use_depth_bounded_continuations_and_visit_each_instance_once() 
                 )
             })
             .test_value()?;
-        let root = parse_errors
+        let parsed = parse_errors
             .run(|out| {
                 ValueParser::parse(
                     &mut context,
@@ -273,8 +274,29 @@ fn wide_defaults_use_depth_bounded_continuations_and_visit_each_instance_once() 
                     out,
                 )
             })
-            .test_value()?
-            .value;
+            .test_value()?;
+        let root = parse_errors
+            .run(|out| {
+                SubtreeValidator::normalize_complete_root(
+                    &mut context,
+                    schema.entry(),
+                    parsed.span,
+                    &parsed.value,
+                    out,
+                )
+            })
+            .test_value()?;
+        parse_errors
+            .run(|out| {
+                SubtreeValidator::validate_complete_root(
+                    &mut context,
+                    schema.entry(),
+                    parsed.span,
+                    &root,
+                    out,
+                )
+            })
+            .test_value()?;
         peaks.push(context.default_work_peak);
         shape_skips.push(context.subtree_shape_skips);
         let mut walk = walk_errors

@@ -1,5 +1,3 @@
-use typol_test_support::ConfigTestSupport as Support;
-
 use core::cmp::Ordering;
 use std::{
     env,
@@ -8,18 +6,30 @@ use std::{
     time::{Duration, Instant},
 };
 use typol_config::{
-    ConfigLimits, ConfigParseOptions, ConfigParseRequest, Environment, EnvironmentError,
-    EnvironmentReadContext,
+    ConfigLimits, ConfigParseOptions, ConfigParseRequest, ConfigParser, Environment,
+    EnvironmentError, EnvironmentReadContext,
     opeo::{OResult, Out},
 };
-use typol_core::{ExecutionLimits, Read, SliceSource, ValueKind};
+use typol_core::{
+    DiagnosticContext, ExecutionLimits, InternalError, Read, SliceSource, ValueKind,
+    diagnostic_context,
+};
 use typol_policy::{ExcerptLimits, RegexLimits, RegexOptions, ValueLimits};
-use typol_schema::{SchemaCompileOptions, SchemaLimits, SchemaSource};
+use typol_schema::{
+    SchemaCompileOptions, SchemaCompiler, SchemaLimits, SchemaResolver, SchemaSource,
+    SourceObserver,
+};
 use typol_semantic::{
     ComparisonOptions, CompiledSchema, SchemaComparison, SchemaEvaluator as Evaluator,
     SchemaValue as EvalValue,
 };
 use typol_test_support::*;
+
+static ENVIRONMENT_TEST_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-config-tests",
+    "environment-provider",
+    "injected-internal-failure",
+);
 
 struct NoHost;
 
@@ -30,17 +40,29 @@ impl Environment for NoHost {
         _: EnvironmentReadContext<'_>,
         out: Out<'slot, 'borrow, EnvironmentError>,
     ) -> OResult<'slot, Option<&'env [u8]>> {
-        Err(out.fail(EnvironmentError::InternalError))
+        Err(out.fail(EnvironmentError::Internal(
+            InternalError::EnvironmentInvariantFailure(ENVIRONMENT_TEST_INVARIANT),
+        )))
     }
 }
 
 fn compile(text: &str, limits: SchemaLimits) -> TestResult<CompiledSchema> {
-    Support::compile_schema(
-        SchemaCompileOptions::new(limits),
-        SchemaSource::from_str(b"schema", text),
-        None,
-        None,
-    )
+    TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::new(limits);
+        let source = SchemaSource::from_str(b"schema", text);
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()
 }
 
@@ -55,14 +77,17 @@ fn execute_assertion_expressions(depth: usize, schema_limits: SchemaLimits) -> T
         let text = format!("entry struct Root {{}} @assert({expression}, \"rule\")");
         let schema = compile(&text, schema_limits)?;
         drop(
-            Support::parse(
-                &schema,
-                config_request(
-                    (&mut SliceSource::new(("{}").as_bytes()), "config"),
-                    &config_limits,
-                ),
-                &mut NoHost,
-            )
+            TestOpeo::outcome(|out| {
+                ConfigParser::new(&schema).parse(
+                    config_request(
+                        (&mut SliceSource::new(("{}").as_bytes()), "config"),
+                        &config_limits,
+                    ),
+                    &mut NoHost,
+                    out,
+                )
+            })
+            .map(|value| value.into_config_value())
             .test_value()?,
         );
     }
@@ -84,14 +109,16 @@ fn execute_nested_quantifier(depth: usize, schema_limits: SchemaLimits) -> TestR
     let schema = compile(&text, schema_limits)?;
     let config = String::from("{}");
     drop(
-        Support::parse_validated_config(
-            &schema,
-            config_request(
-                (&mut SliceSource::new(config.as_bytes()), "config"),
-                &config_limits,
-            ),
-            &mut NoHost,
-        )
+        TestOpeo::outcome(|out| {
+            ConfigParser::new(&schema).parse(
+                config_request(
+                    (&mut SliceSource::new(config.as_bytes()), "config"),
+                    &config_limits,
+                ),
+                &mut NoHost,
+                out,
+            )
+        })
         .test_value()?,
     );
     drop(schema);
@@ -111,14 +138,16 @@ fn compare_nested_unique_values(depth: usize, schema_limits: SchemaLimits) -> Te
     let text =
         format!("enum E {{ V({ty}) }} entry struct Root {{ values: [E] @unique = [.V({value})] }}");
     let schema = compile(&text, schema_limits)?;
-    let root = Support::parse_validated_config(
-        &schema,
-        config_request(
-            (&mut SliceSource::new(("{}").as_bytes()), "config"),
-            &config_limits,
-        ),
-        &mut NoHost,
-    )
+    let root = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            config_request(
+                (&mut SliceSource::new(("{}").as_bytes()), "config"),
+                &config_limits,
+            ),
+            &mut NoHost,
+            out,
+        )
+    })
     .test_value()?;
     let ValueKind::Structure(fields) = root.as_config_value().as_ref() else {
         return Err(TestFailure::new("parsed root value should be a struct"));

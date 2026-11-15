@@ -26,6 +26,11 @@ use typol_core::{
 };
 use typol_i18n::{Language, Translator, t};
 
+struct TopLevelItemPush {
+    item: TopLevelItem,
+    span: SourceSpan,
+}
+
 /// UTF-8 boundary positions recorded while parsing, without retaining source text.
 pub struct SourcePositionIndex {
     entries: ChargedVec<(usize, u64)>,
@@ -353,33 +358,8 @@ impl SchemaParser {
         mut out: Out<'slot, '_, SyntaxErrors>,
     ) -> OResult<'slot, ()> {
         while !parser.stopped {
-            let mut peek_error = None;
-            let info = match try_diagnostic(errors, |out| ParserControl::peek(parser, out)) {
-                ParseAttempt::Success(info) => Some(info),
-                ParseAttempt::Failure(error) => {
-                    peek_error = Some(error.take());
-                    None
-                }
-            };
-            if let Some(diagnostic) = peek_error {
-                let failed_at = diagnostic
-                    .primary()
-                    .map(|span| span.span().start())
-                    .unwrap_or_else(|| ParserControl::eof_span(parser).span().start());
-                SchemaParser::push_diagnostic(parser, errors, diagnostic, out.reborrow())?;
-                let mut recovery_error = None;
-                match try_diagnostic(errors, |out| {
-                    RecoveryParser::recover_top_level(parser, failed_at, out)
-                }) {
-                    ParseAttempt::Success(()) => {}
-                    ParseAttempt::Failure(error) => recovery_error = Some(error.take()),
-                }
-                if let Some(error) = recovery_error {
-                    SchemaParser::push_diagnostic(parser, errors, error, out.reborrow())?;
-                }
-                continue;
-            }
-            let Some(info) = info else {
+            let Some(info) = SchemaParser::peek_top_level_item(parser, errors, out.reborrow())?
+            else {
                 continue;
             };
             if info.kind == TokenKind::Eof {
@@ -387,44 +367,120 @@ impl SchemaParser {
             }
 
             let failed_at = info.span.span().start();
-            let mut parse_error = None;
-            let item = match try_diagnostic(errors, |out| {
-                SchemaParser::parse_top_level_item(parser, out)
-            }) {
-                ParseAttempt::Success(item) => Some(item),
-                ParseAttempt::Failure(error) => {
-                    parse_error = Some(error.take());
-                    None
-                }
-            };
-            if let Some(error) = parse_error {
-                SchemaParser::push_diagnostic(parser, errors, error, out.reborrow())?;
-                let mut recovery_error = None;
-                match try_diagnostic(errors, |out| {
-                    RecoveryParser::recover_top_level(parser, failed_at, out)
-                }) {
-                    ParseAttempt::Success(()) => {}
-                    ParseAttempt::Failure(error) => recovery_error = Some(error.take()),
-                }
-                if let Some(error) = recovery_error {
-                    SchemaParser::push_diagnostic(parser, errors, error, out.reborrow())?;
-                }
-                continue;
-            }
-            let Some(item) = item else {
+            let Some(item) = SchemaParser::parse_top_level_item_with_recovery(
+                parser,
+                errors,
+                failed_at,
+                out.reborrow(),
+            )?
+            else {
                 continue;
             };
+            SchemaParser::push_top_level_item(
+                parser,
+                errors,
+                items,
+                TopLevelItemPush {
+                    item,
+                    span: info.span,
+                },
+                out.reborrow(),
+            )?;
+        }
+        Ok(())
+    }
 
-            let mut push_error = None;
-            match try_diagnostic(errors, |out| {
-                ParserControl::try_push(parser, items, item, info.span, out)
-            }) {
-                ParseAttempt::Success(()) => {}
-                ParseAttempt::Failure(error) => push_error = Some(error.take()),
+    fn peek_top_level_item<'slot>(
+        parser: &mut ParserState<'_>,
+        errors: &mut ErrSlot<Diagnostic>,
+        mut out: Out<'slot, '_, SyntaxErrors>,
+    ) -> OResult<'slot, Option<context::TokenInfo>> {
+        let peek_result = match try_diagnostic(errors, |out| ParserControl::peek(parser, out)) {
+            ParseAttempt::Success(info) => Ok(info),
+            ParseAttempt::Failure(error) => Err(error.take()),
+        };
+        match peek_result {
+            Ok(info) => Ok(Some(info)),
+            Err(diagnostic) => {
+                let failed_at = diagnostic
+                    .primary()
+                    .map(|span| span.span().start())
+                    .unwrap_or_else(|| ParserControl::eof_span(parser).span().start());
+                SchemaParser::recover_top_level_item(
+                    parser,
+                    errors,
+                    diagnostic,
+                    failed_at,
+                    out.reborrow(),
+                )?;
+                Ok(None)
             }
-            if let Some(error) = push_error {
-                SchemaParser::push_diagnostic(parser, errors, error, out.reborrow())?;
+        }
+    }
+
+    fn parse_top_level_item_with_recovery<'slot>(
+        parser: &mut ParserState<'_>,
+        errors: &mut ErrSlot<Diagnostic>,
+        failed_at: usize,
+        mut out: Out<'slot, '_, SyntaxErrors>,
+    ) -> OResult<'slot, Option<TopLevelItem>> {
+        let parse_result = match try_diagnostic(errors, |out| {
+            SchemaParser::parse_top_level_item(parser, out)
+        }) {
+            ParseAttempt::Success(item) => Ok(item),
+            ParseAttempt::Failure(error) => Err(error.take()),
+        };
+        match parse_result {
+            Ok(item) => Ok(Some(item)),
+            Err(diagnostic) => {
+                SchemaParser::recover_top_level_item(
+                    parser,
+                    errors,
+                    diagnostic,
+                    failed_at,
+                    out.reborrow(),
+                )?;
+                Ok(None)
             }
+        }
+    }
+
+    fn recover_top_level_item<'slot>(
+        parser: &mut ParserState<'_>,
+        errors: &mut ErrSlot<Diagnostic>,
+        diagnostic: Diagnostic,
+        failed_at: usize,
+        mut out: Out<'slot, '_, SyntaxErrors>,
+    ) -> OResult<'slot, ()> {
+        SchemaParser::push_diagnostic(parser, errors, diagnostic, out.reborrow())?;
+        let recovery_error = match try_diagnostic(errors, |out| {
+            RecoveryParser::recover_top_level(parser, failed_at, out)
+        }) {
+            ParseAttempt::Success(()) => None,
+            ParseAttempt::Failure(error) => Some(error.take()),
+        };
+        if let Some(error) = recovery_error {
+            SchemaParser::push_diagnostic(parser, errors, error, out.reborrow())?;
+        }
+        Ok(())
+    }
+
+    fn push_top_level_item<'slot>(
+        parser: &mut ParserState<'_>,
+        errors: &mut ErrSlot<Diagnostic>,
+        items: &mut ChargedVec<TopLevelItem>,
+        request: TopLevelItemPush,
+        mut out: Out<'slot, '_, SyntaxErrors>,
+    ) -> OResult<'slot, ()> {
+        let TopLevelItemPush { item, span } = request;
+        let push_error = match try_diagnostic(errors, |out| {
+            ParserControl::try_push(parser, items, item, span, out)
+        }) {
+            ParseAttempt::Success(()) => None,
+            ParseAttempt::Failure(error) => Some(error.take()),
+        };
+        if let Some(error) = push_error {
+            SchemaParser::push_diagnostic(parser, errors, error, out.reborrow())?;
         }
         Ok(())
     }

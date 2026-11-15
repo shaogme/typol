@@ -314,7 +314,10 @@ impl ExecutionModel for CompileModel<'_, '_> {
                         .len()
                         .min(b.len())
                         .checked_add(6)
-                        .ok_or(EvalError::Resource)
+                        .ok_or(EvalError::internal(schema_context!(
+                            "schema-execution",
+                            "type-comparison-step-overflow"
+                        )))
                         .store_err_into(out.reborrow())?;
                     self.consume(steps, out.reborrow())?;
                     return Ok(a == b && self.nominal(left) == self.nominal(right));
@@ -324,7 +327,10 @@ impl ExecutionModel for CompileModel<'_, '_> {
                         .len()
                         .min(b.len())
                         .checked_add(6)
-                        .ok_or(EvalError::Resource)
+                        .ok_or(EvalError::internal(schema_context!(
+                            "schema-execution",
+                            "type-comparison-step-overflow"
+                        )))
                         .store_err_into(out.reborrow())?;
                     self.consume(steps, out.reborrow())?;
                     return Ok(a == b && self.nominal(left) == self.nominal(right));

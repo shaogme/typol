@@ -770,7 +770,7 @@ impl<T: Copy> Bounds<T> {
         min: Option<T>,
         max: Option<T>,
         compare: impl Fn(T, T) -> Option<Ordering>,
-    ) -> Result<(), BuildError> {
+    ) -> Result<(), DiagnosticContext> {
         if let Some(min) = min {
             if self
                 .min
@@ -789,7 +789,7 @@ impl<T: Copy> Bounds<T> {
         }
         if let (Some(min), Some(max)) = (self.min, self.max) {
             if !compare(min, max).is_some_and(|order| !order.is_gt()) {
-                return Err(BuildError::internal(CONSTRAINT_BUILD_INTERNAL));
+                return Err(CONSTRAINT_BUILD_INTERNAL);
             }
         }
         Ok(())

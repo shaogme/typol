@@ -89,7 +89,12 @@ impl Model {
                     let payload = match &variant.fields {
                         Fields::Unit => PayloadModel::Unit,
                         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-                            let field = &fields.unnamed[0];
+                            let Some(field) = fields.unnamed.first() else {
+                                return Err(Error::new_spanned(
+                                    fields,
+                                    "tuple variants must have exactly one payload",
+                                ));
+                            };
                             Attributes::reject(&field.attrs)?;
                             Self::validate_type(&field.ty)?;
                             PayloadModel::Single(Box::new(parse2(field.ty.to_token_stream())?))

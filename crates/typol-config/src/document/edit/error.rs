@@ -2,7 +2,7 @@ use core::{
     error::Error,
     fmt::{self, Debug, Display, Formatter},
 };
-use typol_core::BudgetError;
+use typol_core::{BudgetError, CapacityExceeded, InternalError, ResourceLimit};
 
 use crate::ConfigParseErrors;
 
@@ -15,8 +15,10 @@ pub enum ConfigEditErrorKind {
     InvalidContainer,
     EntryAlreadyExists,
     ValidationFailed,
-    ResourceLimitExceeded,
+    ResourceLimit(ResourceLimit),
     AllocationFailed,
+    CapacityExceeded(CapacityExceeded),
+    Internal(InternalError),
 }
 
 pub struct ConfigEditError {
@@ -49,14 +51,12 @@ impl ConfigEditError {
 
     pub(super) fn budget_kind(error: BudgetError) -> ConfigEditErrorKind {
         match error {
-            BudgetError::Resource
-            | BudgetError::RegexSteps
-            | BudgetError::RegexSearchSteps
-            | BudgetError::RegexWorkspace
-            | BudgetError::CapacityExceeded => ConfigEditErrorKind::ResourceLimitExceeded,
-            BudgetError::Allocation | BudgetError::InvariantViolation(_) => {
-                ConfigEditErrorKind::AllocationFailed
+            BudgetError::ResourceLimit(limit) => ConfigEditErrorKind::ResourceLimit(limit),
+            BudgetError::CapacityExceeded(capacity) => {
+                ConfigEditErrorKind::CapacityExceeded(capacity)
             }
+            BudgetError::Allocation => ConfigEditErrorKind::AllocationFailed,
+            BudgetError::Internal(error) => ConfigEditErrorKind::Internal(error),
         }
     }
 
@@ -101,10 +101,12 @@ impl Display for ConfigEditError {
             }
             ConfigEditErrorKind::EntryAlreadyExists => "configuration edit entry already exists",
             ConfigEditErrorKind::ValidationFailed => "edited configuration failed validation",
-            ConfigEditErrorKind::ResourceLimitExceeded => {
-                "configuration edit resource limit exceeded"
+            ConfigEditErrorKind::ResourceLimit(limit) => {
+                return write!(formatter, "{limit} limit exceeded");
             }
             ConfigEditErrorKind::AllocationFailed => "configuration edit allocation failed",
+            ConfigEditErrorKind::CapacityExceeded(_) => "configuration edit capacity exceeded",
+            ConfigEditErrorKind::Internal(_) => "configuration edit encountered an internal error",
         })
     }
 }

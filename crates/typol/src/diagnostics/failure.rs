@@ -1,6 +1,6 @@
 use typol_core::{
-    BudgetError, Diagnostic, DiagnosticCode, DiagnosticContext, ValueError, ValueErrorKind,
-    diagnostic_context,
+    BudgetError, CapacityExceeded, Diagnostic, DiagnosticCode, DiagnosticContext, InternalError,
+    ResourceLimit, ValueError, ValueErrorKind, diagnostic_context,
 };
 use typol_i18n::{Translator, t};
 use typol_semantic::SchemaAccessError;
@@ -118,14 +118,14 @@ pub enum CodecStage {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failure {
-    Resource,
+    ResourceLimit(ResourceLimit),
     ConversionDepth {
         requested_depth: usize,
         maximum_depth: usize,
     },
     Allocation,
-    Capacity,
-    Internal(DiagnosticContext),
+    Capacity(CapacityExceeded),
+    Internal(InternalError),
     #[cfg(all(test, feature = "std"))]
     BindingMismatch,
     RecursiveType,
@@ -138,7 +138,15 @@ pub enum Failure {
 
 impl Failure {
     pub(crate) const fn internal(context: DiagnosticContext) -> Self {
-        Self::Internal(context)
+        Self::Internal(InternalError::ConfigEncodingInvariantFailure(context))
+    }
+
+    pub(crate) const fn binding_internal(context: DiagnosticContext) -> Self {
+        Self::Internal(InternalError::TypeBindingInvariantFailure(context))
+    }
+
+    pub(crate) const fn conversion_internal(context: DiagnosticContext) -> Self {
+        Self::Internal(InternalError::RustConversionInvariantFailure(context))
     }
 
     pub(crate) fn schema_access(error: SchemaAccessError) -> Self {
@@ -159,17 +167,17 @@ impl Failure {
             "expression node" => SCHEMA_EXPRESSION_CONTEXT,
             _ => SCHEMA_OTHER_CONTEXT,
         };
-        Self::internal(context.with_object_id(error.index() as u64))
+        Self::Internal(InternalError::SchemaAccessInvariantFailure(
+            context.with_object_id(error.index() as u64),
+        ))
     }
 
     pub(crate) fn value_error(error: ValueError) -> Self {
         match error.kind() {
             ValueErrorKind::AllocationFailed => Self::Allocation,
-            ValueErrorKind::ResourceLimitExceeded => Self::Resource,
-            ValueErrorKind::CapacityExceeded => Self::Capacity,
-            ValueErrorKind::InternalInvariantFailure => {
-                Self::internal(error.context().unwrap_or(VALUE_INTERNAL_CONTEXT))
-            }
+            ValueErrorKind::ResourceLimit(limit) => Self::ResourceLimit(limit),
+            ValueErrorKind::CapacityExceeded(capacity) => Self::Capacity(capacity),
+            ValueErrorKind::Internal(internal) => Self::Internal(internal),
             ValueErrorKind::EnvironmentReferenceRequired => {
                 Self::ConversionAt(error.context().unwrap_or(VALUE_INTERNAL_CONTEXT))
             }
@@ -192,11 +200,11 @@ impl Failure {
 
     pub(crate) fn code(self) -> DiagnosticCode {
         match self {
-            Self::Resource => DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-            Self::ConversionDepth { .. } => DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+            Self::ResourceLimit(limit) => limit.diagnostic_code(),
+            Self::ConversionDepth { .. } => DiagnosticCode::TYPE_BINDING_DEPTH_LIMIT_EXCEEDED,
             Self::Allocation => DiagnosticCode::ALLOCATION_FAILED,
-            Self::Capacity => DiagnosticCode::CAPACITY_EXCEEDED,
-            Self::Internal(_) => DiagnosticCode::INTERNAL_ERROR,
+            Self::Capacity(capacity) => capacity.diagnostic_code(),
+            Self::Internal(internal) => internal.diagnostic_code(),
             #[cfg(all(test, feature = "std"))]
             Self::BindingMismatch => DiagnosticCode::TYPE_BINDING_ERROR,
             Self::RecursiveType | Self::ArrayLength => DiagnosticCode::TYPE_BINDING_ERROR,
@@ -207,7 +215,7 @@ impl Failure {
 
     pub(crate) const fn context(self) -> Option<DiagnosticContext> {
         match self {
-            Self::Internal(context) => Some(context),
+            Self::Internal(internal) => Some(internal.context()),
             #[cfg(all(test, feature = "std"))]
             Self::BindingMismatch => Some(BINDING_MISMATCH_CONTEXT),
             Self::RecursiveType => Some(RECURSIVE_TYPE_CONTEXT),
@@ -220,28 +228,22 @@ impl Failure {
             Self::ConversionAt(context) => Some(context),
             Self::Encoding => Some(ENCODING_CONTEXT),
             Self::SecretOutput => Some(SECRET_OUTPUT_REJECTED_CONTEXT),
-            Self::Resource | Self::Allocation | Self::Capacity => None,
+            Self::ResourceLimit(_) | Self::Allocation | Self::Capacity(_) => None,
         }
     }
 
     pub(super) fn emergency_diagnostic(self, translator: Translator) -> Diagnostic {
         let message = match self {
-            Self::Resource | Self::ConversionDepth { .. } => t! {
-                name: "diagnostic.emergency.resource_limit_exceeded",
-                locale: translator,
-            },
+            Self::ResourceLimit(limit) => limit.emergency_message(translator),
+            Self::ConversionDepth { .. } => {
+                ResourceLimit::TypeBindingDepth.emergency_message(translator)
+            }
             Self::Allocation => t! {
                 name: "diagnostic.emergency.allocation_failed",
                 locale: translator,
             },
-            Self::Capacity => t! {
-                name: "diagnostic.emergency.capacity_exceeded",
-                locale: translator,
-            },
-            Self::Internal(_) => t! {
-                name: "diagnostic.emergency.internal_error",
-                locale: translator,
-            },
+            Self::Capacity(capacity) => capacity.emergency_message(translator),
+            Self::Internal(internal) => internal.emergency_message(translator),
             #[cfg(all(test, feature = "std"))]
             Self::BindingMismatch => t! {
                 name: "diagnostic.binding.type_mismatch",
@@ -291,10 +293,10 @@ impl Failure {
     pub(super) fn terminal(self) -> bool {
         matches!(
             self,
-            Self::Resource
+            Self::ResourceLimit(_)
                 | Self::ConversionDepth { .. }
                 | Self::Allocation
-                | Self::Capacity
+                | Self::Capacity(_)
                 | Self::Internal(_)
         )
     }
@@ -322,13 +324,10 @@ impl Failure {
 impl From<BudgetError> for Failure {
     fn from(error: BudgetError) -> Self {
         match error {
-            BudgetError::Resource
-            | BudgetError::RegexSteps
-            | BudgetError::RegexSearchSteps
-            | BudgetError::RegexWorkspace => Self::Resource,
+            BudgetError::ResourceLimit(limit) => Self::ResourceLimit(limit),
             BudgetError::Allocation => Self::Allocation,
-            BudgetError::CapacityExceeded => Self::Capacity,
-            BudgetError::InvariantViolation(context) => Self::internal(*context),
+            BudgetError::CapacityExceeded(capacity) => Self::Capacity(capacity),
+            BudgetError::Internal(internal) => Self::Internal(internal),
         }
     }
 }

@@ -1,7 +1,9 @@
 use std::{cell::RefCell, cmp::Ordering, fmt, mem::take, str::from_utf8};
 
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
-use typol_core::{BudgetError, ChargedString, ChargedVec, ExecutionBudget, SourceId};
+use typol_core::{
+    BudgetError, ChargedString, ChargedVec, ExecutionBudget, ResourceLimit, SourceId,
+};
 use typol_schema::{
     SchemaCompileContext, SourceLoadedRequest, SourceObserver, SourceObserverError,
 };
@@ -275,7 +277,7 @@ impl SourceNames {
             return Err(out.fail(
                 HostError::with_step(
                     HostOperation::SourceNames,
-                    HostErrorKind::ResourceLimitExceeded,
+                    HostErrorKind::ResourceLimit(ResourceLimit::StringBytes),
                     HostFailureStep::SourceNameOperation,
                 )
                 .with_source_id(id),
@@ -379,7 +381,7 @@ impl SourceNames {
             return Err(out.fail(
                 HostError::with_step(
                     HostOperation::SourceNames,
-                    HostErrorKind::ResourceLimitExceeded,
+                    HostErrorKind::ResourceLimit(ResourceLimit::SchemaSourceCount),
                     HostFailureStep::SourceNameOperation,
                 )
                 .with_source_id(id),
@@ -582,7 +584,7 @@ impl SourceNames {
             return Err(out.fail(
                 HostError::with_step(
                     HostOperation::SourceNames,
-                    HostErrorKind::ResourceLimitExceeded,
+                    HostErrorKind::ResourceLimit(ResourceLimit::SchemaSourceCount),
                     HostFailureStep::SourceNameOperation,
                 )
                 .with_source_id(id),
@@ -638,24 +640,26 @@ impl SourceObserver for SourceNames {
             Some(error) => {
                 self.failure.get_or_insert(error);
                 let failure = match error.kind() {
-                    HostErrorKind::ResourceLimitExceeded => Some(BudgetError::Resource),
+                    HostErrorKind::ResourceLimit(limit) => Some(BudgetError::ResourceLimit(limit)),
                     HostErrorKind::AllocationFailed => Some(BudgetError::Allocation),
-                    HostErrorKind::CapacityExceeded => Some(BudgetError::CapacityExceeded),
-                    HostErrorKind::InternalError => {
-                        Some(BudgetError::invariant(error.budget_context()))
+                    HostErrorKind::CapacityExceeded(capacity) => {
+                        Some(BudgetError::CapacityExceeded(capacity))
                     }
+                    HostErrorKind::Internal(internal) => Some(BudgetError::Internal(internal)),
                     _ => None,
                 };
                 if let Some(failure) = failure {
                     self.context.execution().record_failure(failure);
                 }
                 let error = match error.kind() {
-                    HostErrorKind::ResourceLimitExceeded => {
-                        SourceObserverError::ResourceLimitExceeded
+                    HostErrorKind::ResourceLimit(limit) => {
+                        SourceObserverError::ResourceLimit(limit)
                     }
                     HostErrorKind::AllocationFailed => SourceObserverError::AllocationFailed,
-                    HostErrorKind::CapacityExceeded => SourceObserverError::CapacityExceeded,
-                    HostErrorKind::InternalError => SourceObserverError::InternalInvariantFailure,
+                    HostErrorKind::CapacityExceeded(capacity) => {
+                        SourceObserverError::CapacityExceeded(capacity)
+                    }
+                    HostErrorKind::Internal(internal) => SourceObserverError::Internal(internal),
                     _ => SourceObserverError::HostFailure,
                 };
                 Err(out.fail(error))

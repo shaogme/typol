@@ -1,41 +1,15 @@
+mod format_api;
 mod format_scan;
 
-use core::{error::Error, fmt, mem::size_of};
+pub use format_api::{
+    ConfigFormatError, ConfigFormatErrorKind, ConfigFormatOptions, FormattedConfig,
+};
+
+use core::mem::size_of;
 use opeo::{OResult, Out};
-use typol_core::{BudgetError, ChargedString, ChargedVec, ExecutionBudget, Write, WriteError};
+use typol_core::{CapacityExceeded, ChargedString, ChargedVec, ExecutionBudget, ResourceLimit};
 
 use self::format_scan::{ScanError, ScannedToken, SourceScanner, TokenKind};
-
-const DEFAULT_MAX_OUTPUT_BYTES: usize = 16_777_216;
-const DEFAULT_MAX_WORKSPACE_BYTES: usize = 16_777_216;
-const DEFAULT_MAX_NESTING_DEPTH: usize = 128;
-
-/// Stable resource and structure categories for configuration formatting failures.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ConfigFormatErrorKind {
-    ResourceLimitExceeded,
-    AllocationFailed,
-    InvalidStructure,
-}
-
-/// A formatting failure that never exposes configuration source text.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ConfigFormatError {
-    kind: ConfigFormatErrorKind,
-}
-
-/// Limits for formatter-owned output and explicit nesting workspaces.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ConfigFormatOptions {
-    max_output_bytes: usize,
-    max_workspace_bytes: usize,
-    max_nesting_depth: usize,
-}
-
-/// A fully formatted configuration string owned independently from its source document.
-pub struct FormattedConfig {
-    source: ChargedString,
-}
 
 pub(crate) struct FormatRequest<'source, 'budget> {
     pub(crate) source: &'source str,
@@ -85,101 +59,6 @@ pub(crate) struct FormatterEngine<'source, 'budget> {
     comment_run_checked: bool,
 }
 
-impl ConfigFormatError {
-    const fn new(kind: ConfigFormatErrorKind) -> Self {
-        Self { kind }
-    }
-
-    pub const fn kind(self) -> ConfigFormatErrorKind {
-        self.kind
-    }
-}
-
-impl From<BudgetError> for ConfigFormatError {
-    fn from(error: BudgetError) -> Self {
-        Self::new(match error {
-            BudgetError::Resource
-            | BudgetError::RegexSteps
-            | BudgetError::RegexSearchSteps
-            | BudgetError::RegexWorkspace
-            | BudgetError::CapacityExceeded => ConfigFormatErrorKind::ResourceLimitExceeded,
-            BudgetError::Allocation => ConfigFormatErrorKind::AllocationFailed,
-            BudgetError::InvariantViolation(_) => ConfigFormatErrorKind::InvalidStructure,
-        })
-    }
-}
-
-impl fmt::Display for ConfigFormatError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self.kind {
-            ConfigFormatErrorKind::ResourceLimitExceeded => {
-                "configuration formatting resource limit exceeded"
-            }
-            ConfigFormatErrorKind::AllocationFailed => "configuration formatting allocation failed",
-            ConfigFormatErrorKind::InvalidStructure => {
-                "configuration formatting encountered invalid structure"
-            }
-        })
-    }
-}
-
-impl Error for ConfigFormatError {}
-
-impl ConfigFormatOptions {
-    pub const fn new() -> Self {
-        Self {
-            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
-            max_workspace_bytes: DEFAULT_MAX_WORKSPACE_BYTES,
-            max_nesting_depth: DEFAULT_MAX_NESTING_DEPTH,
-        }
-    }
-
-    pub const fn with_max_output_bytes(mut self, max_output_bytes: usize) -> Self {
-        self.max_output_bytes = max_output_bytes;
-        self
-    }
-
-    pub const fn with_max_workspace_bytes(mut self, max_workspace_bytes: usize) -> Self {
-        self.max_workspace_bytes = max_workspace_bytes;
-        self
-    }
-
-    pub const fn with_max_nesting_depth(mut self, max_nesting_depth: usize) -> Self {
-        self.max_nesting_depth = max_nesting_depth;
-        self
-    }
-
-    pub const fn max_output_bytes(&self) -> usize {
-        self.max_output_bytes
-    }
-
-    pub const fn max_workspace_bytes(&self) -> usize {
-        self.max_workspace_bytes
-    }
-
-    pub const fn max_nesting_depth(&self) -> usize {
-        self.max_nesting_depth
-    }
-}
-
-impl Default for ConfigFormatOptions {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FormattedConfig {
-    /// Borrows the complete formatted text.
-    pub fn as_str(&self) -> &str {
-        self.source.as_str()
-    }
-
-    /// Consumes the formatted result after writing all of it to the supplied sink.
-    pub fn write_to(self, output: &mut dyn Write) -> Result<(), WriteError> {
-        output.write_all(self.source.as_str().as_bytes())
-    }
-}
-
 impl FormatterEngine<'_, '_> {
     pub(crate) fn format_source<'slot>(
         request: FormatRequest<'_, '_>,
@@ -191,7 +70,7 @@ impl FormatterEngine<'_, '_> {
                 ConfigFormatErrorKind::InvalidStructure,
             )));
         };
-        Ok(FormattedConfig { source })
+        Ok(FormattedConfig::from_source(source))
     }
 
     pub(crate) fn matches_source<'slot>(
@@ -209,7 +88,7 @@ impl FormatterEngine<'_, '_> {
     ) -> OResult<'slot, FormatResult> {
         if request.source.len() > request.source_limit {
             return Err(out.fail(ConfigFormatError::new(
-                ConfigFormatErrorKind::ResourceLimitExceeded,
+                ConfigFormatErrorKind::ResourceLimit(ResourceLimit::SourceBytes),
             )));
         }
         if let Some(budget) = request.budget {
@@ -217,7 +96,7 @@ impl FormatterEngine<'_, '_> {
         }
         let output_limit = request
             .options
-            .max_output_bytes
+            .max_output_bytes()
             .min(request.source_limit)
             .min(request.constructed_text_limit);
         let newline = if request.source.contains("\r\n") {
@@ -259,7 +138,7 @@ impl FormatterEngine<'_, '_> {
         }
         if engine.output_len > request.constructed_text_limit {
             return Err(out.fail(ConfigFormatError::new(
-                ConfigFormatErrorKind::ResourceLimitExceeded,
+                ConfigFormatErrorKind::ResourceLimit(ResourceLimit::ConfigFormatOutputBytes),
             )));
         }
         if collect_output {
@@ -668,19 +547,22 @@ impl FormatterEngine<'_, '_> {
     ) -> OResult<'slot, ()> {
         let depth = self.stack.len().checked_add(1).ok_or_else(|| {
             out.reborrow().fail(ConfigFormatError::new(
-                ConfigFormatErrorKind::ResourceLimitExceeded,
+                ConfigFormatErrorKind::CapacityExceeded(CapacityExceeded::FormatOutput),
             ))
         })?;
         let workspace_bytes = depth.checked_mul(size_of::<FormatFrame>()).ok_or_else(|| {
             out.reborrow().fail(ConfigFormatError::new(
-                ConfigFormatErrorKind::ResourceLimitExceeded,
+                ConfigFormatErrorKind::CapacityExceeded(CapacityExceeded::FormatOutput),
             ))
         })?;
-        if depth > self.options.max_nesting_depth
-            || workspace_bytes > self.options.max_workspace_bytes
-        {
+        if depth > self.options.max_nesting_depth() {
             return Err(out.fail(ConfigFormatError::new(
-                ConfigFormatErrorKind::ResourceLimitExceeded,
+                ConfigFormatErrorKind::ResourceLimit(ResourceLimit::FormattingNestingDepth),
+            )));
+        }
+        if workspace_bytes > self.options.max_workspace_bytes() {
+            return Err(out.fail(ConfigFormatError::new(
+                ConfigFormatErrorKind::ResourceLimit(ResourceLimit::FormattingWorkspaceBytes),
             )));
         }
         self.stack.try_push(
@@ -710,7 +592,7 @@ impl FormatterEngine<'_, '_> {
         while let Some(byte) = bytes.get(cursor).copied() {
             scanned_bytes = scanned_bytes.checked_add(1).ok_or_else(|| {
                 out.reborrow().fail(ConfigFormatError::new(
-                    ConfigFormatErrorKind::ResourceLimitExceeded,
+                    ConfigFormatErrorKind::CapacityExceeded(CapacityExceeded::FormatOutput),
                 ))
             })?;
             if !matches!(byte, b' ' | b'\t' | b'\r' | b'\n') {
@@ -721,7 +603,7 @@ impl FormatterEngine<'_, '_> {
             }
             cursor = cursor.checked_add(1).ok_or_else(|| {
                 out.reborrow().fail(ConfigFormatError::new(
-                    ConfigFormatErrorKind::ResourceLimitExceeded,
+                    ConfigFormatErrorKind::CapacityExceeded(CapacityExceeded::FormatOutput),
                 ))
             })?;
         }
@@ -780,12 +662,12 @@ impl FormatterEngine<'_, '_> {
     ) -> OResult<'slot, ()> {
         let Some(length) = self.output_len.checked_add(text.len()) else {
             return Err(out.fail(ConfigFormatError::new(
-                ConfigFormatErrorKind::ResourceLimitExceeded,
+                ConfigFormatErrorKind::CapacityExceeded(CapacityExceeded::FormatOutput),
             )));
         };
         if length > self.output_limit {
             return Err(out.fail(ConfigFormatError::new(
-                ConfigFormatErrorKind::ResourceLimitExceeded,
+                ConfigFormatErrorKind::ResourceLimit(ResourceLimit::ConfigFormatOutputBytes),
             )));
         }
         if let Some(output) = &mut self.output {
@@ -833,12 +715,12 @@ impl FormatterEngine<'_, '_> {
         }
         let spaces = depth.checked_mul(4).ok_or_else(|| {
             out.reborrow().fail(ConfigFormatError::new(
-                ConfigFormatErrorKind::ResourceLimitExceeded,
+                ConfigFormatErrorKind::CapacityExceeded(CapacityExceeded::FormatOutput),
             ))
         })?;
         if spaces > self.output_limit.saturating_sub(self.output_len) {
             return Err(out.fail(ConfigFormatError::new(
-                ConfigFormatErrorKind::ResourceLimitExceeded,
+                ConfigFormatErrorKind::ResourceLimit(ResourceLimit::ConfigFormatOutputBytes),
             )));
         }
         for _ in 0..depth {
@@ -850,7 +732,9 @@ impl FormatterEngine<'_, '_> {
     fn scan_error(error: ScanError) -> ConfigFormatError {
         ConfigFormatError::new(match error {
             ScanError::InvalidStructure => ConfigFormatErrorKind::InvalidStructure,
-            ScanError::ResourceLimitExceeded => ConfigFormatErrorKind::ResourceLimitExceeded,
+            ScanError::CapacityExceeded => {
+                ConfigFormatErrorKind::CapacityExceeded(CapacityExceeded::FormatOutput)
+            }
         })
     }
 }

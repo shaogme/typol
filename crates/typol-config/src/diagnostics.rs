@@ -12,9 +12,10 @@ use crate::{options::ConfigLimits, secret::SecretPolicy};
 use core::{cmp::Ordering, error::Error, fmt, slice::from_ref};
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedString, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext,
-    ExcerptLimits, ExecutionBudget, SourceExcerptSet, SourceId, SourceReadError,
-    SourceReadErrorKind, SourceSpan, diagnostic_context,
+    BudgetError, CapacityExceeded, ChargedString, ChargedVec, Diagnostic, DiagnosticCode,
+    DiagnosticContext, ExcerptLimits, ExecutionBudget, InternalError, ResourceLimit,
+    SourceExcerptSet, SourceId, SourceReadError, SourceReadErrorKind, SourceSpan,
+    diagnostic_context,
 };
 use typol_i18n::{Translator, t};
 use typol_report::{DiagnosticReport, ReportContext};
@@ -35,6 +36,11 @@ static CONFIG_MISSING_TERMINAL_DIAGNOSTIC: DiagnosticContext = diagnostic_contex
     "typol-config",
     "diagnostic-collection",
     "missing-terminal-diagnostic",
+);
+static CONFIG_EXHAUSTED_BUDGET_WITHOUT_FAILURE: DiagnosticContext = diagnostic_context!(
+    "typol-config",
+    "diagnostic-collection",
+    "exhausted-budget-without-failure",
 );
 pub(crate) static NAMED_ENTRY_NAME_MISSING: DiagnosticContext =
     diagnostic_context!("typol-config", "value", "named-entry-name-missing");
@@ -101,15 +107,16 @@ impl<'schema> DiagnosticBuffer<'schema> {
             diagnostic = caught.take();
         }
         let code = diagnostic.code();
-        if matches!(
-            code,
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
-                | DiagnosticCode::ALLOCATION_FAILED
-                | DiagnosticCode::CAPACITY_EXCEEDED
-                | DiagnosticCode::SOURCE_INPUT_ERROR
-                | DiagnosticCode::INTERNAL_ERROR
-                | DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED
-        ) || diagnostic.message().is_err()
+        if code.is_resource_limit()
+            || matches!(
+                code,
+                DiagnosticCode::ALLOCATION_FAILED
+                    | DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED
+                    | DiagnosticCode::SOURCE_INPUT_ERROR
+            )
+            || code.is_capacity_exceeded()
+            || code.is_internal_error()
+            || diagnostic.message().is_err()
         {
             if self.len() >= self.limit {
                 self.truncated = true;
@@ -214,11 +221,17 @@ impl ConfigParseErrors {
         }
         let diagnostic = self.diagnostics().last()?;
         let kind = match diagnostic.code() {
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED => SourceReadErrorKind::ResourceLimitExceeded,
+            code if code.is_resource_limit() => {
+                SourceReadErrorKind::ResourceLimit(ResourceLimit::from_diagnostic_code(code)?)
+            }
             DiagnosticCode::ALLOCATION_FAILED => SourceReadErrorKind::AllocationFailed,
-            DiagnosticCode::CAPACITY_EXCEEDED => SourceReadErrorKind::CapacityExceeded,
+            code if code.is_capacity_exceeded() => {
+                SourceReadErrorKind::CapacityExceeded(CapacityExceeded::from_diagnostic_code(code)?)
+            }
             DiagnosticCode::SOURCE_INPUT_ERROR => SourceReadErrorKind::HostFailure,
-            DiagnosticCode::INTERNAL_ERROR => SourceReadErrorKind::InternalInvariantFailure,
+            code if code.is_internal_error() => SourceReadErrorKind::Internal(
+                InternalError::from_diagnostic_code(code, diagnostic.context()?)?,
+            ),
             _ => return None,
         };
         let mut error = SourceReadError::new(kind);
@@ -314,13 +327,20 @@ impl ConfigParseErrors {
         source_name: Option<ChargedString>,
     ) -> Self {
         let translator = buffer.translator;
-        if buffer
+        if let Some(budget) = buffer
             .diagnostics
             .budget()
-            .is_some_and(ExecutionBudget::exhausted)
+            .filter(|budget| budget.exhausted())
         {
             return Self::emergency(
-                BudgetDiagnostic::from_error(BudgetError::Resource, translator),
+                BudgetDiagnostic::from_error(
+                    budget.failure().unwrap_or({
+                        BudgetError::Internal(InternalError::DiagnosticCollectionInvariantFailure(
+                            CONFIG_EXHAUSTED_BUDGET_WITHOUT_FAILURE,
+                        ))
+                    }),
+                    translator,
+                ),
                 source_id,
                 translator,
             );
@@ -333,7 +353,7 @@ impl ConfigParseErrors {
             return match buffer.terminal.take() {
                 Some(diagnostic) => Self::emergency(diagnostic, source_id, translator),
                 None => Self::emergency(
-                    DiagnosticFactory::internal(
+                    DiagnosticFactory::collection_internal(
                         CONFIG_MISSING_TERMINAL_DIAGNOSTIC,
                         None,
                         None,
@@ -347,7 +367,7 @@ impl ConfigParseErrors {
         }
         if buffer.is_empty() {
             return Self::emergency(
-                DiagnosticFactory::internal(
+                DiagnosticFactory::collection_internal(
                     CONFIG_EMPTY_PARSE_RESULT,
                     None,
                     None,
@@ -783,8 +803,8 @@ impl fmt::Display for ConfigParseErrors {
         };
         let span_location = |span| self.span_location(span);
         DiagnosticReport::new(
-            title.as_ref(),
-            Some(stage.as_ref()),
+            title,
+            Some(stage),
             self.diagnostics(),
             ReportContext::new(&source_name, &span_location, self.excerpts()),
             translator,

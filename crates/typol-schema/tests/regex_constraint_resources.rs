@@ -3,7 +3,7 @@ mod support;
 
 use typol_test_support::*;
 
-use typol_core::DiagnosticCode;
+use typol_core::{DiagnosticCode, ResourceLimit};
 use typol_policy::{RegexExecutionLimits, RegexLimits, RegexOptions};
 use typol_schema::{SchemaCompileErrors, SchemaCompileOptions, SchemaLimits};
 use typol_semantic::CompiledSchema;
@@ -62,7 +62,7 @@ fn aggregate_limits_allow_exact_capacity_and_reject_one_below() -> TestResult {
             .first()
             .test_value()?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::RegexPatternBytes.diagnostic_code()
     );
 
     let mut limits = at_limits;
@@ -74,7 +74,7 @@ fn aggregate_limits_allow_exact_capacity_and_reject_one_below() -> TestResult {
             .first()
             .test_value()?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::RegexCompilationBudget.diagnostic_code()
     );
 
     let mut limits = at_limits;
@@ -86,7 +86,7 @@ fn aggregate_limits_allow_exact_capacity_and_reject_one_below() -> TestResult {
             .first()
             .test_value()?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::RegexInstructionCount.diagnostic_code()
     );
 
     let mut limits = at_limits;
@@ -98,7 +98,7 @@ fn aggregate_limits_allow_exact_capacity_and_reject_one_below() -> TestResult {
             .first()
             .test_value()?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::RegexCharacterRanges.diagnostic_code()
     );
     Ok(())
 }
@@ -117,7 +117,7 @@ fn enforces_per_pattern_limits_before_storing_a_constraint() -> TestResult {
             .first()
             .test_value()?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::RegexPatternBytes.diagnostic_code()
     );
 
     let mut limits = defaults;
@@ -129,7 +129,7 @@ fn enforces_per_pattern_limits_before_storing_a_constraint() -> TestResult {
             .first()
             .test_value()?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::RegexInstructionCount.diagnostic_code()
     );
 
     let mut limits = defaults;
@@ -141,7 +141,7 @@ fn enforces_per_pattern_limits_before_storing_a_constraint() -> TestResult {
             .first()
             .test_value()?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::RegexCharacterRanges.diagnostic_code()
     );
     Ok(())
 }
@@ -162,7 +162,7 @@ fn attempted_bytes_include_syntax_failures_but_program_count_does_not() -> TestR
     );
     test_verify_eq!(
         errors.diagnostics().get(1).test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::RegexPatternBytes.diagnostic_code()
     );
 
     let mut limits = RegexLimits::default();
@@ -188,7 +188,7 @@ fn exhausted_instruction_quota_precedes_later_syntax_errors() -> TestResult {
     test_verify_eq!(errors.diagnostics().len(), 1);
     test_verify_eq!(
         errors.diagnostics().first().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::RegexInstructionCount.diagnostic_code()
     );
 
     Ok(())

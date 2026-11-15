@@ -17,7 +17,7 @@ use typol::{
     binding::{
         BindOptions, BudgetedTypol, CodecErrors, TypedSchema, Typol as TypolTrait, WriteOptions,
     },
-    core::{DiagnosticCode, ValueSource},
+    core::{DiagnosticCode, ResourceLimit, ValueSource},
     host::{
         DiagnosticContext, DiagnosticRenderError, DiagnosticRenderer, DisplayError, DisplayOptions,
         HostErrorKind, Language, RenderOptions, SafeValueFormatter, Translator,
@@ -228,9 +228,9 @@ fn safe_errors(errors: &TypolError) -> TestResult {
                 out,
             )
         }),
-        Err(DiagnosticRenderError::Display(
-            DisplayError::ResourceLimitExceeded
-        ))
+        Err(DiagnosticRenderError::Display(DisplayError::ResourceLimit(
+            ResourceLimit::ConfigFormatOutputBytes
+        )))
     );
     assert_eq!(
         codes,
@@ -423,7 +423,7 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
                 errors
                     .diagnostics()
                     .iter()
-                    .any(|d| d.code() == DiagnosticCode::CONFIG_VALIDATION_ERROR)
+                    .any(|d| d.code() == DiagnosticCode::CONFIG_VALUE_ERROR)
             );
         }
     }
@@ -434,7 +434,7 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
     .test_value()?;
     for fault in [
         EnvironmentError::HostFailure,
-        EnvironmentError::ResourceLimitExceeded,
+        EnvironmentError::ResourceLimit(ResourceLimit::EnvironmentBytes),
         EnvironmentError::AllocationFailed,
     ] {
         for errors in [
@@ -459,7 +459,7 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
             .test_expect("decode errors should include diagnostics")?
             .code()
             .get(),
-        3
+        DiagnosticCode::LEXICAL_ERROR.get()
     );
     safe_errors(&errors)?;
 
@@ -469,7 +469,7 @@ fn real_host_secret_sources_and_faults_are_safe() -> TestResult {
     assert_eq!(errors.stage(), TypolStage::ConfigRead);
     assert_eq!(
         errors.host_error().test_value()?.kind(),
-        HostErrorKind::ResourceLimitExceeded
+        HostErrorKind::ResourceLimit(ResourceLimit::SourceBytes)
     );
     safe_errors(&errors)?;
     let errors = load_error(|out| {

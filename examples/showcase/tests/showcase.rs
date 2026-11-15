@@ -10,6 +10,11 @@ use typol_showcase::{
 
 struct DemoEnvironment;
 
+fn successful<T, E>(result: Result<T, E>) -> Option<T> {
+    assert!(result.is_ok(), "operation should succeed");
+    result.ok()
+}
+
 impl Environment for DemoEnvironment {
     fn read<'env, 'slot, 'borrow>(
         &'env mut self,
@@ -33,9 +38,11 @@ impl Environment for DemoEnvironment {
 fn local_schema_import_and_derive_macro_load_the_documented_config() {
     let mut environment = DemoEnvironment;
     let mut errors = ErrSlot::<TypolError>::new();
-    let config = errors
-        .try_call(|out| load_demo_config_with_environment(&mut environment, out))
-        .unwrap();
+    let Some(config) =
+        successful(errors.try_call(|out| load_demo_config_with_environment(&mut environment, out)))
+    else {
+        return;
+    };
 
     assert_eq!(config.service_name(), "metrics-api");
     assert_eq!(config.endpoint().host(), "api.example.test");
@@ -53,17 +60,22 @@ fn local_schema_import_and_derive_macro_load_the_documented_config() {
         Some("platform")
     );
     assert_eq!(config.peers().len(), 2);
-    assert_eq!(config.features()[0], "metrics");
-    assert_eq!(config.features()[1], "health");
+    assert_eq!(
+        config.features().first().map(String::as_str),
+        Some("metrics")
+    );
+    assert_eq!(config.features().get(1).map(String::as_str), Some("health"));
     assert_eq!(config.optional_note(), None);
 }
 
 #[test]
 fn missing_environment_values_and_fields_use_fallbacks_and_schema_defaults() {
     let mut errors = ErrSlot::<TypolError>::new();
-    let demo = errors
-        .try_call(|out| load_demo_config_with_environment(&mut EmptyEnvironment, out))
-        .unwrap();
+    let Some(demo) = successful(
+        errors.try_call(|out| load_demo_config_with_environment(&mut EmptyEnvironment, out)),
+    ) else {
+        return;
+    };
     assert_eq!(demo.service_name(), "typol-demo");
     assert_eq!(demo.endpoint().host(), "127.0.0.1");
     assert_eq!(demo.endpoint().port(), 8443);
@@ -73,9 +85,11 @@ fn missing_environment_values_and_fields_use_fallbacks_and_schema_defaults() {
         peers: [],
         features: ["health"],
     }"#;
-    let config = errors
-        .try_call(|out| load_text_with_environment(minimal, &mut EmptyEnvironment, out))
-        .unwrap();
+    let Some(config) = successful(
+        errors.try_call(|out| load_text_with_environment(minimal, &mut EmptyEnvironment, out)),
+    ) else {
+        return;
+    };
 
     assert_eq!(config.service_name(), "typol-demo");
     assert_eq!(config.endpoint().host(), "127.0.0.1");
@@ -92,29 +106,38 @@ fn missing_environment_values_and_fields_use_fallbacks_and_schema_defaults() {
 #[test]
 fn derived_binding_round_trips_config_and_checks_collection_constraints() {
     let mut load_errors = ErrSlot::<TypolError>::new();
-    let loaded = load_errors.try_call(load_schema).unwrap();
-    let binding = load_errors
-        .try_call(|out| loaded.bind::<ShowcaseConfig>(out))
-        .unwrap();
+    let Some(loaded) = successful(load_errors.try_call(load_schema)) else {
+        return;
+    };
+    let Some(binding) = successful(load_errors.try_call(|out| loaded.bind::<ShowcaseConfig>(out)))
+    else {
+        return;
+    };
     let mut environment = DemoEnvironment;
-    let config = load_errors
-        .try_call(|out| {
-            binding.read(
-                ReadRequest::from_text(include_str!("../config/demo.tconf")),
-                &mut environment,
-                out,
-            )
-        })
-        .unwrap();
+    let Some(config) = successful(load_errors.try_call(|out| {
+        binding.read(
+            ReadRequest::from_text(include_str!("../config/demo.tconf")),
+            &mut environment,
+            out,
+        )
+    })) else {
+        return;
+    };
     let mut encoded = String::new();
-    load_errors
-        .try_call(|out| binding.write(&config, &mut encoded, WriteOptions::default(), out))
-        .unwrap();
+    let Some(()) = successful(
+        load_errors
+            .try_call(|out| binding.write(&config, &mut encoded, WriteOptions::default(), out)),
+    ) else {
+        return;
+    };
 
     let mut source = encoded.as_bytes();
-    let decoded = load_errors
-        .try_call(|out| binding.read_io(&mut source, "往返配置", &mut DemoEnvironment, out))
-        .unwrap();
+    let Some(decoded) = successful(
+        load_errors
+            .try_call(|out| binding.read_io(&mut source, "往返配置", &mut DemoEnvironment, out)),
+    ) else {
+        return;
+    };
 
     assert!(decoded == config);
 
@@ -126,10 +149,11 @@ fn derived_binding_round_trips_config_and_checks_collection_constraints() {
         ],
         features: ["metrics"],
     }"#;
-    let Err(errors) = load_errors
-        .try_call(|out| load_text_with_environment(duplicate_peer, &mut DemoEnvironment, out))
-    else {
-        panic!("重复的 peer 主机名应被拒绝");
+    let result = load_errors
+        .try_call(|out| load_text_with_environment(duplicate_peer, &mut DemoEnvironment, out));
+    assert!(result.is_err(), "重复的 peer 主机名应被拒绝");
+    let Some(errors) = result.err() else {
+        return;
     };
     assert_eq!(errors.get().stage(), TypolStage::Decoding);
 }
@@ -143,10 +167,11 @@ fn struct_assertions_reject_invalid_thread_bounds() {
         features: ["health"],
     }"#;
     let mut errors = ErrSlot::<TypolError>::new();
-    let Err(errors) =
-        errors.try_call(|out| load_text_with_environment(invalid, &mut DemoEnvironment, out))
-    else {
-        panic!("无效的线程范围应被拒绝");
+    let result =
+        errors.try_call(|out| load_text_with_environment(invalid, &mut DemoEnvironment, out));
+    assert!(result.is_err(), "无效的线程范围应被拒绝");
+    let Some(errors) = result.err() else {
+        return;
     };
 
     assert_eq!(errors.get().stage(), TypolStage::Decoding);

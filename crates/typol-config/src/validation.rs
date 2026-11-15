@@ -409,7 +409,7 @@ impl Validator {
                     .len()
                     .checked_add(1)
                     .ok_or_else(|| DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
-                        code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                        code: DiagnosticCode::CONFIG_VALIDATION_INVARIANT_FAILURE,
                         message: t! { name: "diagnostic.config.fallback_rule_limit", locale: metadata.translator }.into(),
                         primary: metadata.span,
                         path: None,

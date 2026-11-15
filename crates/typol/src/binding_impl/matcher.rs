@@ -19,7 +19,9 @@ use fields::{DuplicateCheck, FieldMatch, FieldMatcher};
 use index::BindingIndex;
 use opeo::{OResult, Out, ResultOutExt};
 use support::MatcherSupport;
-use typol_core::{BudgetError, ChargedVec, DiagnosticContext, diagnostic_context};
+use typol_core::{
+    BudgetError, CapacityExceeded, ChargedVec, DiagnosticContext, diagnostic_context,
+};
 use typol_i18n::Translator;
 use typol_semantic::{TypeKind, TypeView, VariantPayloadInfo};
 
@@ -227,7 +229,7 @@ impl<'schema> Matcher<'schema> {
             .checked_add(1)
             .ok_or_else(|| {
                 MatcherSupport::binding_budget_error(
-                    BudgetError::Resource,
+                    BudgetError::CapacityExceeded(CapacityExceeded::RustConversion),
                     context.session().translator(),
                 )
             })
@@ -806,7 +808,7 @@ fn check_name<'slot>(
 fn internal_error(translator: Translator) -> CodecErrors {
     CodecErrors::emergency(
         CodecStage::Binding,
-        Failure::internal(BINDING_INVARIANT),
+        Failure::binding_internal(BINDING_INVARIANT),
         translator,
     )
 }

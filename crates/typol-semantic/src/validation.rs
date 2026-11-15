@@ -14,8 +14,8 @@ use crate::{
 use core::cmp::Ordering;
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 use typol_core::{
-    ChargedVec, DiagnosticContext, ExecutionBudget, RegexExecutionBudget, SourceSpan,
-    diagnostic_context,
+    CapacityExceeded, ChargedVec, DiagnosticContext, ExecutionBudget, RegexExecutionBudget,
+    SourceSpan, diagnostic_context,
 };
 use typol_policy::{RegexLimits, ValueLimits};
 
@@ -170,7 +170,9 @@ impl Validation {
                 .rules
                 .len()
                 .checked_add(segment.tail.len())
-                .ok_or(BuildError::Resource)
+                .ok_or(BuildError::CapacityExceeded(
+                    CapacityExceeded::SchemaStorage,
+                ))
                 .store_err_into(out.reborrow())?;
             execution.consume(rule_count, out.reborrow())?;
             ensure(
@@ -561,20 +563,18 @@ fn validate_refinement<'slot>(
     Ok(())
 }
 
-fn claim(owners: &mut [bool], index: usize) -> Result<(), BuildError> {
-    let owner = owners
-        .get_mut(index)
-        .ok_or(BuildError::internal(SCHEMA_VALIDATION_INTERNAL))?;
+fn claim(owners: &mut [bool], index: usize) -> Result<(), DiagnosticContext> {
+    let owner = owners.get_mut(index).ok_or(SCHEMA_VALIDATION_INTERNAL)?;
     ensure(!*owner)?;
     *owner = true;
     Ok(())
 }
 
-fn ensure(valid: bool) -> Result<(), BuildError> {
+fn ensure(valid: bool) -> Result<(), DiagnosticContext> {
     if valid {
         Ok(())
     } else {
-        Err(BuildError::internal(SCHEMA_VALIDATION_INTERNAL))
+        Err(SCHEMA_VALIDATION_INTERNAL)
     }
 }
 

@@ -1,7 +1,8 @@
 use opeo::{OResult, Out};
 use typol_core::{
-    Diagnostic, DiagnosticContext, ExcerptLimits, ExecutionLimits, LocatedSpan, Read, SliceSource,
-    SourceId, SourceReadError, SourceReadErrorKind, SourceSpan, Span, diagnostic_context,
+    CapacityExceeded, Diagnostic, DiagnosticContext, ExcerptLimits, ExecutionLimits, InternalError,
+    LocatedSpan, Read, ResourceLimit, SliceSource, SourceId, SourceReadError, SourceReadErrorKind,
+    SourceSpan, Span, diagnostic_context,
 };
 use typol_i18n::{Language, Translator, t};
 use typol_policy::{RegexOptions, ValueLimits};
@@ -83,26 +84,19 @@ impl<'src> SchemaSource<'src> {
         let source_id = error.source_id().unwrap_or(source_id);
         let offset = error.offset().unwrap_or(offset);
         let message = match error.kind() {
-            SourceReadErrorKind::ResourceLimitExceeded => t! {
-                name: "diagnostic.emergency.resource_limit_exceeded",
-                locale: translator,
-            },
+            SourceReadErrorKind::ResourceLimit(limit) => limit.emergency_message(translator),
             SourceReadErrorKind::AllocationFailed => t! {
                 name: "diagnostic.emergency.allocation_failed",
                 locale: translator,
             },
-            SourceReadErrorKind::CapacityExceeded => t! {
-                name: "diagnostic.emergency.capacity_exceeded",
-                locale: translator,
-            },
+            SourceReadErrorKind::CapacityExceeded(capacity) => {
+                capacity.emergency_message(translator)
+            }
             SourceReadErrorKind::HostFailure => t! {
                 name: "diagnostic.emergency.source_input_error",
                 locale: translator,
             },
-            SourceReadErrorKind::InternalInvariantFailure => t! {
-                name: "diagnostic.emergency.internal_error",
-                locale: translator,
-            },
+            SourceReadErrorKind::Internal(error) => error.emergency_message(translator),
         };
         let mut diagnostic =
             EmergencyDiagnostics::translated(error.diagnostic_code(), message, None);
@@ -139,10 +133,10 @@ impl<'src, R: Read<SourceReadError>> SchemaSource<'src, R> {
 pub enum ResolverError {
     NotFound,
     ImportsNotSupported,
-    ResourceLimitExceeded,
+    ResourceLimit(ResourceLimit),
     AllocationFailed,
-    CapacityExceeded,
-    InternalInvariantFailure,
+    CapacityExceeded(CapacityExceeded),
+    Internal(InternalError),
     HostFailure,
     ContextMismatch,
 }
@@ -151,6 +145,7 @@ pub struct SchemaResolveRequest<'a> {
     pub from_identity: &'a [u8],
     pub module_name: &'a str,
     pub source_byte_limit: usize,
+    pub source_byte_limit_kind: ResourceLimit,
     pub context: &'a SchemaCompileContext,
 }
 
@@ -166,10 +161,10 @@ pub trait SchemaResolver {
 /// Finite reasons for source-registration failure; no host paths or arbitrary error text are retained.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceObserverError {
-    ResourceLimitExceeded,
+    ResourceLimit(ResourceLimit),
     AllocationFailed,
-    CapacityExceeded,
-    InternalInvariantFailure,
+    CapacityExceeded(CapacityExceeded),
+    Internal(InternalError),
     HostFailure,
 }
 

@@ -10,11 +10,10 @@ use crate::{
         StringLiteral,
     },
 };
-use alloc::borrow::Cow;
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
     ChargedBox, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, RelatedLocationRole,
-    SourceSpan, Span,
+    SourceSpan, Span, diagnostic_context,
 };
 use typol_i18n::{Translator, t};
 use u18n::RenderError;
@@ -127,7 +126,7 @@ impl ParserControl {
             }
             LexEvent::Halted(span) => {
                 let span = *span;
-                let diagnostic = ParserControl::resource_error(parser, span);
+                let diagnostic = ParserControl::halted_error(parser, span);
                 Err(out.reborrow().fail(diagnostic))
             }
         }
@@ -577,7 +576,7 @@ impl ParserControl {
     pub(crate) fn syntax_error<'slot>(
         parser: &ParserState<'_>,
         span: SourceSpan,
-        message: Result<Cow<'static, str>, RenderError>,
+        message: Result<&'static str, RenderError>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Diagnostic> {
         SyntaxDiagnostic::make(
@@ -595,7 +594,7 @@ impl ParserControl {
     pub(crate) fn syntax_failure<'slot, T>(
         parser: &ParserState<'_>,
         span: SourceSpan,
-        message: Result<Cow<'static, str>, RenderError>,
+        message: Result<&'static str, RenderError>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, T> {
         let diagnostic = SyntaxDiagnostic::make(
@@ -611,14 +610,11 @@ impl ParserControl {
         Err(out.reborrow().fail(diagnostic))
     }
 
-    pub(crate) fn resource_error(parser: &ParserState<'_>, span: SourceSpan) -> Diagnostic {
-        SyntaxDiagnostic::emergency(
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-            t! {
-                name: "diagnostic.emergency.resource_limit_exceeded",
-                locale: parser.translator,
-            },
+    pub(crate) fn halted_error(parser: &ParserState<'_>, span: SourceSpan) -> Diagnostic {
+        SyntaxDiagnostic::internal(
+            diagnostic_context!("typol-syntax", "parser", "cursor-already-halted"),
             span,
+            parser.translator,
         )
     }
 
@@ -785,7 +781,9 @@ mod tests {
     use opeo::{ErrSlot, OResult, Out};
     use typol_core::{Diagnostic, DiagnosticCode, SourceId, SourceSpan, Span};
     use typol_i18n::{Language, Translator};
-    use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome};
+    use typol_test_support::{
+        TestFailure as OpeoTestFailure, TestOpeoOutcome, test_assert_eq_early as test_assert_eq,
+    };
 
     use super::SyntaxBudget;
 
@@ -810,16 +808,6 @@ mod tests {
         }
     }
 
-    macro_rules! test_assert_eq {
-        ($left:expr, $right:expr $(, $($message:tt)*)?) => {{
-            let left = &$left;
-            let right = &$right;
-            if left != right {
-                return Err(TestFailure);
-            }
-        }};
-    }
-
     #[test]
     fn syntax_frame_budget_fails_before_growth_and_detects_underflow() -> TestResult {
         let span = SourceSpan::new(SourceId::new(7), Span::empty());
@@ -830,11 +818,14 @@ mod tests {
             call(&mut errors, |out| budget.enter(span, out))
                 .test_error()?
                 .code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+            DiagnosticCode::SCHEMA_PARSE_DEPTH_LIMIT_EXCEEDED
         );
         call(&mut errors, |out| budget.leave(1, span, out)).test_value()?;
         let internal = call(&mut errors, |out| budget.leave(1, span, out)).test_error()?;
-        test_assert_eq!(internal.code(), DiagnosticCode::INTERNAL_ERROR);
+        test_assert_eq!(
+            internal.code(),
+            DiagnosticCode::SYNTAX_STORAGE_INVARIANT_FAILURE
+        );
         let Some(context) = internal.context() else {
             return Err(TestFailure);
         };

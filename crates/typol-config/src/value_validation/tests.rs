@@ -6,9 +6,9 @@ use crate::{
 use alloc::{boxed::Box, format, vec, vec::Vec};
 use opeo::{OResult, Out};
 use typol_core::{
-    AllocationError, BudgetError, ConfigValue, ConfigValueBuilder, DiagnosticCode, ExecutionBudget,
-    ExecutionLimits, NamedValue, SliceSource, ValueError, ValueKind, ValuePayloadView, ValueScalar,
-    ValueSource,
+    AllocationError, BudgetError, ConfigValue, ConfigValueBuilder, DiagnosticCode,
+    DiagnosticContext, ExecutionBudget, ExecutionLimits, InternalError, NamedValue, SliceSource,
+    ValueError, ValueKind, ValuePayloadView, ValueScalar, ValueSource, diagnostic_context,
 };
 use typol_policy::{ExcerptLimits, RegexOptions};
 use typol_schema::{
@@ -17,6 +17,12 @@ use typol_schema::{
 };
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
+
+static ENVIRONMENT_TEST_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-config-tests",
+    "environment-provider",
+    "injected-internal-failure",
+);
 
 struct NoImports;
 
@@ -39,7 +45,9 @@ impl Environment for NoEnvironment {
         _: EnvironmentReadContext<'_>,
         out: Out<'slot, 'borrow, EnvironmentError>,
     ) -> OResult<'slot, Option<&'env [u8]>> {
-        Err(out.fail(EnvironmentError::InternalError))
+        Err(out.fail(EnvironmentError::Internal(
+            InternalError::EnvironmentInvariantFailure(ENVIRONMENT_TEST_INVARIANT),
+        )))
     }
 }
 
@@ -543,7 +551,7 @@ fn shared_budget_and_diagnostic_terminal_slots_are_preserved() -> TestResult<()>
         .test_error()?;
     test_eq!(
         TestCheck::item(errors.diagnostics(), 0)?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED
     )?;
 
     Ok(())
@@ -796,7 +804,7 @@ fn secret_element_struct_assertions_hide_messages_before_path_copy() -> TestResu
         .test_error()?;
     test_eq!(
         TestCheck::item(errors.diagnostics(), 0)?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::REGEX_SCRATCH_STATES_LIMIT_EXCEEDED
     )?;
     test_eq!(
         TestCheck::item(errors.diagnostics(), 0)?

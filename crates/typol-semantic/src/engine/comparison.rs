@@ -5,8 +5,8 @@ use crate::{
 use core::cmp::Ordering;
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
-    ChargedVec, DiagnosticContext, ValueEntries, ValueKind, ValuePayloadView, ValueView,
-    diagnostic_context,
+    ChargedVec, DiagnosticContext, ResourceLimit, ValueEntries, ValueKind, ValuePayloadView,
+    ValueView, diagnostic_context,
 };
 
 static COMPARISON_INTERNAL: DiagnosticContext = diagnostic_context!(
@@ -15,14 +15,14 @@ static COMPARISON_INTERNAL: DiagnosticContext = diagnostic_context!(
     "typed-value-shape-mismatch",
 );
 
-fn optional(value: EvalValue<'_>) -> Result<Option<ValueView<'_>>, EvalError> {
+fn optional(value: EvalValue<'_>) -> Result<Option<ValueView<'_>>, DiagnosticContext> {
     match value.kind() {
         EvalKind::None => Ok(None),
         EvalKind::Value(value) => match value.as_ref() {
             ValueKind::Optional(value) => Ok(value),
-            _ => Err(EvalError::internal(COMPARISON_INTERNAL)),
+            _ => Err(COMPARISON_INTERNAL),
         },
-        _ => Err(EvalError::internal(COMPARISON_INTERNAL)),
+        _ => Err(COMPARISON_INTERNAL),
     }
 }
 
@@ -368,7 +368,7 @@ impl ValueComparison {
         {
             evaluator.step(out.reborrow())?;
             if depth >= evaluator.limits().max_nesting_depth() {
-                return Err(out.fail(EvalError::Resource));
+                return Err(out.fail(EvalError::ResourceLimit(ResourceLimit::ValidationTraversal)));
             }
             evaluator.checked(left, false, out.reborrow())?;
             evaluator.checked(right, false, out.reborrow())?;
@@ -390,7 +390,7 @@ impl ValueComparison {
             let right_kind = right_info.kind();
             let next_depth = depth
                 .checked_add(1)
-                .ok_or(EvalError::Resource)
+                .ok_or(EvalError::internal(COMPARISON_INTERNAL))
                 .store_err_into(out.reborrow())?;
             let order =
                 match Self::scalar_order(evaluator, left, right, equality_only, out.reborrow())? {

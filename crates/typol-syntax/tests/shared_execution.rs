@@ -7,7 +7,10 @@ use typol_syntax::{
     AnnotationData, AstAccessError, InputConfig, LexEvent, SchemaAst, SchemaParseOptions,
     SchemaParser, StreamLimits, SyntaxErrors, SyntaxLimits, TokenCursor,
 };
-use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
+use typol_test_support::{
+    TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot, test_assert_early as test_assert,
+    test_assert_eq_early as test_assert_eq,
+};
 
 struct TestCursor<'source> {
     cursor: TokenCursor<'source>,
@@ -54,24 +57,6 @@ impl From<OpeoTestFailure> for TestFailure {
     fn from(_: OpeoTestFailure) -> Self {
         Self
     }
-}
-
-macro_rules! test_assert {
-    ($condition:expr $(, $($message:tt)*)?) => {{
-        if !$condition {
-            return Err(TestFailure);
-        }
-    }};
-}
-
-macro_rules! test_assert_eq {
-    ($left:expr, $right:expr $(, $($message:tt)*)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(TestFailure);
-        }
-    }};
 }
 
 type TestResult<T = ()> = Result<T, TestFailure>;
@@ -126,7 +111,7 @@ fn zero_steps_rejects_even_an_empty_source_without_retained_storage() -> TestRes
     .test_error()?;
     test_assert_eq!(
         errors.diagnostics().next_back().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED
     );
     test_assert!(budget.exhausted());
     drop(errors);
@@ -175,7 +160,7 @@ fn multiple_sources_share_steps_and_keep_the_first_tree_charged() -> TestResult 
     .test_error()?;
     test_assert_eq!(
         errors.diagnostics().next_back().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED
     );
     test_assert!(budget.steps() > one);
     drop(errors);
@@ -316,7 +301,7 @@ fn parser_work_can_exhaust_a_budget_that_is_sufficient_for_lexing() -> TestResul
     .test_error()?;
     test_assert_eq!(
         errors.diagnostics().next_back().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED
     );
 
     Ok(())
@@ -341,7 +326,7 @@ fn recovery_preserves_previous_errors_and_appends_a_resource_terminal() -> TestR
         let diagnostics = errors.diagnostics();
         if diagnostics.len() >= 2
             && diagnostics.iter().next_back().test_value()?.code()
-                == DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+                == DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED
         {
             test_assert_eq!(
                 diagnostics.first().test_value()?.code(),

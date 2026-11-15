@@ -7,12 +7,11 @@ use crate::{
     parser::SourcePositionIndex,
     token::{CommentKind, Keyword, Symbol, Token, TokenKind},
 };
-use alloc::borrow::Cow;
 use block_string::{BlockStringContext, BlockStringDecoder};
 use opeo::{OResult, Out};
 use typol_core::{
     ChargedString, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, ExecutionBudget,
-    LocatedSpan, SourceLocation, SourceSpan, Span, diagnostic_context,
+    LocatedSpan, ResourceLimit, SourceLocation, SourceSpan, Span, diagnostic_context,
 };
 use typol_i18n::{Translator, t};
 use u18n::RenderError;
@@ -241,7 +240,7 @@ impl<'input> Lexer<'input> {
     fn diagnostic<'slot>(
         &self,
         start: LocatedSpan,
-        message: Result<Cow<'static, str>, RenderError>,
+        message: Result<&'static str, RenderError>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Diagnostic> {
         let located_span = self.input.span_from(start, out.reborrow())?;
@@ -278,7 +277,9 @@ impl<'input> Lexer<'input> {
             .checked_add(character.len_utf8())
             .is_none_or(|next| next > self.stream.max_token_bytes())
         {
-            return Err(out.reborrow().fail(self.input.resource_failure()));
+            return Err(out
+                .reborrow()
+                .fail(self.input.resource_failure(ResourceLimit::TokenBytes)));
         }
         self.input.advance(out.reborrow())
     }
@@ -296,7 +297,9 @@ impl<'input> Lexer<'input> {
                 .checked_add(character.len_utf8())
                 .is_none_or(|next| next > self.limits.max_string_bytes())
         {
-            return Err(out.reborrow().fail(self.input.resource_failure()));
+            return Err(out
+                .reborrow()
+                .fail(self.input.resource_failure(ResourceLimit::StringBytes)));
         }
         SyntaxDiagnostic::budgeted_with(
             out,

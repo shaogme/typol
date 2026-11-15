@@ -53,6 +53,27 @@ impl HostErrorRenderer {
         }
         output.append("): ", out.reborrow())?;
         let text = match error.kind() {
+            HostErrorKind::ResourceLimit(limit) => {
+                return localizer.write_translated(
+                    limit.emergency_message(translator),
+                    output,
+                    out.reborrow(),
+                );
+            }
+            HostErrorKind::CapacityExceeded(capacity) => {
+                return localizer.write_translated(
+                    capacity.emergency_message(translator),
+                    output,
+                    out.reborrow(),
+                );
+            }
+            HostErrorKind::Internal(internal) => {
+                return localizer.write_translated(
+                    internal.emergency_message(translator),
+                    output,
+                    out.reborrow(),
+                );
+            }
             HostErrorKind::NotFound => {
                 t! { name: "report.host_kind.not_found", locale: translator }
             }
@@ -68,17 +89,8 @@ impl HostErrorRenderer {
             HostErrorKind::ReadFailure => {
                 t! { name: "report.host_kind.read_failure", locale: translator }
             }
-            HostErrorKind::ResourceLimitExceeded => {
-                t! { name: "report.host_kind.resource_limit_exceeded", locale: translator }
-            }
             HostErrorKind::AllocationFailed => {
                 t! { name: "report.host_kind.allocation_failed", locale: translator }
-            }
-            HostErrorKind::CapacityExceeded => {
-                t! { name: "report.host_kind.capacity_exceeded", locale: translator }
-            }
-            HostErrorKind::InternalError => {
-                t! { name: "report.host_kind.internal_error", locale: translator }
             }
         };
         localizer.write_translated(text, output, out.reborrow())

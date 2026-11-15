@@ -8,7 +8,9 @@ use crate::{
     value_validation::{ValueValidation, ValueValidationRequest},
 };
 use ::opeo::{ErrSlot, OResult, Out};
-use typol_core::{ConfigValue, DiagnosticContext, ExecutionBudget, diagnostic_context};
+use typol_core::{
+    ConfigValue, DiagnosticContext, ExecutionBudget, ValueSource, diagnostic_context,
+};
 use typol_semantic::CompiledSchema;
 
 static CONFIG_VALUE_BUDGET_MISMATCH: DiagnosticContext = diagnostic_context!(
@@ -149,7 +151,7 @@ impl<'schema> ConfigValueProcessor<'schema> {
         if budget.limits() != *request.options().execution() {
             return Err(out.fail(ConfigValueErrors::from_errors(
                 ConfigParseErrors::emergency(
-                    DiagnosticFactory::internal(
+                    DiagnosticFactory::value_internal(
                         CONFIG_VALUE_NORMALIZATION_BUDGET_MISMATCH,
                         None,
                         None,
@@ -190,6 +192,8 @@ impl<'schema> ConfigValueProcessor<'schema> {
                     text_limit: request.options().config().max_constructed_text_bytes(),
                     schema_default: false,
                     allow_unvalidated_environment_sources: false,
+                    existing_nodes_precounted: false,
+                    missing_value_source: ValueSource::RustValue,
                 },
                 &mut nodes,
                 request.options().config().values(),

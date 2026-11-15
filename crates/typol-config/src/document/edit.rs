@@ -11,7 +11,8 @@ use super::{
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedString, ChargedVec, ConfigValue, ExecutionBudget, TextLayout, ValueView,
+    BudgetError, CapacityExceeded, ChargedString, ChargedVec, ConfigValue, ExecutionBudget,
+    ResourceLimit, TextLayout, ValueView,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -291,19 +292,22 @@ impl<'a> DocumentEditEngine<'a> {
             .checked_mul(search_bound.max(1))
             .and_then(|steps| steps.checked_mul(MAX_PATH_LOOKUPS_PER_EDIT))
             .ok_or_else(|| {
-                out.reborrow().fail(ConfigEditError::new(
-                    ConfigEditErrorKind::ResourceLimitExceeded,
-                ))
+                out.reborrow()
+                    .fail(ConfigEditError::new(ConfigEditErrorKind::CapacityExceeded(
+                        CapacityExceeded::ConfigEdit,
+                    )))
             })?;
         let auxiliary_steps = search_bound.checked_mul(3).ok_or_else(|| {
-            out.reborrow().fail(ConfigEditError::new(
-                ConfigEditErrorKind::ResourceLimitExceeded,
-            ))
+            out.reborrow()
+                .fail(ConfigEditError::new(ConfigEditErrorKind::CapacityExceeded(
+                    CapacityExceeded::ConfigEdit,
+                )))
         })?;
         let steps = path_steps.checked_add(auxiliary_steps).ok_or_else(|| {
-            out.reborrow().fail(ConfigEditError::new(
-                ConfigEditErrorKind::ResourceLimitExceeded,
-            ))
+            out.reborrow()
+                .fail(ConfigEditError::new(ConfigEditErrorKind::CapacityExceeded(
+                    CapacityExceeded::ConfigEdit,
+                )))
         })?;
         if let Some(budget) = self.context.budget {
             budget.consume(steps, out)?;
@@ -676,7 +680,9 @@ impl<'a> DocumentEditEngine<'a> {
                 .checked_mul(request.layout.indent_levels)
                 .and_then(|length| length.checked_add(request.layout.indent.len()))
                 .and_then(|length| length.checked_add(request.layout.line_break.len()))
-                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?
+                .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                    CapacityExceeded::ConfigEdit,
+                ))?
         } else if request.space {
             1
         } else {
@@ -684,7 +690,9 @@ impl<'a> DocumentEditEngine<'a> {
         };
         let total_bytes = spacing_bytes
             .checked_add(usize::from(request.comma))
-            .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+            .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                CapacityExceeded::ConfigEdit,
+            ))?;
         let mut errors = ErrSlot::<BudgetError>::new();
         errors
             .try_call(|out| {
@@ -753,13 +761,15 @@ fn append_charged(
     text: &str,
     limit: usize,
 ) -> Result<(), ConfigEditErrorKind> {
-    if output
-        .len()
-        .checked_add(text.len())
-        .filter(|length| *length <= limit)
-        .is_none()
-    {
-        return Err(ConfigEditErrorKind::ResourceLimitExceeded);
+    let Some(length) = output.len().checked_add(text.len()) else {
+        return Err(ConfigEditErrorKind::CapacityExceeded(
+            CapacityExceeded::ConfigEdit,
+        ));
+    };
+    if length > limit {
+        return Err(ConfigEditErrorKind::ResourceLimit(
+            ResourceLimit::ConfigFormatOutputBytes,
+        ));
     }
     let mut errors = ErrSlot::<BudgetError>::new();
     errors

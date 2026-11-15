@@ -1,6 +1,7 @@
 use super::ParserTestSupport;
 use crate::ConfigLimits;
 use alloc::format;
+use typol_core::DiagnosticCode;
 use typol_test_support::*;
 
 struct NodeLimitCase {
@@ -45,7 +46,10 @@ fn omitted_optional_and_map_keys_count_as_nodes() -> TestResult<()> {
         test_assert!(ParserTestSupport::parse(&schema, case.source, &limits).is_ok())?;
         limits = limits.with_max_value_nodes(case.nodes - 1);
         let errors = ParserTestSupport::parse(&schema, case.source, &limits).test_error()?;
-        test_eq!(ParserTestSupport::codes(&errors), [1])?;
+        test_eq!(
+            ParserTestSupport::codes(&errors),
+            [DiagnosticCode::CONFIG_VALUE_NODES_LIMIT_EXCEEDED.get()]
+        )?;
     }
 
     Ok(())
@@ -76,7 +80,10 @@ fn nesting_counts_optional_wrappers_and_default_containers() -> TestResult<()> {
         test_assert!(ParserTestSupport::parse(&schema, case.source, &limits).is_ok())?;
         limits = limits.with_max_nesting_depth(case.depth - 1);
         let errors = ParserTestSupport::parse(&schema, case.source, &limits).test_error()?;
-        test_eq!(ParserTestSupport::codes(&errors), [1])?;
+        test_eq!(
+            ParserTestSupport::codes(&errors),
+            [DiagnosticCode::CONFIG_VALUE_DEPTH_LIMIT_EXCEEDED.get()]
+        )?;
     }
 
     Ok(())
@@ -89,7 +96,13 @@ fn recovery_scanning_also_obeys_nesting_limit() -> TestResult<()> {
     limits = limits.with_max_nesting_depth(2);
     let errors =
         ParserTestSupport::parse(&schema, "{ a: [[[1]]], b: 999 }", &limits).test_error()?;
-    test_eq!(ParserTestSupport::codes(&errors), [11, 1])?;
+    test_eq!(
+        ParserTestSupport::codes(&errors),
+        [
+            DiagnosticCode::CONFIG_VALUE_ERROR.get(),
+            DiagnosticCode::CONFIG_PARSE_DEPTH_LIMIT_EXCEEDED.get()
+        ]
+    )?;
 
     Ok(())
 }
@@ -109,7 +122,10 @@ fn enum_default_and_explicit_structure_share_depth_accounting() -> TestResult<()
     limits = limits.with_max_nesting_depth(3);
     for source in ["{}", "{ e: .Obj { a: [1] } }"] {
         let errors = ParserTestSupport::parse(&schema, source, &limits).test_error()?;
-        test_eq!(ParserTestSupport::codes(&errors), [1])?;
+        test_eq!(
+            ParserTestSupport::codes(&errors),
+            [DiagnosticCode::CONFIG_VALUE_DEPTH_LIMIT_EXCEEDED.get()]
+        )?;
     }
 
     Ok(())

@@ -1,11 +1,10 @@
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, DiagnosticContext, RegexExecutionBudget, SourceSpan, diagnostic_context,
+    BudgetError, CapacityExceeded, DiagnosticCode, DiagnosticContext, InternalError,
+    RegexExecutionBudget, ResourceLimit, SourceSpan, diagnostic_context,
 };
 use typol_policy::RegexLimits;
-use typol_regex::{
-    Regex, RegexErrorContext, RegexMatchError, RegexResource, RegexScratch, RegexScratchError,
-};
+use typol_regex::{Regex, RegexErrorContext, RegexMatchError, RegexScratch, RegexScratchError};
 
 use crate::CompiledRegexConstraint;
 
@@ -26,7 +25,7 @@ pub enum RegexExecutionFailure {
     Scratch(RegexScratchError),
     Match(RegexMatchError),
     Budget(BudgetError),
-    Internal(Option<DiagnosticContext>),
+    Internal(InternalError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,9 +33,8 @@ pub enum RegexExecutionError {
     Scratch(RegexScratchError),
     Match(RegexMatchError),
     Budget(BudgetError),
-    Internal,
-    InternalAt {
-        context: DiagnosticContext,
+    Internal {
+        error: InternalError,
         source_span: Option<SourceSpan>,
     },
     Located {
@@ -46,23 +44,103 @@ pub enum RegexExecutionError {
 }
 
 impl RegexExecutionError {
+    pub const fn internal_error(self) -> Option<InternalError> {
+        match self {
+            Self::Scratch(error) => error.internal_error(),
+            Self::Match(error) => error.internal_error(),
+            Self::Budget(BudgetError::Internal(error)) | Self::Internal { error, .. } => {
+                Some(error)
+            }
+            Self::Budget(
+                BudgetError::ResourceLimit(_)
+                | BudgetError::Allocation
+                | BudgetError::CapacityExceeded(_),
+            ) => None,
+            Self::Located { error, .. } => match error {
+                RegexExecutionFailure::Scratch(error) => error.internal_error(),
+                RegexExecutionFailure::Match(error) => error.internal_error(),
+                RegexExecutionFailure::Budget(BudgetError::Internal(error))
+                | RegexExecutionFailure::Internal(error) => Some(error),
+                RegexExecutionFailure::Budget(
+                    BudgetError::ResourceLimit(_)
+                    | BudgetError::Allocation
+                    | BudgetError::CapacityExceeded(_),
+                ) => None,
+            },
+        }
+    }
+
+    pub const fn capacity_exceeded(self) -> Option<CapacityExceeded> {
+        match self {
+            Self::Scratch(RegexScratchError::CapacityExceeded(capacity))
+            | Self::Match(RegexMatchError::CapacityExceeded(capacity))
+            | Self::Budget(BudgetError::CapacityExceeded(capacity)) => Some(capacity),
+            Self::Scratch(
+                RegexScratchError::ResourceLimit(_)
+                | RegexScratchError::AllocationFailed
+                | RegexScratchError::Internal { .. },
+            )
+            | Self::Match(
+                RegexMatchError::ResourceLimit(_)
+                | RegexMatchError::AllocationFailed
+                | RegexMatchError::Internal { .. },
+            )
+            | Self::Budget(
+                BudgetError::ResourceLimit(_) | BudgetError::Allocation | BudgetError::Internal(_),
+            )
+            | Self::Internal { .. } => None,
+            Self::Located { error, .. } => match error {
+                RegexExecutionFailure::Scratch(RegexScratchError::CapacityExceeded(capacity))
+                | RegexExecutionFailure::Match(RegexMatchError::CapacityExceeded(capacity))
+                | RegexExecutionFailure::Budget(BudgetError::CapacityExceeded(capacity)) => {
+                    Some(capacity)
+                }
+                RegexExecutionFailure::Scratch(
+                    RegexScratchError::ResourceLimit(_)
+                    | RegexScratchError::AllocationFailed
+                    | RegexScratchError::Internal { .. },
+                )
+                | RegexExecutionFailure::Match(
+                    RegexMatchError::ResourceLimit(_)
+                    | RegexMatchError::AllocationFailed
+                    | RegexMatchError::Internal { .. },
+                )
+                | RegexExecutionFailure::Budget(
+                    BudgetError::ResourceLimit(_)
+                    | BudgetError::Allocation
+                    | BudgetError::Internal(_),
+                )
+                | RegexExecutionFailure::Internal(_) => None,
+            },
+        }
+    }
+
+    pub const fn diagnostic_code(self) -> DiagnosticCode {
+        match self {
+            Self::Scratch(error) => error.diagnostic_code(),
+            Self::Match(error) => error.diagnostic_code(),
+            Self::Budget(error) => error.diagnostic_code(),
+            Self::Internal { error, .. } => error.diagnostic_code(),
+            Self::Located { error, .. } => match error {
+                RegexExecutionFailure::Scratch(error) => error.diagnostic_code(),
+                RegexExecutionFailure::Match(error) => error.diagnostic_code(),
+                RegexExecutionFailure::Budget(error) => error.diagnostic_code(),
+                RegexExecutionFailure::Internal(error) => error.diagnostic_code(),
+            },
+        }
+    }
+
     pub const fn is_internal(self) -> bool {
         match self {
-            Self::Internal | Self::InternalAt { .. } => true,
-            Self::Scratch(error) => matches!(error, RegexScratchError::InternalInvariantFailure(_)),
-            Self::Match(error) => matches!(error, RegexMatchError::InternalInvariantFailure(_)),
-            Self::Budget(error) => matches!(error, BudgetError::InvariantViolation(_)),
+            Self::Internal { .. } => true,
+            Self::Scratch(error) => error.internal_error().is_some(),
+            Self::Match(error) => error.internal_error().is_some(),
+            Self::Budget(error) => matches!(error, BudgetError::Internal(_)),
             Self::Located { error, .. } => match error {
                 RegexExecutionFailure::Internal(_) => true,
-                RegexExecutionFailure::Budget(error) => {
-                    matches!(error, BudgetError::InvariantViolation(_))
-                }
-                RegexExecutionFailure::Scratch(error) => {
-                    matches!(error, RegexScratchError::InternalInvariantFailure(_))
-                }
-                RegexExecutionFailure::Match(error) => {
-                    matches!(error, RegexMatchError::InternalInvariantFailure(_))
-                }
+                RegexExecutionFailure::Budget(error) => matches!(error, BudgetError::Internal(_)),
+                RegexExecutionFailure::Scratch(error) => error.internal_error().is_some(),
+                RegexExecutionFailure::Match(error) => error.internal_error().is_some(),
             },
         }
     }
@@ -78,9 +156,9 @@ impl RegexExecutionError {
                 None => None,
             },
             Self::Budget(error) => error.context(),
-            Self::InternalAt { context, .. } => Some(context),
+            Self::Internal { error, .. } => Some(error.context()),
             Self::Located { error, .. } => match error {
-                RegexExecutionFailure::Internal(context) => context,
+                RegexExecutionFailure::Internal(error) => Some(error.context()),
                 RegexExecutionFailure::Budget(error) => error.context(),
                 RegexExecutionFailure::Scratch(error) => match error.context() {
                     Some(context) => Some(context.diagnostic_context()),
@@ -91,7 +169,6 @@ impl RegexExecutionError {
                     None => None,
                 },
             },
-            Self::Internal => None,
         }
     }
 
@@ -110,7 +187,7 @@ impl RegexExecutionError {
 
     pub const fn source_span(self) -> Option<SourceSpan> {
         match self {
-            Self::InternalAt { source_span, .. } => source_span,
+            Self::Internal { source_span, .. } => source_span,
             Self::Located { source_span, .. } => Some(source_span),
             _ => None,
         }
@@ -121,9 +198,8 @@ impl RegexExecutionError {
             Self::Scratch(error) => RegexExecutionFailure::Scratch(error),
             Self::Match(error) => RegexExecutionFailure::Match(error),
             Self::Budget(error) => RegexExecutionFailure::Budget(error),
-            Self::InternalAt { context, .. } => RegexExecutionFailure::Internal(Some(context)),
+            Self::Internal { error, .. } => RegexExecutionFailure::Internal(error),
             Self::Located { error, .. } => error,
-            Self::Internal => RegexExecutionFailure::Internal(None),
         };
         Self::Located { error, source_span }
     }
@@ -249,8 +325,8 @@ impl RegexExecutor {
         let required = request.regex.scratch_state_count();
         if required > request.limits.max_regex_scratch_states() {
             return Err(out.fail(with_source_span(
-                RegexExecutionError::Scratch(RegexScratchError::ResourceLimitExceeded(
-                    RegexResource::ScratchStateCount,
+                RegexExecutionError::Scratch(RegexScratchError::ResourceLimit(
+                    ResourceLimit::RegexScratchStates,
                 )),
                 request.source_span,
             )));
@@ -284,8 +360,8 @@ impl RegexExecutor {
         }
         let Some(scratch) = self.scratch.as_mut() else {
             return Err(out.fail(with_source_span(
-                RegexExecutionError::InternalAt {
-                    context: REGEX_EXECUTOR_INTERNAL,
+                RegexExecutionError::Internal {
+                    error: InternalError::RegexExecutionInvariantFailure(REGEX_EXECUTOR_INTERNAL),
                     source_span: None,
                 },
                 request.source_span,

@@ -3,6 +3,7 @@ mod encoding;
 mod formatter;
 mod path;
 mod syntax;
+mod syntax_scanner;
 
 pub use crate::document::edit::{
     ConfigEdit, ConfigEditError, ConfigEditErrorKind, ConfigEditOptions,
@@ -18,9 +19,10 @@ use core::{
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedString, ChargedVec, ConfigValue, DiagnosticCode, DiagnosticContext,
-    ExecutionBudget, SliceSource, SourceCommitError, SourceExpectation, SourceRevision,
-    SourceWriter, TextLayout, Write, WriteError, diagnostic_context,
+    BudgetError, CapacityExceeded, ChargedString, ChargedVec, ConfigValue, DiagnosticCode,
+    DiagnosticContext, ExecutionBudget, InternalError, ResourceLimit, SliceSource,
+    SourceCommitError, SourceExpectation, SourceRevision, SourceWriter, TextLayout, Write,
+    WriteError, diagnostic_context,
 };
 use typol_semantic::CompiledSchema;
 
@@ -38,6 +40,8 @@ static EDIT_SOURCE_RANGE_INVALID: DiagnosticContext = diagnostic_context!(
     "config-document-edit",
     "source-range-invalid"
 );
+static EDIT_WORKSPACE_BUDGET_MISSING: DiagnosticContext =
+    diagnostic_context!("typol-config", "document-edit", "workspace-budget-missing",);
 static DOCUMENT_SOURCE_INVARIANT: DiagnosticContext = diagnostic_context!(
     "typol-config",
     "document-source",
@@ -135,7 +139,7 @@ impl<'schema> ConfigDocument<'schema> {
         let display_name = ChargedString::copy(display_name, Some(budget), out.reborrow())?;
         let source = ChargedString::from_utf8_bytes(source).map_err(|(_bytes, _error)| {
             out.reborrow().fail(ConfigParseErrors::emergency(
-                DiagnosticFactory::internal(
+                DiagnosticFactory::edit_internal(
                     DOCUMENT_SOURCE_INVARIANT,
                     None,
                     None,
@@ -419,14 +423,14 @@ impl<'schema> ConfigDocument<'schema> {
                 .checked_add(patch.end - patch.start)
                 .ok_or_else(|| {
                     out.reborrow().fail(ConfigEditError::new(
-                        ConfigEditErrorKind::ResourceLimitExceeded,
+                        ConfigEditErrorKind::CapacityExceeded(CapacityExceeded::ConfigEdit),
                     ))
                 })?;
             added_bytes = added_bytes
                 .checked_add(patch.encoded.len())
                 .ok_or_else(|| {
                     out.reborrow().fail(ConfigEditError::new(
-                        ConfigEditErrorKind::ResourceLimitExceeded,
+                        ConfigEditErrorKind::CapacityExceeded(CapacityExceeded::ConfigEdit),
                     ))
                 })?;
         }
@@ -435,19 +439,23 @@ impl<'schema> ConfigDocument<'schema> {
             .checked_sub(removed_bytes)
             .and_then(|length| length.checked_add(added_bytes))
         else {
-            return Err(out.fail(ConfigEditError::new(
-                ConfigEditErrorKind::ResourceLimitExceeded,
-            )));
+            return Err(
+                out.fail(ConfigEditError::new(ConfigEditErrorKind::CapacityExceeded(
+                    CapacityExceeded::ConfigEdit,
+                ))),
+            );
         };
         if candidate_len > self.options.config().max_source_bytes() {
-            return Err(out.fail(ConfigEditError::new(
-                ConfigEditErrorKind::ResourceLimitExceeded,
-            )));
+            return Err(
+                out.fail(ConfigEditError::new(ConfigEditErrorKind::ResourceLimit(
+                    ResourceLimit::SourceBytes,
+                ))),
+            );
         }
         let Some(budget) = self.workspace_budget() else {
-            return Err(out.fail(ConfigEditError::new(
-                ConfigEditErrorKind::ResourceLimitExceeded,
-            )));
+            return Err(out.fail(ConfigEditError::new(ConfigEditErrorKind::Internal(
+                InternalError::ConfigEditInvariantFailure(EDIT_WORKSPACE_BUDGET_MISSING),
+            ))));
         };
         budget.construct_text(
             candidate_len,
@@ -556,7 +564,7 @@ impl<'schema> ConfigDocument<'schema> {
     ) -> Result<SourceRevision, SourceCommitError<W::Error>> {
         let max_bytes = self.options.config().max_source_bytes();
         if self.source.len() > max_bytes {
-            return Err(SourceCommitError::ResourceLimitExceeded);
+            return Err(SourceCommitError::ResourceLimit(ResourceLimit::SourceBytes));
         }
         let snapshot = self
             .snapshot
@@ -592,13 +600,20 @@ fn validation_error_kind(errors: &ConfigParseErrors) -> ConfigEditErrorKind {
         .any(|diagnostic| diagnostic.code() == DiagnosticCode::ALLOCATION_FAILED)
     {
         ConfigEditErrorKind::AllocationFailed
-    } else if diagnostics.iter().any(|diagnostic| {
-        matches!(
-            diagnostic.code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED | DiagnosticCode::CAPACITY_EXCEEDED
-        )
+    } else if let Some(limit) = diagnostics
+        .iter()
+        .find_map(|diagnostic| ResourceLimit::from_diagnostic_code(diagnostic.code()))
+    {
+        ConfigEditErrorKind::ResourceLimit(limit)
+    } else if let Some(capacity) = diagnostics
+        .iter()
+        .find_map(|diagnostic| CapacityExceeded::from_diagnostic_code(diagnostic.code()))
+    {
+        ConfigEditErrorKind::CapacityExceeded(capacity)
+    } else if let Some(internal) = diagnostics.iter().find_map(|diagnostic| {
+        InternalError::from_diagnostic_code(diagnostic.code(), diagnostic.context()?)
     }) {
-        ConfigEditErrorKind::ResourceLimitExceeded
+        ConfigEditErrorKind::Internal(internal)
     } else {
         ConfigEditErrorKind::ValidationFailed
     }
@@ -609,13 +624,15 @@ fn append_charged(
     text: &str,
     limit: usize,
 ) -> Result<(), ConfigEditErrorKind> {
-    if output
-        .len()
-        .checked_add(text.len())
-        .filter(|length| *length <= limit)
-        .is_none()
-    {
-        return Err(ConfigEditErrorKind::ResourceLimitExceeded);
+    let Some(length) = output.len().checked_add(text.len()) else {
+        return Err(ConfigEditErrorKind::CapacityExceeded(
+            CapacityExceeded::ConfigEdit,
+        ));
+    };
+    if length > limit {
+        return Err(ConfigEditErrorKind::ResourceLimit(
+            ResourceLimit::ConfigFormatOutputBytes,
+        ));
     }
     let mut errors = ErrSlot::<BudgetError>::new();
     errors
@@ -626,13 +643,9 @@ fn append_charged(
 
 fn edit_budget_error(error: BudgetError) -> ConfigEditErrorKind {
     match error {
-        BudgetError::Resource
-        | BudgetError::RegexSteps
-        | BudgetError::RegexSearchSteps
-        | BudgetError::RegexWorkspace
-        | BudgetError::CapacityExceeded => ConfigEditErrorKind::ResourceLimitExceeded,
-        BudgetError::Allocation | BudgetError::InvariantViolation(_) => {
-            ConfigEditErrorKind::AllocationFailed
-        }
+        BudgetError::ResourceLimit(limit) => ConfigEditErrorKind::ResourceLimit(limit),
+        BudgetError::CapacityExceeded(capacity) => ConfigEditErrorKind::CapacityExceeded(capacity),
+        BudgetError::Allocation => ConfigEditErrorKind::AllocationFailed,
+        BudgetError::Internal(error) => ConfigEditErrorKind::Internal(error),
     }
 }

@@ -1,5 +1,4 @@
 mod constraint_checks;
-mod regex_errors;
 mod scalar;
 
 use crate::{
@@ -27,7 +26,7 @@ use core::{
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, ChargedVec, ConfigValue, ConfigValueBuilder, DiagnosticMessage, ExecutionBudget,
-    SourceSpan, ValueError, ValueId,
+    ResourceLimit, SourceSpan, ValueError, ValueId,
 };
 use typol_i18n::Translator;
 use typol_semantic::{
@@ -59,6 +58,15 @@ pub(super) enum CachedDefaultState {
     Unvisited,
     Visiting,
     Finished,
+}
+
+struct RegexExecutionDiagnostics;
+
+impl RegexExecutionDiagnostics {
+    fn map(error: RegexExecutionError, fallback_span: SourceSpan) -> EvalError {
+        let source_span = error.source_span().unwrap_or(fallback_span);
+        EvalError::RegexExecutionAt { error, source_span }
+    }
 }
 
 pub(super) struct DefaultData<'a, 'd> {
@@ -411,7 +419,7 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
                 .context
                 .consume(1, span, self.data.diagnostics, out.reborrow())?;
             let Some(next_depth) = depth.checked_add(1) else {
-                self.data.diagnostics.push(EmergencyDiagnostics::resource(
+                self.data.diagnostics.push(EmergencyDiagnostics::capacity(
                     span,
                     self.data.diagnostics.translator(),
                 ));
@@ -420,6 +428,7 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
             depth = next_depth;
             if depth > self.data.limits.max_nesting_depth() {
                 self.data.diagnostics.push(EmergencyDiagnostics::resource(
+                    ResourceLimit::ValidationTraversal,
                     span,
                     self.data.diagnostics.translator(),
                 ));
@@ -635,7 +644,7 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
                 out.reborrow(),
             ),
             Err(error) => {
-                let error = regex_errors::RegexExecutionDiagnostics::map(error, constraint_span);
+                let error = RegexExecutionDiagnostics::map(error, constraint_span);
                 self.data.diagnostics.push(DefaultDiagnostic::execution(
                     error,
                     value.span,
@@ -694,6 +703,7 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
     ) -> OResult<'slot, ()> {
         if !self.data.limits.values().allows_depth(depth) {
             self.data.diagnostics.push(EmergencyDiagnostics::resource(
+                ResourceLimit::ConfigValueDepth,
                 span,
                 self.data.diagnostics.translator(),
             ));
@@ -709,7 +719,7 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
         out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, ()> {
         let Some(value_nodes) = self.data.value_nodes.checked_add(1) else {
-            self.data.diagnostics.push(EmergencyDiagnostics::resource(
+            self.data.diagnostics.push(EmergencyDiagnostics::capacity(
                 span,
                 self.data.diagnostics.translator(),
             ));
@@ -718,6 +728,7 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
         self.data.value_nodes = value_nodes;
         if self.data.value_nodes > self.data.limits.max_value_nodes() {
             self.data.diagnostics.push(EmergencyDiagnostics::resource(
+                ResourceLimit::ConfigValueNodes,
                 span,
                 self.data.diagnostics.translator(),
             ));
@@ -734,6 +745,7 @@ impl<'a, 'd> DefaultCompiler<'a, 'd> {
     ) -> OResult<'slot, bool> {
         if value.len() > self.data.limits.max_string_bytes() {
             self.data.diagnostics.push(EmergencyDiagnostics::resource(
+                ResourceLimit::StringBytes,
                 span,
                 self.data.diagnostics.translator(),
             ));

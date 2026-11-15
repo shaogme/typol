@@ -11,13 +11,20 @@ use typol_config::{
     opeo::{ErrSlot, OResult, Out},
 };
 use typol_core::{
-    BudgetError, ExecutionBudget, Read, SliceSource, SourceId, SourceReadError, SourceReadErrorKind,
+    BudgetError, DiagnosticContext, ExecutionBudget, InternalError, Read, SliceSource, SourceId,
+    SourceReadError, SourceReadErrorKind, diagnostic_context,
 };
 use typol_schema::{
     ResolverError, SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaResolveRequest,
     SchemaResolver, SchemaSource,
 };
 use typol_semantic::CompiledSchema;
+
+static SOURCE_RANGE_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-config-profile",
+    "stream-input",
+    "source-range-unavailable",
+);
 
 #[derive(Clone, Copy, Default)]
 struct Statistics {
@@ -149,8 +156,10 @@ impl Read for ObservedInput<'_> {
         let count = self.input.read(output, source_id, offset, out.reborrow())?;
         let Some(target) = output.get_mut(..count) else {
             return Err(out.fail(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::SourceInputInvariantFailure(SOURCE_RANGE_INVARIANT),
+                ))
+                .with_input(source_id, offset),
             ));
         };
         self.bytes.set(self.bytes.get() + target.len());

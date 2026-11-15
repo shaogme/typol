@@ -216,7 +216,7 @@ impl<'b, 'c> ExpressionMethods<'b, 'c> {
                 if u32::try_from(id).is_err() {
                     self.context
                         .diagnostics
-                        .push(EmergencyDiagnostics::resource(
+                        .push(EmergencyDiagnostics::capacity(
                             argument.span(),
                             self.context.diagnostics.translator(),
                         ));
@@ -225,7 +225,7 @@ impl<'b, 'c> ExpressionMethods<'b, 'c> {
                 let Some(next_local) = self.context.next_local.checked_add(1) else {
                     self.context
                         .diagnostics
-                        .push(EmergencyDiagnostics::resource(
+                        .push(EmergencyDiagnostics::capacity(
                             argument.span(),
                             self.context.diagnostics.translator(),
                         ));

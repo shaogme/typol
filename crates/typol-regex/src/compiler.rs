@@ -1,9 +1,9 @@
 use opeo::{OResult, Out, ResultOutExt};
-use typol_core::{ChargedVec, RegexExecutionBudget};
+use typol_core::{ChargedVec, RegexExecutionBudget, ResourceLimit};
 use typol_policy::RegexLimits;
 
 use crate::{
-    RegexCompileError, RegexErrorContext, RegexMatchError, RegexResource, RegexScratch,
+    RegexCompileError, RegexErrorContext, RegexMatchError, RegexScratch,
     char_class::CharClass,
     error::{
         COMPILER_FINAL_FRAGMENT_MISSING, COMPILER_PATCH_INSTRUCTION_MISSING,
@@ -292,9 +292,9 @@ impl Compiler<'_> {
             });
         }
         completed
-            .ok_or(RegexCompileError::InternalInvariantFailure(
-                RegexErrorContext::new(COMPILER_FINAL_FRAGMENT_MISSING),
-            ))
+            .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                COMPILER_FINAL_FRAGMENT_MISSING,
+            )))
             .store_err_into(out.reborrow())
     }
 
@@ -307,13 +307,13 @@ impl Compiler<'_> {
         let total_ranges = self
             .range_count
             .checked_add(added_ranges)
-            .ok_or(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::CharacterRangeCount,
+            .ok_or(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexCharacterRanges,
             ))
             .store_err_into(out.reborrow())?;
         if total_ranges > self.max_ranges {
-            return Err(out.fail(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::CharacterRangeCount,
+            return Err(out.fail(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexCharacterRanges,
             )));
         }
 
@@ -451,8 +451,8 @@ impl Compiler<'_> {
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, StateId> {
         if self.instructions.len() >= self.max_instructions {
-            return Err(out.fail(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::InstructionCount,
+            return Err(out.fail(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexInstructionCount,
             )));
         }
         self.instructions.try_reserve(1, out.reborrow())?;
@@ -472,14 +472,14 @@ impl Compiler<'_> {
             let instruction = self
                 .instructions
                 .get_mut(patch.instruction.index())
-                .ok_or(RegexCompileError::InternalInvariantFailure(
-                    RegexErrorContext::new(COMPILER_PATCH_INSTRUCTION_MISSING),
-                ))
+                .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                    COMPILER_PATCH_INSTRUCTION_MISSING,
+                )))
                 .store_err_into(out.reborrow())?;
             if !instruction.patch(patch.field, target) {
-                return Err(out.fail(RegexCompileError::InternalInvariantFailure(
-                    RegexErrorContext::new(COMPILER_PATCH_KIND_MISMATCH),
-                )));
+                return Err(out.fail(RegexCompileError::internal(RegexErrorContext::new(
+                    COMPILER_PATCH_KIND_MISMATCH,
+                ))));
             }
         }
         Ok(())
@@ -491,9 +491,9 @@ impl Compiler<'_> {
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, ()> {
         if start.index() >= self.instructions.len() {
-            return Err(out.fail(RegexCompileError::InternalInvariantFailure(
-                RegexErrorContext::new(COMPILER_PROGRAM_START_OUT_OF_RANGE),
-            )));
+            return Err(out.fail(RegexCompileError::internal(RegexErrorContext::new(
+                COMPILER_PROGRAM_START_OUT_OF_RANGE,
+            ))));
         }
         for instruction in self.instructions.iter() {
             self.execution.consume(1, out.reborrow())?;
@@ -511,9 +511,9 @@ impl Compiler<'_> {
                 Instruction::Match => true,
             };
             if !valid {
-                return Err(out.fail(RegexCompileError::InternalInvariantFailure(
-                    RegexErrorContext::new(COMPILER_PROGRAM_TARGET_OUT_OF_RANGE),
-                )));
+                return Err(out.fail(RegexCompileError::internal(RegexErrorContext::new(
+                    COMPILER_PROGRAM_TARGET_OUT_OF_RANGE,
+                ))));
             }
         }
         Ok(())
@@ -540,9 +540,9 @@ impl Regex {
     ) -> OResult<'slot, &Instruction> {
         self.instructions
             .get(state.index())
-            .ok_or(RegexMatchError::InternalInvariantFailure(
-                RegexErrorContext::new(MATCH_INSTRUCTION_OUT_OF_RANGE),
-            ))
+            .ok_or(RegexMatchError::internal(RegexErrorContext::new(
+                MATCH_INSTRUCTION_OUT_OF_RANGE,
+            )))
             .store_err_into(out.reborrow())
     }
 
@@ -587,10 +587,10 @@ mod tests {
     use core::fmt::Debug;
     use opeo::{ErrSlot, OResult, Out};
 
-    use typol_core::{BudgetError, RegexExecutionBudget};
+    use typol_core::{BudgetError, RegexExecutionBudget, ResourceLimit};
     use typol_policy::RegexLimits;
 
-    use crate::{RegexCompileError, RegexResource};
+    use crate::RegexCompileError;
 
     use super::{Regex, RegexCompiler};
 
@@ -763,8 +763,8 @@ mod tests {
                     &mut execution_errors,
                     &mut compile_errors
                 ),
-                Attempt::Failure(RegexCompileError::ResourceLimitExceeded(
-                    RegexResource::CharacterRangeCount
+                Attempt::Failure(RegexCompileError::ResourceLimit(
+                    ResourceLimit::RegexCharacterRanges
                 ))
             ),
             "range count after repetition expansion should be limited",
@@ -785,8 +785,8 @@ mod tests {
         limits.set_max_regex_ranges_per_pattern(2);
         assert!(matches!(
             compile(".", &limits, &mut execution_errors, &mut compile_errors),
-            Attempt::Failure(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::CharacterRangeCount
+            Attempt::Failure(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexCharacterRanges
             ))
         ));
     }

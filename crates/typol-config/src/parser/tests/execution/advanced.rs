@@ -3,9 +3,12 @@ use crate::{
     parser::tests::{ParserTestSupport, foundation::Provider},
     value::ValueFactory as LocalValueFactory,
 };
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::cmp::Ordering;
-use typol_core::{ConfigValue, ValueError, ValueKind, ValuePayloadView, ValueSource, ValueView};
+use typol_core::{
+    ConfigValue, DiagnosticContext, InternalError, ResourceLimit, ValueError, ValueKind,
+    ValuePayloadView, ValueSource, ValueView, diagnostic_context,
+};
 use typol_model::BuiltinType;
 use typol_policy::{RegexLimits, ValueLimits};
 use typol_semantic::{
@@ -14,6 +17,12 @@ use typol_semantic::{
     SchemaComparison, SchemaEvaluator as Evaluator, SchemaValue as EvalValue,
 };
 use typol_test_support::*;
+
+static EXECUTION_TEST_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-config-tests",
+    "expression-evaluation",
+    "schema-access-test-failure",
+);
 
 fn compile(text: &str) -> TestResult<CompiledSchema> {
     ParserTestSupport::compile(text)
@@ -89,7 +98,11 @@ fn evaluate_first(
             ParserTestSupport::access(&mut schema_errors, |out| assertions.get(0, out))
         }) {
         Ok(Some(assertion)) => assertion,
-        Ok(None) | Err(_) => return TestOpeoOutcome::Error(EvalFailure::Internal),
+        Ok(None) | Err(_) => {
+            return TestOpeoOutcome::Error(EvalFailure::Internal(
+                InternalError::SemanticEvaluationInvariantFailure(EXECUTION_TEST_INVARIANT),
+            ));
+        }
     };
     let mut eval_errors = TestSlot::<EvalError>::default();
     match evaluate_bool(
@@ -105,6 +118,46 @@ fn evaluate_first(
         TestOpeoOutcome::Value(value) => TestOpeoOutcome::Value(value),
         TestOpeoOutcome::Error(error) => TestOpeoOutcome::Error(error.kind()),
     }
+}
+
+#[test]
+fn comparison_depth_is_checked_independently_of_value_construction() -> TestResult<()> {
+    let schema = compile("entry struct Root { v: [[[u8]]] }")?;
+    let mut schema_errors = TestSlot::<SchemaAccessError>::default();
+    let field = ParserTestSupport::required(&mut schema_errors, |out| {
+        schema.entry().field_named("v", out)
+    })?;
+    let ty = ParserTestSupport::access(&mut schema_errors, |out| field.ty(out))?;
+    let value = ValueFactory::try_array(vec![
+        ValueFactory::try_array(vec![
+            ValueFactory::try_array(vec![ValueFactory::unsigned(1)?])
+                .map_err(TestFailure::from_debug)?,
+        ])
+        .map_err(TestFailure::from_debug)?,
+    ])
+    .map_err(TestFailure::from_debug)?;
+    let mut limits = ValueLimits::default();
+    let regex_limits = RegexLimits::default();
+    limits.set_max_nesting_depth(2);
+    let evaluator = Evaluator::new(&schema, &limits, &regex_limits, None);
+    let value = EvalValue::config(value.root(), ty, false);
+    test_eq!(
+        compare(&evaluator, value, value, true, 0),
+        TestOpeoOutcome::Error(EvalError::ResourceLimit(ResourceLimit::ValidationTraversal))
+    )?;
+    limits.set_max_nesting_depth(4);
+    test_eq!(
+        compare(
+            &Evaluator::new(&schema, &limits, &regex_limits, None),
+            value,
+            value,
+            true,
+            0
+        ),
+        TestOpeoOutcome::Value(Ordering::Equal)
+    )?;
+
+    Ok(())
 }
 
 #[test]
@@ -211,7 +264,10 @@ fn short_circuit_skips_a_branch_that_would_exceed_depth() -> TestResult<()> {
     let error = eval_errors
         .run(|out| evaluator.evaluate(assertion.expression(), bindings, out))
         .test_error()?;
-    test_eq!(error.kind(), EvalFailure::Resource)?;
+    test_eq!(
+        error.kind(),
+        EvalFailure::ResourceLimit(ResourceLimit::ValidationTraversal)
+    )?;
     test_assert!(error.source_span().is_some())?;
 
     Ok(())

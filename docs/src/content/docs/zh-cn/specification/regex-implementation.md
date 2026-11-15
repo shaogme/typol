@@ -1,6 +1,6 @@
 ---
 title: "正则实现说明"
-description: "说明 Typol 支持的正则子集、搜索语义、资源限制与错误处理。"
+description: "说明正则编译、搜索语义、资源限制和运行期工作区。"
 sidebar:
   order: 6
 ---
@@ -8,96 +8,140 @@ sidebar:
 ## 本页要点
 
 :::tip[适用场景]
-排查 `@regex` 编译、搜索匹配行为或正则专用资源错误时，请查阅本页。
+排查 `@regex` 编译、搜索行为或正则专用资源错误时，请查阅本页。
 :::
 
-| 主题 | 关键规则 |
-| --- | --- |
-| 匹配方式 | 默认在任意位置搜索；要匹配整串，需要同时使用 `^` 和 `$`。 |
-| 执行方式 | 模式编译为 Thompson NFA 并以无回溯方式执行；宿主正则库的扩展语法不受支持。 |
-| 资源边界 | 编译和匹配受显式额度限制；额度耗尽会返回结构化错误，不会返回部分匹配结果。 |
+- **匹配：** Typol 默认搜索任意位置；整串匹配需使用 `^` 和 `$`。
+- **执行：** 模式编译为 Thompson NFA，不回溯，也不支持宿主库扩展语法。
+- **限制：** 编译和匹配均有明确额度；额度耗尽会返回错误。
 
-本文说明 Typol 当前对 Schema `@regex` 注解的实现，包括编译表示、搜索执行、资源限制、诊断和运行期工作区。正则语言及其可观察匹配语义以[Schema DSL 规范 §5.1](../schema-dsl/#51-正则语法与匹配)为准；本文记录实现方式和实现边界，不扩展 DSL。
+本文介绍 Typol 当前如何编译和执行 Schema 的 `@regex` 注解。正则语言及
+可观察的匹配规则以 [Schema DSL 规范 §5.1](../schema-dsl/#51-正则语法与匹配)
+为准；本文说明实现方式和限制，不扩展 DSL。
 
-## 1. 实现范围
+## 1. 范围与源码索引
 
-`typol-regex` 是独立的 `no_std + alloc` 正则编译与执行 crate。它不访问 Schema 文件、配置环境或宿主资源。编译与匹配入口必须接收 `RegexExecutionBudget`；Schema 和配置调用分别从 `RegexOptions` 为每次编译或运行创建该预算。通用 `ExecutionBudget` 只计量非正则工作。
+`typol-regex` 是独立的 `no_std + alloc` 正则编译器和匹配器，不读取 Schema 文件、
+配置环境或宿主资源。编译和匹配入口都需要 `RegexExecutionBudget`；通用的
+`ExecutionBudget` 则计量其他工作。
 
-主要源码位置：
+Schema 编译会用同一份正则预算处理模式编译和 Schema 默认值中的正则检查。每次
+配置解析及外来值校验也会在调用范围内共用一份正则预算。仅规范化外来值的操作
+不会创建或消耗这份预算。
 
-| 职责 | 实现位置 |
-| --- | --- |
-| 正则语法解析及 AST | `crates/typol-regex/src/parser.rs`、`parser/character_class.rs` |
-| Unicode 标量字符集合 | `crates/typol-regex/src/char_class.rs` |
-| Thompson NFA 编译及不可变程序 | `crates/typol-regex/src/compiler.rs` |
-| NFA 搜索及复用工作区 | `crates/typol-regex/src/matcher.rs` |
-| 结构化错误和模式跨度 | `crates/typol-regex/src/error.rs` |
-| Schema 注解编译和正则集合 | `crates/typol-schema/src/regex.rs`、`crates/typol-semantic/src/regex.rs` |
-| 语义执行器与约束检查 | `crates/typol-semantic/src/engine/regex.rs`、`crates/typol-semantic/src/engine/rules.rs` |
-| 正则资源默认值 | `crates/typol-policy/src/lib.rs` |
+- 解析器和 AST：`crates/typol-regex/src/parser.rs`、`parser/character_class.rs`
+- 字符集合：`crates/typol-regex/src/char_class.rs`
+- NFA 编译器：`crates/typol-regex/src/compiler.rs`
+- 匹配器和 scratch 工作区：`crates/typol-regex/src/matcher.rs`
+- 错误及模式跨度：`crates/typol-regex/src/error.rs`
+- Schema 和语义层接入：`crates/typol-schema/src/regex.rs`、
+  `crates/typol-semantic/src/regex.rs`、`crates/typol-semantic/src/engine/regex.rs`
+- 资源默认值：`crates/typol-policy/src/lib.rs`
 
-## 2. Schema 编译流程
+## 2. Schema 编译
 
-Schema 编译器仅接受目标为 `string` 或 `option<string>` 的 `@regex`。可选值为 `none` 时跳过匹配；有值时按字符串内容执行搜索。
+Schema 编译器接受目标为 `string` 或 `option<string>` 的 `@regex`。可选值为
+`none` 时直接通过，不执行匹配；有值时搜索字符串。Schema 词法器先解码注解
+字符串，再把解码后的 UTF-8 模式交给正则编译器；编译器解析 AST 并生成自有的
+Thompson NFA。
 
-注解中的字符串先由 Schema 词法器按 DSL 规则解码，然后将解码后的 UTF-8 文本交给 `RegexCompiler`。正则编译器先按 Unicode 标量读取模式并构造内部 AST，再生成自有数据的 Thompson NFA。成功后，NFA 与注解的 `SourceSpan` 一起存入 `CompiledRegexConstraints`。运行期不重新解析或编译模式。
+编译结果及注解的 `SourceSpan` 会存入 `CompiledRegexConstraints`。运行期按该跨度
+查找程序，不会重新解析或编译模式。解析器以显式帧处理嵌套分组，构造 NFA 时则
+逐步检查指令数和字符区间数上限。
 
-Schema 编译会累计每个有效目标 `@regex` 的尝试模式字节数，语法无效的模式也会消耗此资源额度；公开 `RegexCounts` 只统计成功保存的程序。`max_regex_count` 限制成功保存的程序数。Schema 剩余指令数和区间数会在解析及 NFA 构造期间传入正则编译器，避免先完整构造超额程序再丢弃。
+有效目标注解只有通过程序数量检查后，才会将尝试模式字节数计入总量；计数发生在
+语法解析之前。因此语法错误仍消耗尝试字节额度，却不会计入公开 `RegexCounts`
+产物统计。数量上限只约束成功保存的程序，并且会在处理下一条注解的字节数之前检查。
 
-Schema 编译器按注解源跨度索引已编译程序。语法错误映射为 `REGEX_SYNTAX_ERROR`，诊断定位在 `@regex` 注解；资源超限映射为资源诊断，分配失败映射为分配诊断。底层正则错误只携带错误类别和模式内跨度，不把模式文本写入错误对象或调试信息。
+语法错误映射为 `REGEX_SYNTAX_ERROR`，位置指向 `@regex` 注解。资源、分配、容量和
+内部错误保留不同诊断类别。底层语法错误只保存错误类型及解码模式内的
+`PatternSpan`；底层错误不会复制模式文本或待匹配的值。
 
 ## 3. 解析与字符集合
 
-解析器使用显式帧处理分组，避免由分组嵌套导致宿主调用栈随输入深度增长。模式内语法错误的 `PatternSpan` 使用 UTF-8 字节偏移，起止位置为半开区间；这与 DSL 字符串解码后的模式偏移相对应，不是 Schema 源文件中的字节跨度。
+解析器跨度是解码后模式中的 UTF-8 半开字节区间，不是 Schema 源文件偏移。解析器
+使用显式帧，避免分组嵌套深度带动宿主调用栈增长。支持的语法详见
+[Schema DSL 规范 §5.1](../schema-dsl/#51-正则语法与匹配)。
 
-解析器实现 Schema DSL 规范列出的字面量、分组、选择、连接、锚点、量词、字符类和转义。它拒绝空选择分支、空字符类、反向范围、对非字面字符类端点使用范围、重复量词及未支持转义。解析器不会接受宿主正则库的额外语法，例如环视、反向引用或 Unicode 属性转义。
+解析器拒绝空选择分支、空字符类、反向范围、端点不是字面字符的范围、重复量词和
+未支持的转义。环视、反向引用和 Unicode 属性转义等宿主正则库语法也不受支持。
 
-字符类编译为按起点排序且合并相邻区间的 Unicode 标量闭区间集合。补集只在 Unicode 标量值域中计算，并跳过代理项区间 `U+D800..U+DFFF`。`\d`、`\w`、`\s` 使用 DSL 定义的 ASCII 集合；大写形式在标量值域取补集。`.` 编译为除 LF 外的标量集合。匹配不做规范化、大小写折叠或区域设置处理。
+字符类会转换为按序排列、合并后的 Unicode 标量闭区间。补集只在标量值域内计算，
+并跳过代理项区间 `U+D800..U+DFFF`。`\d`、`\w` 和 `\s` 使用 DSL 定义的
+ASCII 字符集合，大写形式则取其补集。点号匹配除 LF 外的所有标量值。匹配过程不
+做 Unicode 规范化、大小写折叠或区域设置处理。
 
-## 4. Thompson NFA 与搜索语义
+## 4. Thompson NFA 与搜索
 
-编译结果由指令数组和起始指令索引组成。指令种类为消费一个字符集合、分支、无条件跳转、起始/结束断言和匹配终态。分组仅影响解析优先级，不捕获文本。量词通过复制有限次子程序及分支/回路指令展开；有限重复上限为 255。
+编译结果由指令数组和起始索引组成。指令可以消费字符集合、分支、跳转、断言输入
+起止位置或标记匹配成功。分组只改变优先级，不捕获文本。有界重复会展开有限个
+子程序副本；可选和无界重复使用分支及回路。有限重复上限为 255。
 
-执行器逐 Unicode 标量扫描输入。在每个位置将模式起始态加入活动状态集合，因此实现的是搜索匹配，而非默认整串匹配。`^` 只在输入开头成功，`$` 只在输入结束成功；它们不改变为多行锚点。空模式和可匹配空字符串的表达式可以在输入任意位置成功。需要整串匹配时，调用者在模式中使用 `^` 和 `$`。
+匹配器按 Unicode 标量扫描输入，并在每个输入位置加入模式起始态，因此默认执行
+子串搜索。`^` 只在整个输入开头成功，`$` 只在输入末尾成功，两者都不是多行锚点。
+空模式及其他可匹配空字符串的表达式可以在任意输入位置成功；要匹配整串，应同时
+使用两个锚点。
 
-NFA 状态以去重集合推进，不进行回溯，因此选择和重复不会引入按路径指数展开的回溯搜索。字符集合查询使用排序区间二分查找。每次匹配受独立 `max_search_steps` 限制，计量该次搜索处理的 NFA 状态数；累计正则编译和匹配工作共享 `max_steps`。任一额度耗尽都会返回结构化资源错误，不返回部分匹配结果。
+匹配器以去重后的 NFA 状态集合推进，不进行回溯，因此选择和重复不会造成按路径
+指数增长的回溯。字符区间成员检查使用二分查找。`max_search_steps` 计量一次搜索
+处理的 NFA 状态数；`max_steps` 计量正则编译和匹配的累计显式工作。额度耗尽会
+返回错误，不会返回部分匹配结果。
 
 ## 5. 资源限制
 
-`RegexLimits::default()` 提供结构限制；调用方通过 `RegexExecutionLimits` 单独配置执行额度，再由 `RegexOptions` 组合两者。以下默认值是实现配置，不是 DSL 的永久语义承诺。
+`RegexLimits::default()` 提供结构上限，`RegexExecutionLimits::default()` 提供运行期
+额度。调用方可通过 `RegexOptions` 配置两者；这些默认值属于实现策略，不是 DSL 的
+永久保证。
 
-| 限制 | 默认值 | 作用范围 |
-| --- | ---: | --- |
-| `max_regex_pattern_bytes` | 8,192 | 单个解码后模式的 UTF-8 字节数 |
-| `max_regex_total_pattern_bytes` | 65,536 | 一个 Schema 内有效目标注解的尝试模式字节数累计，包括语法无效模式 |
-| `max_regex_count` | 16 | 一个 Schema 内成功保存的正则程序数 |
-| `max_regex_nesting_depth` | 64 | 单个模式的分组嵌套深度 |
-| `max_regex_instructions_per_pattern` | 4,096 | 单个编译程序的 NFA 指令数 |
-| `max_regex_ranges_per_pattern` | 4,096 | 单个程序持有的字符区间数，按量词展开后的程序累计 |
-| `max_regex_instructions_total` | 16,384 | 一个 Schema 中所有程序的指令数累计 |
-| `max_regex_ranges_total` | 16,384 | 一个 Schema 中所有程序的字符区间数累计 |
-| `max_regex_scratch_states` | 4,096 | 单次执行工作区的状态槽位数 |
+结构默认值：
 
-`RegexExecutionLimits::default()` 的执行额度如下：
+- `max_regex_pattern_bytes`：单个解码模式最多 8,192 个 UTF-8 字节。
+- `max_regex_total_pattern_bytes`：一个 Schema 最多累计 65,536 个尝试字节。
+- `max_regex_count`：一个 Schema 最多保存 16 个正则程序。
+- `max_regex_nesting_depth`：单个模式最多嵌套 64 层分组。
+- `max_regex_instructions_per_pattern`：单个程序最多 4,096 条 NFA 指令。
+- `max_regex_ranges_per_pattern`：单个程序最多使用 4,096 个字符区间。
+- `max_regex_instructions_total`：一个 Schema 的程序最多共用 16,384 条指令。
+- `max_regex_ranges_total`：一个 Schema 的程序最多共用 16,384 个字符区间。
+- `max_regex_scratch_states`：一个工作区最多容纳 4,096 个状态槽位。
 
-| 限制 | 默认值 | 作用范围 |
-| --- | ---: | --- |
-| `max_steps` | 67,108,864 | 一次调用内由正则编译器和匹配器显式计量的累计工作 |
-| `max_search_steps` | 67,108,864 | 单次搜索处理的 NFA 状态数 |
-| `max_workspace_bytes` | 67,108,864 | 一次调用中正则自有的存活容量 |
+运行期默认值：
 
-模式字节数按 UTF-8 字节而不是字符数统计。尝试模式字节数用于限制编译消耗，即使语法错误也不回退；公开模式字节、范围和指令统计只包含最终保存的程序，因此无效模式不会污染产物统计。量词展开会增加成功程序的指令和范围占用。Schema 级剩余额度与单程序限制共同约束解析和程序构造，任一超限都会使 Schema 编译或运行失败。一次 Schema 编译中的多个模式以及默认值正则检查共用一个正则预算；一次配置解析或外来值校验也在调用范围内共用一个正则预算，即使复用了调用方的通用预算。仅规范化外来值的操作不会创建或消耗正则预算。
+- `max_steps`：每次调用最多计量 67,108,864 个正则步骤。
+- `max_search_steps`：单次搜索最多处理 67,108,864 个 NFA 状态。
+- `max_workspace_bytes`：正则自有存活容量最多为 67,108,864 字节。
 
-编译 AST、NFA、字符集合和工作区所需的容器通过可失败分配向量计入正则预算的步数和存活工作区。正则预算的固定 bookkeeping 不计入其工作区上限。容量超限返回资源错误；分配器拒绝分配时返回分配错误。错误不包含模式或输入内容。
+模式大小按 UTF-8 字节而不是 Unicode 字符数计算。语法无效的模式在进入字节统计后
+仍会消耗尝试额度；公开的字节、区间和指令统计只计算已保存程序。量词展开会增加
+指令和区间用量；单模式上限与 Schema 剩余的指令、区间上限共同约束解析和 NFA 构造。
+
+正则预算会计量 AST、NFA 程序、字符集合和工作区的显式工作量及存活容量。预算自身
+的固定 bookkeeping 不计入 `max_workspace_bytes`；该额度也不代表整个进程的内存
+上限。逻辑资源超限、分配器拒绝、容量错误和内部不变量错误会保留为不同类别。
 
 ## 6. 工作区生命周期与错误
 
-`RegexScratch` 为一次 NFA 搜索持有活动态、下一态、遍历栈和去重标记缓冲区。初次使用时按程序指令数创建；之后在匹配开始前按当前正则预算扩容，匹配过程不扩容。增长失败保留具体错误分类，且不会主动丢弃已有工作区。分配失败不会耗尽正则预算，原工作区仍可继续使用；正则工作区不足会令该预算进入终止状态。降低 scratch 上限时，超过上限的缓存会先释放。
+`RegexScratch` 保存活动态、下一态、遍历栈和去重标记。初始化时按程序指令数分配；
+之后可在同一正则预算下、搜索开始前扩容，搜索期间不会扩容。扩容失败会保留具体
+错误类别和已有工作区；仅发生分配失败不会耗尽正则预算。降低 scratch 状态上限后，
+执行器会在复用前释放超出新上限的缓存。
 
-语义层的 `RegexExecutor` 在多条约束间复用并增长工作区。绑定新的正则预算调用时会丢弃旧工作区，避免把先前调用占用的容量错误计入新调用；空可选值会先清理预算身份已变化或超过当前上限的旧缓存，再直接视为通过，不会为新预算创建 scratch。
+语义层的 `RegexExecutor` 会在一次调用的多条约束间复用工作区。若下一次调用使用了
+不同的正则预算，它会丢弃旧工作区，避免将旧容量计入新预算。对于空可选值，执行器
+仍会先清理预算身份变化或超限的旧缓存，然后直接通过，不为新预算创建 scratch。
 
-正则相关错误分为语法错误、资源超限和分配失败。匹配错误只报告资源超限；Schema 诊断层将底层错误类别转换为稳定的诊断代码和注解位置。正则语法错误对象另含模式内 `PatternSpan`，供需要细粒度定位的直接 `typol-regex` 调用者使用。
+执行步数、搜索步数或计费工作区额度耗尽时，正则预算会记录失败并进入终止状态。
+scratch 状态数等结构限制则在检测到超限的位置报告。上层 Schema 诊断会定位到注解，
+也可能按常规规则附带源码上下文；底层错误只保留元数据，不复制解码模式或输入值。
 
 ## 7. 验证覆盖
 
-实现行为由 `crates/typol-regex/tests/regex_behavior.rs` 覆盖，其中包括搜索/锚点、选择和重复、转义、ASCII 快捷类、Unicode 标量与代理项间隙、错误跨度和限制边界；编译器单元测试覆盖点号在三个及两个可用区间下的边界。`compilation_budget.rs`、`compilation_allocation.rs`、`allocation_failure.rs` 覆盖共享预算、有限栈、分配失败及释放行为。Schema 层的 `crates/typol-schema/tests/regex_constraint_collection.rs` 和 `regex_constraint_resources.rs` 覆盖导入约束、尝试额度、产物统计及诊断优先级；语义层 `crates/typol-semantic/tests/regex_execution.rs`、`regex_budget.rs` 和 `regex_allocation.rs` 覆盖工作区增长、增长失败、预算切换和上限回收。
+`crates/typol-regex/tests/regex_behavior.rs` 覆盖搜索、锚点、量词、转义、ASCII 快捷
+字符类、Unicode 标量、错误跨度及限制边界。正则 crate 的编译和预算测试也覆盖字符
+区间计数与分配失败。
+
+Schema 接入测试位于 `crates/typol-schema/tests`，包括
+`regex_constraint_collection.rs`、`regex_constraint_resources.rs` 和
+`regex_constraint_diagnostics.rs`。语义层的执行、预算和分配测试分别位于
+`crates/typol-semantic/tests/regex_execution.rs`、`regex_budget.rs` 和
+`regex_allocation.rs`。

@@ -14,8 +14,9 @@ use std::{
 };
 
 use typol_core::{
-    DiagnosticContext, ExecutionBudget, Read as SourceRead, SourceId, SourceReadError,
-    SourceReadErrorKind, Write, WriteError, diagnostic_context,
+    CapacityExceeded, DiagnosticContext, ExecutionBudget, InternalError, Read as SourceRead,
+    ResourceLimit, SourceId, SourceReadError, SourceReadErrorKind, Write, WriteError,
+    diagnostic_context,
 };
 
 #[cfg(target_os = "linux")]
@@ -35,6 +36,8 @@ static FILE_SCHEMA_INPUT_INVARIANT: DiagnosticContext =
     diagnostic_context!("typol-std", "file-schema-input", "stream-state-invariant",);
 static FILE_SCHEMA_INPUT_LIMIT: DiagnosticContext =
     diagnostic_context!("typol-std", "file-schema-input", "source-byte-limit",);
+static WRITE_SINK_INVARIANT: DiagnosticContext =
+    diagnostic_context!("typol-std", "write-sink", "write-count-invariant",);
 
 #[cfg(target_os = "linux")]
 const LINUX_OPEN_NONBLOCK: i32 = 0o4000;
@@ -44,6 +47,14 @@ enum SourceReadState {
     Reading,
     Finished,
     Failed,
+}
+
+struct LimitedReadContext {
+    source_id: SourceId,
+    input_offset: usize,
+    limit_kind: ResourceLimit,
+    limit_context: DiagnosticContext,
+    invariant_context: DiagnosticContext,
 }
 
 #[derive(Clone, Copy)]
@@ -60,19 +71,20 @@ enum LimitedReadFailure {
 }
 
 impl LimitedReadFailure {
-    fn into_source_error(
-        self,
-        source_id: SourceId,
-        input_offset: usize,
-        limit_context: DiagnosticContext,
-        invariant_context: DiagnosticContext,
-    ) -> SourceReadError {
+    fn into_source_error(self, context: LimitedReadContext) -> SourceReadError {
+        let LimitedReadContext {
+            source_id,
+            input_offset,
+            limit_kind,
+            limit_context,
+            invariant_context,
+        } = context;
         match self {
             Self::LimitExceeded {
                 offset,
                 requested_bytes,
                 consumed_bytes,
-            } => SourceReadError::new(SourceReadErrorKind::ResourceLimitExceeded)
+            } => SourceReadError::new(SourceReadErrorKind::ResourceLimit(limit_kind))
                 .with_offset(offset)
                 .with_requested_bytes(requested_bytes)
                 .with_consumed_bytes(consumed_bytes)
@@ -81,25 +93,29 @@ impl LimitedReadFailure {
             Self::InvariantFailure {
                 offset,
                 requested_bytes,
-            } => SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                .with_offset(offset)
-                .with_requested_bytes(requested_bytes)
-                .with_context(invariant_context)
-                .with_input(source_id, input_offset),
+            } => SourceReadError::new(SourceReadErrorKind::Internal(
+                InternalError::HostAdapterInvariantFailure(invariant_context),
+            ))
+            .with_offset(offset)
+            .with_requested_bytes(requested_bytes)
+            .with_context(invariant_context)
+            .with_input(source_id, input_offset),
         }
     }
 }
 
 struct LimitedSourceState {
     limit: usize,
+    limit_kind: ResourceLimit,
     fetched: usize,
     state: SourceReadState,
 }
 
 impl LimitedSourceState {
-    const fn new(limit: usize) -> Self {
+    const fn new(limit: usize, limit_kind: ResourceLimit) -> Self {
         Self {
             limit,
+            limit_kind,
             fetched: 0,
             state: SourceReadState::Reading,
         }
@@ -107,6 +123,10 @@ impl LimitedSourceState {
 
     const fn fetched(&self) -> usize {
         self.fetched
+    }
+
+    const fn limit_kind(&self) -> ResourceLimit {
+        self.limit_kind
     }
 
     const fn is_finished(&self) -> bool {
@@ -191,10 +211,11 @@ pub(crate) struct OpenedSchemaFile {
     metadata: Metadata,
 }
 
-struct SchemaInputParams<'budget> {
-    limit: usize,
-    budget: &'budget ExecutionBudget,
-    operation: HostOperation,
+pub(super) struct SchemaInputParams<'budget> {
+    pub(super) limit: usize,
+    pub(super) limit_kind: ResourceLimit,
+    pub(super) budget: &'budget ExecutionBudget,
+    pub(super) operation: HostOperation,
 }
 
 impl OpenedSchemaFile {
@@ -250,22 +271,16 @@ impl OpenedSchemaFile {
             .store_err_into(out.reborrow())
     }
 
-    pub(crate) fn into_input_and_pin<'slot>(
+    pub(super) fn into_input_and_pin<'slot>(
         self,
-        limit: usize,
-        budget: &ExecutionBudget,
-        operation: HostOperation,
+        params: SchemaInputParams<'_>,
         mut out: Out<'slot, '_, HostError>,
     ) -> OResult<'slot, (FileSchemaInput, File)> {
-        let pin = self.clone_handle(operation, out.reborrow())?;
+        let pin = self.clone_handle(params.operation, out.reborrow())?;
         let input = FileSchemaInput::from_opened_metadata(
             self.file,
             self.metadata,
-            SchemaInputParams {
-                limit,
-                budget,
-                operation,
-            },
+            params,
             out.reborrow(),
         )?;
         Ok((input, pin))
@@ -288,6 +303,7 @@ impl FileSchemaInput {
             info,
             SchemaInputParams {
                 limit,
+                limit_kind: ResourceLimit::SourceBytes,
                 budget,
                 operation,
             },
@@ -303,6 +319,7 @@ impl FileSchemaInput {
     ) -> OResult<'slot, Self> {
         let SchemaInputParams {
             limit,
+            limit_kind,
             budget,
             operation,
         } = params;
@@ -316,10 +333,19 @@ impl FileSchemaInput {
                 HostFailureStep::FileMetadata,
             )));
         }
-        if info.len() > u64::try_from(limit).unwrap_or(u64::MAX) {
+        let limit_u64 = u64::try_from(limit)
+            .map_err(|_| {
+                HostError::with_step(
+                    operation,
+                    HostErrorKind::CapacityExceeded(CapacityExceeded::HostSource),
+                    HostFailureStep::FileMetadata,
+                )
+            })
+            .store_err_into(out.reborrow())?;
+        if info.len() > limit_u64 {
             return Err(out.fail(HostError::with_step(
                 operation,
-                HostErrorKind::ResourceLimitExceeded,
+                HostErrorKind::ResourceLimit(limit_kind),
                 HostFailureStep::FileMetadata,
             )));
         }
@@ -328,7 +354,7 @@ impl FileSchemaInput {
         Ok(Self {
             file,
             budget,
-            progress: LimitedSourceState::new(limit),
+            progress: LimitedSourceState::new(limit, limit_kind),
             issued: false,
         })
     }
@@ -352,32 +378,38 @@ impl SourceRead for FileSchemaInput {
     ) -> OResult<'slot, usize> {
         if self.progress.is_failed() || !self.issued {
             return Err(out.fail(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_context(FILE_SCHEMA_INPUT_INVARIANT)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::HostAdapterInvariantFailure(FILE_SCHEMA_INPUT_INVARIANT),
+                ))
+                .with_context(FILE_SCHEMA_INPUT_INVARIANT)
+                .with_input(source_id, offset),
             ));
         }
         if self.progress.is_finished() || output.is_empty() {
             return Ok(0);
         }
+        let limit_kind = self.progress.limit_kind();
         let size = self
             .progress
             .request_size(output.len())
             .map_err(|failure| {
-                failure.into_source_error(
+                failure.into_source_error(LimitedReadContext {
                     source_id,
-                    offset,
-                    FILE_SCHEMA_INPUT_LIMIT,
-                    FILE_SCHEMA_INPUT_INVARIANT,
-                )
+                    input_offset: offset,
+                    limit_kind,
+                    limit_context: FILE_SCHEMA_INPUT_LIMIT,
+                    invariant_context: FILE_SCHEMA_INPUT_INVARIANT,
+                })
             })
             .store_err_into(out.reborrow())?;
         let Some(buffer) = output.get_mut(..size) else {
             self.progress.fail();
             return Err(out.fail(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_context(FILE_SCHEMA_INPUT_INVARIANT)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::HostAdapterInvariantFailure(FILE_SCHEMA_INPUT_INVARIANT),
+                ))
+                .with_context(FILE_SCHEMA_INPUT_INVARIANT)
+                .with_input(source_id, offset),
             ));
         };
         let mut source = ReadSource::new(&mut self.file, &self.budget, out.reborrow())?;
@@ -385,12 +417,13 @@ impl SourceRead for FileSchemaInput {
         self.progress
             .record(size, count)
             .map_err(|failure| {
-                failure.into_source_error(
+                failure.into_source_error(LimitedReadContext {
                     source_id,
-                    offset,
-                    FILE_SCHEMA_INPUT_LIMIT,
-                    FILE_SCHEMA_INPUT_INVARIANT,
-                )
+                    input_offset: offset,
+                    limit_kind,
+                    limit_context: FILE_SCHEMA_INPUT_LIMIT,
+                    invariant_context: FILE_SCHEMA_INPUT_INVARIANT,
+                })
             })
             .store_err_into(out.reborrow())?;
         Ok(count)
@@ -441,20 +474,28 @@ impl SourceRead for ReadSource<'_> {
                 Ok(count) => {
                     if count > requested_bytes {
                         return Err(out.fail(
-                            SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                                .with_input(source_id, offset)
-                                .with_requested_bytes(requested_bytes)
-                                .with_context(READ_SOURCE_COUNT_INVARIANT),
+                            SourceReadError::new(SourceReadErrorKind::Internal(
+                                InternalError::HostAdapterInvariantFailure(
+                                    READ_SOURCE_COUNT_INVARIANT,
+                                ),
+                            ))
+                            .with_input(source_id, offset)
+                            .with_requested_bytes(requested_bytes)
+                            .with_context(READ_SOURCE_COUNT_INVARIANT),
                         ));
                     }
                     self.finished = count == 0;
                     let _ = offset
                         .checked_add(count)
                         .ok_or_else(|| {
-                            SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                                .with_input(source_id, offset)
-                                .with_requested_bytes(requested_bytes)
-                                .with_context(READ_SOURCE_OFFSET_OVERFLOW)
+                            SourceReadError::new(SourceReadErrorKind::Internal(
+                                InternalError::HostAdapterInvariantFailure(
+                                    READ_SOURCE_OFFSET_OVERFLOW,
+                                ),
+                            ))
+                            .with_input(source_id, offset)
+                            .with_requested_bytes(requested_bytes)
+                            .with_context(READ_SOURCE_OFFSET_OVERFLOW)
                         })
                         .store_err_into(out.reborrow())?;
                     return Ok(count);
@@ -495,11 +536,15 @@ impl Write for IoWriteSink<'_> {
             match self.writer.write(bytes) {
                 Ok(0) => return Err(WriteError::HostFailure),
                 Ok(count) if count <= bytes.len() => {
-                    bytes = bytes
-                        .get(count..)
-                        .ok_or(WriteError::InternalInvariantFailure)?;
+                    bytes = bytes.get(count..).ok_or(WriteError::Internal(
+                        InternalError::HostAdapterInvariantFailure(WRITE_SINK_INVARIANT),
+                    ))?;
                 }
-                Ok(_) => return Err(WriteError::InternalInvariantFailure),
+                Ok(_) => {
+                    return Err(WriteError::Internal(
+                        InternalError::HostAdapterInvariantFailure(WRITE_SINK_INVARIANT),
+                    ));
+                }
                 Err(error) if error.kind() == ErrorKind::Interrupted => {}
                 Err(_) => return Err(WriteError::HostFailure),
             }
@@ -544,10 +589,19 @@ impl FileConfigInput {
         )?;
         let (file, info) = opened.into_parts();
         let limit = source_byte_limit.min(limits.max_file_bytes());
-        if info.len() > u64::try_from(limit).unwrap_or(u64::MAX) {
+        let limit_u64 = u64::try_from(limit)
+            .map_err(|_| {
+                HostError::with_step(
+                    operation,
+                    HostErrorKind::CapacityExceeded(CapacityExceeded::HostSource),
+                    HostFailureStep::FileMetadata,
+                )
+            })
+            .store_err_into(out.reborrow())?;
+        if info.len() > limit_u64 {
             return Err(out.fail(HostError::with_step(
                 operation,
-                HostErrorKind::ResourceLimitExceeded,
+                HostErrorKind::ResourceLimit(ResourceLimit::SourceBytes),
                 HostFailureStep::FileMetadata,
             )));
         }
@@ -557,7 +611,7 @@ impl FileConfigInput {
             file,
             path: display_path,
             budget,
-            progress: LimitedSourceState::new(limit),
+            progress: LimitedSourceState::new(limit, ResourceLimit::SourceBytes),
         })
     }
 
@@ -586,16 +640,18 @@ impl SourceRead for FileConfigInput {
         if self.progress.is_finished() || output.is_empty() {
             return Ok(0);
         }
+        let limit_kind = self.progress.limit_kind();
         let size = self
             .progress
             .request_size(output.len())
             .map_err(|failure| {
-                failure.into_source_error(
+                failure.into_source_error(LimitedReadContext {
                     source_id,
-                    offset,
-                    FILE_CONFIG_INPUT_LIMIT,
-                    FILE_CONFIG_INPUT_INVARIANT,
-                )
+                    input_offset: offset,
+                    limit_kind,
+                    limit_context: FILE_CONFIG_INPUT_LIMIT,
+                    invariant_context: FILE_CONFIG_INPUT_INVARIANT,
+                })
             })
             .store_err_into(out.reborrow())?;
         let fetched = self.progress.fetched();
@@ -608,12 +664,13 @@ impl SourceRead for FileConfigInput {
         self.progress
             .record(size, count)
             .map_err(|failure| {
-                failure.into_source_error(
+                failure.into_source_error(LimitedReadContext {
                     source_id,
-                    offset,
-                    FILE_CONFIG_INPUT_LIMIT,
-                    FILE_CONFIG_INPUT_INVARIANT,
-                )
+                    input_offset: offset,
+                    limit_kind,
+                    limit_context: FILE_CONFIG_INPUT_LIMIT,
+                    invariant_context: FILE_CONFIG_INPUT_INVARIANT,
+                })
             })
             .store_err_into(out.reborrow())?;
         Ok(count)
@@ -621,10 +678,12 @@ impl SourceRead for FileConfigInput {
 }
 
 fn file_input_error(offset: usize, requested_bytes: usize) -> SourceReadError {
-    SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-        .with_offset(offset)
-        .with_requested_bytes(requested_bytes)
-        .with_context(FILE_CONFIG_INPUT_INVARIANT)
+    SourceReadError::new(SourceReadErrorKind::Internal(
+        InternalError::HostAdapterInvariantFailure(FILE_CONFIG_INPUT_INVARIANT),
+    ))
+    .with_offset(offset)
+    .with_requested_bytes(requested_bytes)
+    .with_context(FILE_CONFIG_INPUT_INVARIANT)
 }
 
 impl fmt::Debug for FileConfigInput {

@@ -1,7 +1,7 @@
 #[path = "support/schema_compile.rs"]
 mod schema_support;
 
-use typol_core::DiagnosticCode;
+use typol_core::{DiagnosticCode, ResourceLimit};
 use typol_policy::{RegexExecutionLimits, RegexLimits, RegexOptions};
 use typol_schema::{
     ResolverError, SchemaCompileOptions, SchemaLimits, SchemaResolveRequest, SchemaResolver,
@@ -99,12 +99,9 @@ fn aggregate_regex_limits_include_imported_schema_programs() -> TestResult {
         None,
     )
     .test_error()?;
-    test_verify!(
-        errors
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| { diagnostic.code() == DiagnosticCode::RESOURCE_LIMIT_EXCEEDED })
-    );
+    test_verify!(errors.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code() == ResourceLimit::RegexCompilationBudget.diagnostic_code()
+    }));
     Ok(())
 }
 

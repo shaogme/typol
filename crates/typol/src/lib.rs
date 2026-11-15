@@ -130,7 +130,7 @@ mod loading;
 mod loading_errors;
 mod options;
 mod session;
-#[cfg(any(feature = "serde", test))]
+#[cfg(any(feature = "serde", all(test, feature = "std")))]
 mod value;
 mod value_walk;
 
@@ -147,7 +147,6 @@ pub use conversion::{
     EnvironmentFallback, EnvironmentScalar, EnvironmentSourcedValue, OrderedMap, Sourced,
 };
 pub use error::{TypolError, TypolStage};
-pub use typol_i18n::{Language, Translator};
 pub use loading::{
     BoundRead, BoundSchema, LoadedSchema, SchemaLoader, SourceNames, TrustedBoundSchema,
 };
@@ -162,9 +161,10 @@ pub use typol_config::{
     FormattedConfig, NormalizedConfigValue, ValidatedConfigValue,
 };
 pub use typol_core::{
-    ConfigValue, ExecutionBudget, ExecutionLimits, Read, SliceSource, SourceCommitError,
-    SourceExpectation, SourceRevision, SourceWriter, TextLayout,
+    ConfigValue, ExecutionBudget, ExecutionLimits, Read, ResourceLimit, SliceSource,
+    SourceCommitError, SourceExpectation, SourceRevision, SourceWriter, TextLayout,
 };
+pub use typol_i18n::{Language, Translator};
 
 pub use api::{binding, config, core, model, policy, schema, semantic};
 pub use typol_macros::Typol;

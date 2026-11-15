@@ -3,10 +3,10 @@ name = "typol-test-support"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+authors.workspace = true
 description = "Shared test fixtures and utilities for Typol workspace crates."
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 publish = false
 
@@ -14,9 +14,6 @@ publish = false
 opeo.workspace = true
 typol-opeo-test-support.workspace = true
 typol-core.workspace = true
-typol-config.workspace = true
-typol-schema.workspace = true
-typol-semantic.workspace = true
 
 [lints]
 workspace = true

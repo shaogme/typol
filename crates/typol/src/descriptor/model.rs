@@ -132,7 +132,9 @@ impl DescriptorProvider {
             DescriptorNode::Type { identity, .. } if *identity == self.identity => Ok(descriptor),
             _ => Err(out.reborrow().fail(CodecErrors::emergency(
                 CodecStage::Binding,
-                Failure::internal(PROVIDER_TYPE_MISMATCH.with_object_id(descriptor.slot as u64)),
+                Failure::binding_internal(
+                    PROVIDER_TYPE_MISMATCH.with_object_id(descriptor.slot as u64),
+                ),
                 context.session().translator(),
             ))),
         }

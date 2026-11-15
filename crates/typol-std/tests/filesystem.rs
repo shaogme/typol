@@ -1,7 +1,3 @@
-#[macro_use]
-#[path = "support/assertions.rs"]
-mod assertions;
-
 use std::{
     cell::Cell,
     env::temp_dir,
@@ -20,9 +16,10 @@ use typol_config::{
     EnvironmentError, EnvironmentReadContext,
 };
 use typol_core::{
-    BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read as SourceRead, SourceId,
-    SourceReadError, SourceReadErrorKind, ValueKind,
+    BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, InternalError,
+    Read as SourceRead, ResourceLimit, SourceId, SourceReadError, SourceReadErrorKind, ValueKind,
 };
+use typol_opeo_test_support::{ensure, ensure_eq};
 use typol_schema::{
     ResolverError, SchemaCompileContext, SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler,
     SchemaLimits, SchemaResolveRequest, SchemaResolver, SchemaSource, SourceLoadedRequest,
@@ -103,8 +100,10 @@ fn new_file_resolver(
 fn read_root(
     resolver: &mut FileSchemaResolver,
     path: &Path,
-) -> Result<FileSchemaSource, HostError> {
-    ErrSlot::<HostError>::new().call(|out| resolver.read_root(path, out))
+) -> Result<FileSchemaSource, Box<HostError>> {
+    ErrSlot::<HostError>::new()
+        .call(|out| resolver.read_root(path, out))
+        .map_err(Box::new)
 }
 
 fn resolve<'src>(
@@ -137,15 +136,19 @@ fn set_name(
     source_id: SourceId,
     name: &str,
     options: SourceNameEditOptions,
-) -> Result<(), HostError> {
-    ErrSlot::<HostError>::new().call(|out| names.set_name(source_id, name, options, out))
+) -> Result<(), Box<HostError>> {
+    ErrSlot::<HostError>::new()
+        .call(|out| names.set_name(source_id, name, options, out))
+        .map_err(Box::new)
 }
 
 fn copy_names(
     names: &SourceNames,
     options: SourceNameEditOptions,
-) -> Result<SourceNames, HostError> {
-    ErrSlot::<HostError>::new().call(|out| names.try_copy(options, out))
+) -> Result<SourceNames, Box<HostError>> {
+    ErrSlot::<HostError>::new()
+        .call(|out| names.try_copy(options, out))
+        .map_err(Box::new)
 }
 
 fn open_config_input(
@@ -153,9 +156,10 @@ fn open_config_input(
     limits: FileConfigInputLimits,
     source_byte_limit: usize,
     budget: &ExecutionBudget,
-) -> Result<FileConfigInput, HostError> {
+) -> Result<FileConfigInput, Box<HostError>> {
     ErrSlot::<HostError>::new()
         .call(|out| FileConfigInput::open(path, limits, source_byte_limit, budget, out))
+        .map_err(Box::new)
 }
 
 fn read_source<S: SourceRead<SourceReadError> + ?Sized>(
@@ -398,6 +402,7 @@ fn file_schema_source_is_reopened_without_content_cache() -> Result<(), Box<dyn 
                 from_identity: &0_u64.to_le_bytes(),
                 module_name: "child",
                 source_byte_limit: 100,
+                source_byte_limit_kind: ResourceLimit::SourceBytes,
                 context: &context,
             },
         )
@@ -410,6 +415,7 @@ fn file_schema_source_is_reopened_without_content_cache() -> Result<(), Box<dyn 
             from_identity: &0_u64.to_le_bytes(),
             module_name: "child",
             source_byte_limit: 100,
+            source_byte_limit_kind: ResourceLimit::SourceBytes,
             context: &context,
         },
     )
@@ -454,6 +460,7 @@ fn direct_requests_reject_paths_keywords_and_unknown_identities() -> Result<(), 
                         from_identity: &0_u64.to_le_bytes(),
                         module_name: name,
                         source_byte_limit: 100,
+                        source_byte_limit_kind: ResourceLimit::SourceBytes,
                         context: &context
                     }
                 ),
@@ -470,6 +477,7 @@ fn direct_requests_reject_paths_keywords_and_unknown_identities() -> Result<(), 
                     from_identity: identity,
                     module_name: "child",
                     source_byte_limit: 100,
+                    source_byte_limit_kind: ResourceLimit::SourceBytes,
                     context: &context
                 }
             ),
@@ -483,6 +491,7 @@ fn direct_requests_reject_paths_keywords_and_unknown_identities() -> Result<(), 
                 from_identity: &0_u64.to_le_bytes(),
                 module_name: "missing",
                 source_byte_limit: 100,
+                source_byte_limit_kind: ResourceLimit::SourceBytes,
                 context: &context
             }
         ),
@@ -520,7 +529,10 @@ fn zero_exact_and_excess_file_lengths_are_distinguished() -> Result<(), Box<dyn 
         let error = open_config_input(&path, FileConfigInputLimits::default(), limit, &budget)
             .err()
             .ok_or_else(|| io::Error::other("expected operation to fail"))?;
-        ensure_eq!(error.kind(), HostErrorKind::ResourceLimitExceeded);
+        ensure_eq!(
+            error.kind(),
+            HostErrorKind::ResourceLimit(ResourceLimit::SourceBytes)
+        );
         ensure_eq!(error.operation(), HostOperation::ConfigRead);
         ensure!(error.source().is_none());
     }
@@ -551,13 +563,19 @@ fn file_config_input_file_and_path_limits_are_enforced() -> Result<(), Box<dyn E
     let error = open_config_input(&path, short_file_limit, usize::MAX, &budget)
         .err()
         .ok_or_else(|| io::Error::other("file byte limit should reject a larger file"))?;
-    ensure_eq!(error.kind(), HostErrorKind::ResourceLimitExceeded);
+    ensure_eq!(
+        error.kind(),
+        HostErrorKind::ResourceLimit(ResourceLimit::SourceBytes)
+    );
 
     let no_path_limit = FileConfigInputLimits::default().with_max_path_bytes(0);
     let error = open_config_input(&path, no_path_limit, usize::MAX, &budget)
         .err()
         .ok_or_else(|| io::Error::other("path byte limit should reject a non-empty path"))?;
-    ensure_eq!(error.kind(), HostErrorKind::ResourceLimitExceeded);
+    ensure_eq!(
+        error.kind(),
+        HostErrorKind::ResourceLimit(ResourceLimit::StringBytes)
+    );
 
     Ok(())
 }
@@ -589,10 +607,13 @@ fn host_file_path_count_step_and_workspace_limits_are_enforced() -> Result<(), B
                 from_identity: &0_u64.to_le_bytes(),
                 module_name: "child",
                 source_byte_limit: 100,
+                source_byte_limit_kind: ResourceLimit::SourceBytes,
                 context: &context
             }
         ),
-        Err(ResolverError::ResourceLimitExceeded)
+        Err(ResolverError::ResourceLimit(
+            ResourceLimit::SchemaSourceCount
+        ))
     ));
     for field in ["files", "path", "bytes"] {
         let mut params = defaults();
@@ -613,11 +634,12 @@ fn host_file_path_count_step_and_workspace_limits_are_enforced() -> Result<(), B
         let error = read_root(&mut resolver, &path)
             .err()
             .ok_or_else(|| io::Error::other("expected operation to fail"))?;
-        ensure_eq!(
-            error.kind(),
-            HostErrorKind::ResourceLimitExceeded,
-            "{field}"
-        );
+        let limit = match field {
+            "files" => ResourceLimit::SchemaSourceCount,
+            "path" => ResourceLimit::StringBytes,
+            _ => ResourceLimit::SourceBytes,
+        };
+        ensure_eq!(error.kind(), HostErrorKind::ResourceLimit(limit), "{field}");
     }
 
     Ok(())
@@ -746,7 +768,9 @@ fn observer_latches_first_failure_and_alias_failure_keeps_old_name() -> Result<(
                 context: &context
             }
         ),
-        Err(SourceObserverError::ResourceLimitExceeded)
+        Err(SourceObserverError::ResourceLimit(
+            ResourceLimit::StringBytes
+        ))
     );
     ensure_eq!(
         source_loaded(
@@ -757,9 +781,14 @@ fn observer_latches_first_failure_and_alias_failure_keeps_old_name() -> Result<(
                 context: &context
             }
         ),
-        Err(SourceObserverError::ResourceLimitExceeded)
+        Err(SourceObserverError::ResourceLimit(
+            ResourceLimit::StringBytes
+        ))
     );
-    ensure_eq!(names.failure(), Some(HostErrorKind::ResourceLimitExceeded));
+    ensure_eq!(
+        names.failure(),
+        Some(HostErrorKind::ResourceLimit(ResourceLimit::StringBytes))
+    );
     let failure = names
         .failure_context()
         .ok_or_else(|| io::Error::other("source registration failure context is missing"))?;
@@ -780,7 +809,7 @@ fn observer_latches_first_failure_and_alias_failure_keeps_old_name() -> Result<(
         .err()
         .ok_or_else(|| io::Error::other("expected operation to fail"))?
         .kind(),
-        HostErrorKind::ResourceLimitExceeded
+        HostErrorKind::ResourceLimit(ResourceLimit::StringBytes)
     );
     ensure_eq!(context.usage(), completed);
     let copy = copy_names(&names, SourceNameEditOptions::default())?;
@@ -788,7 +817,10 @@ fn observer_latches_first_failure_and_alias_failure_keeps_old_name() -> Result<(
     drop(names);
     ensure_eq!(copy.name(SourceId::new(0)), Some("schema#0"));
     ensure_eq!(copy.name(SourceId::new(10)), None);
-    ensure_eq!(copy.failure(), Some(HostErrorKind::ResourceLimitExceeded));
+    ensure_eq!(
+        copy.failure(),
+        Some(HostErrorKind::ResourceLimit(ResourceLimit::StringBytes))
+    );
     ensure_eq!(
         set_name(
             &mut copy,
@@ -799,7 +831,7 @@ fn observer_latches_first_failure_and_alias_failure_keeps_old_name() -> Result<(
         .err()
         .ok_or_else(|| io::Error::other("expected operation to fail"))?
         .kind(),
-        HostErrorKind::ResourceLimitExceeded
+        HostErrorKind::ResourceLimit(ResourceLimit::StringBytes)
     );
     ensure_eq!(copy.name(SourceId::new(0)), Some("schema#0"));
     ensure_eq!(context.usage().steps, completed.steps);
@@ -814,9 +846,12 @@ fn observer_latches_first_failure_and_alias_failure_keeps_old_name() -> Result<(
         .err()
         .ok_or_else(|| io::Error::other("expected operation to fail"))?
         .kind(),
-        HostErrorKind::ResourceLimitExceeded
+        HostErrorKind::ResourceLimit(ResourceLimit::SchemaSourceCount)
     );
-    ensure_eq!(copy.failure(), Some(HostErrorKind::ResourceLimitExceeded));
+    ensure_eq!(
+        copy.failure(),
+        Some(HostErrorKind::ResourceLimit(ResourceLimit::StringBytes))
+    );
     ensure!(
         ErrSlot::<SchemaCompileErrors>::new()
             .call(|out| SchemaCompiler::new(
@@ -878,13 +913,21 @@ fn names_failure_aborts_before_parsing_root_or_reading_imports() -> Result<(), B
         .compile("root.tschem", &mut names, compiler)?
         .err()
         .ok_or_else(|| io::Error::other("expected operation to fail"))?;
-    ensure_eq!(names.failure(), Some(HostErrorKind::ResourceLimitExceeded));
+    ensure_eq!(
+        names.failure(),
+        Some(HostErrorKind::ResourceLimit(
+            ResourceLimit::SchemaSourceCount
+        ))
+    );
     ensure_eq!(errors.diagnostics().len(), 1);
     let diagnostic = errors
         .diagnostics()
         .first()
         .ok_or_else(|| io::Error::other("diagnostic is missing"))?;
-    ensure_eq!(diagnostic.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED);
+    ensure_eq!(
+        diagnostic.code(),
+        ResourceLimit::SchemaSourceCount.diagnostic_code()
+    );
     let primary = diagnostic
         .primary()
         .ok_or_else(|| io::Error::other("primary location is missing"))?;
@@ -1158,6 +1201,7 @@ fn native_candidate_length_equal_to_limit_succeeds() -> Result<(), Box<dyn Error
                 from_identity: &0_u64.to_le_bytes(),
                 module_name: "long_child_name",
                 source_byte_limit: 100,
+                source_byte_limit_kind: ResourceLimit::SourceBytes,
                 context: &context
             }
         )
@@ -1182,10 +1226,11 @@ fn native_candidate_length_equal_to_limit_succeeds() -> Result<(), Box<dyn Error
                 from_identity: &0_u64.to_le_bytes(),
                 module_name: "long_child_name",
                 source_byte_limit: 100,
+                source_byte_limit_kind: ResourceLimit::SourceBytes,
                 context: &context
             }
         ),
-        Err(ResolverError::ResourceLimitExceeded)
+        Err(ResolverError::ResourceLimit(ResourceLimit::StringBytes))
     ));
 
     Ok(())
@@ -1206,7 +1251,7 @@ fn root_budget_failure_before_observer_does_not_invent_an_id() -> Result<(), Box
             .err()
             .ok_or_else(|| io::Error::other("expected operation to fail"))?
             .kind(),
-        HostErrorKind::ResourceLimitExceeded
+        HostErrorKind::ResourceLimit(ResourceLimit::SchemaSourceCount)
     );
     ensure_eq!(names.name(SourceId::new(0)), None);
     ensure_eq!(names.failure(), None);
@@ -1232,10 +1277,11 @@ fn oversized_preferred_file_never_uses_valid_alternate() -> Result<(), Box<dyn E
                 from_identity: &0_u64.to_le_bytes(),
                 module_name: "child",
                 source_byte_limit: 100,
+                source_byte_limit_kind: ResourceLimit::SourceBytes,
                 context: &context
             }
         ),
-        Err(ResolverError::ResourceLimitExceeded)
+        Err(ResolverError::ResourceLimit(ResourceLimit::SourceBytes))
     ));
 
     Ok(())
@@ -1256,7 +1302,10 @@ fn config_handles_detect_growth_and_observe_truncation_after_metadata() -> Resul
     let error = read_source(&mut input, &mut bytes, SourceId::new(0), 2)
         .err()
         .ok_or_else(|| io::Error::other("expected config source read to exceed its limit"))?;
-    ensure_eq!(error.kind(), SourceReadErrorKind::ResourceLimitExceeded);
+    ensure_eq!(
+        error.kind(),
+        SourceReadErrorKind::ResourceLimit(ResourceLimit::SourceBytes)
+    );
     ensure_eq!(error.offset(), Some(2));
     ensure_eq!(
         error
@@ -1272,10 +1321,10 @@ fn config_handles_detect_growth_and_observe_truncation_after_metadata() -> Resul
             .ok_or_else(|| {
                 io::Error::other("config source must remain failed after exceeding its limit")
             })?;
-        ensure_eq!(
+        ensure!(matches!(
             repeated_error.kind(),
-            SourceReadErrorKind::InternalInvariantFailure
-        );
+            SourceReadErrorKind::Internal(InternalError::HostAdapterInvariantFailure(_))
+        ));
         ensure_eq!(
             repeated_error
                 .context()
@@ -1391,7 +1440,10 @@ fn reader_adapter_rejects_counts_beyond_the_supplied_buffer() -> Result<(), Box<
     let error = read_source(&mut source, &mut [0; 2], SourceId::new(0), 0)
         .err()
         .ok_or_else(|| io::Error::other("expected a read count invariant error"))?;
-    ensure_eq!(error.kind(), SourceReadErrorKind::InternalInvariantFailure);
+    ensure!(matches!(
+        error.kind(),
+        SourceReadErrorKind::Internal(InternalError::HostAdapterInvariantFailure(_))
+    ));
     ensure_eq!(error.offset(), Some(0));
     ensure_eq!(error.requested_bytes(), Some(2));
     ensure_eq!(

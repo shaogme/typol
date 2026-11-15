@@ -429,7 +429,7 @@ fn secret_errors_share_budget_and_fatal_paths_are_safe() -> TestResult<()> {
     .test_error()?;
     test_eq!(
         errors.last().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::CONFIG_VALUE_NODES_LIMIT_EXCEEDED
     )?;
     test_eq!(
         errors.last().test_value()?.message().test_value()?,

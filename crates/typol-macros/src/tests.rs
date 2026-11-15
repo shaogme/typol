@@ -2,47 +2,81 @@ use crate::{
     expand::Expander,
     model::{BodyModel, Model},
 };
-use proc_macro2::TokenStream;
-use quote::quote;
-use syn::{Data, DeriveInput, Fields, parse_str, parse2};
+use std::fmt::Display;
 
-fn expand(source: &str) -> String {
-    let input: DeriveInput = parse_str(source).unwrap();
-    let model = Model::parse(input).unwrap();
-    Expander::expand(&model).unwrap().to_string()
+use proc_macro2::{Span, TokenStream};
+use quote::quote;
+use syn::{Data, DeriveInput, Error, Fields, Result, parse_str, parse2};
+
+macro_rules! ensure {
+    ($condition:expr $(,)?) => {
+        if !$condition {
+            return Err(test_error(format!(
+                "assertion failed: {}",
+                stringify!($condition)
+            )));
+        }
+    };
+    ($condition:expr, $($argument:tt)+) => {
+        if !$condition {
+            return Err(test_error(format!($($argument)+)));
+        }
+    };
 }
 
-fn reject(source: &str, message: &str) {
-    let input = parse_str(source).unwrap();
-    let error = match Model::parse(input) {
-        Ok(_) => panic!("invalid declaration was accepted: {source}"),
-        Err(error) => error,
+macro_rules! ensure_eq {
+    ($left:expr, $right:expr $(,)?) => {
+        let left = $left;
+        let right = $right;
+        if left != right {
+            return Err(test_error(format!(
+                "assertion failed: left={left:?}, right={right:?}"
+            )));
+        }
     };
-    assert!(error.to_string().contains(message), "{error}");
+}
+
+fn test_error(message: impl Display) -> Error {
+    Error::new(Span::call_site(), message)
+}
+
+fn expand(source: &str) -> Result<String> {
+    let input: DeriveInput = parse_str(source)?;
+    let model = Model::parse(input)?;
+    Ok(Expander::expand(&model)?.to_string())
+}
+
+fn reject(source: &str, message: &str) -> Result<()> {
+    let input = parse_str(source)?;
+    let error = Model::parse(input)
+        .err()
+        .ok_or_else(|| test_error(format!("invalid declaration was accepted: {source}")))?;
+    ensure!(error.to_string().contains(message), "{error}");
     let tokens = error.to_compile_error().to_string();
-    assert!(tokens.contains("compile_error"));
+    ensure!(tokens.contains("compile_error"));
+    Ok(())
 }
 
 #[test]
-fn named_structs_empty_structs_and_all_payloads_expand() {
+fn named_structs_empty_structs_and_all_payloads_expand() -> Result<()> {
     for source in [
         "struct Empty {}",
         "struct UnitEmpty;",
         "struct Root { value: u8, nested: module::Alias }",
         "enum Choice { Unit, Single(u8), Object { label: String }, Empty {} }",
     ] {
-        let output = expand(source);
-        assert!(output.contains("fn describe"));
-        assert!(output.contains("fn to_config_value"));
-        assert!(output.contains("fn from_config_value"));
-        assert!(output.contains("start :: < Self >"));
-        assert!(!output.contains("allow"));
-        assert!(!output.contains("typol_core"));
-        assert!(!output.contains("session"));
-        let tokens: TokenStream = parse_str(&output).unwrap();
-        assert_eq!(tokens.to_string(), output);
+        let output = expand(source)?;
+        ensure!(output.contains("fn describe"));
+        ensure!(output.contains("fn to_config_value"));
+        ensure!(output.contains("fn from_config_value"));
+        ensure!(output.contains("start :: < Self >"));
+        ensure!(!output.contains("allow"));
+        ensure!(!output.contains("typol_core"));
+        ensure!(!output.contains("session"));
+        let tokens: TokenStream = parse_str(&output)?;
+        ensure_eq!(tokens.to_string(), output);
     }
-    let output = expand("enum Choice { Unit, Single(u8), Object { label: String } }");
+    let output = expand("enum Choice { Unit, Single(u8), Object { label: String } }")?;
     for method in [
         "single_variant",
         "structure_variant",
@@ -50,23 +84,25 @@ fn named_structs_empty_structs_and_all_payloads_expand() {
         "read_field",
         "read_enumeration",
     ] {
-        assert!(output.contains(method));
+        ensure!(output.contains(method));
     }
+    Ok(())
 }
 
 #[test]
-fn unit_structs_expand_as_zero_field_structures_and_decode_as_unit_values() {
-    let output = expand("struct Empty;");
+fn unit_structs_expand_as_zero_field_structures_and_decode_as_unit_values() -> Result<()> {
+    let output = expand("struct Empty;")?;
 
-    assert!(output.contains("TypeShape :: Structure"));
-    assert!(output.contains("context . structure"));
-    assert!(output.contains("read_structure"));
-    assert!(output.contains("Ok (Self)"));
-    assert!(!output.contains("Self {"));
+    ensure!(output.contains("TypeShape :: Structure"));
+    ensure!(output.contains("context . structure"));
+    ensure!(output.contains("read_structure"));
+    ensure!(output.contains("Ok (Self)"));
+    ensure!(!output.contains("Self {"));
+    Ok(())
 }
 
 #[test]
-fn renamed_types_fields_variants_and_raw_identifiers_keep_rust_names() {
+fn renamed_types_fields_variants_and_raw_identifiers_keep_rust_names() -> Result<()> {
     let input: DeriveInput = parse2(quote! {
         #[typol(rename = "Renamed")]
         struct r#type {
@@ -74,30 +110,36 @@ fn renamed_types_fields_variants_and_raw_identifiers_keep_rust_names() {
             r#type: u8,
             r#match: String,
         }
-    })
-    .unwrap();
-    let model = Model::parse(input).unwrap();
+    })?;
+    let model = Model::parse(input)?;
     let BodyModel::Structure { fields, .. } = model.body() else {
-        panic!()
+        return Err(test_error("expected a structure model"));
     };
-    assert_eq!(fields[0].name.value(), "value");
-    assert_eq!(fields[1].name.value(), "match");
-    let output = Expander::expand(&model).unwrap().to_string();
-    assert!(output.contains("r#type"));
-    assert!(output.contains("\"Renamed\""));
+    let first_field = fields
+        .first()
+        .ok_or_else(|| test_error("expected the first field"))?;
+    let second_field = fields
+        .get(1)
+        .ok_or_else(|| test_error("expected the second field"))?;
+    ensure_eq!(first_field.name.value(), "value");
+    ensure_eq!(second_field.name.value(), "match");
+    let output = Expander::expand(&model)?.to_string();
+    ensure!(output.contains("r#type"));
+    ensure!(output.contains("\"Renamed\""));
     let output = expand(
         "enum Choice { #[typol(rename = \"Object\")] Old { #[typol(rename = \"value\")] old: u8 } }",
-    );
-    assert!(output.contains("Self :: Old"));
-    assert!(output.contains("\"Object\""));
-    assert!(output.contains("\"value\""));
+    )?;
+    ensure!(output.contains("Self :: Old"));
+    ensure!(output.contains("\"Object\""));
+    ensure!(output.contains("\"value\""));
+    Ok(())
 }
 
 #[test]
-fn generics_const_parameters_where_clauses_and_paths_are_preserved() {
+fn generics_const_parameters_where_clauses_and_paths_are_preserved() -> Result<()> {
     let output = expand(
         "struct Root<T, U, const N: usize> where T: Clone, U: Copy { values: [T; N], other: module::Wrapper<U> }",
-    );
+    )?;
     for text in [
         "T : Clone",
         "U : Copy",
@@ -106,36 +148,38 @@ fn generics_const_parameters_where_clauses_and_paths_are_preserved() {
         "module :: Wrapper < U >",
         "Self : 'static",
     ] {
-        assert!(output.contains(text), "missing {text}: {output}");
+        ensure!(output.contains(text), "missing {text}: {output}");
     }
-    assert!(output.contains("T : __typol_0_Typol"));
-    assert!(output.contains("U : __typol_0_Typol"));
-    assert!(!output.contains("Default"));
-    let output = expand("struct Root<T> where T: Iterator { value: T::Item }");
-    assert!(output.contains("T :: Item : __typol_0_Typol"));
-    let output = expand("struct Root<T = u8, const N: usize = 2> { values: [T; N] }");
-    assert!(!output.contains("T = u8"));
+    ensure!(output.contains("T : __typol_0_Typol"));
+    ensure!(output.contains("U : __typol_0_Typol"));
+    ensure!(!output.contains("Default"));
+    let output = expand("struct Root<T> where T: Iterator { value: T::Item }")?;
+    ensure!(output.contains("T :: Item : __typol_0_Typol"));
+    let output = expand("struct Root<T = u8, const N: usize = 2> { values: [T; N] }")?;
+    ensure!(!output.contains("T = u8"));
+    Ok(())
 }
 
 #[test]
-fn facade_paths_and_hygiene_are_explicit() {
+fn facade_paths_and_hygiene_are_explicit() -> Result<()> {
     for path in ["renamed_typol", "crate", "::renamed::facade"] {
         let output = expand(&format!(
             "#[typol(crate = \"{path}\")] struct Root {{ value: ::std::vec::Vec<module::Alias> }}"
-        ));
-        assert!(output.contains(&path.replace("::", " :: ").trim().to_string()));
-        assert!(!output.contains("use :: typol"));
-        assert!(output.contains(":: std :: vec :: Vec < module :: Alias >"));
+        ))?;
+        ensure!(output.contains(&path.replace("::", " :: ").trim().to_string()));
+        ensure!(!output.contains("use :: typol"));
+        ensure!(output.contains(":: std :: vec :: Vec < module :: Alias >"));
     }
-    assert!(expand("struct Root { value: u8 }").contains("use :: typol"));
-    let output = expand("struct Root<__typol_0_Typol> { value: __typol_0_Typol }");
-    assert!(output.contains("__typol_1_Typol"));
-    let output = expand("struct Root { __typol_0_context: u8 }");
-    assert!(output.contains("__typol_1_context"));
+    ensure!(expand("struct Root { value: u8 }")?.contains("use :: typol"));
+    let output = expand("struct Root<__typol_0_Typol> { value: __typol_0_Typol }")?;
+    ensure!(output.contains("__typol_1_Typol"));
+    let output = expand("struct Root { __typol_0_context: u8 }")?;
+    ensure!(output.contains("__typol_1_context"));
+    Ok(())
 }
 
 #[test]
-fn internal_prefix_selection_scans_nested_identifiers_and_skips_gaps() {
+fn internal_prefix_selection_scans_nested_identifiers_and_skips_gaps() -> Result<()> {
     let mut fields: Vec<_> = (0..64)
         .map(|index| format!("__typol_{index}_field: u8"))
         .collect();
@@ -145,17 +189,18 @@ fn internal_prefix_selection_scans_nested_identifiers_and_skips_gaps() {
         fields.join(",")
     );
 
-    let output = expand(&source);
+    let output = expand(&source)?;
 
-    assert!(output.contains("__typol_65_Typol"));
+    ensure!(output.contains("__typol_65_Typol"));
     let gap_output = expand(
         "#[other(inner(__typol_2_nested))] struct Root { __typol_0_field: u8, __typol_01_padded: u8 }",
-    );
-    assert!(gap_output.contains("__typol_1_Typol"));
+    )?;
+    ensure!(gap_output.contains("__typol_1_Typol"));
+    Ok(())
 }
 
 #[test]
-fn invalid_shapes_and_borrowed_targets_are_rejected() {
+fn invalid_shapes_and_borrowed_targets_are_rejected() -> Result<()> {
     for (source, message) in [
         ("union Root { value: u8 }", "union"),
         ("struct Root(u8);", "named-field"),
@@ -172,35 +217,37 @@ fn invalid_shapes_and_borrowed_targets_are_rejected() {
         ("struct Root { value: dyn Send }", "own its data"),
         ("struct Root { value: Holder<'static> }", "borrowed targets"),
     ] {
-        reject(source, message);
+        reject(source, message)?;
     }
+    Ok(())
 }
 
 #[test]
-fn named_fields_without_identifiers_return_spanned_errors() {
-    let mut input: DeriveInput = parse_str("struct Root { value: u8 }").unwrap();
+fn named_fields_without_identifiers_return_spanned_errors() -> Result<()> {
+    let mut input: DeriveInput = parse_str("struct Root { value: u8 }")?;
     let Data::Struct(data) = &mut input.data else {
-        panic!()
+        return Err(test_error("expected a struct declaration"));
     };
     let Fields::Named(fields) = &mut data.fields else {
-        panic!()
+        return Err(test_error("expected named fields"));
     };
-    let Some(field) = fields.named.first_mut() else {
-        panic!()
-    };
+    let field = fields
+        .named
+        .first_mut()
+        .ok_or_else(|| test_error("expected a field"))?;
     field.ident = None;
 
-    let error = match Model::parse(input) {
-        Ok(_) => panic!("named field without an identifier should return a macro error"),
-        Err(error) => error,
-    };
+    let error = Model::parse(input).err().ok_or_else(|| {
+        test_error("named field without an identifier should return a macro error")
+    })?;
 
-    assert_eq!(error.to_string(), "named field is missing an identifier");
-    assert!(error.span().start().column > 0);
+    ensure_eq!(error.to_string(), "named field is missing an identifier");
+    ensure!(error.span().start().column > 0);
+    Ok(())
 }
 
 #[test]
-fn attributes_names_positions_and_collisions_are_checked() {
+fn attributes_names_positions_and_collisions_are_checked() -> Result<()> {
     for (source, message) in [
         (
             "#[typol(rename = \"X\")] #[typol(crate = \"crate\")] struct Root {}",
@@ -257,7 +304,7 @@ fn attributes_names_positions_and_collisions_are_checked() {
         ("struct Root { r#type: u8 }", "non-reserved"),
         ("struct café {}", "ASCII"),
     ] {
-        reject(source, message);
+        reject(source, message)?;
     }
     for name in [
         "", "a-b", "a::b", "9a", "café", "extern", "mod", "type", "struct", "entry", "enum",
@@ -267,12 +314,13 @@ fn attributes_names_positions_and_collisions_are_checked() {
         reject(
             &format!("#[typol(rename = \"{name}\")] struct Root {{}}"),
             "non-reserved",
-        );
+        )?;
     }
+    Ok(())
 }
 
 #[test]
-fn aliases_and_unsupported_path_types_are_left_to_the_trait_contract() {
+fn aliases_and_unsupported_path_types_are_left_to_the_trait_contract() -> Result<()> {
     for ty in [
         "usize",
         "isize",
@@ -284,105 +332,116 @@ fn aliases_and_unsupported_path_types_are_left_to_the_trait_contract() {
         "custom::Vec<u8>",
         "Alias",
     ] {
-        let output = expand(&format!("struct Root {{ value: {ty} }}"));
-        assert!(output.contains("DescriptorProvider"));
-        assert!(!output.contains("BuiltinType"));
+        let output = expand(&format!("struct Root {{ value: {ty} }}"))?;
+        ensure!(output.contains("DescriptorProvider"));
+        ensure!(!output.contains("BuiltinType"));
     }
-    let output = expand("struct Root { children: Vec<Self> }");
-    assert!(output.contains("Vec < Self >"));
-    assert!(!output.contains("Vec < Self > :"));
+    let output = expand("struct Root { children: Vec<Self> }")?;
+    ensure!(output.contains("Vec < Self >"));
+    ensure!(!output.contains("Vec < Self > :"));
+    Ok(())
 }
 
 #[test]
-fn diagnostic_tokens_keep_the_offending_rust_span() {
+fn diagnostic_tokens_keep_the_offending_rust_span() -> Result<()> {
     for source in [
         "struct Root { #[typol(rename = \"type\")] value: u8 }",
         "struct Root { #[typol(skip)] value: u8 }",
         "struct Root { value: &'static str }",
         "struct Root<'a> { value: u8 }",
     ] {
-        let error = match Model::parse(parse_str(source).unwrap()) {
-            Ok(_) => panic!(),
-            Err(error) => error,
-        };
-        let text = error.span().source_text().unwrap();
-        assert!(!text.is_empty());
-        assert!(source.contains(&text));
-        assert!(error.span().start().column > 0);
+        let error = Model::parse(parse_str(source)?)
+            .err()
+            .ok_or_else(|| test_error("expected a diagnostic for an invalid declaration"))?;
+        let text = error
+            .span()
+            .source_text()
+            .ok_or_else(|| test_error("expected diagnostic source text"))?;
+        ensure!(!text.is_empty());
+        ensure!(source.contains(&text));
+        ensure!(error.span().start().column > 0);
     }
-    let error = match Model::parse(
-        parse_str("struct Root { #[typol(rename = \"type\")] value: u8 }").unwrap(),
-    ) {
-        Ok(_) => panic!(),
-        Err(error) => error,
-    };
-    assert_eq!(error.span().source_text().as_deref(), Some("\"type\""));
-    let input: DeriveInput =
-        parse_str("struct Root { a: u8, #[typol(rename = \"a\")] b: u8 }").unwrap();
-    let error = match Model::parse(input) {
-        Ok(_) => panic!(),
-        Err(error) => error,
-    };
+    let error = Model::parse(parse_str(
+        "struct Root { #[typol(rename = \"type\")] value: u8 }",
+    )?)
+    .err()
+    .ok_or_else(|| test_error("expected a diagnostic for a reserved rename"))?;
+    ensure!(error.span().source_text().as_deref() == Some("\"type\""));
+    let input: DeriveInput = parse_str("struct Root { a: u8, #[typol(rename = \"a\")] b: u8 }")?;
+    let error = Model::parse(input)
+        .err()
+        .ok_or_else(|| test_error("expected diagnostics for colliding field names"))?;
     let errors: Vec<_> = error.into_iter().collect();
-    assert_eq!(errors.len(), 2);
-    assert_eq!(errors[0].span().source_text().as_deref(), Some("\"a\""));
-    assert_eq!(errors[1].span().source_text().as_deref(), Some("a"));
+    ensure_eq!(errors.len(), 2);
+    let first_error = errors
+        .first()
+        .ok_or_else(|| test_error("expected the first collision diagnostic"))?;
+    let second_error = errors
+        .get(1)
+        .ok_or_else(|| test_error("expected the second collision diagnostic"))?;
+    ensure!(first_error.span().source_text().as_deref() == Some("\"a\""));
+    ensure!(second_error.span().source_text().as_deref() == Some("a"));
+    Ok(())
 }
 
 #[test]
-fn bounds_follow_type_positions_and_generated_imports_follow_usage() {
-    let output = expand("struct Root<T> { value: module::T }");
-    assert!(output.contains("impl < T >"));
-    let output = expand("struct Root<T> where T: Iterator { value: <T as Iterator>::Item }");
-    assert!(output.contains("T : __typol_0_Typol"));
+fn bounds_follow_type_positions_and_generated_imports_follow_usage() -> Result<()> {
+    let output = expand("struct Root<T> { value: module::T }")?;
+    ensure!(output.contains("impl < T >"));
+    let output = expand("struct Root<T> where T: Iterator { value: <T as Iterator>::Item }")?;
+    ensure!(output.contains("T : __typol_0_Typol"));
     for source in ["struct Empty {}", "enum Empty { Unit, Object {} }"] {
-        assert!(!expand(source).contains("DescriptorProvider as"));
+        ensure!(!expand(source)?.contains("DescriptorProvider as"));
     }
-    let output = expand("enum Choice { Value(u8), Object { value: u8 } }");
-    assert!(!output.contains("EnumPayload as"));
-    assert!(output.contains("ConversionPayload as"));
-    let output = expand("struct Root { second: u16, first: u8 }");
-    assert!(output.contains(
+    let output = expand("enum Choice { Value(u8), Object { value: u8 } }")?;
+    ensure!(!output.contains("EnumPayload as"));
+    ensure!(output.contains("ConversionPayload as"));
+    let output = expand("struct Root { second: u16, first: u8 }")?;
+    ensure!(output.contains(
         "read_field :: < u16 > (__typol_0_members , 0usize , __typol_0_out . reborrow ())"
     ));
-    assert!(output.contains(
+    ensure!(output.contains(
         "read_field :: < u8 > (__typol_0_members , 1usize , __typol_0_out . reborrow ())"
     ));
+    Ok(())
 }
 
 #[test]
-fn budgeted_marker_bounds_follow_nested_and_recursive_types() {
-    let output = expand("struct Parent<T> { child: Option<Vec<T>> }");
-    assert!(output.contains("T : __typol_0_BudgetedTypol"));
-    assert!(!output.contains("Option < Vec < T > > : __typol_0_BudgetedTypol"));
+fn budgeted_marker_bounds_follow_nested_and_recursive_types() -> Result<()> {
+    let output = expand("struct Parent<T> { child: Option<Vec<T>> }")?;
+    ensure!(output.contains("T : __typol_0_BudgetedTypol"));
+    ensure!(!output.contains("Option < Vec < T > > : __typol_0_BudgetedTypol"));
 
-    let output = expand("struct Parent<T> where T: Iterator { child: Vec<T::Item> }");
-    assert!(output.contains("T :: Item : __typol_0_BudgetedTypol"));
+    let output = expand("struct Parent<T> where T: Iterator { child: Vec<T::Item> }")?;
+    ensure!(output.contains("T :: Item : __typol_0_BudgetedTypol"));
 
-    let output = expand("struct Recursive { children: Vec<Self> }");
-    assert!(output.contains("impl __typol_0_BudgetedTypol for Recursive"));
-    assert!(!output.contains("Vec < Self > : __typol_0_BudgetedTypol"));
+    let output = expand("struct Recursive { children: Vec<Self> }")?;
+    ensure!(output.contains("impl __typol_0_BudgetedTypol for Recursive"));
+    ensure!(!output.contains("Vec < Self > : __typol_0_BudgetedTypol"));
+    Ok(())
 }
 
 #[test]
-fn trusted_derive_omits_the_budgeted_marker() {
-    let output = expand("#[typol(trusted)] struct Parent { child: Manual }");
-    assert!(output.contains("impl __typol_0_Typol for Parent"));
-    assert!(!output.contains("BudgetedTypol"));
+fn trusted_derive_omits_the_budgeted_marker() -> Result<()> {
+    let output = expand("#[typol(trusted)] struct Parent { child: Manual }")?;
+    ensure!(output.contains("impl __typol_0_Typol for Parent"));
+    ensure!(!output.contains("BudgetedTypol"));
+    Ok(())
 }
 
 #[test]
-fn rename_overrides_invalid_defaults_and_foreign_attributes_are_preserved() {
+fn rename_overrides_invalid_defaults_and_foreign_attributes_are_preserved() -> Result<()> {
     let output = expand(
         "#[serde(rename = \"Other\")] #[typol(rename = \"Root\")] struct café { #[serde(skip)] #[typol(rename = \"value\")] r#type: u8 }",
-    );
-    assert!(output.contains("impl __typol_0_Typol for café"));
-    assert!(output.contains("self . r#type"));
-    assert!(!output.contains("serde"));
-    reject("#[typol(rename = 7)] struct Root {}", "string literal");
-    reject("#[typol(crate = \"\")] struct Root {}", "unexpected end");
+    )?;
+    ensure!(output.contains("impl __typol_0_Typol for café"));
+    ensure!(output.contains("self . r#type"));
+    ensure!(!output.contains("serde"));
+    reject("#[typol(rename = 7)] struct Root {}", "string literal")?;
+    reject("#[typol(crate = \"\")] struct Root {}", "unexpected end")?;
     reject(
         "struct Root<#[typol(rename = \"Count\")] const N: usize> { values: [u8; N] }",
         "not allowed here",
-    );
+    )?;
+    Ok(())
 }

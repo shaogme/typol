@@ -17,6 +17,8 @@ pub use regex::{RegexExecutionError, RegexExecutionFailure, RegexExecutor, Regex
 pub use rules::{AllItemRequest, AllItemValue, SumBoundsRequest, ValueRules};
 pub use values::{Bindings, EvalKind, EvalValue};
 
+pub(crate) use error::EvaluationInvariant;
+
 use crate::{
     ExpressionLiteral, ExpressionMethodInfo, FieldId, StoredBindingInfo, StoredExpressionArgument,
     StoredExpressionKind, StoredTypeKind, TypeId, TypedExpression, VariantId,

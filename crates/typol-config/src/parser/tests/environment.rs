@@ -6,7 +6,9 @@ use crate::{
 };
 use alloc::{format, vec::Vec};
 use opeo::{OResult, Out};
-use typol_core::{ConfigValue, DiagnosticCode, SliceSource, ValueKind, ValueSource, ValueView};
+use typol_core::{
+    ConfigValue, DiagnosticCode, ResourceLimit, SliceSource, ValueKind, ValueSource, ValueView,
+};
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
 
@@ -139,7 +141,12 @@ fn same_name_converts_each_reference_and_caches_failures() -> TestResult<()> {
         (Ok(Some(&b"\xff"[..])), &[13, 13][..]),
         (Err(EnvironmentError::HostFailure), &[13, 13][..]),
         (Err(EnvironmentError::AllocationFailed), &[2][..]),
-        (Err(EnvironmentError::ResourceLimitExceeded), &[1][..]),
+        (
+            Err(EnvironmentError::ResourceLimit(
+                ResourceLimit::EnvironmentBytes,
+            )),
+            &[ResourceLimit::EnvironmentBytes.diagnostic_code().get()][..],
+        ),
     ] {
         let mut provider = provider(result);
         let errors = EnvironmentTest::run(&schema, source, &mut provider, &ConfigLimits::default())
@@ -304,7 +311,7 @@ fn temporary_fallback_nodes_and_option_wrappers_obey_limits() -> TestResult<()> 
             if budget < required {
                 test_eq!(
                     TestCheck::item(value.test_error()?.diagnostics(), 0)?.code(),
-                    DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+                    DiagnosticCode::CONFIG_VALUE_NODES_LIMIT_EXCEEDED
                 )?;
             } else {
                 test_assert!(value.is_ok())?;
@@ -384,7 +391,7 @@ fn environment_entry_limits_precede_provider_reads() -> TestResult<()> {
         let errors = EnvironmentTest::run(&schema, source, &mut provider, &limits).test_error()?;
         test_eq!(
             TestCheck::item(errors.diagnostics(), 0)?.code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+            DiagnosticCode::ENVIRONMENT_ENTRIES_LIMIT_EXCEEDED
         )?;
         test_eq!(provider.calls(), expected_calls)?;
     }

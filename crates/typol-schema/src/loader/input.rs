@@ -1,5 +1,7 @@
 use opeo::{ErrSlot, OResult, Out};
-use typol_core::{Diagnostic, Read, SourceCapture, SourceId, SourceReadError, SourceSpan, Span};
+use typol_core::{
+    Diagnostic, Read, ResourceLimit, SourceCapture, SourceId, SourceReadError, SourceSpan, Span,
+};
 
 use crate::{SchemaSource, diagnostics::EmergencyDiagnostics, session::CompileBudget};
 
@@ -93,7 +95,13 @@ impl Read<Diagnostic> for BoundedSource<'_> {
                     };
                     if consumed > allowance || !within_total {
                         self.capture.invalidate();
+                        let limit = if source_remaining <= total_remaining {
+                            ResourceLimit::SourceBytes
+                        } else {
+                            ResourceLimit::SchemaTotalBytes
+                        };
                         return Err(out.reborrow().fail(EmergencyDiagnostics::resource(
+                            limit,
                             SourceSpan::new(
                                 source_id,
                                 Span::point(offset.saturating_add(allowance)),
@@ -129,7 +137,13 @@ impl Read<Diagnostic> for BoundedSource<'_> {
         if count > allowance || !within_total {
             self.capture.invalidate();
             let limit_offset = offset.saturating_add(allowance);
+            let limit = if source_remaining <= total_remaining {
+                ResourceLimit::SourceBytes
+            } else {
+                ResourceLimit::SchemaTotalBytes
+            };
             return Err(out.reborrow().fail(EmergencyDiagnostics::resource(
+                limit,
                 SourceSpan::new(source_id, Span::point(limit_offset)),
                 self.budget.translator(),
             )));

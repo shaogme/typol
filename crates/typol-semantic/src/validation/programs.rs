@@ -1,6 +1,8 @@
 mod nodes;
 
-pub(super) use nodes::{PROGRAM_VALIDATION_INTERNAL, ProgramBindings, ProgramValidationState};
+pub(super) use nodes::{
+    PROGRAM_VALIDATION_INTERNAL, ProgramBindings, ProgramBindingsError, ProgramValidationState,
+};
 
 use crate::{
     BuildError, CompiledSchema, ConstraintKind, ConstraintRecord, ExpressionBinding,
@@ -177,8 +179,14 @@ impl ProgramValidation {
                     .get(program.index())
                     .ok_or(BuildError::internal(PROGRAM_VALIDATION_INTERNAL))
                     .store_err_into(out.reborrow())?;
-                let bindings =
-                    ProgramBindings::all(schema, target).store_err_into(out.reborrow())?;
+                let bindings = ProgramBindings::all(schema, target)
+                    .map_err(|error| match error {
+                        ProgramBindingsError::Internal(context) => BuildError::internal(context),
+                        ProgramBindingsError::SchemaAccess(error) => {
+                            BuildError::SchemaAccess(error)
+                        }
+                    })
+                    .store_err_into(out.reborrow())?;
                 Self::validate(
                     schema,
                     program.expression(),

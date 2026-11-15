@@ -7,7 +7,7 @@ use crate::{
     },
 };
 use opeo::{OResult, Out, ResultOutExt};
-use typol_core::{ChargedVec, ValueKind};
+use typol_core::{ChargedVec, ResourceLimit, ValueKind};
 use typol_model::BinaryOperator;
 
 struct EvaluationState<'a> {
@@ -93,7 +93,7 @@ impl<'e, 'model> ExpressionExecutor<'e, 'model> {
         let (index, depth) = location;
         self.evaluator.step(out.reborrow())?;
         if depth >= self.evaluator.limits().max_nesting_depth() {
-            return Err(out.fail(EvalError::Resource));
+            return Err(out.fail(EvalError::ResourceLimit(ResourceLimit::ValidationTraversal)));
         }
         let node = expression
             .node(index)
@@ -101,7 +101,7 @@ impl<'e, 'model> ExpressionExecutor<'e, 'model> {
             .store_err_into(out.reborrow())?;
         let next = depth
             .checked_add(1)
-            .ok_or(EvalError::Resource)
+            .ok_or(EvalError::internal(EVALUATOR_INTERNAL))
             .store_err_into(out.reborrow())?;
         match node.kind() {
             StoredExpressionKind::Field { receiver, .. }

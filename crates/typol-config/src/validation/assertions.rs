@@ -30,6 +30,11 @@ static ASSERTION_SCHEMA_ACCESS: DiagnosticContext = diagnostic_context!(
     "assertion-evaluation",
     "compiled-schema-view-unavailable",
 );
+static ASSERTION_VALUE_ERROR: DiagnosticContext = diagnostic_context!(
+    "typol-config",
+    "assertion-evaluation",
+    "value-error-during-expression-evaluation",
+);
 
 struct AssertionEvaluation<'evaluator, 'schema, 'value> {
     evaluator: &'evaluator Evaluator<'schema>,
@@ -177,13 +182,18 @@ fn assertion_result<'schema, 'value, 'slot>(
 
 fn map_value_error(error: ValueError) -> EvalError {
     match error.kind() {
-        ValueErrorKind::ResourceLimitExceeded => EvalError::Resource,
+        ValueErrorKind::ResourceLimit(limit) => EvalError::ResourceLimit(limit),
         ValueErrorKind::AllocationFailed => EvalError::Allocation,
-        ValueErrorKind::CapacityExceeded => EvalError::Capacity,
+        ValueErrorKind::CapacityExceeded(capacity) => EvalError::CapacityExceeded(capacity),
+        ValueErrorKind::Internal(error) => EvalError::Internal {
+            error,
+            source_span: None,
+        },
         ValueErrorKind::DuplicateMapKey
         | ValueErrorKind::DuplicateFieldName
-        | ValueErrorKind::EnvironmentReferenceRequired
-        | ValueErrorKind::InternalInvariantFailure => EvalError::Internal,
+        | ValueErrorKind::EnvironmentReferenceRequired => {
+            EvalError::internal(ASSERTION_VALUE_ERROR)
+        }
     }
 }
 

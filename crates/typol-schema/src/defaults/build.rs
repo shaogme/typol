@@ -420,15 +420,16 @@ impl<'b, 'a, 'd> DefaultBuilder<'b, 'a, 'd> {
         translator: Translator,
     ) -> Diagnostic {
         match error.kind() {
-            ValueErrorKind::ResourceLimitExceeded => {
-                EmergencyDiagnostics::resource(span, translator)
+            ValueErrorKind::ResourceLimit(limit) => {
+                EmergencyDiagnostics::resource(limit, span, translator)
             }
             ValueErrorKind::AllocationFailed => EmergencyDiagnostics::allocation(span, translator),
-            ValueErrorKind::CapacityExceeded => EmergencyDiagnostics::capacity(span, translator),
-            ValueErrorKind::InternalInvariantFailure => match error.context() {
-                Some(context) => EmergencyDiagnostics::internal(span, context, translator),
-                None => schema_internal!(translator, span),
-            },
+            ValueErrorKind::CapacityExceeded(capacity) => {
+                EmergencyDiagnostics::capacity_error(span, capacity, translator)
+            }
+            ValueErrorKind::Internal(internal) => {
+                EmergencyDiagnostics::internal_error(span, internal, translator)
+            }
             ValueErrorKind::EnvironmentReferenceRequired => schema_internal!(translator, span),
             ValueErrorKind::DuplicateMapKey => {
                 let context = error.duplicate_indices().map_or_else(
@@ -459,13 +460,22 @@ impl<'b, 'a, 'd> DefaultBuilder<'b, 'a, 'd> {
         translator: Translator,
     ) -> Diagnostic {
         match error {
-            CopyError::Resource => EmergencyDiagnostics::resource(span, translator),
-            CopyError::Allocation => EmergencyDiagnostics::allocation(span, translator),
-            CopyError::Capacity => EmergencyDiagnostics::capacity(span, translator),
-            CopyError::Internal => schema_internal!(translator, span),
-            CopyError::InternalAt(context) => {
-                EmergencyDiagnostics::internal(span, context, translator)
+            CopyError::ResourceLimit(limit) => {
+                EmergencyDiagnostics::resource(limit, span, translator)
             }
+            CopyError::Allocation => EmergencyDiagnostics::allocation(span, translator),
+            CopyError::CapacityExceeded(capacity) => {
+                EmergencyDiagnostics::capacity_error(span, capacity, translator)
+            }
+            CopyError::Internal(error) => {
+                EmergencyDiagnostics::internal_error(span, error, translator)
+            }
+            CopyError::InternalSource(source) => match source.kind() {
+                ValueErrorKind::Internal(error) => {
+                    EmergencyDiagnostics::internal_error(span, error, translator)
+                }
+                _ => schema_internal!(translator, span),
+            },
             CopyError::InvalidValue(error) => Self::value_diagnostic(error, span, translator),
         }
     }

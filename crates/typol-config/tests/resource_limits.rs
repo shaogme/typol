@@ -1,14 +1,16 @@
-use typol_test_support::{ConfigTestSupport as Support, TestOpeoOutcome};
+use typol_test_support::TestOpeoOutcome;
 
 use typol_config::{
-    ConfigLimits, ConfigParseOptions, ConfigParseRequest, ConfigValidationOptions,
+    ConfigLimits, ConfigParseOptions, ConfigParseRequest, ConfigParser, ConfigValidationOptions,
     ConfigValidationRequest, ConfigValueProcessor, Environment, EnvironmentError,
     EnvironmentReadContext,
     opeo::{OResult, Out},
 };
 use typol_core::{ConfigValue, DiagnosticCode, ExecutionLimits, SliceSource};
 use typol_policy::{ExcerptLimits, RegexOptions};
-use typol_schema::{SchemaCompileOptions, SchemaSource};
+use typol_schema::{
+    SchemaCompileOptions, SchemaCompiler, SchemaResolver, SchemaSource, SourceObserver,
+};
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
 
@@ -30,12 +32,22 @@ impl Environment for Provider {
 }
 
 fn compile(text: &str) -> TestResult<CompiledSchema> {
-    Support::compile_schema(
-        SchemaCompileOptions::default(),
-        SchemaSource::from_str(b"limits", text),
-        None,
-        None,
-    )
+    TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::default();
+        let source = SchemaSource::from_str(b"limits", text);
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()
 }
 
@@ -73,20 +85,22 @@ fn parse(
     options: ConfigParseOptions,
     provider: &mut Provider,
 ) -> TestOpeoOutcome<(), DiagnosticCode> {
-    match Support::parse(
-        schema,
-        ConfigParseRequest::new(&mut SliceSource::new((text).as_bytes()), "limits", options),
-        provider,
-    ) {
+    match TestOpeo::outcome(|out| {
+        ConfigParser::new(schema).parse(
+            ConfigParseRequest::new(&mut SliceSource::new((text).as_bytes()), "limits", options),
+            provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
+    {
         TestOpeoOutcome::Value(_) => TestOpeoOutcome::Value(()),
-        TestOpeoOutcome::Error(errors) => TestOpeoOutcome::Error(
-            errors
-                .diagnostics()
-                .last()
-                .map_or(DiagnosticCode::INTERNAL_ERROR, |diagnostic| {
-                    diagnostic.code()
-                }),
-        ),
+        TestOpeoOutcome::Error(errors) => {
+            TestOpeoOutcome::Error(errors.diagnostics().last().map_or(
+                DiagnosticCode::CONFIG_VALIDATION_INVARIANT_FAILURE,
+                |diagnostic| diagnostic.code(),
+            ))
+        }
     }
 }
 
@@ -100,15 +114,18 @@ fn validation_options(config: ConfigLimits) -> ConfigValidationOptions {
 }
 
 fn external_value(schema: &CompiledSchema, source: &str) -> TestResult<ConfigValue> {
-    Support::parse(
-        schema,
-        ConfigParseRequest::new(
-            &mut SliceSource::new(source.as_bytes()),
-            "depth",
-            options(generous_config(), generous_execution()),
-        ),
-        &mut provider(),
-    )
+    TestOpeo::outcome(|out| {
+        ConfigParser::new(schema).parse(
+            ConfigParseRequest::new(
+                &mut SliceSource::new(source.as_bytes()),
+                "depth",
+                options(generous_config(), generous_execution()),
+            ),
+            &mut provider(),
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_value()
 }
 
@@ -226,15 +243,15 @@ fn nesting_depth_boundaries_match_for_text_normalization_and_validation() -> Tes
                     options(below, generous_execution()),
                     &mut provider(),
                 ),
-                TestOpeoOutcome::Error(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+                TestOpeoOutcome::Error(DiagnosticCode::CONFIG_VALUE_DEPTH_LIMIT_EXCEEDED)
             )?;
             test_eq!(
                 normalization_error(&schema, external_value(&schema, case.source)?, below),
-                Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+                Some(DiagnosticCode::CONFIG_VALUE_DEPTH_LIMIT_EXCEEDED)
             )?;
             test_eq!(
                 validation_error(&schema, external_value(&schema, case.source)?, below),
-                Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+                Some(DiagnosticCode::CONFIG_VALUE_DEPTH_LIMIT_EXCEEDED)
             )?;
         }
     }
@@ -269,22 +286,31 @@ fn environment_cache_and_constructed_copies_have_independent_exact_limits() -> T
         TestOpeoOutcome::Value(())
     )?;
     test_eq!(provider.names, ["A", "B", "C"])?;
-    for config in [
-        ConfigLimits::default()
-            .with_max_environment_entries(2)
-            .with_max_environment_bytes(192)
-            .with_max_constructed_text_bytes(268)
-            .with_max_display_name_bytes(6),
-        ConfigLimits::default()
-            .with_max_environment_entries(3)
-            .with_max_environment_bytes(191)
-            .with_max_constructed_text_bytes(268)
-            .with_max_display_name_bytes(6),
-        ConfigLimits::default()
-            .with_max_environment_entries(3)
-            .with_max_environment_bytes(192)
-            .with_max_constructed_text_bytes(267)
-            .with_max_display_name_bytes(6),
+    for (config, expected) in [
+        (
+            ConfigLimits::default()
+                .with_max_environment_entries(2)
+                .with_max_environment_bytes(192)
+                .with_max_constructed_text_bytes(268)
+                .with_max_display_name_bytes(6),
+            DiagnosticCode::ENVIRONMENT_ENTRIES_LIMIT_EXCEEDED,
+        ),
+        (
+            ConfigLimits::default()
+                .with_max_environment_entries(3)
+                .with_max_environment_bytes(191)
+                .with_max_constructed_text_bytes(268)
+                .with_max_display_name_bytes(6),
+            DiagnosticCode::ENVIRONMENT_BYTES_LIMIT_EXCEEDED,
+        ),
+        (
+            ConfigLimits::default()
+                .with_max_environment_entries(3)
+                .with_max_environment_bytes(192)
+                .with_max_constructed_text_bytes(267)
+                .with_max_display_name_bytes(6),
+            DiagnosticCode::CONFIG_TEXT_BYTES_LIMIT_EXCEEDED,
+        ),
     ] {
         provider.names.clear();
         test_eq!(
@@ -294,7 +320,7 @@ fn environment_cache_and_constructed_copies_have_independent_exact_limits() -> T
                 options(config, generous_execution()),
                 &mut provider
             ),
-            TestOpeoOutcome::Error(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+            TestOpeoOutcome::Error(expected)
         )?;
         test_assert!(provider.names.len() <= 3)?;
     }
@@ -313,7 +339,7 @@ fn environment_cache_and_constructed_copies_have_independent_exact_limits() -> T
             ),
             &mut provider
         ),
-        TestOpeoOutcome::Error(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+        TestOpeoOutcome::Error(DiagnosticCode::ENVIRONMENT_ENTRIES_LIMIT_EXCEEDED)
     )?;
     test_assert!(provider.names.is_empty())?;
 
@@ -341,7 +367,7 @@ fn missing_environment_entries_count_and_repeat_names_use_cache() -> TestResult<
             ),
             &mut provider
         ),
-        TestOpeoOutcome::Error(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+        TestOpeoOutcome::Error(DiagnosticCode::ENVIRONMENT_ENTRIES_LIMIT_EXCEEDED)
     )?;
     test_eq!(provider.names, ["A"])?;
     provider.names.clear();
@@ -405,7 +431,7 @@ fn discarded_fallback_still_consumes_constructed_text() -> TestResult<()> {
             ),
             &mut provider
         ),
-        TestOpeoOutcome::Error(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+        TestOpeoOutcome::Error(DiagnosticCode::CONFIG_TEXT_BYTES_LIMIT_EXCEEDED)
     )?;
     test_eq!(provider.names, ["X"])?;
 
@@ -416,6 +442,13 @@ fn discarded_fallback_still_consumes_constructed_text() -> TestResult<()> {
 enum Quota {
     Steps,
     Workspace,
+}
+
+fn quota_error(quota: Quota) -> DiagnosticCode {
+    match quota {
+        Quota::Steps => DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED,
+        Quota::Workspace => DiagnosticCode::WORKSPACE_BYTES_LIMIT_EXCEEDED,
+    }
 }
 
 fn execution(quota: Quota, value: usize) -> ExecutionLimits {
@@ -438,7 +471,7 @@ fn minimum(schema: &CompiledSchema, text: &str, quota: Quota) -> TestResult<usiz
         ) {
             TestOpeoOutcome::Value(()) => high = middle,
             TestOpeoOutcome::Error(code) => {
-                test_eq!(code, DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)?;
+                test_eq!(code, quota_error(quota))?;
                 low = middle + 1;
             }
         }
@@ -470,7 +503,7 @@ fn shared_regex_steps_and_workspace_accept_exact_boundary() -> TestResult<()> {
                 options(generous_config(), execution(quota, limit - 1)),
                 &mut provider()
             ),
-            TestOpeoOutcome::Error(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+            TestOpeoOutcome::Error(quota_error(quota))
         )?;
     }
     let one = minimum(&schema, r#"{values: ["x"]}"#, Quota::Steps)?;
@@ -481,7 +514,7 @@ fn shared_regex_steps_and_workspace_accept_exact_boundary() -> TestResult<()> {
             options(generous_config(), execution(Quota::Steps, one)),
             &mut provider()
         ),
-        TestOpeoOutcome::Error(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+        TestOpeoOutcome::Error(quota_error(Quota::Steps))
     )?;
 
     Ok(())
@@ -525,7 +558,7 @@ fn display_name_limit_precedes_provider_read() -> TestResult<()> {
             ),
             &mut provider
         ),
-        TestOpeoOutcome::Error(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+        TestOpeoOutcome::Error(DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED)
     )?;
     test_assert!(provider.names.is_empty())?;
 
@@ -569,7 +602,7 @@ fn defaults_count_each_owned_key_field_variant_and_string_copy() -> TestResult<(
                 if quota == text_bytes {
                     TestOpeoOutcome::Value(())
                 } else {
-                    TestOpeoOutcome::Error(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+                    TestOpeoOutcome::Error(DiagnosticCode::CONFIG_TEXT_BYTES_LIMIT_EXCEEDED)
                 }
             )?;
         }
@@ -601,7 +634,7 @@ fn nested_quantifiers_unique_and_sum_share_one_balance() -> TestResult<()> {
             options(generous_config(), execution(Quota::Steps, limit - 1)),
             &mut provider()
         ),
-        TestOpeoOutcome::Error(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+        TestOpeoOutcome::Error(DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED)
     )?;
 
     Ok(())
@@ -625,7 +658,7 @@ fn unicode_error_finalization_uses_remaining_steps_and_safe_emergency_exit() -> 
         if code == DiagnosticCode::CONFIG_VALIDATION_ERROR {
             high = middle;
         } else {
-            test_eq!(code, DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)?;
+            test_eq!(code, DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED)?;
             low = middle + 1;
         }
     }
@@ -639,19 +672,22 @@ fn unicode_error_finalization_uses_remaining_steps_and_safe_emergency_exit() -> 
         TestOpeoOutcome::Error(DiagnosticCode::CONFIG_VALIDATION_ERROR)
     )?;
     let mut provider = provider();
-    let errors = Support::parse(
-        &schema,
-        ConfigParseRequest::new(
-            &mut SliceSource::new(text.as_bytes()),
-            "limits",
-            options(generous_config(), execution(Quota::Steps, low - 1)),
-        ),
-        &mut provider,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            ConfigParseRequest::new(
+                &mut SliceSource::new(text.as_bytes()),
+                "limits",
+                options(generous_config(), execution(Quota::Steps, low - 1)),
+            ),
+            &mut provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_eq!(
         errors.diagnostics().last().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED
     )?;
     test_assert!(errors.diagnostics().last().test_value()?.path().is_none())?;
     test_assert!(!format!("{errors:?}").contains(&"é".repeat(10)))?;
@@ -681,13 +717,13 @@ fn enum_syntax_and_container_recovery_share_diagnostic_budget() -> TestResult<()
             if code == DiagnosticCode::CONFIG_SYNTAX_ERROR {
                 high = middle;
             } else {
-                test_eq!(code, DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)?;
+                test_eq!(code, DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED)?;
                 low = middle + 1;
             }
         }
         for (quota, expected) in [
             (low, DiagnosticCode::CONFIG_SYNTAX_ERROR),
-            (low - 1, DiagnosticCode::RESOURCE_LIMIT_EXCEEDED),
+            (low - 1, DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED),
         ] {
             test_eq!(
                 parse(

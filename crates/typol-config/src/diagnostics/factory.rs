@@ -1,11 +1,10 @@
 use crate::context::SemanticStatus;
-use alloc::borrow::Cow;
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedString, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext,
-    DiagnosticFieldStatus, DiagnosticLabelInput, DiagnosticMessage, DiagnosticParameters,
-    ExecutionBudget, InstancePath, LocatedSpan, RelatedLocationRole, SourceSpan, ValueSource,
-    diagnostic_context,
+    BudgetError, CapacityExceeded, ChargedString, ChargedVec, Diagnostic, DiagnosticCode,
+    DiagnosticContext, DiagnosticFieldStatus, DiagnosticLabelInput, DiagnosticMessage,
+    DiagnosticParameters, ExecutionBudget, InstancePath, InternalError, LocatedSpan,
+    RelatedLocationRole, SourceSpan, ValueSource, diagnostic_context,
 };
 use typol_i18n::{Translator, t};
 use typol_semantic::{EvalError, EvalFailure, SchemaAccessError};
@@ -87,12 +86,17 @@ impl ExecutionDiagnostic {
             .into();
         }
         match error.map(EvalError::kind) {
-            Some(EvalFailure::Internal | EvalFailure::InternalAt(_)) => t! {
+            Some(
+                EvalFailure::Internal(_)
+                | EvalFailure::RegexExecution(_)
+                | EvalFailure::SchemaAccess(_)
+                | EvalFailure::CapacityExceeded(_),
+            ) => t! {
                 name: "diagnostic.validation.runtime_internal",
                 locale: translator,
             }
             .into(),
-            Some(EvalFailure::Resource) => t! {
+            Some(EvalFailure::ResourceLimit(_)) => t! {
                 name: "diagnostic.validation.runtime_limit",
                 locale: translator,
             }
@@ -199,13 +203,15 @@ impl ExecutionDiagnostic {
 
     pub(crate) fn code(error: EvalError) -> DiagnosticCode {
         match error.kind() {
-            EvalFailure::Internal | EvalFailure::InternalAt(_) | EvalFailure::SchemaAccess(_) => {
-                DiagnosticCode::INTERNAL_ERROR
+            EvalFailure::Internal(internal) => internal.diagnostic_code(),
+            EvalFailure::RegexExecution(error) => error.diagnostic_code(),
+            EvalFailure::SchemaAccess(error) => {
+                InternalError::SchemaAccessInvariantFailure(error.context()).diagnostic_code()
             }
-            EvalFailure::Resource => DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+            EvalFailure::ResourceLimit(limit) => limit.diagnostic_code(),
             EvalFailure::Arithmetic => DiagnosticCode::CONFIG_VALIDATION_ERROR,
             EvalFailure::Allocation => DiagnosticCode::ALLOCATION_FAILED,
-            EvalFailure::Capacity => DiagnosticCode::CAPACITY_EXCEEDED,
+            EvalFailure::CapacityExceeded(capacity) => capacity.diagnostic_code(),
         }
     }
 }
@@ -232,25 +238,12 @@ impl BudgetDiagnostic {
                 name: "diagnostic.emergency.allocation_failed",
                 locale: translator,
             },
-            BudgetError::CapacityExceeded => t! {
-                name: "diagnostic.emergency.capacity_exceeded",
-                locale: translator,
-            },
-            BudgetError::InvariantViolation(_) => t! {
-                name: "diagnostic.emergency.internal_error",
-                locale: translator,
-            },
-            BudgetError::Resource
-            | BudgetError::RegexSteps
-            | BudgetError::RegexSearchSteps
-            | BudgetError::RegexWorkspace => t! {
-                name: "diagnostic.emergency.resource_limit_exceeded",
-                locale: translator,
-            },
+            BudgetError::CapacityExceeded(capacity) => capacity.emergency_message(translator),
+            BudgetError::Internal(error) => error.emergency_message(translator),
+            BudgetError::ResourceLimit(limit) => limit.emergency_message(translator),
         };
         let mut diagnostic = match message {
-            Ok(Cow::Borrowed(message)) => Diagnostic::emergency(code, message),
-            Ok(Cow::Owned(_)) => Diagnostic::translation_failure(code, RenderError::InvalidCatalog),
+            Ok(message) => Diagnostic::emergency(code, message),
             Err(error) => Diagnostic::translation_failure(code, error),
         };
         diagnostic.set_context(context);
@@ -307,7 +300,109 @@ impl DiagnosticFactory {
     }
 
     pub(crate) fn schema_access(error: SchemaAccessError, translator: Translator) -> Diagnostic {
-        Self::internal(error.context(), None, None, None, translator)
+        Self::internal_error(
+            InternalError::SchemaAccessInvariantFailure(error.context()),
+            None,
+            None,
+            None,
+            translator,
+        )
+    }
+
+    pub(crate) fn parser_internal(
+        context: DiagnosticContext,
+        primary: Option<LocatedSpan>,
+        path: Option<InstancePath>,
+        value_source: Option<ValueSource>,
+        translator: Translator,
+    ) -> Diagnostic {
+        Self::internal_error(
+            InternalError::ConfigParserInvariantFailure(context),
+            primary,
+            path,
+            value_source,
+            translator,
+        )
+    }
+
+    pub(crate) fn value_internal(
+        context: DiagnosticContext,
+        primary: Option<LocatedSpan>,
+        path: Option<InstancePath>,
+        value_source: Option<ValueSource>,
+        translator: Translator,
+    ) -> Diagnostic {
+        Self::internal_error(
+            InternalError::ConfigValueInvariantFailure(context),
+            primary,
+            path,
+            value_source,
+            translator,
+        )
+    }
+
+    pub(crate) fn environment_internal(
+        context: DiagnosticContext,
+        primary: Option<LocatedSpan>,
+        path: Option<InstancePath>,
+        value_source: Option<ValueSource>,
+        translator: Translator,
+    ) -> Diagnostic {
+        Self::internal_error(
+            InternalError::EnvironmentInvariantFailure(context),
+            primary,
+            path,
+            value_source,
+            translator,
+        )
+    }
+
+    pub(crate) fn secret_policy_internal(
+        context: DiagnosticContext,
+        primary: Option<LocatedSpan>,
+        path: Option<InstancePath>,
+        value_source: Option<ValueSource>,
+        translator: Translator,
+    ) -> Diagnostic {
+        Self::internal_error(
+            InternalError::SecretPolicyInvariantFailure(context),
+            primary,
+            path,
+            value_source,
+            translator,
+        )
+    }
+
+    pub(crate) fn edit_internal(
+        context: DiagnosticContext,
+        primary: Option<LocatedSpan>,
+        path: Option<InstancePath>,
+        value_source: Option<ValueSource>,
+        translator: Translator,
+    ) -> Diagnostic {
+        Self::internal_error(
+            InternalError::ConfigEditInvariantFailure(context),
+            primary,
+            path,
+            value_source,
+            translator,
+        )
+    }
+
+    pub(crate) fn collection_internal(
+        context: DiagnosticContext,
+        primary: Option<LocatedSpan>,
+        path: Option<InstancePath>,
+        value_source: Option<ValueSource>,
+        translator: Translator,
+    ) -> Diagnostic {
+        Self::internal_error(
+            InternalError::DiagnosticCollectionInvariantFailure(context),
+            primary,
+            path,
+            value_source,
+            translator,
+        )
     }
 
     pub(crate) fn make_diagnostic(request: DetailedDiagnosticRequest<'_>) -> Diagnostic {
@@ -388,20 +483,44 @@ impl DiagnosticFactory {
         value_source: Option<ValueSource>,
         translator: Translator,
     ) -> Diagnostic {
-        let mut diagnostic = match t! {
-            name: "diagnostic.emergency.internal_error",
-            locale: translator,
-        } {
-            Ok(Cow::Borrowed(message)) => {
-                Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR, message)
-            }
-            Ok(Cow::Owned(_)) => Diagnostic::translation_failure(
-                DiagnosticCode::INTERNAL_ERROR,
-                RenderError::InvalidCatalog,
-            ),
-            Err(error) => Diagnostic::translation_failure(DiagnosticCode::INTERNAL_ERROR, error),
+        Self::internal_error(
+            InternalError::ConfigValidationInvariantFailure(context),
+            primary,
+            path,
+            value_source,
+            translator,
+        )
+    }
+
+    pub(crate) fn internal_error(
+        error: InternalError,
+        primary: Option<LocatedSpan>,
+        path: Option<InstancePath>,
+        value_source: Option<ValueSource>,
+        translator: Translator,
+    ) -> Diagnostic {
+        let code = error.diagnostic_code();
+        let mut diagnostic = match error.emergency_message(translator) {
+            Ok(message) => Diagnostic::emergency(error.diagnostic_code(), message),
+            Err(render_error) => Diagnostic::translation_failure(code, render_error),
         };
-        diagnostic.set_context(Some(context));
+        diagnostic.set_context(Some(error.context()));
+        diagnostic.set_located_primary(primary);
+        Self::bind_path(&mut diagnostic, path);
+        diagnostic.set_value_source(value_source);
+        diagnostic
+    }
+
+    pub(crate) fn capacity_error(
+        capacity: CapacityExceeded,
+        primary: Option<LocatedSpan>,
+        path: Option<InstancePath>,
+        value_source: Option<ValueSource>,
+        translator: Translator,
+    ) -> Diagnostic {
+        let code = capacity.diagnostic_code();
+        let mut diagnostic =
+            Diagnostic::translated_emergency(code, capacity.emergency_message(translator));
         diagnostic.set_located_primary(primary);
         Self::bind_path(&mut diagnostic, path);
         diagnostic.set_value_source(value_source);
@@ -417,13 +536,7 @@ impl DiagnosticFactory {
             name: "diagnostic.emergency.diagnostic_limit_reached",
             locale: translator,
         } {
-            Ok(Cow::Borrowed(message)) => {
-                Diagnostic::emergency(DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED, message)
-            }
-            Ok(Cow::Owned(_)) => Diagnostic::translation_failure(
-                DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED,
-                RenderError::InvalidCatalog,
-            ),
+            Ok(message) => Diagnostic::emergency(DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED, message),
             Err(error) => {
                 Diagnostic::translation_failure(DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED, error)
             }
@@ -494,7 +607,10 @@ fn execution_redaction_uses_explicit_state() {
             redacted: true,
             translator,
         },
-        Some(EvalError::Internal),
+        Some(EvalError::Internal {
+            error: InternalError::SemanticEvaluationInvariantFailure(CONFIG_EVALUATION_UNSPECIFIED),
+            source_span: None,
+        }),
     );
     assert!(hidden.failure().is_none());
     assert_eq!(hidden.text(), "value is hidden");
@@ -505,7 +621,10 @@ fn execution_redaction_uses_explicit_state() {
             redacted: false,
             translator,
         },
-        Some(EvalError::Internal),
+        Some(EvalError::Internal {
+            error: InternalError::SemanticEvaluationInvariantFailure(CONFIG_EVALUATION_UNSPECIFIED),
+            source_span: None,
+        }),
     );
     assert!(visible.failure().is_none());
     assert_eq!(

@@ -1,5 +1,7 @@
 use crate::{
-    AllocationError, DiagnosticCode, DiagnosticContext, diagnostic_context, workspace::WorkspaceVec,
+    AllocationError, CapacityExceeded, DiagnosticCode, DiagnosticContext,
+    DiagnosticContextDescriptor, InternalError, ResourceLimit, diagnostic_context,
+    workspace::WorkspaceVec,
 };
 use alloc::alloc::{Layout, alloc, dealloc};
 use core::{
@@ -19,41 +21,30 @@ static COUNTER_UNDERFLOW: DiagnosticContext =
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BudgetError {
-    Resource,
-    RegexSteps,
-    RegexSearchSteps,
-    RegexWorkspace,
+    ResourceLimit(ResourceLimit),
     Allocation,
-    CapacityExceeded,
-    InvariantViolation(&'static DiagnosticContext),
+    CapacityExceeded(CapacityExceeded),
+    Internal(InternalError),
 }
 
 impl BudgetError {
     pub const fn invariant(context: &'static DiagnosticContext) -> Self {
-        Self::InvariantViolation(context)
+        Self::Internal(InternalError::BudgetInvariantFailure(*context))
     }
 
     pub const fn diagnostic_code(self) -> DiagnosticCode {
         match self {
-            Self::Resource => DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-            Self::RegexSteps | Self::RegexSearchSteps | Self::RegexWorkspace => {
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
-            }
+            Self::ResourceLimit(limit) => limit.diagnostic_code(),
             Self::Allocation => DiagnosticCode::ALLOCATION_FAILED,
-            Self::CapacityExceeded => DiagnosticCode::CAPACITY_EXCEEDED,
-            Self::InvariantViolation(_) => DiagnosticCode::INTERNAL_ERROR,
+            Self::CapacityExceeded(capacity) => capacity.diagnostic_code(),
+            Self::Internal(error) => error.diagnostic_code(),
         }
     }
 
     pub const fn context(self) -> Option<DiagnosticContext> {
         match self {
-            Self::InvariantViolation(context) => Some(*context),
-            Self::Resource
-            | Self::RegexSteps
-            | Self::RegexSearchSteps
-            | Self::RegexWorkspace
-            | Self::Allocation
-            | Self::CapacityExceeded => None,
+            Self::Internal(error) => Some(error.context()),
+            Self::ResourceLimit(_) | Self::Allocation | Self::CapacityExceeded(_) => None,
         }
     }
 }
@@ -61,13 +52,10 @@ impl BudgetError {
 impl fmt::Display for BudgetError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
-            Self::Resource => "execution resource limit exceeded",
-            Self::RegexSteps => "regular-expression step limit exceeded",
-            Self::RegexSearchSteps => "regular-expression search limit exceeded",
-            Self::RegexWorkspace => "regular-expression workspace limit exceeded",
+            Self::ResourceLimit(limit) => return write!(formatter, "{limit} limit exceeded"),
             Self::Allocation => "memory allocation failed",
-            Self::CapacityExceeded => "workspace capacity exceeded",
-            Self::InvariantViolation(_) => "internal state invariant violated",
+            Self::CapacityExceeded(_) => "workspace capacity exceeded",
+            Self::Internal(_) => "internal state invariant violated",
         };
         formatter.write_str(message)
     }
@@ -135,7 +123,9 @@ impl Counter {
         let mut old = self.get();
         loop {
             let Some(next) = old.checked_add(amount) else {
-                return Err(out.fail(convert(BudgetError::CapacityExceeded)));
+                return Err(out.fail(convert(BudgetError::CapacityExceeded(
+                    CapacityExceeded::BudgetBookkeeping,
+                ))));
             };
             match self.0.compare_exchange_weak(
                 old,
@@ -201,9 +191,17 @@ struct State {
     exhausted: AtomicBool,
     stage: AtomicUsize,
     failure: AtomicUsize,
-    failure_context: AtomicPtr<DiagnosticContext>,
+    failure_context: AtomicPtr<()>,
     finished: AtomicBool,
     regex: bool,
+}
+
+struct CounterIncrease<'counter, 'slot, 'borrow, E> {
+    current: &'counter Counter,
+    amount: usize,
+    limit: usize,
+    resource: ResourceLimit,
+    out: Out<'slot, 'borrow, E>,
 }
 
 /// A fallibly created atomic shared budget; handles explicitly increment the atomic reference count through `try_clone`.
@@ -233,7 +231,7 @@ impl ExecutionBudget {
     ) -> OResult<'slot, Self> {
         let bytes = Layout::new::<State>().size();
         if charge_state && bytes > limits.max_workspace_bytes {
-            return Err(out.fail(BudgetError::Resource));
+            return Err(out.fail(BudgetError::ResourceLimit(ResourceLimit::WorkspaceBytes)));
         }
         // SAFETY: Allocates with the `State` layout, checks for a null pointer, then initializes uniquely owned storage.
         let pointer = unsafe { alloc(Layout::new::<State>()) }.cast::<State>();
@@ -290,7 +288,9 @@ impl ExecutionBudget {
         match self.state().references.increase_optional(1) {
             Some(_) => Some(Self { state: self.state }),
             None => {
-                self.record_failure(BudgetError::CapacityExceeded);
+                self.record_failure(BudgetError::CapacityExceeded(
+                    CapacityExceeded::BudgetBookkeeping,
+                ));
                 None
             }
         }
@@ -312,14 +312,16 @@ impl ExecutionBudget {
     }
 
     pub fn record_failure(&self, error: BudgetError) {
-        let (value, context) = match error {
-            BudgetError::Resource => (1, None),
-            BudgetError::RegexSteps => (5, None),
-            BudgetError::RegexSearchSteps => (6, None),
-            BudgetError::RegexWorkspace => (7, None),
-            BudgetError::Allocation => (2, None),
-            BudgetError::CapacityExceeded => (3, None),
-            BudgetError::InvariantViolation(context) => (4, Some(context)),
+        let (value, context_pointer) = match error {
+            BudgetError::ResourceLimit(limit) => (100 + limit.id(), ptr::null_mut()),
+            BudgetError::Allocation => (2, ptr::null_mut()),
+            BudgetError::CapacityExceeded(capacity) => {
+                (capacity.diagnostic_code().get() as usize, ptr::null_mut())
+            }
+            BudgetError::Internal(internal) => (
+                4 + internal.tag(),
+                internal.context().descriptor() as *const DiagnosticContextDescriptor as *mut (),
+            ),
         };
         if self
             .state()
@@ -332,9 +334,6 @@ impl ExecutionBudget {
             )
             .is_ok()
         {
-            let context_pointer = context.map_or(ptr::null_mut(), |context| {
-                context as *const DiagnosticContext as *mut DiagnosticContext
-            });
             self.state()
                 .failure_context
                 .store(context_pointer, AtomicOrdering::Relaxed);
@@ -351,17 +350,24 @@ impl ExecutionBudget {
             spin_loop();
         };
         match value {
-            1 => Some(BudgetError::Resource),
             2 => Some(BudgetError::Allocation),
-            3 => Some(BudgetError::CapacityExceeded),
-            4 => {
-                let context = self.state().failure_context.load(AtomicOrdering::Relaxed);
-                // SAFETY: This pointer can refer only to the static context supplied when the invariant error is created.
-                unsafe { context.as_ref() }.map(BudgetError::invariant)
+            capacity if (70..=84).contains(&capacity) => DiagnosticCode::new(capacity as u32)
+                .and_then(CapacityExceeded::from_diagnostic_code)
+                .map(BudgetError::CapacityExceeded),
+            internal if (4..32).contains(&internal) => {
+                let context_pointer = self.state().failure_context.load(AtomicOrdering::Relaxed);
+                // SAFETY: The pointer refers to the static descriptor retained by the internal error.
+                let descriptor = unsafe {
+                    context_pointer
+                        .cast::<DiagnosticContextDescriptor>()
+                        .as_ref()
+                }?;
+                InternalError::from_tag(internal - 4, DiagnosticContext::new(descriptor))
+                    .map(BudgetError::Internal)
             }
-            5 => Some(BudgetError::RegexSteps),
-            6 => Some(BudgetError::RegexSearchSteps),
-            7 => Some(BudgetError::RegexWorkspace),
+            resource if resource >= 101 => {
+                ResourceLimit::from_id(resource - 100).map(BudgetError::ResourceLimit)
+            }
             _ => None,
         }
     }
@@ -383,14 +389,11 @@ impl ExecutionBudget {
     }
 
     pub fn resource_error(&self) -> BudgetError {
-        let error = if self.state().regex {
-            BudgetError::RegexSteps
+        self.limit_error(if self.state().regex {
+            ResourceLimit::RegexExecutionSteps
         } else {
-            BudgetError::Resource
-        };
-        self.record_failure(error);
-        self.state().exhausted.store(true, AtomicOrdering::Relaxed);
-        error
+            ResourceLimit::ExecutionSteps
+        })
     }
 
     pub fn invariant_error(&self, context: &'static DiagnosticContext) -> BudgetError {
@@ -419,32 +422,69 @@ impl ExecutionBudget {
         self.state().exhausted.load(AtomicOrdering::Relaxed)
     }
 
+    fn increase_with<'slot, 'borrow, E>(
+        &self,
+        request: CounterIncrease<'_, 'slot, 'borrow, E>,
+        convert: impl FnOnce(BudgetError) -> E,
+    ) -> OResult<'slot, usize> {
+        let CounterIncrease {
+            current,
+            amount,
+            limit,
+            resource,
+            out,
+        } = request;
+        if self.exhausted() {
+            return Err(out.fail(convert(self.failure().unwrap_or(
+                BudgetError::CapacityExceeded(CapacityExceeded::BudgetBookkeeping),
+            ))));
+        }
+        let mut old = current.get();
+        loop {
+            if self.exhausted() {
+                return Err(out.fail(convert(self.failure().unwrap_or(
+                    BudgetError::CapacityExceeded(CapacityExceeded::BudgetBookkeeping),
+                ))));
+            }
+            let Some(next) = old.checked_add(amount) else {
+                return Err(out.fail(convert(self.capacity_error())));
+            };
+            if next > limit {
+                return Err(out.fail(convert(self.limit_error(resource))));
+            }
+            match current.0.compare_exchange_weak(
+                old,
+                next,
+                AtomicOrdering::Relaxed,
+                AtomicOrdering::Relaxed,
+            ) {
+                Ok(_) => return Ok(next),
+                Err(actual) => old = actual,
+            }
+        }
+    }
+
     fn increase<'slot, 'borrow, E>(
         &self,
-        current: &Counter,
-        amount: usize,
-        limit: usize,
-        out: Out<'slot, 'borrow, E>,
+        request: CounterIncrease<'_, 'slot, 'borrow, E>,
     ) -> OResult<'slot, usize>
     where
         E: From<BudgetError>,
     {
-        match self.increase_optional(current, amount, limit) {
-            Some(value) => Ok(value),
-            None => Err(out.fail(E::from(self.resource_error()))),
-        }
+        self.increase_with(request, E::from)
     }
 
     pub fn consume<'slot, E>(&self, steps: usize, mut out: Out<'slot, '_, E>) -> OResult<'slot, ()>
     where
         E: From<BudgetError>,
     {
-        self.increase(
-            &self.state().steps,
-            steps,
-            self.state().limits.max_steps,
-            out.reborrow(),
-        )?;
+        self.increase(CounterIncrease {
+            current: &self.state().steps,
+            amount: steps,
+            limit: self.state().limits.max_steps,
+            resource: ResourceLimit::ExecutionSteps,
+            out: out.reborrow(),
+        })?;
         Ok(())
     }
 
@@ -454,10 +494,17 @@ impl ExecutionBudget {
         out: Out<'slot, 'borrow, E>,
         convert: impl FnOnce(BudgetError) -> E,
     ) -> OResult<'slot, ()> {
-        match self.increase_optional(&self.state().steps, steps, self.state().limits.max_steps) {
-            Some(_) => Ok(()),
-            None => Err(out.fail(convert(self.resource_error()))),
-        }
+        self.increase_with(
+            CounterIncrease {
+                current: &self.state().steps,
+                amount: steps,
+                limit: self.state().limits.max_steps,
+                resource: ResourceLimit::ExecutionSteps,
+                out,
+            },
+            convert,
+        )
+        .map(|_| ())
     }
 
     pub fn construct_text<'slot, E>(
@@ -469,7 +516,13 @@ impl ExecutionBudget {
     where
         E: From<BudgetError>,
     {
-        self.increase(&self.state().text, bytes, limit, out.reborrow())?;
+        self.increase(CounterIncrease {
+            current: &self.state().text,
+            amount: bytes,
+            limit,
+            resource: ResourceLimit::ConfigTextBytes,
+            out: out.reborrow(),
+        })?;
         Ok(())
     }
 
@@ -521,13 +574,20 @@ impl ExecutionBudget {
         E: From<BudgetError>,
     {
         let state = self.state();
-        match self.increase_optional(&state.workspace, bytes, state.limits.max_workspace_bytes) {
-            Some(total) => {
-                state.peak.0.fetch_max(total, AtomicOrdering::Relaxed);
-                Ok(())
-            }
-            None => Err(out.fail(E::from(self.workspace_error()))),
-        }
+        let limit = if state.regex {
+            ResourceLimit::RegexWorkspaceBytes
+        } else {
+            ResourceLimit::WorkspaceBytes
+        };
+        let total = self.increase(CounterIncrease {
+            current: &state.workspace,
+            amount: bytes,
+            limit: state.limits.max_workspace_bytes,
+            resource: limit,
+            out,
+        })?;
+        state.peak.0.fetch_max(total, AtomicOrdering::Relaxed);
+        Ok(())
     }
 
     pub fn reserve_workspace_with<'slot, 'borrow, E>(
@@ -537,13 +597,23 @@ impl ExecutionBudget {
         convert: impl FnOnce(BudgetError) -> E,
     ) -> OResult<'slot, ()> {
         let state = self.state();
-        match self.increase_optional(&state.workspace, bytes, state.limits.max_workspace_bytes) {
-            Some(total) => {
-                state.peak.0.fetch_max(total, AtomicOrdering::Relaxed);
-                Ok(())
-            }
-            None => Err(out.fail(convert(self.workspace_error()))),
-        }
+        let limit = if state.regex {
+            ResourceLimit::RegexWorkspaceBytes
+        } else {
+            ResourceLimit::WorkspaceBytes
+        };
+        let total = self.increase_with(
+            CounterIncrease {
+                current: &state.workspace,
+                amount: bytes,
+                limit: state.limits.max_workspace_bytes,
+                resource: limit,
+                out,
+            },
+            convert,
+        )?;
+        state.peak.0.fetch_max(total, AtomicOrdering::Relaxed);
+        Ok(())
     }
 
     pub(crate) fn return_workspace<'slot, 'borrow, E>(
@@ -563,11 +633,23 @@ impl ExecutionBudget {
     }
 
     fn workspace_error(&self) -> BudgetError {
-        let error = if self.state().regex {
-            BudgetError::RegexWorkspace
+        let limit = if self.state().regex {
+            ResourceLimit::RegexWorkspaceBytes
         } else {
-            BudgetError::Resource
+            ResourceLimit::WorkspaceBytes
         };
+        self.limit_error(limit)
+    }
+
+    fn capacity_error(&self) -> BudgetError {
+        let error = BudgetError::CapacityExceeded(CapacityExceeded::BudgetBookkeeping);
+        self.record_failure(error);
+        self.state().exhausted.store(true, AtomicOrdering::Relaxed);
+        error
+    }
+
+    fn limit_error(&self, limit: ResourceLimit) -> BudgetError {
+        let error = BudgetError::ResourceLimit(limit);
         self.record_failure(error);
         self.state().exhausted.store(true, AtomicOrdering::Relaxed);
         error
@@ -585,7 +667,9 @@ impl ExecutionBudget {
         E: From<BudgetError>,
     {
         if !self.is_regex() {
-            return Err(out.fail(E::from(BudgetError::CapacityExceeded)));
+            return Err(out.fail(E::from(BudgetError::CapacityExceeded(
+                CapacityExceeded::BudgetBookkeeping,
+            ))));
         }
         let execution = self.try_clone(out.reborrow())?;
         Ok(RegexExecutionBudget { execution })
@@ -707,7 +791,7 @@ impl RegexExecutionBudget {
     }
 
     pub fn search_limit_error(&self) -> BudgetError {
-        self.fail(BudgetError::RegexSearchSteps)
+        self.fail(BudgetError::ResourceLimit(ResourceLimit::RegexSearchSteps))
     }
 
     pub fn reserve_workspace<'slot, E>(

@@ -1,7 +1,3 @@
-#[macro_use]
-#[path = "support/assertions.rs"]
-mod assertions;
-
 use opeo::{ErrSlot, OResult, Out};
 use std::{
     cell::Cell,
@@ -18,8 +14,9 @@ use typol_config::{
 };
 use typol_core::{
     BudgetError, ConfigValue, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits,
-    SliceSource, ValueKind,
+    ResourceLimit, SliceSource, ValueKind,
 };
+use typol_opeo_test_support::{ensure, ensure_eq};
 use typol_schema::{
     ResolverError, SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaResolveRequest,
     SchemaResolver, SchemaSource,
@@ -122,7 +119,12 @@ fn read_process_with<'env>(
 ) -> Result<Option<&'env [u8]>, EnvironmentError> {
     let budget = ErrSlot::<BudgetError>::new()
         .call(|out| ExecutionBudget::new(execution, out))
-        .map_err(|_| EnvironmentError::InternalError)?;
+        .map_err(|error| match error {
+            BudgetError::ResourceLimit(limit) => EnvironmentError::ResourceLimit(limit),
+            BudgetError::Allocation => EnvironmentError::AllocationFailed,
+            BudgetError::CapacityExceeded(capacity) => EnvironmentError::CapacityExceeded(capacity),
+            BudgetError::Internal(internal) => EnvironmentError::Internal(internal),
+        })?;
     let context = EnvironmentReadContext::new(&budget, max_value_bytes);
     ErrSlot::<EnvironmentError>::new().call(|out| process.read(name, context, out))
 }
@@ -276,7 +278,9 @@ fn process_environment_child() -> Result<(), Box<dyn Error>> {
     let mut short = ProcessEnvironment::new(limits(6, 7));
     ensure_eq!(
         read_process(&mut short, "UNICODE"),
-        Err(EnvironmentError::ResourceLimitExceeded)
+        Err(EnvironmentError::ResourceLimit(
+            ResourceLimit::EnvironmentBytes
+        ))
     );
     let mut zero = ProcessEnvironment::new(limits(0, 5));
     ensure_eq!(
@@ -285,7 +289,9 @@ fn process_environment_child() -> Result<(), Box<dyn Error>> {
     );
     ensure_eq!(
         read_process(&mut zero, "VALUE"),
-        Err(EnvironmentError::ResourceLimitExceeded)
+        Err(EnvironmentError::ResourceLimit(
+            ResourceLimit::EnvironmentBytes
+        ))
     );
     ensure_eq!(
         read_process(&mut zero, "EMPTY").into_test_error()?,
@@ -295,7 +301,9 @@ fn process_environment_child() -> Result<(), Box<dyn Error>> {
     let mut limited = ProcessEnvironment::new(limits(10, 10));
     ensure_eq!(
         read_process_with(&mut limited, "VALUE", execution, usize::MAX),
-        Err(EnvironmentError::ResourceLimitExceeded)
+        Err(EnvironmentError::ResourceLimit(
+            ResourceLimit::ExecutionSteps
+        ))
     );
     let mut exhausted = ProcessEnvironment::new(ProcessEnvironmentLimits::default());
     ensure_eq!(
@@ -305,12 +313,14 @@ fn process_environment_child() -> Result<(), Box<dyn Error>> {
             ExecutionLimits::new(0, 4096),
             usize::MAX,
         ),
-        Err(EnvironmentError::ResourceLimitExceeded)
+        Err(EnvironmentError::ResourceLimit(
+            ResourceLimit::ExecutionSteps
+        ))
     );
     let mut named = ProcessEnvironment::new(limits(10, 4));
     ensure_eq!(
         read_process(&mut named, "VALUE"),
-        Err(EnvironmentError::ResourceLimitExceeded)
+        Err(EnvironmentError::ResourceLimit(ResourceLimit::StringBytes))
     );
     let mut counted = CountingEnvironment {
         process: provider,
@@ -368,7 +378,7 @@ fn process_environment_child() -> Result<(), Box<dyn Error>> {
             .first_diagnostic()
             .ok_or_else(|| io::Error::other("diagnostic is missing"))?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::EnvironmentBytes.diagnostic_code()
     );
     let mut missing = RedirectEnvironment {
         process: counted.process,
@@ -422,7 +432,7 @@ fn process_environment_child() -> Result<(), Box<dyn Error>> {
             .first_diagnostic()
             .ok_or_else(|| io::Error::other("diagnostic is missing"))?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::EnvironmentBytes.diagnostic_code()
     );
 
     Ok(())

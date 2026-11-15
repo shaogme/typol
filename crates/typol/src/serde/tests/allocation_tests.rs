@@ -13,7 +13,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
     thread,
 };
-use typol_core::{ExecutionLimits, ValueKind};
+use typol_core::{DiagnosticCode, ExecutionLimits, ValueKind};
 use typol_test_support::{
     TestExpect, TestExtract, TestResult, test_verify as assert, test_verify_eq as assert_eq,
 };
@@ -119,7 +119,7 @@ fn live_capacity_text_and_default_node_limits_are_exact() -> TestResult {
             .err()
             .test_value()?
         )?,
-        1
+        DiagnosticCode::CONFIG_TEXT_BYTES_LIMIT_EXCEEDED.get()
     );
     drop(tree);
     let call = Support::session()?;
@@ -157,7 +157,7 @@ fn live_capacity_text_and_default_node_limits_are_exact() -> TestResult {
             .err()
             .test_value()?
         )?,
-        1
+        DiagnosticCode::WORKSPACE_BYTES_LIMIT_EXCEEDED.get()
     );
     let schema = Support::compile("entry struct Root { value: [u8] = [1, 2], }")?;
     let empty = FieldsEvent::new("Root", &[]);
@@ -181,7 +181,7 @@ fn live_capacity_text_and_default_node_limits_are_exact() -> TestResult {
             .err()
             .test_value()?
         )?,
-        1
+        DiagnosticCode::CONFIG_VALUE_NODES_LIMIT_EXCEEDED.get()
     );
     assert_eq!(
         Support::code(
@@ -194,7 +194,7 @@ fn live_capacity_text_and_default_node_limits_are_exact() -> TestResult {
             .err()
             .test_value()?
         )?,
-        1
+        DiagnosticCode::CONFIG_VALUE_DEPTH_LIMIT_EXCEEDED.get()
     );
 
     Ok(())
@@ -267,7 +267,7 @@ fn deep_deserialization_and_failure_cleanup_fit_a_small_stack() -> TestResult {
                     .err()
                     .test_value()?
                 )?,
-                1
+                DiagnosticCode::TYPE_BINDING_DEPTH_LIMIT_EXCEEDED.get()
             );
             Ok(())
         })

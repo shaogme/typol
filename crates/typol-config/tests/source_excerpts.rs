@@ -1,8 +1,6 @@
-use typol_test_support::ConfigTestSupport as Support;
-
 use typol_config::{
-    ConfigLimits, ConfigParseErrors, ConfigParseOptions, ConfigParseRequest, Environment,
-    EnvironmentError, EnvironmentReadContext,
+    ConfigLimits, ConfigParseErrors, ConfigParseOptions, ConfigParseRequest, ConfigParser,
+    Environment, EnvironmentError, EnvironmentReadContext,
     opeo::{OResult, Out},
 };
 use typol_core::{
@@ -11,7 +9,9 @@ use typol_core::{
     SourceCapture, SourceExcerptSet, SourceId, SourceReadError, SourceReadErrorKind, SourceSpan,
     Span, SpanError, SpanLocation,
 };
-use typol_schema::{SchemaCompileOptions, SchemaSource};
+use typol_schema::{
+    SchemaCompileOptions, SchemaCompiler, SchemaResolver, SchemaSource, SourceObserver,
+};
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
 
@@ -97,12 +97,22 @@ impl Environment for NoEnvironment {
 }
 
 fn compile(source: &str) -> TestResult<CompiledSchema> {
-    Support::compile_schema(
-        SchemaCompileOptions::default(),
-        SchemaSource::from_str(b"test", source),
-        None,
-        None,
-    )
+    TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::default();
+        let source = SchemaSource::from_str(b"test", source);
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()
 }
 
@@ -111,15 +121,18 @@ fn parse(
     source: &str,
     limits: ExcerptLimits,
 ) -> TestResult<ConfigParseErrors> {
-    Support::parse(
-        schema,
-        ConfigParseRequest::new(
-            &mut SliceSource::new(source.as_bytes()),
-            "configuration",
-            ConfigParseOptions::default().with_excerpts(limits),
-        ),
-        &mut NoEnvironment,
-    )
+    TestOpeo::outcome(|out| {
+        ConfigParser::new(schema).parse(
+            ConfigParseRequest::new(
+                &mut SliceSource::new(source.as_bytes()),
+                "configuration",
+                ConfigParseOptions::default().with_excerpts(limits),
+            ),
+            &mut NoEnvironment,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()
 }
 
@@ -319,11 +332,14 @@ fn nonrewindable_chunks_and_input_failure_keep_owned_safe_snapshots() -> TestRes
                 bytes: b"{value: 1,\npassword: \"PRIVATE-SENTINEL\"}\n",
                 fail,
             };
-            Support::parse(
-                &schema,
-                ConfigParseRequest::new(&mut source, "stream", ConfigParseOptions::default()),
-                &mut NoEnvironment,
-            )
+            TestOpeo::outcome(|out| {
+                ConfigParser::new(&schema).parse(
+                    ConfigParseRequest::new(&mut source, "stream", ConfigParseOptions::default()),
+                    &mut NoEnvironment,
+                    out,
+                )
+            })
+            .map(|value| value.into_config_value())
             .test_error()?
         };
         test_assert!(!text(&errors).contains("PRIVATE-SENTINEL"))?;
@@ -575,17 +591,20 @@ fn missing_window_candidates_and_diagnostic_limit_keep_original_errors() -> Test
     let mut config = ConfigLimits::default();
     config = config.with_max_diagnostics(1);
     let resources = ExcerptLimits::default();
-    let errors = Support::parse(
-        &schema,
-        ConfigParseRequest::new(
-            &mut SliceSource::new(b"{values: [1,1]}"),
-            "configuration",
-            ConfigParseOptions::default()
-                .with_excerpts(resources)
-                .with_config(config),
-        ),
-        &mut NoEnvironment,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            ConfigParseRequest::new(
+                &mut SliceSource::new(b"{values: [1,1]}"),
+                "configuration",
+                ConfigParseOptions::default()
+                    .with_excerpts(resources)
+                    .with_config(config),
+            ),
+            &mut NoEnvironment,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_eq!(
         errors.diagnostics().last().test_value()?.code(),

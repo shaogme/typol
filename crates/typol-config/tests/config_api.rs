@@ -1,5 +1,3 @@
-use typol_test_support::ConfigTestSupport as Support;
-
 use typol_config::{
     ConfigLimits, ConfigParseOptions, ConfigParseRequest, ConfigParser, ConfigValidationOptions,
     ConfigValidationRequest, ConfigValueErrors, ConfigValueProcessor, Environment,
@@ -7,12 +5,14 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{
-    ConfigValueBuilder, DiagnosticCode, ExecutionLimits, NamedValue, Read, SliceSource, SourceId,
-    SourceSpan, Span, ValueKind, ValueScalar, ValueSource, ValueView,
+    ConfigValueBuilder, DiagnosticCode, ExecutionLimits, NamedValue, Read, ResourceLimit,
+    SliceSource, SourceId, SourceSpan, Span, ValueKind, ValueScalar, ValueSource, ValueView,
 };
 use typol_i18n::{Language, Translator};
 use typol_policy::{ExcerptLimits, RegexOptions};
-use typol_schema::{SchemaCompileOptions, SchemaSource};
+use typol_schema::{
+    SchemaCompileOptions, SchemaCompiler, SchemaResolver, SchemaSource, SourceObserver,
+};
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
 
@@ -38,12 +38,22 @@ impl Environment for Provider {
 }
 
 fn compile(text: &str) -> TestResult<CompiledSchema> {
-    Support::compile_schema(
-        SchemaCompileOptions::default(),
-        SchemaSource::from_str(b"root", text),
-        None,
-        None,
-    )
+    TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::default();
+        let source = SchemaSource::from_str(b"root", text);
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()
 }
 
@@ -98,17 +108,20 @@ fn text_parse_enforces_nested_type_use_constraints() -> TestResult<()> {
         calls: 0,
         error: None,
     };
-    let errors = Support::parse(
-        &schema,
-        config_request(
-            (
-                &mut SliceSource::new(br#"{ values: ["x"], mapping: {"one": 1} }"#),
-                "nested",
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            config_request(
+                (
+                    &mut SliceSource::new(br#"{ values: ["x"], mapping: {"one": 1} }"#),
+                    "nested",
+                ),
+                &ConfigLimits::default(),
             ),
-            &ConfigLimits::default(),
-        ),
-        &mut provider,
-    )
+            &mut provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_assert!(
         errors
@@ -185,11 +198,14 @@ fn root_api_validates_full_tree_and_returns_owned_values() -> TestResult<()> {
             calls: 0,
             error: None,
         };
-        let value = Support::parse(
-            &schema,
-            config_request(source, &ConfigLimits::default()),
-            &mut provider,
-        )
+        let value = TestOpeo::outcome(|out| {
+            ConfigParser::new(&schema).parse(
+                config_request(source, &ConfigLimits::default()),
+                &mut provider,
+                out,
+            )
+        })
+        .map(|value| value.into_config_value())
         .test_value()?;
         test_eq!(provider.calls, 1)?;
         for invalid in [
@@ -197,14 +213,17 @@ fn root_api_validates_full_tree_and_returns_owned_values() -> TestResult<()> {
             r#"{ first: env("X"), second: env("X"), values: [1, 2], limit: 2 }"#,
             r#"{ first: env("X"), second: env("X"), values: [3], limit: 1 }"#,
         ] {
-            let errors = Support::parse(
-                &schema,
-                config_request(
-                    (&mut SliceSource::new((invalid).as_bytes()), "invalid"),
-                    &ConfigLimits::default(),
-                ),
-                &mut provider,
-            )
+            let errors = TestOpeo::outcome(|out| {
+                ConfigParser::new(&schema).parse(
+                    config_request(
+                        (&mut SliceSource::new((invalid).as_bytes()), "invalid"),
+                        &ConfigLimits::default(),
+                    ),
+                    &mut provider,
+                    out,
+                )
+            })
+            .map(|value| value.into_config_value())
             .test_error()?;
             test_assert!(
                 errors
@@ -395,14 +414,17 @@ fn errors_keep_safe_paths_and_both_source_locations_after_inputs_drop() -> TestR
             calls: 0,
             error: None,
         };
-        Support::parse(
-            &schema,
-            config_request(
-                (&mut SliceSource::new(text.as_bytes()), &name),
-                &ConfigLimits::default(),
-            ),
-            &mut provider,
-        )
+        TestOpeo::outcome(|out| {
+            ConfigParser::new(&schema).parse(
+                config_request(
+                    (&mut SliceSource::new(text.as_bytes()), &name),
+                    &ConfigLimits::default(),
+                ),
+                &mut provider,
+                out,
+            )
+        })
+        .map(|value| value.into_config_value())
         .test_error()?
     };
     test_eq!(errors.config_source_name(), Some("invalid.tconf"))?;
@@ -448,8 +470,8 @@ fn provider_failures_and_diagnostic_budget_share_the_public_error_type() -> Test
             DiagnosticCode::ALLOCATION_FAILED,
         ),
         (
-            EnvironmentError::ResourceLimitExceeded,
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+            EnvironmentError::ResourceLimit(ResourceLimit::EnvironmentBytes),
+            DiagnosticCode::ENVIRONMENT_BYTES_LIMIT_EXCEEDED,
         ),
     ] {
         let mut provider = Provider {
@@ -457,17 +479,20 @@ fn provider_failures_and_diagnostic_budget_share_the_public_error_type() -> Test
             calls: 0,
             error: Some(error),
         };
-        let errors = Support::parse(
-            &schema,
-            config_request(
-                (
-                    &mut SliceSource::new((r#"{ value: env("X", 1) }"#).as_bytes()),
-                    "provider",
+        let errors = TestOpeo::outcome(|out| {
+            ConfigParser::new(&schema).parse(
+                config_request(
+                    (
+                        &mut SliceSource::new((r#"{ value: env("X", 1) }"#).as_bytes()),
+                        "provider",
+                    ),
+                    &ConfigLimits::default(),
                 ),
-                &ConfigLimits::default(),
-            ),
-            &mut provider,
-        )
+                &mut provider,
+                out,
+            )
+        })
+        .map(|value| value.into_config_value())
         .test_error()?;
         test_eq!(TestCheck::item(errors.diagnostics(), 0)?.code(), code)?;
         test_eq!(provider.calls, 1)?;
@@ -480,14 +505,17 @@ fn provider_failures_and_diagnostic_budget_share_the_public_error_type() -> Test
             calls: 0,
             error: None,
         };
-        let errors = Support::parse(
-            &schema,
-            config_request(
-                (&mut SliceSource::new(("{} {}").as_bytes()), "budget"),
-                &limits,
-            ),
-            &mut provider,
-        )
+        let errors = TestOpeo::outcome(|out| {
+            ConfigParser::new(&schema).parse(
+                config_request(
+                    (&mut SliceSource::new(("{} {}").as_bytes()), "budget"),
+                    &limits,
+                ),
+                &mut provider,
+                out,
+            )
+        })
+        .map(|value| value.into_config_value())
         .test_error()?;
         test_assert!(!errors.diagnostics().is_empty())?;
         test_assert!(errors.diagnostics().len() <= budget.max(1))?;
@@ -514,28 +542,34 @@ fn source_limit_stops_before_provider_and_trailing_tokens_fail() -> TestResult<(
     };
     let mut limits = ConfigLimits::default();
     limits = limits.with_max_source_bytes(1);
-    let errors = Support::parse(
-        &schema,
-        config_request(
-            (&mut SliceSource::new(("{}").as_bytes()), "too-large"),
-            &limits,
-        ),
-        &mut provider,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            config_request(
+                (&mut SliceSource::new(("{}").as_bytes()), "too-large"),
+                &limits,
+            ),
+            &mut provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_eq!(
         TestCheck::item(errors.diagnostics(), 0)?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::SOURCE_BYTES_LIMIT_EXCEEDED
     )?;
     test_eq!(provider.calls, 0)?;
-    let errors = Support::parse(
-        &schema,
-        config_request(
-            (&mut SliceSource::new(("{} {}").as_bytes()), "trailing"),
-            &ConfigLimits::default(),
-        ),
-        &mut provider,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            config_request(
+                (&mut SliceSource::new(("{} {}").as_bytes()), "trailing"),
+                &ConfigLimits::default(),
+            ),
+            &mut provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_eq!(
         TestCheck::item(errors.diagnostics(), 0)?.code(),
@@ -556,14 +590,17 @@ entry struct Root { child: Child = {}, limit: u8 }"#;
             calls: 0,
             error: None,
         };
-        let errors = Support::parse(
-            &schema,
-            config_request(
-                (&mut SliceSource::new(("{limit: 2}").as_bytes()), "defaults"),
-                &ConfigLimits::default(),
-            ),
-            &mut provider,
-        )
+        let errors = TestOpeo::outcome(|out| {
+            ConfigParser::new(&schema).parse(
+                config_request(
+                    (&mut SliceSource::new(("{limit: 2}").as_bytes()), "defaults"),
+                    &ConfigLimits::default(),
+                ),
+                &mut provider,
+                out,
+            )
+        })
+        .map(|value| value.into_config_value())
         .test_error()?;
         let mut expected = Vec::new();
         let mut access_errors = TestSlot::default();

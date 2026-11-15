@@ -6,6 +6,7 @@ use std::{
     env::{current_exe, temp_dir, var_os},
     error::Error,
     ffi::OsString,
+    fmt::{Display, Formatter, Result as FmtResult},
     fs::{File, remove_file},
     io::{Error as IoError, Write},
     path::{Path, PathBuf},
@@ -16,10 +17,11 @@ use std::{
 
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read, SourceId, SourceReadError,
-    SourceReadErrorKind,
+    BudgetError, CapacityExceeded, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read,
+    ResourceLimit, SourceId, SourceReadError, SourceReadErrorKind,
 };
 use typol_i18n::{Language, Translator};
+use typol_opeo_test_support::{ensure, ensure_eq};
 use typol_schema::{
     ResolverError, SchemaCompileErrors, SchemaCompileOptions, SchemaCompileStage, SchemaCompiler,
     SchemaResolveRequest, SchemaResolver, SchemaSource, SourceLoadedRequest, SourceObserver,
@@ -27,8 +29,8 @@ use typol_schema::{
 };
 
 use crate::{
-    FileConfigInputLimits, HostError, HostErrorKind, HostOperation, SourceNameEditOptions,
-    SourceNameLimits, SourceNames,
+    FileConfigInputLimits, HostError, HostErrorKind, HostFailureStep, HostOperation,
+    SourceNameEditOptions, SourceNameLimits, SourceNames,
     environment::{EnvironmentBytes, EnvironmentFailure},
     filesystem::{input::FileSchemaInput, paths::PathCandidate},
 };
@@ -46,38 +48,28 @@ use std::{
     os::unix::fs::symlink,
 };
 
-macro_rules! ensure {
-    ($condition:expr $(,)?) => {
-        if !$condition {
-            return Err(IoError::other(concat!("assertion failed: ", stringify!($condition))).into());
-        }
-    };
-    ($condition:expr, $($argument:tt)+) => {
-        if !$condition {
-            return Err(IoError::other(format!($($argument)+)).into());
-        }
-    };
+#[derive(Debug)]
+struct HostErrorSummary(HostErrorKind);
+
+impl HostErrorSummary {
+    fn kind(&self) -> HostErrorKind {
+        self.0
+    }
 }
 
-macro_rules! ensure_eq {
-    ($left:expr, $right:expr $(,)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(IoError::other(format!(
-                "assertion failed: {} and {} differ (actual {:?}, expected {:?})",
-                stringify!($left), stringify!($right), left, right,
-            )).into());
-        }
-    }};
-    ($left:expr, $right:expr, $($argument:tt)+) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(IoError::other(format!($($argument)+)).into());
-        }
-    }};
+impl From<HostError> for HostErrorSummary {
+    fn from(error: HostError) -> Self {
+        Self(error.kind())
+    }
 }
+
+impl Display for HostErrorSummary {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        write!(formatter, "{:?}", self.0)
+    }
+}
+
+impl Error for HostErrorSummary {}
 
 fn regex_budget_state_bytes() -> Result<usize, Box<dyn Error>> {
     let scope = Scope::start(None, false);
@@ -94,16 +86,24 @@ fn regex_budget_state_bytes() -> Result<usize, Box<dyn Error>> {
     Ok(bytes)
 }
 
-fn exercise(path: &Path) -> Result<usize, HostError> {
+fn exercise(path: &Path) -> Result<usize, HostErrorSummary> {
     let compiler = ErrSlot::<SchemaCompileErrors>::new()
         .call(|out| SchemaCompiler::new(SchemaCompileOptions::default(), out))
-        .map_err(|_| HostError::new(HostOperation::SourceNames, HostErrorKind::AllocationFailed))?;
+        .map_err(|_| {
+            HostErrorSummary(
+                HostError::new(HostOperation::SourceNames, HostErrorKind::AllocationFailed).kind(),
+            )
+        })?;
     let context = ErrSlot::<BudgetError>::new()
         .call(|out| compiler.context(out))
-        .map_err(|error| HostError::budget(HostOperation::SourceNames, error))?;
+        .map_err(|error| {
+            HostErrorSummary(HostError::budget(HostOperation::SourceNames, error).kind())
+        })?;
     let mut names = ErrSlot::<BudgetError>::new()
         .call(|out| SourceNames::new(SourceNameLimits::default(), &context, out))
-        .map_err(|error| HostError::budget(HostOperation::SourceNames, error))?;
+        .map_err(|error| {
+            HostErrorSummary(HostError::budget(HostOperation::SourceNames, error).kind())
+        })?;
     for id in [0, 1, 2, 3, 4, 12] {
         if ErrSlot::<SourceObserverError>::new()
             .call(|out| {
@@ -118,34 +118,41 @@ fn exercise(path: &Path) -> Result<usize, HostError> {
             })
             .is_err()
         {
-            let kind = names.failure().ok_or(HostError::new(
-                HostOperation::SourceNames,
-                HostErrorKind::InternalError,
-            ))?;
-            return Err(HostError::new(HostOperation::SourceNames, kind));
+            let kind = names.failure().unwrap_or_else(|| {
+                HostError::internal(
+                    HostOperation::SourceNames,
+                    HostFailureStep::SourceObserverValidation,
+                )
+                .kind()
+            });
+            return Err(HostErrorSummary(kind));
         }
     }
     drop(compiler);
-    ErrSlot::<HostError>::new().call(|out| {
-        names.set_name(
-            SourceId::new(1),
-            "public name",
-            SourceNameEditOptions::default(),
-            out,
-        )
-    })?;
+    ErrSlot::<HostError>::new()
+        .call(|out| {
+            names.set_name(
+                SourceId::new(1),
+                "public name",
+                SourceNameEditOptions::default(),
+                out,
+            )
+        })
+        .map_err(HostErrorSummary::from)?;
     let copy = ErrSlot::<HostError>::new()
         .call(|out| names.try_copy(SourceNameEditOptions::default(), out))?;
     let budget = names_budget()?;
-    let mut input = ErrSlot::<HostError>::new().call(|out| {
-        FileSchemaInput::open(
-            path,
-            FileConfigInputLimits::default().max_file_bytes(),
-            &budget,
-            HostOperation::SchemaRead,
-            out,
-        )
-    })?;
+    let mut input = ErrSlot::<HostError>::new()
+        .call(|out| {
+            FileSchemaInput::open(
+                path,
+                FileConfigInputLimits::default().max_file_bytes(),
+                &budget,
+                HostOperation::SchemaRead,
+                out,
+            )
+        })
+        .map_err(HostErrorSummary::from)?;
     input.claim();
     let length = stream_source_len(&mut input)?;
     drop(input);
@@ -153,7 +160,7 @@ fn exercise(path: &Path) -> Result<usize, HostError> {
     Ok(length)
 }
 
-fn stream_source_len(input: &mut FileSchemaInput) -> Result<usize, HostError> {
+fn stream_source_len(input: &mut FileSchemaInput) -> Result<usize, HostErrorSummary> {
     let mut buffer = [0; 8192];
     let mut length = 0_usize;
     loop {
@@ -161,13 +168,15 @@ fn stream_source_len(input: &mut FileSchemaInput) -> Result<usize, HostError> {
             .call(|out| input.read(&mut buffer, SourceId::new(0), length, out))
             .map_err(|error| {
                 let kind = match error.kind() {
-                    SourceReadErrorKind::ResourceLimitExceeded => {
-                        HostErrorKind::ResourceLimitExceeded
+                    SourceReadErrorKind::ResourceLimit(limit) => {
+                        HostErrorKind::ResourceLimit(limit)
                     }
                     SourceReadErrorKind::AllocationFailed => HostErrorKind::AllocationFailed,
-                    SourceReadErrorKind::CapacityExceeded => HostErrorKind::CapacityExceeded,
+                    SourceReadErrorKind::CapacityExceeded(capacity) => {
+                        HostErrorKind::CapacityExceeded(capacity)
+                    }
                     SourceReadErrorKind::HostFailure => HostErrorKind::ReadFailure,
-                    SourceReadErrorKind::InternalInvariantFailure => HostErrorKind::InternalError,
+                    SourceReadErrorKind::Internal(internal) => HostErrorKind::Internal(internal),
                 };
                 HostError::new(HostOperation::SchemaRead, kind)
             })?;
@@ -176,7 +185,7 @@ fn stream_source_len(input: &mut FileSchemaInput) -> Result<usize, HostError> {
         }
         length = length.checked_add(count).ok_or(HostError::new(
             HostOperation::SchemaRead,
-            HostErrorKind::ResourceLimitExceeded,
+            HostErrorKind::CapacityExceeded(CapacityExceeded::HostSource),
         ))?;
     }
 }
@@ -232,10 +241,12 @@ impl Drop for AllocationPathTree {
 
 const TEST_EXECUTION: ExecutionLimits = ExecutionLimits::new(16_777_216, 16_777_216);
 
-fn names_budget() -> Result<ExecutionBudget, HostError> {
+fn names_budget() -> Result<ExecutionBudget, HostErrorSummary> {
     ErrSlot::<BudgetError>::new()
         .call(|out| ExecutionBudget::new(TEST_EXECUTION, out))
-        .map_err(|error| HostError::budget(HostOperation::ConfigRead, error))
+        .map_err(|error| {
+            HostErrorSummary::from(HostError::budget(HostOperation::ConfigRead, error))
+        })
 }
 
 #[test]
@@ -360,7 +371,10 @@ fn failed_registration_copies_keep_allocation_latch() -> Result<(), Box<dyn Erro
             })
             .err()
             .ok_or_else(|| IoError::other("expected limited name copy to fail"))?;
-        ensure_eq!(error.kind(), HostErrorKind::ResourceLimitExceeded);
+        ensure_eq!(
+            error.kind(),
+            HostErrorKind::ResourceLimit(ResourceLimit::WorkspaceBytes)
+        );
         ensure_eq!(copy.failure(), Some(HostErrorKind::AllocationFailed));
     }
     Ok(())
@@ -535,18 +549,21 @@ fn recoverable_native_path_copies_and_candidates_release_storage() -> Result<(),
             let scope = Scope::start(Some(index), persistent);
             let result = ErrSlot::<HostError>::new()
                 .call(|out| native.copy(&budget, HostOperation::SchemaRead, out))
+                .map_err(HostErrorSummary::from)
                 .and_then(|copy| {
-                    ErrSlot::<HostError>::new().call(|out| {
-                        copy.candidate(
-                            PathCandidate {
-                                module: "child",
-                                alternate: true,
-                            },
-                            max_path_bytes,
-                            &budget,
-                            out,
-                        )
-                    })
+                    ErrSlot::<HostError>::new()
+                        .call(|out| {
+                            copy.candidate(
+                                PathCandidate {
+                                    module: "child",
+                                    alternate: true,
+                                },
+                                max_path_bytes,
+                                &budget,
+                                out,
+                            )
+                        })
+                        .map_err(HostErrorSummary::from)
                 });
             let kind = result.err().map(|error| error.kind());
             let state = scope.finish();
@@ -591,7 +608,7 @@ fn opened_path_limit_bounds_handle_path_buffer_allocation() -> Result<(), Box<dy
     let state = scope.finish();
     ensure_eq!(
         result.err().map(|error| error.kind()),
-        Some(HostErrorKind::ResourceLimitExceeded)
+        Some(HostErrorKind::ResourceLimit(ResourceLimit::StringBytes))
     );
     ensure!(
         state.largest_allocation <= path_limit + 1,
@@ -611,8 +628,9 @@ fn environment_native_storage_is_charged_and_conversion_failures_are_recoverable
         let native = OsString::from("value");
         let native_capacity = native.capacity();
         let scope = Scope::start(Some(0), persistent);
-        let result = ErrSlot::<EnvironmentFailure>::new()
-            .call(|out| EnvironmentBytes::from_native(native, 5, &budget, out));
+        let result = ErrSlot::<EnvironmentFailure>::new().call(|out| {
+            EnvironmentBytes::from_native(native, 5, ResourceLimit::EnvironmentBytes, &budget, out)
+        });
         let state = scope.finish();
         ensure!(
             result.is_ok(),

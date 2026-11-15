@@ -131,7 +131,7 @@ impl<'a, 'd> TypeGraphBuilder<'a, 'd> {
             .checked_add(builtins.len())
             .and_then(|n| n.checked_add(symbols.variants().len()));
         let Some(count) = count else {
-            diagnostics.push(EmergencyDiagnostics::resource(
+            diagnostics.push(EmergencyDiagnostics::capacity(
                 span,
                 diagnostics.translator(),
             ));

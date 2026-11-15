@@ -1,7 +1,3 @@
-#[macro_use]
-#[path = "support/assertions.rs"]
-mod assertions;
-
 use opeo::{ErrSlot, OResult, Out};
 use std::{
     cell::Cell,
@@ -17,7 +13,10 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use typol_core::{BudgetError, Diagnostic, DiagnosticCode, ExecutionLimits, SourceId};
+use typol_core::{
+    BudgetError, Diagnostic, DiagnosticCode, ExecutionLimits, ResourceLimit, SourceId,
+};
+use typol_opeo_test_support::{ensure, ensure_eq};
 use typol_schema::{
     ResolverError, SchemaCompileContext, SchemaCompileErrors, SchemaCompileOptions,
     SchemaCompileStage, SchemaCompiler, SchemaLimits, SchemaResolveRequest, SchemaResolver,
@@ -143,7 +142,7 @@ fn initialization_and_root_checks_precede_any_filesystem_access() -> Result<(), 
             .ok_or_else(|| io::Error::other("expected Schema initialization to fail"))?;
         ensure_eq!(
             first_code(error.diagnostics())?,
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+            ResourceLimit::WorkspaceBytes.diagnostic_code()
         );
         let error = ErrSlot::<FileSchemaCompileErrors>::new()
             .call(|out| {
@@ -162,7 +161,10 @@ fn initialization_and_root_checks_precede_any_filesystem_access() -> Result<(), 
             .ok_or_else(|| io::Error::other("expected operation to fail"))?;
         ensure_eq!(error.usage().last_stage, SchemaCompileStage::Initialization);
         ensure_eq!(error.usage().workspace_bytes, 0);
-        ensure_eq!(error.usage().failure, Some(BudgetError::Resource));
+        ensure_eq!(
+            error.usage().failure,
+            Some(BudgetError::ResourceLimit(ResourceLimit::WorkspaceBytes))
+        );
         ensure!(
             matches!(error.failure(), FileSchemaCompileFailure::Compilation(error) if error.diagnostics().first().is_some_and(|diagnostic| diagnostic.primary().is_none()))
         );
@@ -177,7 +179,7 @@ fn initialization_and_root_checks_precede_any_filesystem_access() -> Result<(), 
             .err()
             .ok_or_else(|| io::Error::other("expected operation to fail"))?
             .kind(),
-        HostErrorKind::ResourceLimitExceeded
+        HostErrorKind::ResourceLimit(ResourceLimit::ExecutionSteps)
     );
     ensure_eq!(context.usage().steps, 0);
     let error = ErrSlot::<FileSchemaCompileErrors>::new()
@@ -195,7 +197,7 @@ fn initialization_and_root_checks_precede_any_filesystem_access() -> Result<(), 
         .err()
         .ok_or_else(|| io::Error::other("expected operation to fail"))?;
     ensure!(
-        matches!(error.failure(), FileSchemaCompileFailure::Root(host) if host.kind() == HostErrorKind::ResourceLimitExceeded)
+        matches!(error.failure(), FileSchemaCompileFailure::Root(host) if host.kind() == HostErrorKind::ResourceLimit(ResourceLimit::ExecutionSteps))
     );
     ensure_eq!(error.usage().last_stage, SchemaCompileStage::RootRead);
     ensure!(!format!("{error:?}").contains("secret sentinel"));
@@ -235,9 +237,12 @@ fn terminal_slot_initialization_reports_the_live_usage_snapshot() -> Result<(), 
     ensure_eq!(usage.steps, 0);
     ensure_eq!(usage.workspace_bytes, initial_workspace);
     ensure_eq!(usage.peak_workspace_bytes, initial_workspace);
-    ensure_eq!(usage.failure, Some(BudgetError::Resource));
+    ensure_eq!(
+        usage.failure,
+        Some(BudgetError::ResourceLimit(ResourceLimit::WorkspaceBytes))
+    );
     ensure!(
-        matches!(error.failure(), FileSchemaCompileFailure::Compilation(errors) if first_code(errors.diagnostics()).ok() == Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED))
+        matches!(error.failure(), FileSchemaCompileFailure::Compilation(errors) if first_code(errors.diagnostics()).ok() == Some(ResourceLimit::WorkspaceBytes.diagnostic_code()))
     );
 
     Ok(())
@@ -268,9 +273,16 @@ fn root_uses_the_minimum_schema_and_host_source_limit() -> Result<(), Box<dyn Er
             })
             .err()
             .ok_or_else(|| io::Error::other("expected operation to fail"))?;
-        ensure!(
-            matches!(error.failure(), FileSchemaCompileFailure::Root(host) if host.kind() == HostErrorKind::ResourceLimitExceeded)
-        );
+        let limit = if total {
+            ResourceLimit::SchemaTotalBytes
+        } else {
+            ResourceLimit::SourceBytes
+        };
+        ensure!(matches!(
+            error.failure(),
+            FileSchemaCompileFailure::Root(host)
+                if host.kind() == HostErrorKind::ResourceLimit(limit)
+        ));
         ensure!(
             error
                 .names()
@@ -300,6 +312,7 @@ fn mismatched_resolver_observer_and_root_do_no_further_work() -> Result<(), Box<
                 from_identity: b"invalid",
                 module_name: "never",
                 source_byte_limit: LIMIT,
+                source_byte_limit_kind: ResourceLimit::SourceBytes,
                 context: &second_context,
             },
             out
@@ -481,7 +494,7 @@ fn host_streaming_root_ast_and_names_share_the_peak() -> Result<(), Box<dyn Erro
     ensure!(shared.peak > file_peak.max(memory_peak));
     ensure_eq!(
         combined_peak(&path, file_peak.max(memory_peak))?.failure,
-        Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+        Some(ResourceLimit::WorkspaceBytes.diagnostic_code())
     );
 
     Ok(())

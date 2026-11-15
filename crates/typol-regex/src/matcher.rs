@@ -1,5 +1,5 @@
 use crate::{
-    Regex, RegexErrorContext, RegexMatchError, RegexResource, RegexScratchError,
+    Regex, RegexErrorContext, RegexMatchError, RegexScratchError,
     compiler::{Instruction, StateId},
     error::{
         MATCH_ACTIVE_STATE_MISSING, MATCH_CURRENT_STACK_CAPACITY_EXCEEDED,
@@ -11,7 +11,7 @@ use crate::{
 };
 use core::{mem::swap, str::Chars};
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
-use typol_core::{BudgetError, ChargedVec, DiagnosticContext, RegexExecutionBudget};
+use typol_core::{BudgetError, ChargedVec, DiagnosticContext, RegexExecutionBudget, ResourceLimit};
 use typol_policy::RegexLimits;
 
 /// A reusable, bounded Thompson NFA search workspace.
@@ -40,16 +40,16 @@ impl RegexMatcher {
     ) -> OResult<'slot, bool> {
         let max_search_steps = budget.max_search_steps();
         if regex.state_count() > scratch.capacity() {
-            return Err(out.fail(RegexMatchError::ResourceLimitExceeded(
-                RegexResource::ScratchStateCount,
+            return Err(out.fail(RegexMatchError::ResourceLimit(
+                ResourceLimit::RegexScratchStates,
             )));
         }
 
         let initial_steps = scratch
             .capacity()
             .checked_mul(2)
-            .ok_or(RegexMatchError::ResourceLimitExceeded(
-                RegexResource::SearchSteps,
+            .ok_or(RegexMatchError::ResourceLimit(
+                ResourceLimit::RegexSearchSteps,
             ))
             .store_err_into(out.reborrow())?;
         consume(budget, initial_steps, out.reborrow())?;
@@ -71,9 +71,9 @@ impl RegexMatcher {
                     .active
                     .get(index)
                     .copied()
-                    .ok_or(RegexMatchError::InternalInvariantFailure(
-                        RegexErrorContext::new(MATCH_ACTIVE_STATE_MISSING),
-                    ))
+                    .ok_or(RegexMatchError::internal(RegexErrorContext::new(
+                        MATCH_ACTIVE_STATE_MISSING,
+                    )))
                     .store_err_into(out.reborrow())?;
                 enqueue(scratch, state, out.reborrow())?;
             }
@@ -86,8 +86,8 @@ impl RegexMatcher {
                 consume(budget, 1, out.reborrow())?;
                 steps = steps
                     .checked_add(1)
-                    .ok_or(RegexMatchError::ResourceLimitExceeded(
-                        RegexResource::SearchSteps,
+                    .ok_or(RegexMatchError::ResourceLimit(
+                        ResourceLimit::RegexSearchSteps,
                     ))
                     .store_err_into(out.reborrow())?;
 
@@ -145,7 +145,7 @@ fn enqueue<'slot>(
 ) -> OResult<'slot, ()> {
     let index = state.index();
     let Some(visited) = scratch.visited.get(index).copied() else {
-        return Err(out.fail(RegexMatchError::InternalInvariantFailure(
+        return Err(out.fail(RegexMatchError::internal(
             RegexErrorContext::new(MATCH_CURRENT_STATE_OUT_OF_RANGE).with_object_id(index as u64),
         )));
     };
@@ -153,12 +153,12 @@ fn enqueue<'slot>(
         return Ok(());
     }
     if scratch.stack.len() >= scratch.capacity || scratch.stack.len() >= scratch.stack.capacity() {
-        return Err(out.fail(RegexMatchError::InternalInvariantFailure(
-            RegexErrorContext::new(MATCH_CURRENT_STACK_CAPACITY_EXCEEDED),
-        )));
+        return Err(out.fail(RegexMatchError::internal(RegexErrorContext::new(
+            MATCH_CURRENT_STACK_CAPACITY_EXCEEDED,
+        ))));
     }
     let Some(visited) = scratch.visited.get_mut(index) else {
-        return Err(out.fail(RegexMatchError::InternalInvariantFailure(
+        return Err(out.fail(RegexMatchError::internal(
             RegexErrorContext::new(MATCH_VISITED_SLOT_MISSING).with_object_id(index as u64),
         )));
     };
@@ -181,7 +181,7 @@ fn enqueue_next<'slot>(
 ) -> OResult<'slot, ()> {
     let index = state.index();
     let Some(seen) = scratch.next_seen.get(index).copied() else {
-        return Err(out.fail(RegexMatchError::InternalInvariantFailure(
+        return Err(out.fail(RegexMatchError::internal(
             RegexErrorContext::new(MATCH_NEXT_STATE_OUT_OF_RANGE).with_object_id(index as u64),
         )));
     };
@@ -189,12 +189,12 @@ fn enqueue_next<'slot>(
         return Ok(());
     }
     if scratch.next.len() >= scratch.capacity || scratch.next.len() >= scratch.next.capacity() {
-        return Err(out.fail(RegexMatchError::InternalInvariantFailure(
-            RegexErrorContext::new(MATCH_NEXT_STACK_CAPACITY_EXCEEDED),
-        )));
+        return Err(out.fail(RegexMatchError::internal(RegexErrorContext::new(
+            MATCH_NEXT_STACK_CAPACITY_EXCEEDED,
+        ))));
     }
     let Some(seen) = scratch.next_seen.get_mut(index) else {
-        return Err(out.fail(RegexMatchError::InternalInvariantFailure(
+        return Err(out.fail(RegexMatchError::internal(
             RegexErrorContext::new(MATCH_NEXT_SEEN_SLOT_MISSING).with_object_id(index as u64),
         )));
     };
@@ -250,8 +250,8 @@ impl RegexScratch {
     ) -> OResult<'slot, Self> {
         let capacity = regex.scratch_state_count();
         if capacity > limits.max_regex_scratch_states() {
-            return Err(out.fail(RegexScratchError::ResourceLimitExceeded(
-                RegexResource::ScratchStateCount,
+            return Err(out.fail(RegexScratchError::ResourceLimit(
+                ResourceLimit::RegexScratchStates,
             )));
         }
 
@@ -297,17 +297,17 @@ impl RegexScratch {
     ) -> OResult<'slot, ()> {
         let required = regex.scratch_state_count();
         if required > limits.max_regex_scratch_states() {
-            return Err(out.fail(RegexScratchError::ResourceLimitExceeded(
-                RegexResource::ScratchStateCount,
+            return Err(out.fail(RegexScratchError::ResourceLimit(
+                ResourceLimit::RegexScratchStates,
             )));
         }
         if required <= self.capacity {
             return Ok(());
         }
         if !self.budget.same_call(budget) {
-            return Err(out.fail(RegexScratchError::InternalInvariantFailure(
-                RegexErrorContext::new(SCRATCH_STATE_BUFFER_GROWTH),
-            )));
+            return Err(out.fail(RegexScratchError::internal(RegexErrorContext::new(
+                SCRATCH_STATE_BUFFER_GROWTH,
+            ))));
         }
 
         grow_state_buffer(
@@ -363,24 +363,18 @@ impl RegexScratch {
     ) -> RegexScratchError {
         match error {
             BudgetError::Allocation => RegexScratchError::AllocationFailed,
-            BudgetError::Resource => {
-                RegexScratchError::ResourceLimitExceeded(RegexResource::ScratchStateCount)
+            BudgetError::ResourceLimit(limit) => RegexScratchError::ResourceLimit(match limit {
+                ResourceLimit::ExecutionSteps => ResourceLimit::RegexExecutionSteps,
+                ResourceLimit::WorkspaceBytes => ResourceLimit::RegexWorkspaceBytes,
+                other => other,
+            }),
+            BudgetError::CapacityExceeded(capacity) => {
+                RegexScratchError::CapacityExceeded(capacity)
             }
-            BudgetError::RegexWorkspace => {
-                RegexScratchError::ResourceLimitExceeded(RegexResource::WorkspaceBytes)
-            }
-            BudgetError::RegexSteps => {
-                RegexScratchError::ResourceLimitExceeded(RegexResource::ExecutionSteps)
-            }
-            BudgetError::RegexSearchSteps => {
-                RegexScratchError::ResourceLimitExceeded(RegexResource::SearchSteps)
-            }
-            BudgetError::CapacityExceeded => RegexScratchError::CapacityExceeded,
-            BudgetError::InvariantViolation(source_context) => {
-                RegexScratchError::InternalInvariantFailure(
-                    RegexErrorContext::new(context).with_source_context(*source_context),
-                )
-            }
+            BudgetError::Internal(error) => RegexScratchError::Internal {
+                error,
+                context: RegexErrorContext::new(context).with_source_context(error.context()),
+            },
         }
     }
 }
@@ -552,10 +546,7 @@ mod tests {
             "scratch budget source failure point does not match",
         )?;
         check(
-            matches!(
-                scratch_error,
-                RegexScratchError::InternalInvariantFailure(_)
-            ),
+            matches!(scratch_error, RegexScratchError::Internal { .. }),
             "scratch internal error category does not match",
         )
     }
@@ -591,7 +582,7 @@ mod tests {
             regex.is_match("sensitive-subject", &mut scratch, &execution, out)
         });
         let context = match result {
-            Attempt::Failure(RegexMatchError::InternalInvariantFailure(context)) => context,
+            Attempt::Failure(RegexMatchError::Internal { context, .. }) => context,
             other => {
                 return Err(format!(
                     "match invariant failure was not returned as an error: {other:?}"

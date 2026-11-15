@@ -3,16 +3,7 @@ use typol_core::{
     Diagnostic, DiagnosticCode, ExcerptLimits, ExcerptStatus, LocatedSpan, SecretRange,
     SourceCapture, SourceExcerptSet, SourceId, SourceLocation, SourceSpan, Span, SpanLocation,
 };
-
-macro_rules! ensure {
-    ($condition:expr $(,)?) => {
-        if !$condition {
-            return Err(
-                IoError::other(concat!("assertion failed: ", stringify!($condition))).into(),
-            );
-        }
-    };
-}
+use typol_opeo_test_support::ensure;
 
 fn located(span: SourceSpan, start: usize, end: usize) -> Result<LocatedSpan, IoError> {
     let start =

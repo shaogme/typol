@@ -39,6 +39,17 @@ macro_rules! rejected_typol_impl {
     };
 }
 
+struct Indirect;
+
+rejected_typol_impl!(Indirect, |context, out| {
+    BindingTestSupport::structure::<Self>(
+        context,
+        "Root",
+        &[("value", DescriptorProvider::of::<Vec<Self>>())],
+        out.reborrow(),
+    )
+});
+
 struct NestedChildMismatches;
 
 rejected_typol_impl!(NestedChildMismatches, |context, out| {
@@ -185,5 +196,13 @@ fn nested_mismatches_continue_across_sibling_fields() -> TestResult {
             .get(2)
             .is_some_and(|mismatch| mismatch.kind() == BindingMismatchKind::FieldShape)
     );
+    Ok(())
+}
+
+#[test]
+fn indirect_container_cycle_is_detected_by_actual_rust_identity() -> TestResult {
+    let schema = BindingTestSupport::compile("entry struct Root { value: [u8] }")?;
+    let errors = BindingTestSupport::bind_error::<Indirect>(&schema, BindOptions::default())?;
+    assert_eq!(BindingTestSupport::code(errors)?, 14);
     Ok(())
 }

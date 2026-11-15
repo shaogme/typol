@@ -261,7 +261,10 @@ fn public_serde_validation_cannot_reset_conversion_balance() -> TestResult {
     let errors =
         Support::codec_error(|out| binding.serialize_serde_to_string(&input, options, out))?;
     assert_eq!(errors.stage(), CodecStage::Validation);
-    assert_eq!(Support::code(errors)?, 1);
+    assert_eq!(
+        Support::code(errors)?,
+        DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED.get()
+    );
 
     Ok(())
 }

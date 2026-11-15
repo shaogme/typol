@@ -1,18 +1,17 @@
-#[macro_use]
-#[path = "support/assertions.rs"]
-mod assertions;
-
 #[path = "support/display.rs"]
 mod support;
 
 use std::{error::Error, io, thread::Builder};
 
-use typol_core::{AllocationError, ExecutionLimits, ValueError, ValueKind, ValueSource};
+use typol_core::{
+    AllocationError, ExecutionLimits, ResourceLimit, ValueError, ValueKind, ValueSource,
+};
 use typol_policy::ValueLimits;
 use typol_schema::{SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaSource};
 use typol_std::{DisplayError, DisplayOptions, opeo::ErrSlot};
 
 use support::{ConfigValue, DisplayTest, EnumPayload, FieldValue, MapEntry, NoImports};
+use typol_opeo_test_support::{ensure, ensure_eq};
 
 struct NumberCase {
     ty: &'static str,
@@ -364,22 +363,31 @@ fn exact_output_nodes_depth_string_steps_and_zero_limits_are_enforced() -> Resul
         DisplayTest::format_with_options(&schema, &value, exact)?,
         text
     );
-    for resources in [
-        {
-            let mut r = resources;
-            r.set_max_nesting_depth(1);
-            r
-        },
-        {
-            let mut r = resources;
-            r.set_max_value_nodes(2);
-            r
-        },
-        {
-            let mut r = resources;
-            r.set_max_string_bytes(2);
-            r
-        },
+    for (resources, limit) in [
+        (
+            {
+                let mut r = resources;
+                r.set_max_nesting_depth(1);
+                r
+            },
+            ResourceLimit::FormattingNestingDepth,
+        ),
+        (
+            {
+                let mut r = resources;
+                r.set_max_value_nodes(2);
+                r
+            },
+            ResourceLimit::ConfigValueNodes,
+        ),
+        (
+            {
+                let mut r = resources;
+                r.set_max_string_bytes(2);
+                r
+            },
+            ResourceLimit::StringBytes,
+        ),
     ] {
         ensure_eq!(
             DisplayTest::format_with_options(
@@ -387,7 +395,7 @@ fn exact_output_nodes_depth_string_steps_and_zero_limits_are_enforced() -> Resul
                 &value,
                 DisplayOptions::new(resources, exact.execution(), text.len())
             ),
-            Err(DisplayError::ResourceLimitExceeded)
+            Err(DisplayError::ResourceLimit(limit))
         );
     }
     ensure_eq!(
@@ -396,16 +404,24 @@ fn exact_output_nodes_depth_string_steps_and_zero_limits_are_enforced() -> Resul
             &value,
             DisplayOptions::new(resources, exact.execution(), text.len() - 1)
         ),
-        Err(DisplayError::ResourceLimitExceeded)
+        Err(DisplayError::ResourceLimit(
+            ResourceLimit::ConfigFormatOutputBytes
+        ))
     );
-    for execution in [ExecutionLimits::new(0, 8192), ExecutionLimits::new(8192, 0)] {
+    for (execution, limit) in [
+        (ExecutionLimits::new(0, 8192), ResourceLimit::ExecutionSteps),
+        (
+            ExecutionLimits::new(8192, 0),
+            ResourceLimit::FormattingWorkspaceBytes,
+        ),
+    ] {
         ensure_eq!(
             DisplayTest::format_with_options(
                 &schema,
                 &value,
                 DisplayOptions::new(resources, execution, text.len())
             ),
-            Err(DisplayError::ResourceLimitExceeded)
+            Err(DisplayError::ResourceLimit(limit))
         );
     }
     let mut low = 0;
@@ -437,7 +453,7 @@ fn exact_output_nodes_depth_string_steps_and_zero_limits_are_enforced() -> Resul
             &value,
             DisplayOptions::new(resources, ExecutionLimits::new(low - 1, 8192), text.len())
         ),
-        Err(DisplayError::ResourceLimitExceeded)
+        Err(DisplayError::ResourceLimit(ResourceLimit::ExecutionSteps))
     );
 
     Ok(())
@@ -483,8 +499,15 @@ fn deep_tree_uses_explicit_frames_on_a_small_stack() -> Result<(), Box<dyn Error
                 DisplayOptions::new(resources, DisplayOptions::default().execution(), 1_048_576),
             )
             .map_err(|error| io::Error::other(format!("{error:?}")))?;
-            ensure!(!text.contains("PRIVATE"));
-            ensure_eq!(text.matches("********").count(), 1);
+            ensure!(
+                !text.contains("PRIVATE"),
+                failure = io::Error::other("assertion failed: !text.contains(\"PRIVATE\")")
+            );
+            ensure_eq!(
+                text.matches("********").count(),
+                1,
+                failure = io::Error::other("assertion failed: masked value count differs")
+            );
             Ok(())
         })?
         .join()
@@ -517,7 +540,7 @@ fn map_keys_count_as_nodes_and_secret_interiors_consume_no_structural_allowance(
             &value,
             DisplayOptions::new(resources, options.execution(), 1024)
         ),
-        Err(DisplayError::ResourceLimitExceeded)
+        Err(DisplayError::ResourceLimit(ResourceLimit::ConfigValueNodes))
     );
     let hidden = DisplayTest::compile("entry struct Root { value: map<string, bool> @secret }")?;
     resources.set_max_value_nodes(2);

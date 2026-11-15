@@ -1,7 +1,3 @@
-#[macro_use]
-#[path = "support/assertions.rs"]
-mod assertions;
-
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
@@ -18,6 +14,7 @@ use std::{
 use typol_core::{
     BudgetError, DiagnosticCode, ExcerptLimits, ExecutionLimits, RegexExecutionBudget, SourceId,
 };
+use typol_opeo_test_support::{ensure, ensure_eq};
 use typol_schema::{SchemaCompileOptions, SchemaCompileStage, SchemaCompileUsage, SchemaLimits};
 use typol_std::{
     FileSchemaCompileErrors, FileSchemaCompileOptions, FileSchemaCompiler, FileSchemaLimits,

@@ -4,7 +4,10 @@ use typol_syntax::{
     SchemaParser, SyntaxErrors, SyntaxLimits, UnaryOperator,
 };
 
-use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
+use typol_test_support::{
+    TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot, test_assert_early as test_assert,
+    test_assert_eq_early as test_assert_eq,
+};
 
 #[derive(Debug)]
 struct TestFailure;
@@ -13,24 +16,6 @@ impl From<OpeoTestFailure> for TestFailure {
     fn from(_: OpeoTestFailure) -> Self {
         Self
     }
-}
-
-macro_rules! test_assert {
-    ($condition:expr $(, $($message:tt)*)?) => {{
-        if !$condition {
-            return Err(TestFailure);
-        }
-    }};
-}
-
-macro_rules! test_assert_eq {
-    ($left:expr, $right:expr $(, $($message:tt)*)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(TestFailure);
-        }
-    }};
 }
 
 type TestResult<T = ()> = Result<T, TestFailure>;

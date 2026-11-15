@@ -1,6 +1,6 @@
 use crate::{
-    BudgetError, DiagnosticContext, ExecutionBudget, RegexExecutionBudget, diagnostic_context,
-    workspace::WorkspaceVec,
+    BudgetError, CapacityExceeded, DiagnosticContext, ExecutionBudget, RegexExecutionBudget,
+    diagnostic_context, workspace::WorkspaceVec,
 };
 use alloc::{
     alloc::{Layout, alloc},
@@ -85,7 +85,9 @@ impl WorkspaceCharge {
         let next = self
             .bytes
             .checked_add(bytes)
-            .ok_or(BudgetError::CapacityExceeded)
+            .ok_or(BudgetError::CapacityExceeded(
+                CapacityExceeded::BudgetBookkeeping,
+            ))
             .store_err_into(out.reborrow())?;
         if let Some(budget) = &self.budget {
             budget.reserve_workspace(bytes, out.reborrow())?;
@@ -168,7 +170,9 @@ impl WorkspaceCharge {
         let total = destination
             .bytes
             .checked_add(self.bytes)
-            .ok_or(BudgetError::CapacityExceeded)
+            .ok_or(BudgetError::CapacityExceeded(
+                CapacityExceeded::BudgetBookkeeping,
+            ))
             .store_err_into(out.reborrow())?;
         destination.bytes = total;
         self.bytes = 0;

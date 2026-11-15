@@ -2,15 +2,16 @@ use core::{
     fmt::{Debug, Formatter, Result as FmtResult},
     mem::size_of,
 };
-use typol_core::{BudgetError, RegexExecutionBudget};
+use typol_core::{BudgetError, RegexExecutionBudget, ResourceLimit};
 use typol_policy::RegexLimits;
-use typol_regex::{RegexCompileError, RegexCompiler, RegexResource, RegexScratchError};
+use typol_regex::{RegexCompileError, RegexCompiler, RegexScratchError};
 use typol_semantic::{RegexExecutionError, RegexExecutor, RegexMatchOptions, opeo::ErrSlot};
+use typol_test_support::{check, check_eq};
 
 enum TestError {
     Budget(BudgetError),
     Compile(RegexCompileError),
-    Execution(RegexExecutionError),
+    Execution(Box<RegexExecutionError>),
     Assertion(&'static str),
 }
 
@@ -39,29 +40,11 @@ impl From<RegexCompileError> for TestError {
 
 impl From<RegexExecutionError> for TestError {
     fn from(error: RegexExecutionError) -> Self {
-        Self::Execution(error)
+        Self::Execution(Box::new(error))
     }
 }
 
 type TestResult<T> = Result<T, TestError>;
-
-macro_rules! check_eq {
-    ($actual:expr, $expected:expr $(,)?) => {{
-        let actual = &$actual;
-        let expected = &$expected;
-        if actual != expected {
-            return Err(TestError::Assertion(stringify!($actual)));
-        }
-    }};
-}
-
-macro_rules! check {
-    ($condition:expr $(, $($message:tt)+)? $(,)?) => {{
-        if !$condition {
-            return Err(TestError::Assertion(stringify!($condition)));
-        }
-    }};
-}
 
 #[test]
 fn executor_rebinds_scratch_instead_of_reusing_another_calls_free_capacity() -> TestResult<()> {
@@ -74,7 +57,7 @@ fn executor_rebinds_scratch_instead_of_reusing_another_calls_free_capacity() -> 
     let regex =
         compile_errors.call(|out| RegexCompiler::compile("^x$", &limits, &compilation, out))?;
     let mut executor = RegexExecutor::new();
-    check_eq!(
+    check_eq!(TestError::Assertion;
         execution_errors.call(|out| {
             executor.is_match_budgeted(
                 &regex,
@@ -92,7 +75,7 @@ fn executor_rebinds_scratch_instead_of_reusing_another_calls_free_capacity() -> 
         budget_errors.call(|out| RegexExecutionBudget::new(1_000, 1_000, 1_048_576, out))?;
     let initial = initial_budget.workspace_bytes();
     let small = budget_errors.call(|out| RegexExecutionBudget::new(1_000, 1_000, initial, out))?;
-    check_eq!(
+    check_eq!(TestError::Assertion;
         execution_errors.call(|out| {
             executor.is_match_budgeted(
                 &regex,
@@ -105,12 +88,12 @@ fn executor_rebinds_scratch_instead_of_reusing_another_calls_free_capacity() -> 
             )
         }),
         Err(RegexExecutionError::Scratch(
-            RegexScratchError::ResourceLimitExceeded(RegexResource::WorkspaceBytes)
+            RegexScratchError::ResourceLimit(ResourceLimit::RegexWorkspaceBytes)
         ))
     );
     let first =
         budget_errors.call(|out| RegexExecutionBudget::new(1_000, 1_000, 1_048_576, out))?;
-    check_eq!(
+    check_eq!(TestError::Assertion;
         execution_errors.call(|out| {
             executor.is_match_budgeted(
                 &regex,
@@ -124,10 +107,10 @@ fn executor_rebinds_scratch_instead_of_reusing_another_calls_free_capacity() -> 
         }),
         Ok(true)
     );
-    check!(first.workspace_bytes() > initial);
+    check!(TestError::Assertion; first.workspace_bytes() > initial);
     let second =
         budget_errors.call(|out| RegexExecutionBudget::new(1_000, 1_000, 1_048_576, out))?;
-    check_eq!(
+    check_eq!(TestError::Assertion;
         execution_errors.call(|out| {
             executor.is_match_budgeted(
                 &regex,
@@ -141,10 +124,10 @@ fn executor_rebinds_scratch_instead_of_reusing_another_calls_free_capacity() -> 
         }),
         Ok(true)
     );
-    check_eq!(first.workspace_bytes(), initial);
-    check!(second.workspace_bytes() > initial);
+    check_eq!(TestError::Assertion; first.workspace_bytes(), initial);
+    check!(TestError::Assertion; second.workspace_bytes() > initial);
     drop(executor);
-    check_eq!(second.workspace_bytes(), initial);
+    check_eq!(TestError::Assertion; second.workspace_bytes(), initial);
     Ok(())
 }
 
@@ -160,7 +143,7 @@ fn executor_grows_scratch_and_keeps_the_old_cache_when_growth_fails() -> TestRes
         compile_errors.call(|out| RegexCompiler::compile("^x$", &limits, &compilation, out))?;
     let large =
         compile_errors.call(|out| RegexCompiler::compile("x{4}", &limits, &compilation, out))?;
-    check!(large.scratch_state_count() > small.scratch_state_count());
+    check!(TestError::Assertion; large.scratch_state_count() > small.scratch_state_count());
 
     let small_capacity = small.scratch_state_count();
     let bytes_per_state = 3 * size_of::<usize>() + 2 * size_of::<bool>();
@@ -171,7 +154,7 @@ fn executor_grows_scratch_and_keeps_the_old_cache_when_growth_fails() -> TestRes
     let constrained = budget_errors
         .call(|out| RegexExecutionBudget::new(1_000_000, 1_000_000, cached_limit, out))?;
     let mut executor = RegexExecutor::new();
-    check_eq!(
+    check_eq!(TestError::Assertion;
         execution_errors.call(|out| {
             executor.is_match_budgeted(
                 &small,
@@ -186,8 +169,8 @@ fn executor_grows_scratch_and_keeps_the_old_cache_when_growth_fails() -> TestRes
         Ok(true)
     );
     let cached_bytes = constrained.workspace_bytes();
-    check_eq!(cached_bytes, cached_limit);
-    check_eq!(
+    check_eq!(TestError::Assertion; cached_bytes, cached_limit);
+    check_eq!(TestError::Assertion;
         execution_errors.call(|out| {
             executor.is_match_budgeted(
                 &large,
@@ -200,15 +183,15 @@ fn executor_grows_scratch_and_keeps_the_old_cache_when_growth_fails() -> TestRes
             )
         }),
         Err(RegexExecutionError::Scratch(
-            RegexScratchError::ResourceLimitExceeded(RegexResource::WorkspaceBytes)
+            RegexScratchError::ResourceLimit(ResourceLimit::RegexWorkspaceBytes)
         ))
     );
-    check_eq!(constrained.workspace_bytes(), cached_bytes);
-    check!(constrained.exhausted());
+    check_eq!(TestError::Assertion; constrained.workspace_bytes(), cached_bytes);
+    check!(TestError::Assertion; constrained.exhausted());
 
     let mut lowered_limits = limits;
     lowered_limits.set_max_regex_scratch_states(small_capacity - 1);
-    check_eq!(
+    check_eq!(TestError::Assertion;
         execution_errors.call(|out| {
             executor.is_match_budgeted(
                 &small,
@@ -222,7 +205,7 @@ fn executor_grows_scratch_and_keeps_the_old_cache_when_growth_fails() -> TestRes
         }),
         Ok(true)
     );
-    check_eq!(constrained.workspace_bytes(), baseline);
+    check_eq!(TestError::Assertion; constrained.workspace_bytes(), baseline);
     Ok(())
 }
 
@@ -244,7 +227,7 @@ fn empty_value_releases_scratch_when_the_budget_changes_without_allocating_again
     let first_initial = first.workspace_bytes();
     let second_initial = second.workspace_bytes();
     let mut executor = RegexExecutor::new();
-    check_eq!(
+    check_eq!(TestError::Assertion;
         execution_errors.call(|out| {
             executor.is_match_budgeted(
                 &regex,
@@ -258,8 +241,8 @@ fn empty_value_releases_scratch_when_the_budget_changes_without_allocating_again
         }),
         Ok(true)
     );
-    check!(first.workspace_bytes() > first_initial);
-    check_eq!(
+    check!(TestError::Assertion; first.workspace_bytes() > first_initial);
+    check_eq!(TestError::Assertion;
         execution_errors.call(|out| {
             executor.is_match_budgeted(
                 &regex,
@@ -273,7 +256,7 @@ fn empty_value_releases_scratch_when_the_budget_changes_without_allocating_again
         }),
         Ok(true)
     );
-    check_eq!(first.workspace_bytes(), first_initial);
-    check_eq!(second.workspace_bytes(), second_initial);
+    check_eq!(TestError::Assertion; first.workspace_bytes(), first_initial);
+    check_eq!(TestError::Assertion; second.workspace_bytes(), second_initial);
     Ok(())
 }

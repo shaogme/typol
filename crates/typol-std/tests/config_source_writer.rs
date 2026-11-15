@@ -1,16 +1,14 @@
-#[macro_use]
-#[path = "support/assertions.rs"]
-mod assertions;
-
 use std::{
     env::temp_dir,
     error::Error,
     fs, io,
     path::PathBuf,
-    process,
+    process::id as process_id,
     sync::atomic::{AtomicU64, Ordering},
 };
 use typol_config::{SourceExpectation, SourceWriter};
+use typol_core::ResourceLimit;
+use typol_opeo_test_support::{ensure, ensure_eq};
 use typol_std::{FileSourceWriter, SourceWriteErrorKind};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -22,10 +20,7 @@ struct TemporaryDirectory {
 impl TemporaryDirectory {
     fn new() -> Result<Self, Box<dyn Error>> {
         let id = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-        let path = temp_dir().join(format!(
-            "typol-config-source-writer-{}-{id}",
-            std::process::id()
-        ));
+        let path = temp_dir().join(format!("typol-config-source-writer-{}-{id}", process_id()));
         fs::create_dir(&path)?;
         Ok(Self { path })
     }
@@ -49,10 +44,7 @@ impl TemporaryRelativeFile {
     fn new() -> Self {
         let id = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
         Self {
-            path: PathBuf::from(format!(
-                "typol-relative-writer-{}-{id}.tconf",
-                process::id()
-            )),
+            path: PathBuf::from(format!("typol-relative-writer-{}-{id}.tconf", process_id())),
         }
     }
 }
@@ -188,7 +180,7 @@ fn source_writer_rejects_directories_and_enforces_limits() -> Result<(), Box<dyn
     };
     ensure_eq!(
         limit_error.kind(),
-        SourceWriteErrorKind::ResourceLimitExceeded
+        SourceWriteErrorKind::ResourceLimit(ResourceLimit::SourceBytes)
     );
     ensure!(!target.exists());
     Ok(())

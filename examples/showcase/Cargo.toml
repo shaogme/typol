@@ -3,12 +3,15 @@ name = "typol-showcase"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+authors.workspace = true
 description = "Complete example application demonstrating Typol configuration loading."
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 publish = false
 
 [dependencies]
 typol = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

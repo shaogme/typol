@@ -1,12 +1,8 @@
-#[macro_use]
-#[path = "support/assertions.rs"]
-mod assertions;
-
 use std::{cell::Cell, error::Error, io, path::Path, rc::Rc, slice::from_ref};
 use typol_i18n::{Language, Translator, t};
 
 use opeo::{OResult, Out};
-use typol_opeo_test_support::TestOpeo;
+use typol_opeo_test_support::{TestOpeo, ensure, ensure_eq, ensure_ne};
 
 use typol_config::{
     ConfigParseErrors, ConfigParseOptions, ConfigParseRequest, ConfigParser, ConfigValueErrors,
@@ -15,8 +11,8 @@ use typol_config::{
 use typol_core::{
     BudgetError, Diagnostic, DiagnosticCode, DiagnosticContext as CoreDiagnosticContext,
     DiagnosticContextDescriptor, DiagnosticFailure, DiagnosticLabelInput, ExecutionBudget,
-    ExecutionLimits, InstancePath, RelatedLocationRole, SliceSource, SourceExcerptSet, SourceId,
-    SourceLocation, SourceSpan, Span, ValueSource,
+    ExecutionLimits, InstancePath, InternalError, RelatedLocationRole, ResourceLimit, SliceSource,
+    SourceExcerptSet, SourceId, SourceLocation, SourceSpan, Span, ValueSource,
 };
 use typol_report::{DiagnosticReport as StructuredDiagnosticReport, ReportContext};
 use typol_schema::{
@@ -303,24 +299,27 @@ fn public_error_displays_keep_the_generated_message() -> Result<(), Box<dyn Erro
     let translator = Translator::new(Language::English);
     let diagnostic = TestOpeo::call(|out| {
         Diagnostic::try_new(
-            DiagnosticCode::INTERNAL_ERROR,
-            t! { name: "diagnostic.emergency.internal_error", locale: translator },
+            DiagnosticCode::HOST_ADAPTER_INVARIANT_FAILURE,
+            t! { name: "diagnostic.emergency.host_adapter_invariant_failure", locale: translator },
             None,
             out,
         )
     })?;
     let parse_errors = ConfigParseErrors::from(diagnostic);
     let rendered = render(parse_errors.diagnostics(), RenderOptions::default())?;
-    ensure!(rendered.contains("an internal error prevented the operation"));
+    ensure!(rendered.contains("host adapter invariant failed"));
 
     let value_errors = ConfigValueErrors::from(parse_errors);
     let mut value_text = String::new();
     ensure!(std::fmt::write(&mut value_text, format_args!("{value_errors}")).is_err());
     ensure!(value_text.is_empty());
 
-    let schema_errors = SchemaCompileErrors::budget_failure(BudgetError::Resource, translator);
+    let schema_errors = SchemaCompileErrors::budget_failure(
+        BudgetError::ResourceLimit(ResourceLimit::WorkspaceBytes),
+        translator,
+    );
     let schema_text = schema_errors.to_string();
-    ensure!(schema_text.contains("resource limit exceeded"));
+    ensure!(schema_text.contains("workspace byte limit exceeded"));
     ensure!(!schema_text.contains("diagnostic message unavailable"));
     Ok(())
 }
@@ -354,7 +353,7 @@ fn localized_report_translates_builtin_text_and_preserves_custom_text() -> Resul
         diagnostic.try_add_label_with_text(
             DiagnosticLabelInput {
                 span,
-                text: label.as_ref(),
+                text: label,
                 role: RelatedLocationRole::ConstraintDefinition,
             },
             None,
@@ -418,7 +417,7 @@ fn localized_report_translates_builtin_text_and_preserves_custom_text() -> Resul
 
     let custom_resource = TestOpeo::call(|out| {
         Diagnostic::try_new(
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+            DiagnosticCode::SOURCE_BYTES_LIMIT_EXCEEDED,
             "custom resource detail",
             None,
             out,
@@ -441,7 +440,7 @@ fn localized_report_translates_builtin_text_and_preserves_custom_text() -> Resul
 
     let mut invalid = Diagnostic::failure(
         DiagnosticCode::CONFIG_VALUE_ERROR,
-        DiagnosticFailure::Budget(BudgetError::Resource),
+        DiagnosticFailure::Budget(BudgetError::ResourceLimit(ResourceLimit::WorkspaceBytes)),
     );
     invalid.set_primary(Some(span));
     let failure = TestOpeo::call(|out| {
@@ -460,12 +459,12 @@ fn localized_report_translates_builtin_text_and_preserves_custom_text() -> Resul
     ensure!(matches!(
         failure,
         Err(DiagnosticRenderError::Diagnostic(
-            DiagnosticFailure::Budget(BudgetError::Resource)
+            DiagnosticFailure::Budget(BudgetError::ResourceLimit(ResourceLimit::WorkspaceBytes))
         ))
     ));
 
     let emergency = Diagnostic::emergency(
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+        DiagnosticCode::SOURCE_BYTES_LIMIT_EXCEEDED,
         "resource limit exceeded",
     );
     let localized_emergency = TestOpeo::call(|out| {
@@ -612,7 +611,10 @@ fn every_dynamic_channel_escapes_controls_and_bidi_without_double_escaping()
 
 #[test]
 fn unavailable_snapshots_do_not_invent_names_or_positions() -> Result<(), Box<dyn Error>> {
-    let mut diagnostic = Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR, "internal error");
+    let mut diagnostic = Diagnostic::emergency(
+        DiagnosticCode::HOST_ADAPTER_INVARIANT_FAILURE,
+        "internal error",
+    );
     let span = SourceSpan::new(
         SourceId::new(0),
         TestOpeo::call(|out| Span::new(0, 0, out))
@@ -634,9 +636,9 @@ fn unavailable_snapshots_do_not_invent_names_or_positions() -> Result<(), Box<dy
     ensure_eq!(
         text,
         concat!(
-            "INTERNAL_ERROR (9): internal error",
-            "\nKind: INTERNAL_ERROR",
-            "\nDiagnostic stage: internal",
+            "HOST_ADAPTER_INVARIANT_FAILURE (1024): internal error",
+            "\nKind: HOST_ADAPTER_INVARIANT_FAILURE",
+            "\nDiagnostic stage: host_io",
             "\nLocation: location unavailable\n  = source excerpt unavailable",
             "\nRelated location (associated input): location unavailable: rule\n  = source excerpt unavailable"
         )
@@ -681,20 +683,26 @@ fn exact_output_and_execution_limits_are_atomic_and_leave_business_errors_intact
             &diagnostics,
             RenderOptions::new(options.execution(), text.len() - 1)
         ),
-        Err(DiagnosticRenderError::Display(
-            DisplayError::ResourceLimitExceeded
-        ))
+        Err(DiagnosticRenderError::Display(DisplayError::ResourceLimit(
+            ResourceLimit::ConfigFormatOutputBytes
+        )))
     );
-    for limits in [
-        ExecutionLimits::new(0, 8192),
-        ExecutionLimits::new(8192, 0),
-        ExecutionLimits::new(usize::MAX, 1),
+    for (limits, limit) in [
+        (ExecutionLimits::new(0, 8192), ResourceLimit::ExecutionSteps),
+        (
+            ExecutionLimits::new(8192, 0),
+            ResourceLimit::FormattingWorkspaceBytes,
+        ),
+        (
+            ExecutionLimits::new(usize::MAX, 1),
+            ResourceLimit::FormattingWorkspaceBytes,
+        ),
     ] {
         ensure_eq!(
             render(&diagnostics, RenderOptions::new(limits, usize::MAX)),
-            Err(DiagnosticRenderError::Display(
-                DisplayError::ResourceLimitExceeded
-            ))
+            Err(DiagnosticRenderError::Display(DisplayError::ResourceLimit(
+                limit
+            )))
         );
     }
     let minimum = (1..20_000)
@@ -713,9 +721,9 @@ fn exact_output_and_execution_limits_are_atomic_and_leave_business_errors_intact
             &diagnostics,
             RenderOptions::new(ExecutionLimits::new(minimum - 1, 16_384), text.len())
         ),
-        Err(DiagnosticRenderError::Display(
-            DisplayError::ResourceLimitExceeded
-        ))
+        Err(DiagnosticRenderError::Display(DisplayError::ResourceLimit(
+            ResourceLimit::ExecutionSteps
+        )))
     );
     let diagnostic = diagnostics
         .first()
@@ -749,9 +757,9 @@ fn localized_rendering_enforces_output_and_work_limits() -> Result<(), Box<dyn E
                 &diagnostics,
                 RenderOptions::new(exact.execution(), max_output_bytes),
             ),
-            Err(DiagnosticRenderError::Display(
-                DisplayError::ResourceLimitExceeded
-            ))
+            Err(DiagnosticRenderError::Display(DisplayError::ResourceLimit(
+                ResourceLimit::ConfigFormatOutputBytes
+            )))
         );
     }
 
@@ -761,12 +769,15 @@ fn localized_rendering_enforces_output_and_work_limits() -> Result<(), Box<dyn E
     );
     ensure_eq!(
         render(&diagnostics, work_exhausted),
-        Err(DiagnosticRenderError::Display(
-            DisplayError::ResourceLimitExceeded
-        ))
+        Err(DiagnosticRenderError::Display(DisplayError::ResourceLimit(
+            ResourceLimit::ExecutionSteps
+        )))
     );
 
-    let host = HostError::budget(HostOperation::ConfigRead, BudgetError::Resource);
+    let host = HostError::budget(
+        HostOperation::ConfigRead,
+        BudgetError::ResourceLimit(ResourceLimit::SourceBytes),
+    );
     let rendered_host = TestOpeo::call(|out| {
         DiagnosticRenderer::render_host(
             &host,
@@ -775,7 +786,7 @@ fn localized_rendering_enforces_output_and_work_limits() -> Result<(), Box<dyn E
             out,
         )
     })?;
-    ensure!(rendered_host.contains("resource limit exceeded"));
+    ensure!(rendered_host.contains("source byte limit exceeded"));
 
     Ok(())
 }
@@ -993,7 +1004,11 @@ fn host_and_file_wrappers_expose_only_safe_standard_error_chains() -> Result<(),
         HostOperation::SourceNames,
         BudgetError::invariant(&LOWER_ERROR_CONTEXT),
     );
-    ensure_eq!(propagated.kind(), HostErrorKind::InternalError);
+    ensure!(matches!(
+        propagated.kind(),
+        HostErrorKind::Internal(InternalError::BudgetInvariantFailure(context))
+            if context == LOWER_ERROR_CONTEXT
+    ));
     ensure_eq!(propagated.context().failure_point(), "budget-invariant");
     ensure_eq!(
         propagated
@@ -1047,9 +1062,9 @@ fn host_and_file_wrappers_expose_only_safe_standard_error_chains() -> Result<(),
                 out,
             )
         }),
-        Err(DiagnosticRenderError::Display(
-            DisplayError::ResourceLimitExceeded
-        ))
+        Err(DiagnosticRenderError::Display(DisplayError::ResourceLimit(
+            ResourceLimit::ConfigFormatOutputBytes
+        )))
     );
     let errors = TestOpeo::call(|out| {
         FileSchemaCompiler::compile(path, FileSchemaCompileOptions::default(), out)
@@ -1098,7 +1113,7 @@ fn host_and_file_wrappers_expose_only_safe_standard_error_chains() -> Result<(),
     );
     for error in [
         DisplayError::AllocationFailed,
-        DisplayError::ResourceLimitExceeded,
+        DisplayError::ResourceLimit(ResourceLimit::SourceBytes),
         DisplayError::ShapeMismatch,
     ] {
         ensure!(error.source().is_none());

@@ -1,18 +1,18 @@
 use crate::{
     AllItemRequest, AllItemValue, BuildError, CompiledSchema, ConstraintList, EffectiveRules,
-    EvalError, EvalFailure, FieldId, RegexExecutionError, RegexExecutionFailure, RegexExecutor,
-    RegexMatchOptions, StoredPayloadInfo, StoredRuleView, StoredTypeKind, SumBoundsRequest, TypeId,
-    TypedExpression, ValueRules, VariantId, VariantRestrictionMode, engine::Evaluator,
+    EvalError, EvalFailure, FieldId, RegexExecutionError, RegexExecutor, RegexMatchOptions,
+    StoredPayloadInfo, StoredRuleView, StoredTypeKind, SumBoundsRequest, TypeId, TypedExpression,
+    ValueRules, VariantId, VariantRestrictionMode, engine::Evaluator,
 };
 use core::cell::RefCell;
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 use typol_core::{
-    ChargedVec, ConfigValue, DiagnosticContext, ExecutionBudget, RegexExecutionBudget, SourceSpan,
-    ValueEntries, ValueKind, ValuePayloadView, ValueView, diagnostic_context,
+    CapacityExceeded, ChargedVec, ConfigValue, DiagnosticContext, ExecutionBudget,
+    RegexExecutionBudget, ResourceLimit, SourceSpan, ValueEntries, ValueKind, ValuePayloadView,
+    ValueView, diagnostic_context,
 };
 use typol_model::BuiltinType;
 use typol_policy::{RegexLimits, ValueLimits};
-use typol_regex::{RegexMatchError, RegexScratchError};
 
 static DEFAULT_VALIDATION_INTERNAL: DiagnosticContext = diagnostic_context!(
     "typol-semantic",
@@ -131,16 +131,19 @@ impl DefaultValidation {
             execution.consume(1, out.reborrow())?;
             value_nodes = value_nodes
                 .checked_add(1)
-                .ok_or(BuildError::Resource)
+                .ok_or(BuildError::CapacityExceeded(
+                    CapacityExceeded::SchemaStorage,
+                ))
                 .store_err_into(out.reborrow())?;
-            if !value_limits.allows_depth(current.depth)
-                || value_nodes > value_limits.max_value_nodes()
-            {
-                return Err(out.fail(BuildError::Resource));
+            if !value_limits.allows_depth(current.depth) {
+                return Err(out.fail(BuildError::ResourceLimit(ResourceLimit::ConfigValueDepth)));
+            }
+            if value_nodes > value_limits.max_value_nodes() {
+                return Err(out.fail(BuildError::ResourceLimit(ResourceLimit::ConfigValueNodes)));
             }
             if let ValueKind::String(text) = current.value.as_ref() {
                 if text.len() > value_limits.max_string_bytes() {
-                    return Err(out.fail(BuildError::Resource));
+                    return Err(out.fail(BuildError::ResourceLimit(ResourceLimit::ConfigTextBytes)));
                 }
             }
             let type_info = schema
@@ -165,7 +168,9 @@ impl DefaultValidation {
             let next_depth = current
                 .depth
                 .checked_add(1)
-                .ok_or(BuildError::Resource)
+                .ok_or(BuildError::CapacityExceeded(
+                    CapacityExceeded::SchemaStorage,
+                ))
                 .store_err_into(out.reborrow())?;
             match (info.kind(), current.value.as_ref()) {
                 (StoredTypeKind::Builtin(BuiltinType::Bool), ValueKind::Bool(_))
@@ -704,80 +709,31 @@ impl RuleExecution<'_> {
 
     fn evaluation_error(error: EvalError, span: SourceSpan) -> BuildError {
         match error.kind() {
-            EvalFailure::InternalAt(context) => BuildError::InternalAt {
-                context,
-                source_span: Some(error.source_span().unwrap_or(span)),
+            EvalFailure::Internal(internal) => {
+                BuildError::with_internal_error(internal, Some(error.source_span().unwrap_or(span)))
+            }
+            EvalFailure::RegexExecution(regex_error) => BuildError::RegexExecutionAt {
+                error: regex_error,
+                source_span: error.source_span().unwrap_or(span),
             },
             EvalFailure::SchemaAccess(schema_error) => BuildError::SchemaAccessAt {
                 error: schema_error,
                 source_span: error.source_span().unwrap_or(span),
             },
-            EvalFailure::Resource => BuildError::Resource,
+            EvalFailure::ResourceLimit(limit) => BuildError::ResourceLimit(limit),
             EvalFailure::Arithmetic => BuildError::DefaultEvaluationAt {
                 failure: EvalFailure::Arithmetic,
                 source_span: error.source_span().unwrap_or(span),
             },
             EvalFailure::Allocation => BuildError::Allocation,
-            EvalFailure::Capacity => BuildError::Capacity,
-            EvalFailure::Internal => BuildError::InternalAt {
-                context: DEFAULT_VALIDATION_INTERNAL,
-                source_span: Some(error.source_span().unwrap_or(span)),
-            },
+            EvalFailure::CapacityExceeded(capacity) => BuildError::CapacityExceeded(capacity),
         }
     }
 
     fn regex_error(error: RegexExecutionError, span: SourceSpan) -> BuildError {
-        match error {
-            RegexExecutionError::Scratch(error) => Self::scratch_error(error, span),
-            RegexExecutionError::Match(error) => Self::match_error(error, span),
-            RegexExecutionError::Budget(error) => BuildError::from(error).with_source_span(span),
-            RegexExecutionError::InternalAt { context, .. } => BuildError::InternalAt {
-                context,
-                source_span: Some(span),
-            },
-            RegexExecutionError::Located { error, .. } => match error {
-                RegexExecutionFailure::Scratch(error) => Self::scratch_error(error, span),
-                RegexExecutionFailure::Match(error) => Self::match_error(error, span),
-                RegexExecutionFailure::Budget(error) => {
-                    BuildError::from(error).with_source_span(span)
-                }
-                RegexExecutionFailure::Internal(Some(context)) => BuildError::InternalAt {
-                    context,
-                    source_span: Some(span),
-                },
-                RegexExecutionFailure::Internal(None) => BuildError::InternalAt {
-                    context: DEFAULT_VALIDATION_INTERNAL,
-                    source_span: Some(span),
-                },
-            },
-            RegexExecutionError::Internal => BuildError::InternalAt {
-                context: DEFAULT_VALIDATION_INTERNAL,
-                source_span: Some(span),
-            },
-        }
-    }
-
-    fn scratch_error(error: RegexScratchError, span: SourceSpan) -> BuildError {
-        match error {
-            RegexScratchError::ResourceLimitExceeded(_) => BuildError::Resource,
-            RegexScratchError::AllocationFailed => BuildError::Allocation,
-            RegexScratchError::CapacityExceeded => BuildError::Capacity,
-            RegexScratchError::InternalInvariantFailure(context) => BuildError::InternalAt {
-                context: context.diagnostic_context(),
-                source_span: Some(span),
-            },
-        }
-    }
-
-    fn match_error(error: RegexMatchError, span: SourceSpan) -> BuildError {
-        match error {
-            RegexMatchError::ResourceLimitExceeded(_) => BuildError::Resource,
-            RegexMatchError::AllocationFailed => BuildError::Allocation,
-            RegexMatchError::CapacityExceeded => BuildError::Capacity,
-            RegexMatchError::InternalInvariantFailure(context) => BuildError::InternalAt {
-                context: context.diagnostic_context(),
-                source_span: Some(span),
-            },
+        BuildError::RegexExecutionAt {
+            error,
+            source_span: span,
         }
     }
 }

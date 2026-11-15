@@ -19,7 +19,7 @@ use u18n::RenderError;
 use typol_i18n::Language;
 
 #[cfg(test)]
-use typol_core::ExecutionLimits;
+use typol_core::{ExecutionLimits, ResourceLimit};
 
 #[cfg(test)]
 use typol_test_support::{TestFailure, TestOpeo, TestResult, test_assert, test_eq};
@@ -149,14 +149,27 @@ impl LiteralDiagnostic {
             },
             out.reborrow(),
         )?;
+        if hidden {
+            return Ok(DiagnosticFactory::make_diagnostic(
+                DetailedDiagnosticRequest {
+                    code,
+                    message: t! {
+                        name: "diagnostic.validation.value_hidden",
+                        locale: translator,
+                    }
+                    .into(),
+                    primary: Some(span),
+                    path: Some(path),
+                    value_source,
+                    context: None,
+                    translator,
+                },
+            ));
+        }
         let budget = path.budget();
         let mut errors = ErrSlot::new();
         let message = match errors.try_call(|budget_out| {
-            if hidden {
-                render_value_hidden(translator, budget, budget_out)
-            } else {
-                render_fixed_array_length_mismatch(expected, actual, translator, budget, budget_out)
-            }
+            render_fixed_array_length_mismatch(expected, actual, translator, budget, budget_out)
         }) {
             Ok(message) => message,
             Err(caught) => {
@@ -201,24 +214,6 @@ impl LiteralDiagnostic {
             out,
         )
     }
-}
-
-fn render_value_hidden<'slot>(
-    translator: Translator,
-    budget: Option<&ExecutionBudget>,
-    mut out: Out<'slot, '_, BudgetError>,
-) -> OResult<'slot, Result<ChargedString, RenderError>> {
-    let mut sink = WorkspaceStringSink::new(budget, out.reborrow())?;
-    let result = t! {
-        name: "diagnostic.validation.value_hidden",
-        locale: translator,
-        sink: &mut sink,
-    };
-    if let Some(error) = sink.budget_error.take() {
-        return Err(out.fail(error));
-    }
-    let WorkspaceStringSink { output, .. } = sink;
-    Ok(result.map(|()| output))
 }
 
 fn render_fixed_array_length_mismatch<'slot>(
@@ -299,6 +294,9 @@ fn fixed_array_length_sink_preserves_budget_errors() -> TestResult<()> {
             out,
         )
     });
-    test_assert!(matches!(result, Err(BudgetError::Resource)))?;
+    test_assert!(matches!(
+        result,
+        Err(BudgetError::ResourceLimit(ResourceLimit::WorkspaceBytes))
+    ))?;
     Ok(())
 }

@@ -3,14 +3,15 @@ name = "typol-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+authors.workspace = true
 description = "Core values, source handling, diagnostics, and execution budgets for Typol."
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
 opeo.workspace = true
+typol-i18n.workspace = true
 u18n.workspace = true
 
 [dev-dependencies]

@@ -1,6 +1,9 @@
 use typol_core::{BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId};
 use typol_syntax::{SchemaAst, SchemaParseOptions, SchemaParser, SyntaxErrors, SyntaxLimits};
-use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
+use typol_test_support::{
+    TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot, test_assert_early as test_assert,
+    test_assert_eq_early as test_assert_eq,
+};
 
 struct TestErrors {
     budget: TestSlot<BudgetError>,
@@ -39,24 +42,6 @@ impl From<OpeoTestFailure> for TestFailure {
     fn from(_: OpeoTestFailure) -> Self {
         Self
     }
-}
-
-macro_rules! test_assert {
-    ($condition:expr $(, $($message:tt)*)?) => {{
-        if !$condition {
-            return Err(TestFailure);
-        }
-    }};
-}
-
-macro_rules! test_assert_eq {
-    ($left:expr, $right:expr $(, $($message:tt)*)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(TestFailure);
-        }
-    }};
 }
 
 type TestResult<T = ()> = Result<T, TestFailure>;
@@ -216,7 +201,7 @@ fn source_and_nesting_limits_stop_schema_parsing_with_resource_diagnostics() -> 
     test_assert_eq!(diagnostics.len(), 1);
     test_assert_eq!(
         diagnostics.first().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::SOURCE_BYTES_LIMIT_EXCEEDED
     );
     let span = diagnostics
         .first()
@@ -240,7 +225,7 @@ fn source_and_nesting_limits_stop_schema_parsing_with_resource_diagnostics() -> 
     test_assert_eq!(diagnostics.len(), 1);
     test_assert_eq!(
         diagnostics.first().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::SCHEMA_PARSE_DEPTH_LIMIT_EXCEEDED
     );
 
     Ok(())
@@ -273,7 +258,7 @@ fn fatal_causes_take_the_reserved_slot_and_zero_budget_accepts_valid_input() -> 
         test_assert_eq!(syntax_errors.diagnostics().len(), 1);
         test_assert_eq!(
             syntax_errors.diagnostics().first().test_value()?.code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+            DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED
         );
         let syntax_errors = errors
             .parse(SOURCE_ID, "? ? ?", &limits, &execution)
@@ -305,7 +290,7 @@ fn fatal_causes_take_the_reserved_slot_and_zero_budget_accepts_valid_input() -> 
             .iter()
             .map(|diagnostic| diagnostic.code().get())
             .collect::<Vec<_>>(),
-        [3, 1]
+        [3, DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED.get()]
     );
 
     Ok(())
@@ -413,7 +398,7 @@ fn resource_failures_inside_members_are_not_recovered_as_syntax_errors() -> Test
     test_assert_eq!(diagnostics.len(), 1);
     test_assert_eq!(
         diagnostics.first().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::SCHEMA_PARSE_DEPTH_LIMIT_EXCEEDED
     );
 
     Ok(())

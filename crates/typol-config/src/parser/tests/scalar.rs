@@ -4,7 +4,7 @@ use super::{
 };
 use crate::diagnostics::ConfigParseErrors;
 use alloc::{format, vec::Vec};
-use typol_core::{ConfigValue, ValueKind, ValueSource};
+use typol_core::{ConfigValue, DiagnosticCode, ValueKind, ValueSource};
 use typol_policy::{ExcerptLimits, RegexExecutionLimits, RegexOptions};
 use typol_semantic::{CompiledSchema, SchemaAccessError};
 use typol_test_support::*;
@@ -263,7 +263,10 @@ fn absent_options_skip_regex_even_with_zero_scratch_budget() -> TestResult<()> {
         &limits,
     )
     .test_error()?;
-    test_eq!(ParserTestSupport::codes(&errors), [1])?;
+    test_eq!(
+        ParserTestSupport::codes(&errors),
+        [DiagnosticCode::REGEX_SCRATCH_STATES_LIMIT_EXCEEDED.get()]
+    )?;
 
     Ok(())
 }
@@ -285,7 +288,10 @@ fn regex_mismatch_and_resource_exhaustion_are_distinct_and_budgeted() -> TestRes
     let mut limits = RegexOptions::default()
         .with_execution(RegexExecutionLimits::default().with_max_search_steps(0));
     let errors = validate(&schema, source, &mut Provider::new(Ok(None)), &limits).test_error()?;
-    test_eq!(ParserTestSupport::codes(&errors), [1])?;
+    test_eq!(
+        ParserTestSupport::codes(&errors),
+        [DiagnosticCode::REGEX_SEARCH_STEPS_LIMIT_EXCEEDED.get()]
+    )?;
     test_eq!(TestCheck::item(errors.diagnostics(), 0)?.labels().len(), 1)?;
     let mut config_limits = ConfigLimits::default();
     for (budget, expected) in [(0, &[12][..]), (1, &[12][..]), (2, &[12, 5][..])] {
@@ -372,7 +378,10 @@ fn nested_defaults_run_real_regex_validation_at_the_owning_schema_span() -> Test
     let limits = RegexOptions::default()
         .with_execution(RegexExecutionLimits::default().with_max_search_steps(0));
     let errors = validate(&schema, "{}", &mut Provider::new(Ok(None)), &limits).test_error()?;
-    test_eq!(ParserTestSupport::codes(&errors), [1])?;
+    test_eq!(
+        ParserTestSupport::codes(&errors),
+        [DiagnosticCode::REGEX_SEARCH_STEPS_LIMIT_EXCEEDED.get()]
+    )?;
     let mut schema_errors = TestSlot::<SchemaAccessError>::default();
     let field = ParserTestSupport::required(&mut schema_errors, |out| {
         schema.entry().field_named("value", out)

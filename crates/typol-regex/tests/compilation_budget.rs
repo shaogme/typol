@@ -2,12 +2,10 @@
 mod clippy;
 
 use std::{env, process::Command, thread};
-use typol_core::{BudgetError, ExecutionLimits};
+use typol_core::{BudgetError, CapacityExceeded, DiagnosticCode, ExecutionLimits, ResourceLimit};
 use typol_opeo_test_support::TestSlot;
 use typol_policy::RegexLimits;
-use typol_regex::{
-    RegexCompileError, RegexCompiler, RegexResource, RegexScratch, RegexScratchError,
-};
+use typol_regex::{RegexCompileError, RegexCompiler, RegexScratch, RegexScratchError};
 
 const LIMIT: usize = 67_108_864;
 
@@ -52,6 +50,25 @@ fn compiled_program_retains_payloads_and_shares_cumulative_work() {
 }
 
 #[test]
+fn generic_workspace_capacity_is_classified_by_regex_phase() {
+    let compile_error = RegexCompileError::from(BudgetError::CapacityExceeded(
+        CapacityExceeded::BudgetBookkeeping,
+    ));
+    assert_eq!(
+        compile_error.diagnostic_code(),
+        DiagnosticCode::REGEX_COMPILATION_CAPACITY_EXCEEDED
+    );
+
+    let scratch_error = RegexScratchError::from(BudgetError::CapacityExceeded(
+        CapacityExceeded::BudgetBookkeeping,
+    ));
+    assert_eq!(
+        scratch_error.diagnostic_code(),
+        DiagnosticCode::REGEX_EXECUTION_CAPACITY_EXCEEDED
+    );
+}
+
+#[test]
 fn parsing_and_repeat_expansion_stop_at_the_shared_step_boundary() {
     let mut budget_errors = TestSlot::<BudgetError>::default();
     let mut compile_errors = TestSlot::<RegexCompileError>::default();
@@ -89,8 +106,8 @@ fn parsing_and_repeat_expansion_stop_at_the_shared_step_boundary() {
             clippy::Clippy::attempt(&mut compile_errors, |out| {
                 RegexCompiler::compile(pattern, &RegexLimits::default(), &limited, out)
             }),
-            clippy::Attempt::Failure(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::CompilationBudget
+            clippy::Attempt::Failure(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexCompilationBudget
             ))
         ));
         assert!(limited.exhausted());
@@ -99,8 +116,8 @@ fn parsing_and_repeat_expansion_stop_at_the_shared_step_boundary() {
             clippy::Clippy::attempt(&mut compile_errors, |out| {
                 RegexCompiler::compile("a", &RegexLimits::default(), &limited, out)
             }),
-            clippy::Attempt::Failure(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::CompilationBudget
+            clippy::Attempt::Failure(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexCompilationBudget
             ))
         ));
     }
@@ -184,8 +201,8 @@ fn regex_stack_child() {
             clippy::Clippy::attempt(&mut compile_errors, |out| {
                 RegexCompiler::compile(&pattern, &limits, &budget, out)
             }),
-            clippy::Attempt::Failure(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::NestingDepth
+            clippy::Attempt::Failure(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexNestingDepth
             ))
         ));
         limits.set_max_regex_nesting_depth(depth + 16);
@@ -203,8 +220,8 @@ fn regex_stack_child() {
             clippy::Clippy::attempt(&mut compile_errors, |out| {
                 RegexCompiler::compile(&pattern, &limits, &small, out)
             }),
-            clippy::Attempt::Failure(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::CompilationBudget
+            clippy::Attempt::Failure(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexCompilationBudget
             ))
         ));
     });
@@ -264,8 +281,8 @@ fn independent_capacity_limit_rejects_compilation_and_releases_partial_ast() {
         clippy::Clippy::attempt(&mut compile_errors, |out| {
             RegexCompiler::compile("(ab|[a-z]){2,8}", &RegexLimits::default(), &budget, out)
         }),
-        clippy::Attempt::Failure(RegexCompileError::ResourceLimitExceeded(
-            RegexResource::WorkspaceBytes
+        clippy::Attempt::Failure(RegexCompileError::ResourceLimit(
+            ResourceLimit::RegexWorkspaceBytes
         ))
     ));
     assert!(budget.exhausted());

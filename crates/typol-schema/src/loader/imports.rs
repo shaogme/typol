@@ -144,12 +144,16 @@ impl ImportLoader {
             };
             frame.next_item_index = next_item_index;
             // Depth and file count are checked before calling the host; no further reads occur after either limit fails.
-            let Some(byte_limit) = budget.request_limit(stack.len()) else {
-                diagnostics.push(EmergencyDiagnostics::resource(
-                    import_span,
-                    diagnostics.translator(),
-                ));
-                break;
+            let (byte_limit, byte_limit_kind) = match budget.request_limit(stack.len()) {
+                Ok(request_limit) => request_limit,
+                Err(limit) => {
+                    diagnostics.push(EmergencyDiagnostics::resource(
+                        limit,
+                        import_span,
+                        diagnostics.translator(),
+                    ));
+                    break;
+                }
             };
             let Some(file) = loaded.files_mut().get_mut(file_index) else {
                 diagnostics.abort(schema_internal!(diagnostics.translator(), import_span));
@@ -207,6 +211,7 @@ impl ImportLoader {
                 from_identity,
                 module_name: name,
                 source_byte_limit: byte_limit,
+                source_byte_limit_kind: byte_limit_kind,
                 context: &context.session,
             };
             let resolved =
@@ -317,7 +322,7 @@ impl ImportLoader {
                 continue;
             }
             let child_index = loaded.files().len();
-            if !budget.register_source() {
+            if let Err(error) = budget.register_source() {
                 if !Self::set_last_edge(
                     loaded.files_mut(),
                     file_index,
@@ -327,7 +332,8 @@ impl ImportLoader {
                 ) {
                     break;
                 }
-                diagnostics.push(EmergencyDiagnostics::resource(
+                diagnostics.push(BudgetDiagnostics::make(
+                    error,
                     import_span,
                     diagnostics.translator(),
                 ));

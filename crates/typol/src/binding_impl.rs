@@ -190,7 +190,7 @@ impl<'schema> BindingPlan<'schema> {
         }
         Err(out.fail(CodecErrors::emergency(
             CodecStage::Conversion,
-            Failure::internal(BINDING_PLAN_ENTRY_MISSING),
+            Failure::binding_internal(BINDING_PLAN_ENTRY_MISSING),
             session.translator(),
         )))
     }
@@ -624,7 +624,7 @@ impl<'schema, T: Typol> TypedSchema<'schema, T> {
 fn internal_error(translator: Translator) -> CodecErrors {
     CodecErrors::emergency(
         CodecStage::Binding,
-        Failure::internal(BINDING_INVARIANT),
+        Failure::binding_internal(BINDING_INVARIANT),
         translator,
     )
 }

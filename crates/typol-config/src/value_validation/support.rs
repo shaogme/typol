@@ -4,8 +4,8 @@ use crate::{
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, LocatedSpan,
-    ValueSource, ValueView, diagnostic_context,
+    BudgetError, CapacityExceeded, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext,
+    LocatedSpan, ValueSource, ValueView, diagnostic_context,
 };
 use typol_i18n::{Translator, t};
 use typol_semantic::SchemaAccessError;
@@ -78,15 +78,19 @@ impl TreeSupport {
         out: Out<'slot, 'borrow, Diagnostic>,
     ) -> OResult<'slot, ()> {
         let Some(depth) = context.nesting_depth.checked_add(1) else {
-            return Err(out.fail(DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
-                code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                message: t! { name: "diagnostic.config.value_tree_nesting_limit", locale: context.resources.translator }.into(),
-                primary: span,
-                path: None,
-                value_source: source,
-                context: None,
-                translator: context.resources.translator,
-            })));
+            return Err(out.fail(DiagnosticFactory::make_diagnostic(
+                DetailedDiagnosticRequest {
+                    code: DiagnosticCode::CONFIG_VALUE_CAPACITY_EXCEEDED,
+                    message: CapacityExceeded::ConfigValue
+                        .emergency_message(context.resources.translator)
+                        .into(),
+                    primary: span,
+                    path: None,
+                    value_source: source,
+                    context: None,
+                    translator: context.resources.translator,
+                },
+            )));
         };
         context.nesting_depth = depth;
         Ok(())
@@ -103,7 +107,7 @@ impl TreeSupport {
             return Ok(());
         }
         Err(out.fail(DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
-            code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+            code: DiagnosticCode::CONFIG_VALUE_DEPTH_LIMIT_EXCEEDED,
             message: t! { name: "diagnostic.config.value_tree_nesting_limit", locale: context.resources.translator }.into(),
             primary: span,
             path: None,

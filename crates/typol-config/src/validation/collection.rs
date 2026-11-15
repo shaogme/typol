@@ -281,15 +281,17 @@ impl CollectionValidator {
                 out.reborrow(),
             )?;
             let result = match data {
-                ConstraintData::SizeBounds { .. } => resources
+                ConstraintData::SizeBounds { .. } => match resources
                     .eval_errors
                     .try_call(|eval_out| {
                         SchemaRules::scalar(value, data, Some(&resources.budget), eval_out)
                     })
                     .map_err(|caught| caught.take())
-                    .and_then(|result| {
-                        result.ok_or(EvalError::internal(COLLECTION_SIZE_RULE_RESULT))
-                    }),
+                {
+                    Ok(Some(result)) => Ok(result),
+                    Ok(None) => Err(EvalError::internal(COLLECTION_SIZE_RULE_RESULT)),
+                    Err(error) => Err(error),
+                },
                 ConstraintData::SumBounds { min, max } => {
                     let Some(values) = collection.array() else {
                         return Err(

@@ -56,7 +56,6 @@ impl RuleContext {
 
 /// Completion state is independent of origin: a prevalidated value still needs a concrete instance recorded, but its rules must not run again.
 pub(crate) enum CompletionState {
-    ChildrenComplete,
     NeedsTraversal,
     NeedsTraversalWithKnownShape,
     Validated(ValidatedFallback),

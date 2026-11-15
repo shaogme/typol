@@ -544,7 +544,7 @@ impl BindingConversion {
     fn named_entry_name_error(translator: Translator) -> CodecErrors {
         CodecErrors::emergency(
             CodecStage::Conversion,
-            Failure::internal(NAMED_ENTRY_NAME_MISSING),
+            Failure::conversion_internal(NAMED_ENTRY_NAME_MISSING),
             translator,
         )
     }

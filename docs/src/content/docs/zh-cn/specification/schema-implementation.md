@@ -8,316 +8,354 @@ sidebar:
 ## 本页要点
 
 :::tip[适用场景]
-了解 Schema 加载、编译诊断、外部导入，或编译类型如何供配置解析和 Rust 绑定使用时，请查阅本页。
+了解 Schema 加载、编译诊断、外部导入，或编译类型如何供配置解析和 Rust
+绑定使用时，请查阅本页。
 :::
 
 | 阶段 | 当前行为 |
 | --- | --- |
-| 输入 | 共享流式 lexer 和 parser 生成带源码跨度的拥有型 Schema AST。 |
-| 编译 | loader 解析导入、检查静态语义，并构造不可变的编译后 Schema。 |
-| 使用方 | 配置解析和 Rust 绑定读取编译后的 Schema 视图；文件访问由宿主适配器提供。 |
+| 输入 | 流式 lexer 和 parser 将 Schema 解析为带源码跨度的 AST。 |
+| 编译 | loader 解析导入、检查语义，并生成不可变的 Schema。 |
+| 使用方 | 配置解析和 Rust 绑定读取编译视图；宿主访问由适配器提供。 |
 
-本文说明 Typol 当前如何实现 `.tschem` Schema：各 crate 的职责、从源文本到只读编译产物的处理步骤、静态语义边界，以及配置解析和 Rust 类型绑定如何消费编译结果。它补充[Schema DSL 规范](../schema-dsl/)，不改变 DSL 的词法、语法和语义。
+本文说明 `.tschem` 的当前实现，以及编译结果如何用于配置解析和 Rust 绑定。
+[Schema DSL 规范](../schema-dsl/)定义语言行为，遇到语义问题时以规范为准。
 
-本文依据当前源码整理。语义以 Schema DSL 规范为准。
+## 1. 实现范围与架构
 
-## 1. 实现范围与边界
+Schema 处理分为四层：
 
-Schema 实现分为四层：
+1. `typol-syntax` 对 UTF-8 输入执行词法和语法分析，生成拥有型 AST。
+2. `typol-schema` 加载根源与导入源，解析声明并执行静态编译。
+3. `typol-semantic` 保存不可变的编译模型，并提供只读视图。
+4. `typol-config`、`typol` 和 `typol-std` 分别解析配置、编排应用 API，
+   并提供宿主适配器。
 
-1. `typol-syntax` 对 UTF-8 源执行共享词法分析，产生带字节跨度的 token，并将 Schema 解析为拥有型 AST。
-2. `typol-schema` 通过宿主提供的 resolver 加载根文件及 `extern mod` 文件，建立模块/符号/类型模型，执行完整静态编译。
-3. `typol-semantic` 保存编译后的类型、字段、变体、约束、表达式程序、正则程序、源位置和索引，并为调用方提供只读视图。
-4. `typol-config`、`typol` 和 `typol-std` 分别在 Schema 指导下构造/验证配置值、提供应用级编排、接入文件和进程环境。
+核心语法和语义 crate 使用 `no_std + alloc`。Schema 编译通过
+`SchemaResolver` 接收导入源，不直接访问文件；配置解析直接构造值，不建立
+独立的配置 AST。`typol-macros` 只从 Rust 类型生成类型描述，运行时由
+`TypedSchema::bind` 检查它与编译后 Schema 的兼容性。
 
-核心语法与语义 crate 使用 `no_std + alloc`。Schema 编译不自行访问文件系统；`typol-schema::SchemaResolver` 是导入读取边界。配置解析不建立配置 AST，而是消费 token 并直接构造值。`typol-macros` 在编译宿主上生成 Rust 类型描述，不读取 Schema 文件；实际兼容性由 `TypedSchema::bind` 对传入的 `CompiledSchema` 检查。
+不依赖标准库的应用集成方式见 [no_std 指南](../../guides/no_std/)。
 
-在 `no_std + alloc` 环境中通过 facade 集成应用的步骤见 [no_std 指南](../../guides/no_std/)。
-
-主要源码位置：
-
-| 职责 | 实现位置 |
+| 职责 | 主要源码位置 |
 | --- | --- |
-| 词法、token 游标、Schema AST/parser | `crates/typol-syntax/src/lexer.rs`、`token.rs`、`cursor.rs`、`parser.rs`、`parser/`、`ast.rs`、`storage.rs` |
-| 导入加载、编译会话、模块和符号 | `crates/typol-schema/src/resolver.rs`、`loader.rs`、`session.rs`、`module_tree.rs`、`symbols.rs` |
-| 类型解析、别名与递归检测 | `crates/typol-schema/src/types.rs`、`types/` |
-| 注解、正则和表达式静态编译 | `crates/typol-schema/src/annotations.rs`、`regex.rs`、`expressions.rs`、`expressions/` |
-| 默认值编译与最终 Schema 记录 | `crates/typol-schema/src/defaults.rs`、`defaults/`、`compiled.rs`、`compiled/records.rs` |
-| 编译结果和语义视图 | `crates/typol-semantic/src/model.rs`、`views.rs`、`constraints.rs`、`expressions.rs` |
-| 配置解析和运行期校验 | `crates/typol-config/src/parser.rs`、`validation.rs`、`value_validation.rs`、`environment.rs` |
-| 文件加载和应用 facade | `crates/typol-std/src/schema_compiler.rs`、`crates/typol/src/loading.rs`、`binding.rs`、`descriptor.rs` |
+| Lexer、token 游标、Schema AST/parser | `crates/typol-syntax/src/` |
+| 导入、模块、符号和类型解析 | `typol-schema`：`loader/`、`module_tree.rs`、`symbols.rs`、`types.rs` |
+| 注解、表达式、默认值和记录 | `typol-schema`：`annotations/`、`expressions/`、`defaults/`、`compiled/` |
+| 编译模型与语义视图 | `typol-semantic`：`model`、`views`、`constraints`、`expressions` |
+| 配置解析和校验 | `typol-config`：`parser.rs`、`validation.rs`、`value_validation.rs` |
+| 宿主加载与 Rust 绑定 | `typol-std`：`schema_compiler.rs`；`typol`：`loading/`、`binding_impl.rs` |
 
-## 2. 源输入和词法/语法阶段
+## 2. 源输入、词法和语法分析
 
-### 2.1 字节流与 token
+### 2.1 流式输入
 
-Schema 输入必须是有效 UTF-8。词法约定以[Schema DSL §1](../schema-dsl/#1-词法规则)为准。`Read` 按顺序提供字节，短读不代表结束，零字节表示 EOF；parser 不要求输入可重放，也不保存完整源文本。Lexer 按需扫描，不生成完整 token 数组；`TokenCursor` 最多缓存当前事件和一个前瞻事件。token 保存 `SourceSpan`（源 ID 与 UTF-8 字节范围），标识符/数字可读取原文，字符串提供解码内容。EOF 的跨度是源末尾的空范围。
+Schema 源必须是有效 UTF-8，词法规则见
+[Schema DSL §1](../schema-dsl/#1-词法规则)。`Read` 按顺序提供字节：短读不代表
+输入结束，读到零字节才是 `EOF`。解析不要求输入可重放，也不会保留完整源文本。
 
-标识符和数字 token 使用受预算约束的拥有缓冲；Schema parser 借用 token 文本并复制到 AST 文本池。字符串始终使用受预算约束的拥有型解码缓冲，无论原文是否含转义；Schema parser 将解码缓冲直接移交 AST。由于输入不可保证可回放，块字符串只将当前 token 正文暂存到受计费工作区，再计算缩进并解码到第二个受计费缓冲区。源扫描消耗共享执行额度；token 字节上限包括分隔符、正文、CRLF 源字节和闭合缩进，字符串上限只统计去缩进、换行归一化及转义解码后的字节。只有完整找到闭合分隔符并完成解码后才会返回块字符串。共享 lexer 通过可复用窗口读取 `Read`，不会向 token 暴露稳定的源文本切片。token、AST 的调试输出避免打印字面值，只暴露种类、跨度和长度等信息。
+Lexer 按需扫描，不生成完整 token 数组。`TokenCursor` 最多缓存当前事件和一个
+前瞻事件；每个 token 都带有源 ID 和 UTF-8 字节范围组成的 `SourceSpan`。
+标识符和数字 token 可提供源文本，字符串 token 保存解码结果，`EOF` 使用空跨度。
 
-### 2.2 Schema AST
+Token 与 AST 文本使用受预算约束的拥有型存储。输入可能无法重放，因此块字符串
+只暂存当前 token 的正文；暂存内容与解码结果同时存在时都会计入额度。Token
+字节上限包括分隔符和源换行，字符串上限则作用于解码后的内容。
 
-`SchemaParser::parse(source_id, byte_source, options, budget)` 接收 `Read<Diagnostic>` 并使用统一的 `SchemaParseOptions` 配置 `SyntaxLimits` 与 `StreamLimits`；`parse_str` 只将字符串包装为 `SliceSource`。需要后续源位置查询时使用 `parse_with_positions`，成功结果同时拥有 `SchemaAst` 和预算化 `SourcePositionIndex`。位置索引记录词法 token 起止端点的字节偏移、行号和 Unicode 标量列号，不保留源字节；EOF token 提供实际源长度及 EOF 位置。parser 不预读或缓存整份输入；来源上限在读取期间约束输入，EOF token 确认后的实际字节偏移用于 `SchemaAst::span()`，AST 存储也在成功完成时将跨度边界收紧到该长度。诊断初始化和 EOF 未知时的通用锚点使用当前已知位置，EOF 语法错误使用 EOF token 的精确跨度。默认调用可使用 `SchemaParseOptions::default()`。成功时返回 AST；词法或语法错误返回非空 `SyntaxErrors`，不会返回可被误用的部分 AST。parser 在顶层声明、模块成员、字段和变体边界的可靠同步点继续收集后续独立错误；恢复循环与 parser 的 token 访问共用 `ExecutionBudget`，资源耗尽、分配失败和内部错误等终止错误会停止解析。
+共享 lexer 通过可复用窗口读取输入，不会暴露稳定的源文本切片。Token 和 AST 的
+调试输出不展示字面值，只包含种类、跨度、长度等元数据。
 
-`SchemaParseOptions::with_translator` 为语法诊断选择语言；Schema 编译也可通过 `SchemaCompileOptions` 设置相同语种。如果工具分别调用 parser 和 compiler，应保持两处设置一致。默认使用英文。诊断原因在生成时固定，后续报告 writer 不会重新翻译。
+### 2.2 AST 与解析结果
 
-`SchemaAst` 由分表节点存储和拥有型文本缓冲持有，不借用输入源。公开节点是只能通过所属 AST 读取的只读视图；节点、ID 和存储表不可由调用方伪造。AST 保留：
+`SchemaParser::parse` 接收字节源、`SchemaParseOptions` 和 `ExecutionBudget`。
+`parse_str` 将字符串适配为 `SliceSource`；若后续需要查找源码位置，则使用
+`parse_with_positions`。该入口返回拥有型 AST 和 `SourcePositionIndex`，索引保存
+字节偏移、行号及 Unicode 标量列号，不保留源字节。
 
-- 顶层项、模块声明、字段、变体的源顺序及各自 span；
-- 别名目标、容器/数组长度、类型路径分段；
-- 单元/单载荷/匿名结构体三类枚举载荷；
-- 注解的结构化参数和参数源顺序；
-- 默认值原始数值文本、`none`、数组、枚举，以及大括号键是标识符还是字符串；
-- 断言/集合表达式的运算结构、路径、方法调用和闭包参数。
+`SchemaParseOptions::with_translator` 设置语法诊断的语言。Schema 编译也可通过
+`SchemaCompileOptions` 设置语言；工具若分开执行解析和编译，应保持两处设置一致。
+默认语言为英文，后续报告 writer 不会再次翻译诊断。
 
-解析阶段仅确认语法，不判定名称是否存在、类型是否兼容、注解是否适用，也不执行表达式。空 `{}` 保留为未判型的大括号字面值，由后续编译阶段根据目标类型判为对象或 map。
+解析器会一直读取到 `EOF`，并以确认后的字节长度确定 AST 跨度。成功时返回完整
+AST；词法或语法错误返回非空 `SyntaxErrors`，不会返回部分 AST。在可靠的声明、
+模块、字段和变体边界，解析器会恢复并继续收集独立错误。
 
-### 2.3 Parser 深度和 AST 预算
+恢复扫描和 token 访问共用执行预算。资源耗尽、分配失败或内部错误会终止解析。
+AST 节点是由所属 AST 持有的只读视图，调用方不能伪造节点 ID 或存储表。
 
-Schema parser 从 `SchemaLimits::syntax()` 读取 `SyntaxLimits`：解析深度、AST 节点、字符串解码、单源字节数和诊断数量均由该类型控制。`SchemaLimits::stream_limits()` 单独提供 token 扫描窗口和单 token 字节上限，并通过 `set_stream_limits()` 配置。流限制通过 `StreamLimits::try_new()` 构造，零窗口会立即返回 `StreamLimitsError`；token 上限为零仍可用于拒绝任何非空 token。Schema loader 将实际流读取限制在单源和全局剩余额度加一个探测字节内，并把字节 tee 到受限源码候选捕获器；成功解析必须到达 EOF。默认 token 窗口为 8192 字节，token 上限为 1 MiB。AST 节点统计包括实际构造的节点（也包括恢复过程中后来被丢弃的节点），每个文件单独计数。AST 还提供 `node_count()` 和 `structure_height()` 供只读检查。默认值与工作区构造均通过可失败分配路径处理。
+AST 保留源顺序和跨度、类型路径与别名目标、注解参数、枚举载荷形式及原始数值
+文本。它也保留大括号字面量的键是标识符还是字符串，以及表达式结构、路径、
+方法调用和闭包参数。
 
-当前 parser 使用显式续接帧处理嵌套声明、类型、默认值和表达式；恢复过程也受工作预算约束。实现应维持本节列出的解析深度、节点数、输入字节和诊断数量边界。
+解析阶段只检查语法，不解析名称、不检查类型兼容性或注解适用范围，也不执行
+表达式。空 `{}` 会暂时保留为未判型的大括号字面量，之后由编译器根据目标类型
+判定它表示对象还是 map。
 
-### 2.4 Parse-only 文档与格式化
+### 2.3 限制与仅解析文档
 
-需要保留原文的工具可调用 `SchemaParser::parse_document`。它返回 `SchemaDocument<'source>`，借用传入的确切 `&str`，并拥有成功解析的语法 AST。该入口不解析导入，也不执行静态语义检查；编译路径仍使用原有流式 `parse`，不会保存完整源文本。
+`SchemaLimits::syntax()` 配置解析深度、AST 节点数、解码字符串、单源字节数和
+诊断数。`SchemaLimits::stream_limits()` 设置 lexer 窗口和单 token 字节上限；
+`StreamLimits::try_new()` 会拒绝零长度窗口。Loader 还限制所有源的总字节数和
+文件数，成功编译要求每个源都读到 EOF。
 
-`SchemaFormatter::format` 消费绑定后的文档和 `SchemaFormatOptions`，通过 OPEO 错误槽返回完整的 `FormattedSchema`。它使用 AST span 识别声明、类型、默认值和枚举载荷分隔符，同时保留源 token 与注释。AST 存储、token 容量和 formatter 帧均计入工作区额度；输出字节数和嵌套深度有各自限额。Formatter 将完整块字符串视为单一 token，保留原始字节、内部换行、缩进和转义拼写，只统一该 token 外部布局。它保留所有 token 与注释的顺序，统一布局与尾逗号；输入中含 CRLF 时使用 CRLF，否则使用 LF。调用方可用 `FormattedSchema::as_str()` 检查结果，或消费式调用 `write_to()` 写入 `fmt::Write` sink。
+默认 token 窗口为 8192 字节，token 上限为 1 MiB。默认语法限制包括深度 128、
+100 条诊断、256 KiB 解码字符串和每文件 100,000 个 AST 节点。节点数包含恢复时
+构造后又丢弃的节点；调用方可读取 `SchemaAst::node_count()` 和
+`structure_height()`。
 
-```rust
-use std::{error::Error, io::Error as IoError};
-use typol::{
-    SchemaFormatError, SchemaFormatOptions, SchemaFormatter, SchemaParseOptions, SchemaParser,
-    SyntaxErrors,
-    core::{ExecutionBudget, ExecutionLimits, SourceId},
-    opeo::ErrSlot,
-};
+需要保留原文的工具可调用 `SchemaParser::parse_document`。它返回借用原始字符串、
+并拥有成功 AST 的 `SchemaDocument`。此入口不解析导入或检查静态语义；编译器的
+流式路径仍不会保留完整源文本。
 
-fn format_schema(source: &str) -> Result<String, Box<dyn Error>> {
-    let mut budget_errors = ErrSlot::new();
-    let budget = budget_errors
-        .try_call(|out| {
-            ExecutionBudget::new(ExecutionLimits::new(2_000_000, 16_000_000), out)
-        })
-        .map_err(|caught| IoError::other(format!("{:?}", caught.take())))?;
-    let mut parse_errors = ErrSlot::<SyntaxErrors>::new();
-    let document = parse_errors
-        .try_call(|out| {
-            SchemaParser::parse_document(
-                SourceId::new(0),
-                source,
-                &SchemaParseOptions::default(),
-                &budget,
-                out,
-            )
-        })
-        .map_err(|caught| IoError::other(format!("{:?}", caught.take())))?;
-    let mut format_errors = ErrSlot::<SchemaFormatError>::new();
-    let formatted = format_errors
-        .try_call(|out| {
-            SchemaFormatter::format(document, SchemaFormatOptions::default(), out)
-        })
-        .map_err(|caught| IoError::other(format!("{:?}", caught.take())))?;
-    let mut output = String::new();
-    formatted.write_to(&mut output)?;
-    Ok(output)
-}
-```
+`SchemaFormatter::format` 接收文档和格式选项，返回完整的 `FormattedSchema`。
+它通过 AST 跨度识别分隔符，同时保留 token 与注释；格式化会统一布局和尾逗号，
+保留块字符串原始字节，并根据输入选择 CRLF 或 LF。
 
-## 3. Schema 编译会话
+Formatter 的工作区、输出大小和嵌套深度分别受限。调用方可通过
+`FormattedSchema::as_str()` 读取结果，也可调用 `write_to()` 将完整结果写入
+`fmt::Write` sink。
+
+## 3. 编译会话与导入
 
 ### 3.1 编译入口
 
-通用/no_std 调用方使用 `SchemaCompiler::new(SchemaCompileOptions)` 建立一次性会话。需要导入时调用 `compile(root, resolver, observer)`；不含 `extern mod` 的内存源可直接调用 `compile_without_imports(root)`，该入口遇到导入时会给出明确诊断。需要登记源名称时使用 `compile_without_imports_with_observer`。`SchemaSource::from_source` 接收一次性 `Read<SourceReadError>`，`from_str` 为内存字符串提供便捷适配；源身份按字节精确比较，但不写入编译产物。源对象不能复制，loader 消费后输入不可复用。可选 `SchemaCompileContext` 将根读取、resolver 和编译各阶段绑定到同一调用余额。
+使用 `SchemaCompiler::new(SchemaCompileOptions)` 创建一次性编译会话。有导入时调用
+`compile(root, resolver, observer)`；不需要导入的内存源可调用
+`compile_without_imports(root)`。带 observer 的无导入入口可登记源名称。
 
-`SchemaResolver::resolve` 接收当前源身份、单段模块名、剩余源字节额度和编译上下文，返回下一份 Schema 源或有限的 `ResolverError`。导入者负责如何映射模块名到文件/内存源。可选 `SourceObserver` 按源登记身份到 `SourceId` 的关联，供宿主保存可读源名称；身份重复时不会重复登记。
+`SchemaSource::from_source` 接收一次性字节 reader，`from_str` 则适配内存字符串。
+源身份按字节精确比较，不写入编译后的 Schema。显式绑定到其他编译上下文的源会
+以 `SCHEMA_CONTEXT_MISMATCH` 失败；上下文已结束时会以
+`SCHEMA_SESSION_FINISHED` 失败。
 
-显式绑定到其他调用的根源会以 `SCHEMA_CONTEXT_MISMATCH` 失败；执行上下文已结束时会以 `SCHEMA_SESSION_FINISHED` 失败。`SchemaCompileErrors::context_failure()` 可读取对应的 `SchemaCompileContextFailure`，诊断保留根源跨度，错误展示包含具体原因。两类调用契约/生命周期错误不会调用 resolver；resolver 自身的宿主失败仍使用 `SCHEMA_RESOLVER_ERROR`。
+`SchemaResolver::resolve` 接收当前源身份、单段模块名、剩余源字节额度和编译上下文。
+宿主负责决定模块名如何映射到文件或内存源。`SourceObserver` 可登记已加载源的
+身份与 `SourceId`，供宿主关联可读名称。
 
-标准文件调用方可使用 `typol_std::FileSchemaCompiler::compile`。该适配器打开并检查文件句柄，由 parser 按需读取 Schema 正文，不构造 `FileText` 全文缓冲；它也负责相对导入路径、宿主文件身份和源名称表。Schema 的词法、语法、名称解析和静态语义仍由核心实现。应用级 `SchemaLoader::compile_file` 编译文件，`compile_text` 通过 `SchemaSource::from_str` 提供无需 resolver 的内存入口，`compile_with_resolver` 用于自定义导入。加载完成后，调用 `LoadedSchema::bind::<T>()` 创建可复用绑定，再通过 `BoundSchema::read` 读取多份配置，避免每次读取都重新匹配 Rust 与 Schema 类型。
+`typol_std::FileSchemaCompiler` 提供文件加载和相对导入，并在 parser 按需读取时
+保持文件句柄有效。应用 facade 提供 `SchemaLoader::compile_file`、
+`compile_text` 和 `compile_with_resolver`；加载后的 `LoadedSchema` 可绑定一次，
+再重复读取多份配置。
 
-### 3.2 导入图加载
+### 3.2 导入图
 
-根文件被分配 `SourceId(0)`；后续成功登记的源按加载顺序获得后续 ID。loader 按根 AST 中的 `extern mod` 声明请求源，并通过显式栈深度优先加载。每条导入边保留状态和可选目标，失败边没有有效目标。
+根源使用 `SourceId(0)`，后续源按加载顺序分配 ID。Loader 使用显式栈按深度优先
+读取导入；每条导入边都记录状态和可选目标，因此失败边不会指向有效源。
 
-源身份按字节精确比较：遇到仍处于 `Loading` 的身份即诊断导入环；遇到已经加载过的身份则诊断重复导入。不能因两个不同身份返回了相同字节而认定是同一源。loader 在解析前登记 `SourceId` 并调用 observer；导入身份去重后才读取正文。源读取错误由有限 `SourceReadError` 类别转为结构化诊断，不向诊断写入宿主任意错误文本。
+仍在加载的身份再次出现时会报告导入环；已加载的身份再次出现则报告重复导入。
+即使内容相同，不同身份仍表示不同源。Loader 在解析前登记源，但会先按身份去重，
+再读取重复源的正文。
 
-`FileSchemaResolver` 将已打开文件的稳定 ID 映射为上述源身份，并在会话期间保留句柄，防止文件 ID 被复用。Unix 使用设备号和 inode，Windows 使用卷序列号和文件索引；硬链接因此共用源身份。无法取得稳定 ID 的平台按规范路径去重。Linux 有 `/proc/self/fd` 时，导入基路径也从实际读取句柄解析；不可用时按请求路径规范化退化。文件内容仍是按需读取，不形成快照。
+文件 resolver 在可用时使用稳定文件 ID：Unix 使用设备号和 inode，Windows 使用
+卷序列号和文件索引，因此硬链接共享身份。无法取得稳定 ID 时改用规范路径；
+Linux 上还可从 `/proc/self/fd` 确定导入基路径。
 
-单文件字节数、所有源总字节数、Schema 文件数和导入嵌套深度在读取时检查。读取边界按实际字节计量，并最多额外请求一个字节以区分恰好达到额度与超限；底层错误可报告已消费字节数。Schema 导入声明只存在于 AST 文件根项；语言中的普通 `mod` 是同一文件内的命名空间层级。
+读取过程同时检查单文件和总字节数、文件数及导入深度。为区分恰好达到上限与
+已经超限，loader 最多额外读取一个探测字节。Schema 导入使用文件级
+`extern mod`；普通 `mod` 声明则在同一源内建立命名空间。
 
-### 3.3 一次调用共享预算
+### 3.3 共享预算
 
-源加载、解析、非正则语义工作、记录生成、索引、位置映射和冻结共用通用 `ExecutionBudget`。Schema 编译器另从 `SchemaCompileOptions::regex()` 创建 `RegexExecutionBudget`，供模式编译及 Schema 默认值中的正则检查共享。两种预算分别报告步数、工作区和失败来源。`SchemaCompileUsage.steps`、`workspace_bytes`、`peak_workspace_bytes` 和 `failure` 继续表示通用额度；对应的 `regex_*` 字段报告正则用量及失败。资源超限与分配失败是不同错误；阶段标签记录当前通用编译阶段，以支持宿主观测。
+一个 `ExecutionBudget` 覆盖源加载、解析、语义检查、记录生成、索引、位置映射和
+冻结。独立的 `RegexExecutionBudget` 覆盖模式编译和 Schema 默认值中的正则检查；
+两类预算分别报告步数、工作区用量和失败原因。
 
-冻结索引按声明槽位保存字段和变体的排序名称查找表，索引分配与比较均消耗同一预算。索引只保存槽位，记录中的字段和变体仍保持 Schema 声明顺序；只读变体查询可使用预算化二分查找。
+`SchemaCompileUsage` 的 `steps`、`workspace_bytes`、`peak_workspace_bytes` 和
+`failure` 表示通用工作用量；`regex_*` 字段表示正则用量。资源耗尽与分配失败
+属于不同错误，阶段标签则标识当前通用编译阶段。
 
-默认策略由不同职责的类型分别提供：`SchemaLimits` 限制单源 1 MiB、Schema 总源 8 MiB 和 64 个源；其 `SyntaxLimits` 限制嵌套深度 128、100 条诊断、解码字符串 256 KiB 和每文件 100,000 个 AST 节点；其 `StreamLimits` 默认使用 8192 字节窗口和 1 MiB token 上限；Schema 默认值验证使用 100,000 个值节点。`RegexLimits` 提供模式字节、数量、嵌套、指令、字符区间和 scratch 状态的结构上限。`RegexExecutionLimits` 独立限制累计正则步数、单次搜索 NFA 状态数和正则工作区，默认分别为 67,108,864。Schema 通用执行额度仍单独配置。源码诊断快照的默认值为 65,536 字节、单行 512 字节、128 条记录及每跨度额外两行上下文。数值是运行策略，可以由调用方覆盖，不属于 DSL 语义；默认值分别定义在 `typol-schema::SchemaLimits`、`typol-syntax::SyntaxLimits`、`typol-syntax::StreamLimits`、`typol-policy::ValueLimits`、`RegexLimits`、`RegexExecutionLimits` 和 `ExcerptLimits`。
+默认资源策略由 `SchemaLimits`、`SyntaxLimits`、`StreamLimits`、`ValueLimits`、
+`RegexLimits`、`RegexExecutionLimits` 和 `ExcerptLimits` 分别配置。例如，默认
+Schema 限制为单源 1 MiB、总源 8 MiB、最多 64 个文件。调用方可以覆盖这些运行期
+策略；它们不是 DSL 语义。
 
-## 4. 静态编译流水线
+## 4. 静态编译
 
-所有步骤均在 `typol-schema::SchemaCompilation::compile` 中按顺序编排。遇到诊断后不生成可用的 `CompiledSchema`；只有全阶段无错误才返回最终产物。
+`SchemaCompilation::compile` 按顺序执行以下阶段。任何诊断都会阻止可用的
+`CompiledSchema` 返回；只有所有检查都通过，编译才成功。
 
-### 4.1 解析各源
+### 4.1 解析、模块与符号
 
-loader 对根源和每个新导入源调用 `SchemaParser`。解析错误保留对应 `SourceId` 和源跨度。语法失败的源不会进入后续模块树；其他可独立加载的源仍可能用于收集诊断，除非发生终止预算错误。
+Loader 解析根源和每个导入源。存在语法错误的源不会进入模块树，但其他可加载的源
+仍可用于收集诊断，除非发生终止性预算错误。
 
-### 4.2 模块树与命名空间
+`ModuleTree` 将声明放入对应源模块，并递归加入普通 `mod` 声明。只有根文件的
+`entry struct` 是配置入口；导入文件中的 entry 标记不会替代根入口。
 
-`ModuleTree` 将每个源的根声明放入相应模块，并递归加入普通 `mod` 声明。模块树和类型声明按稳定 ID 存放，模块成员保持插入顺序。根文件的 `entry struct` 被标为唯一配置入口；导入文件的 entry 标记不会替代根入口，它在声明树中仍表现为可引用类型。
+`SymbolTable` 为模块、类型、字段、变体及匿名结构体载荷字段建立索引。它检查
+声明、字段和变体重名，以及入口数量是否有效。查找结果会明确区分缺失、唯一命中
+和歧义，不会静默选择重名项。
 
-`SymbolTable` 为每个模块建立共享的模块/类型命名空间索引，并为结构体字段、枚举变体和结构体载荷字段建立索引。它检查同层声明重名、入口数量、字段重名和变体重名；重复项会关联先前声明的位置。查找索引返回缺失、唯一命中或歧义状态，不静默选择重复声明。
+### 4.2 类型解析
 
-### 4.3 类型路径和已解析类型图
+类型路径首段从当前模块开始，逐级向父模块查找。首段解析后，其余路径段只能在
+模块命名空间中解析。把类型用作中间模块、末段不是类型或符号无效都会产生语义
+错误。
 
-类型引用从当前模块开始，向父模块逐层查找路径首段；首段命中后，剩余路径段只能在模块命名空间继续解析。中间段若命中类型而不是模块、最终段若不是类型、目标模块/符号无效，分别产生语义错误。
+类型图为内建类型、用户类型、容器、别名和匿名结构体枚举载荷分配 ID。别名保留
+自身记录和底层形态；使用点也能保留适用的别名约束及 `@secret` 元数据。
 
-类型图为内建类型、用户类型、容器类型、别名链接和匿名结构体变体载荷分配语义 ID。别名是透明的类型形态：编译结果会保留命名别名记录以及目标底层形态，使用点仍可保留别名约束和 `@secret` 元数据。别名环保持独立检测；之后编译器以受预算约束的工作队列计算可产生有限值的用户声明最小不动点。内建类型、option、动态数组、map 和零长度定长数组可构造；结构体要求全部字段可构造，枚举至少要求一个可构造变体。正长度定长数组要求其元素类型可构造。固定点中仍无有限值的递归组件使用 `SCHEMA_SEMANTIC_ERROR` 并报告“递归类型不存在有限值”。未知引用和别名环等前序无效声明不会再引出递归级联诊断。未知路径、嵌套 option 及超范围定长数组继续使用原诊断。
+别名环单独检查。随后编译器通过受预算约束的工作队列，计算哪些用户类型能构造
+有限值：结构体要求全部字段可构造，枚举只需有一个可构造变体。正长度定长数组
+要求元素可构造，零长度数组则不要求。
 
-字段及载荷解析前会为命名结构体和枚举预分配 ID，因此递归引用始终是有限 ID 边，不会展开成无限声明树。冻结校验会检查索引范围、字段和载荷引用、owner 以及嵌套 option 规则，并接受合法回边。
+无法构造有限值的递归组件会产生语义诊断。其他原因已无效的声明会排除在此检查外，
+避免产生级联递归错误。字段和载荷解析前会先分配结构体与枚举 ID，使合法递归引用
+保持为有限的 ID 边。
 
-类型记录包括内建类型、`option`、数组（可选固定长度）、map、结构体和枚举。结构体与枚举按声明顺序保存字段/变体引用；枚举变体显式保存 unit、单值或匿名结构体载荷类型。公开语法 AST 通过 `TypeExpr::annotations()` 提供注解；别名、字段和单值载荷视图上的注解 accessor 已移除。下游穷举匹配 `ConstraintLayer` 时需处理新增的 `TypeUse` 变体。
+### 4.3 注解与表达式
 
-### 4.4 注解和正则
+注解附着在其后紧邻的递归类型表达式节点上。编译器将声明根注解分配给所属项，
+将嵌套注解分配给 `TypeUse` 槽，并检查目标类型、参数、重复项、边界顺序及约束
+之间的兼容性。
 
-解析器将注解存放在其后紧邻的递归类型表达式节点上。注解编译器同时遍历 AST 和已解析类型图：根注解分配给声明 owner，嵌套注解分配给 TypeUse 槽。它检查注解的目标类型、参数形式、重复注解、边界顺序及叠加约束兼容性。有效规则先合并别名约束，再合并当前字段、载荷或嵌套类型使用点的约束。
+`@regex` 字符串由 `typol-regex` 编译为受限 Thompson NFA。编译期检查模式大小、
+正则数量、指令数和字符范围；运行期校验复用编译好的程序。`@env` 只允许出现在
+符合条件的标量或可选标量字段根节点，并生成授权元数据，不读取环境提供器。
 
-`@regex` 的字符串在 Schema 编译期交给 `typol-regex` 编译为受限 Thompson NFA；实现细节见[正则实现说明](../regex-implementation/)。非法模式映射到正则语法诊断；模式字节、正则数量、单模式/累计指令数和字符范围数量累计受限。编译后约束只保存 regex 程序引用，不在配置每次校验时重新编译。
+`@secret` 标记精确的类型节点，用于诊断、展示和 Rust 转换时的脱敏；别名根标记也
+会作用于该别名的使用点。`@variants` 会沿透明别名解析名称，并保存 `VariantId`；
+未知或重复名称、目标类型无效及有效集合为空都会使 Schema 编译失败。
 
-只有符合条件的字段根节点上的 `@env` 会编译为字段环境授权记录；嵌套 TypeUse、别名和载荷根上的 `@env` 无效，Schema 编译器也不会读取环境。`@secret` 属于精确的类型表达式节点，并在对应值上用于配置诊断、安全展示和 Rust 值转换；别名根的标记仍会应用到该别名的使用位置。
+表达式编译器会类型检查 `@assert` 和 `@all`，包括路径、方法、运算符、字面值类型，
+以及可用的 `self`、`root`、闭包和 map 上下文。表达式结果必须是 `bool`。
+编译后的程序存入 `typol-semantic`；断言稍后执行，`@all` 则附着于对应数组或
+map 的类型使用点。
 
-`@variants` 会将解码后的名称解析为透明别名最终指向的枚举，并在编译规则中保存排序且唯一的 `VariantId`。未知名称、重复名称、非枚举目标、同一类型节点上的重复注解及组合后空集合均会在冻结记录前失败。别名限制与当前 TypeUse 限制取交集；即使是 `option<Enum>`，允许集合也必须非空。默认值构造也会执行相同规则；被拒绝的默认值会产生 Schema 语义诊断，并将约束标签指向拒绝它的规则。
+### 4.4 默认值与冻结
 
-### 4.5 表达式静态分析
+默认值编译器根据已解析的字段类型构造 `ConfigValue`，并检查标量形态、数值范围、
+浮点有限性、容器、对象、枚举载荷和适用约束。整数类型只接受整数 token，浮点
+类型只接受浮点 token；`f32` 默认值直接舍入到 binary32。
 
-表达式编译器解析 AST 中的 `@assert` 和 `@all`，分类 `self`、`root`、闭包参数及 map 的 `key`/`value` 上下文，对路径、方法、字面值推断、运算符和比较逐节点检查类型，并要求程序结果为布尔值。无效字段、方法、上下文、操作数或非布尔结果使整个 Schema 编译失败。
+对象默认值可省略有字段默认值或为 `option` 的字段。缺少必填字段、未知字段或字段
+重复都会使 Schema 无效。默认值依赖使用显式帧并检查循环，包括递归 Schema 类型
+导致的循环；默认值不会读取环境变量。
 
-成功表达式编译为 `typol-semantic` 中的类型化表达式节点和程序 ID。`@all` 仅附着于紧邻注解之前的数组或 map 节点，其约束槽稍后绑定到表达式程序。Schema 编译期间不执行实例断言；静态默认值的集合约束由默认值构造校验阶段执行。
+默认值通过校验后会产生 `SchemaDefaultValidation`。完整编译将它传给
+`Builder::freeze_with_validated_defaults`，避免重复校验；直接调用
+`Builder::freeze` 时没有这份凭证，仍会校验输入。默认值构造受值限制和通用预算
+约束，正则检查则使用本次编译的正则预算。
 
-### 4.6 默认值静态构造
+`RecordBuilder` 将模块、符号、类型、约束、默认值、表达式和位置数据冻结为
+`CompiledSchema`。它建立排序查找索引，同时保持字段和变体的声明顺序。调用方通过
+只读 `TypeView`、字段、变体和规则视图读取结果；`CompiledSchema::entry()` 返回
+根入口视图。
 
-默认值编译以字段已解析类型为上下文，将语法节点构造成 `ConfigValue`：检查目标标量形态、数值范围和有限浮点，递归构造数组/map/对象/枚举载荷。整数类型默认值只接受整数 token，浮点类型默认值只接受浮点 token，与配置字面值一致；`f32` 浮点 token 直接解析到 binary32，避免先转 `f64` 再舍入。`{...}` 根据目标是结构体还是 map 判型；对象字段未知/重复或必填字段缺失均使 Schema 无效。
+源码跨度仍是 UTF-8 字节范围。编译模型根据解析期索引保存 1-based 行列位置，列按
+Unicode 标量计数。源码片段独立受限；编译器不保留完整源文本，也不会为补齐缺失
+片段而重新读取源文件。
 
-对象默认值可以省略由字段默认值或 option 规则可补足的字段。字段默认值依赖以显式帧解析，并检测依赖环；即使 Schema 类型本身合法递归，也不会放过省略字段造成的默认值无限展开。编译后的嵌套默认值会复制到适用字段。Schema 默认值不会访问环境。默认值构造阶段递归检查目标形状以及局部、别名继承、字段、载荷和嵌套 TypeUse 约束；枚举默认值还会解析为变体 ID 并逐条检查 `@variants`，拒绝时报告默认值位置和对应约束标签。阶段会保留错误恢复和元素位置。校验成功时会产生 `SchemaDefaultValidation` 结果；完整 Schema 编译将该结果随同同批默认值传入 `Builder::freeze_with_validated_defaults`，从而省去冻结时的重复遍历。普通 `Builder::freeze` 不接受校验结果，仍对任意直接构造的输入完整校验。值节点、深度和字符串使用 Schema 编译配置的 `ValueLimits` 与通用 `ExecutionBudget`；正则检查与模式编译共用本次编译的 `RegexExecutionBudget`。违反约束会阻止产生校验结果，不会冻结出无效默认值。跨字段 `@assert` 依赖完整配置实例和 `root` 上下文，仍在配置值构造后执行。
+## 5. 诊断
 
-### 4.7 记录冻结与返回
+Schema 失败会返回非空 `SchemaCompileErrors`，或不需要分配的紧急错误。诊断包含
+稳定错误码、主要跨度、可选标签和位置状态；重名诊断可指出两处声明。
 
-`RecordBuilder` 将临时模块/符号/类型图、约束槽、默认值、表达式程序和源位置信息冻结为 `typol-semantic::CompiledSchema`。冻结先构建字段/变体槽位索引并校验记录结构；普通 `Builder::freeze` 还会完整校验每个默认值，完整 Schema 编译则使用与默认值绑定的校验结果避免重复遍历。只有全部检查通过才返回编译模型。最终模型通过只读 `TypeView`/字段/变体/有效规则视图读取；外部调用方不能改变内部记录、索引和编译状态。结构字段查询依据排序槽位索引；表达式读取字段时先确认声明槽位与值项名称一致，再直接读取该项。变体排序索引只映射回保持声明顺序的记录。`CompiledSchema::entry()` 返回根入口类型视图。
+`Diagnostic::message()` 返回 `Result`，因此翻译失败会保留给调用方。
+`Display` 无需先生成报告字符串，即可写出错误码、消息、可用位置和安全片段；
+`Debug` 只显示数量和状态。`internal_cause()` 可读取结构化内部原因。
 
-最终记录还包含源 span 到 1-based 行列 `SpanLocation` 的索引。位置由解析期 `SourcePositionIndex` 按端点查询；冻结时 `SourceCatalog` 通过源长度和索引中的 UTF-8 边界验证跨度，不读取源文本。行号/列号按 Unicode 标量计数；span 本身仍是 UTF-8 字节偏移。成功记录缺少端点时编译失败。错误返回若诊断位置无法由诊断或索引提供，则保留原始诊断并通过 `LocationStatus` 报告不可用，不回读源文件。
-
-`LoadedFile` 仅保留身份、AST、实际字节长度、位置索引及有界候选捕获器，不保留完整源文本。每个源的候选字节和记录额度按最大源数切分，以保证本次编译的候选捕获总量不超过 `SchemaLimits::excerpts()`；所有存储仍计入共享工作区。AST 完整后，所有默认值跨度先被遮罩，再固定诊断或编译记录引用的候选行。成功产物通过有界 `SourceExcerptSet` 保存安全行；编译失败则在源目录释放前提取诊断所需片段并交给 `SchemaCompileErrors` 拥有。快照缺少候选时标记截断或不可用，不回读源文件，也不会改变主要诊断。
-
-## 5. 静态错误与诊断契约
-
-Schema 错误由 `SchemaCompileErrors` 以非空集合或不需分配的内联紧急错误返回。公开读取接口为 `diagnostics()`、`span_location()` 和 `location_status()`。诊断带稳定错误码、主要跨度和可选标签；重复名称诊断可同时指出后续和先前声明。
-
-每条诊断还公开稳定的 `kind().id()`、自身的 `DiagnosticStage`、语义相关位置角色和字段可用状态。`TypolError` 在 std 与 no_std 构建中提供相同的索引诊断及上下文查询接口。应用同时处理 Schema 和配置错误时，应使用公共 facade 查询接口，并将操作阶段与诊断阶段分开保存；
-
-`Diagnostic::message()` 以 `Result` 返回已存储的原因文本，因为紧急翻译失败必须保留并传给调用方。原因在诊断生成时确定，报告和 JSON 消费端直接读取它。
-
-`SchemaCompileErrors` 实现 `Display` 和标准错误接口。`Display` 写出错误码名称与数值、消息、可用位置和安全源码片段，不先申请拥有型报告字符串；`Debug` 只显示诊断数量与位置状态。`internal_cause()` 可查询结构化的 `SchemaInternalCause`，其中 AST 访问失败保留原始错误变体、完整 `usize` 索引及范围端点；内部原因也会出现在展示文本中。源码快照可通过 `excerpts()` 读取。额度为零或收集失败时仍保留诊断和可用位置，源码片段状态为 `Unavailable` 或 `Truncated`。
-
-当前相关错误码定义在 `typol-core::DiagnosticCode`：
-
-| 诊断类别 | 错误码 |
+| 类别 | 错误码 |
 | --- | ---: |
-| 资源超限 | 1 |
 | 分配失败 | 2 |
 | 词法错误 | 3 |
 | Schema 语法错误 | 4 |
 | 诊断数量到限 | 5 |
 | 正则语法错误 | 6 |
 | Schema 静态语义错误 | 7 |
-| resolver/宿主导入错误 | 8 |
-| 根源编译上下文不匹配 | 19 |
-| Schema 编译会话已结束 | 20 |
+| resolver 或宿主导入错误 | 8 |
+| 根编译上下文不匹配 | 19 |
+| 编译会话已结束 | 20 |
 
-资源、分配和内部错误优先作为终止诊断；普通诊断按源 ID 和字节跨度稳定排序，达到诊断上限时保留终止槽。诊断不应复制完整源码行、环境原值或敏感默认值。宿主错误使用有限类别，不将任意 OS 错误文本纳入核心诊断。
+普通诊断按源 ID 和字节跨度稳定排序。资源、分配和内部错误优先作为终止诊断，
+并为诊断数量到限保留槽位。核心诊断不会复制完整源码行、环境原值、敏感默认值、
+宿主任意错误文本或真实文件路径。
 
-词法错误与 Schema 语法错误分别由 syntax 层产生；缺失导入、名称/类型不匹配、注解错误和表达式类型错误由 Schema 编译产生。Schema 无效时调用方必须停止配置解析，不能将部分记录用于加载。
+语法错误由 `typol-syntax` 产生；导入、名称、类型、注解和表达式错误由 Schema
+编译阶段产生。编译失败时必须停止配置解析，因为部分记录不可用于加载。
 
-## 6. 编译产物在配置期的使用
+## 6. 配置解析
 
-`typol-config::ConfigParser::parse` 要求有效 `CompiledSchema`、配置源/选项和 `Environment` 实现。解析器从 `schema.entry()` 开始按预期类型读取配置 token，直接创建值树。结构体和 map 的 `{}` 解释由编译类型决定；解析不会尝试另一种解释来挽救类型错误。
+`ConfigParser::parse` 接收有效的 `CompiledSchema`、配置源和选项，以及
+`Environment` 实现。解析器从 `schema.entry()` 开始，按预期类型读取 token 并直接
+构造值树。大括号表示结构体还是 map，由编译后的类型决定。
 
-完成结构体或匿名结构体载荷时，解析器对每个字段应用显式值、字段默认值、option 的 `none`/可选提升规则，并诊断未知、重复或缺失必填字段。数组、定长数组、map 和枚举载荷按 Schema 记录校验形态。所有值完整后才执行结构体与当前活动枚举变体断言。任何构造或校验错误都不返回部分实例。
+结构体或匿名结构体载荷完成时，解析器应用显式值、字段默认值和 option 规则，并
+报告未知、重复或缺失的必填字段。数组、定长数组、map 和枚举载荷按编译后的形态
+检查；出现错误就不会返回部分值。
 
-局部标量、字段、载荷和嵌套 TypeUse 约束在对应值完成时检查；数组/map 集合约束在容器完成时检查；完整树断言最后执行。环境读取仅在配置显式使用 `env(...)` 时发生，并受符合条件的字段根 `@env` 授权；同一调用中的同名原始环境值仅读一次，但每个字段引用独立转换/验证。Schema 默认值不来自环境。各值来源（配置 literal、Schema 默认、环境、fallback、Rust 转换）在 `typol-core::ValueSource` 区分。
+局部约束在值完成时检查，集合约束在数组或 map 结束时检查，完整树断言最后运行。
+断言只检查当前激活的枚举变体。环境仅在配置显式写出 `env(...)` 且字段根
+`@env` 已授权时读取；一次调用中每个名称只读取一次，但各引用分别转换和校验。
 
-编译产物中的别名约束、字段/载荷约束、表达式程序、正则程序、秘密标记及源位置，在配置期按只读视图访问。运行时正则搜索使用调用方额度和有界 scratch；预算耗尽是资源错误，不是匹配失败。
+Schema 默认值不会来自环境。`ValueSource` 区分配置文本、Schema 默认值、环境值、
+回退值和 Rust 转换值。运行期通过只读视图读取已编译约束和正则程序。
 
-## 7. Rust 类型绑定和宿主入口
+## 7. Rust 绑定与编解码
 
-`#[derive(Typol)]` 只从 Rust 类型本身生成类型描述和转换实现。它不在宏展开时读取 Schema。`LoadedSchema::bind` 和 `TypedSchema::bind(compiled_schema, options)` 要求类型具备隐藏的 `BudgetedTypol` 标记；derive 为所有嵌套字段和枚举载荷添加标记约束。内建标量与容器按其子类型条件实现该标记。derive 支持 `Vec<Self>` 等递归形态；绑定器按 Rust `TypeId` 与 Schema `TypeView` 配对追踪活动分支，遇到相同配对时结束该分支，并继续独立检查同一 Rust 类型在其他 Schema 使用点的映射。绑定、转换、节点、执行和工作区额度仍约束有限递归值。若派生类型包含手写 `Typol` 子类型，应添加 `#[typol(trusted)]` 以省略该类型的常规额度标记，并通过 `bind_trusted` 使用。
+`#[derive(Typol)]` 描述 Rust 类型时不会打开 Schema 文件。`LoadedSchema::bind` 将类型
+描述与 Schema 入口比对，并返回可复用绑定。普通绑定要求 `BudgetedTypol`；递归
+派生类型按 Rust `TypeId` 与 Schema 视图配对，转换值仍受已配置额度约束。
 
-当应用逻辑需要字段来源时，使用 `Sourced<T>`。它与 `T` 具有相同的 Schema 形态，`source()` 返回来源类别。成功解析 `env(...)` 后，`environment_name()` 和 `environment_fallback()` 可读取保留的引用元数据；它们不含 provider 返回的实际值。`Option<Sourced<T>>` 在内层标量存在时记录引用，`Sourced<Option<T>>` 则在 option 值上记录引用。环境引用只允许位于标量或 `option<标量>` 字段，且 `@env` 名称必须完全匹配。数组、map、枚举单载荷、未授权字段和 `none` 值不能携带引用。
+手写 `Typol` 实现通过 `bind_trusted` 接入，返回类型会明确标记为受信任绑定。库管理的
+工作仍受预算约束，但回调可以在额度外分配、阻塞或执行任意计算；手写解码器的
+返回值也不会重新校验。`BudgetedTypol` 是能力标记，不是沙箱。
 
-`Sourced::from_environment` 与 `Sourced::from_environment_with_fallback` 可显式创建引用，不会查询环境 provider。typed writer 会在写入首字节前校验名称、标量形状、fallback 可表示性、字段位置和 `@env` 授权。调用 `into_value()` 可主动丢弃引用，只写 Rust 值。变量未设置且采用表达式回退值时，解析结果来源是 `ExplicitFallback`，不是环境引用。`Sourced<T>` 不实现 `Debug`，避免意外打印包装的秘密或引用 fallback。`BoundSchema::read_with_value` 返回 `BoundRead<T>`，其中包含类型化结果和同一次解析、校验会话产生的 `ValidatedConfigValue`；`read` 仍是只返回类型化结果的便捷方法。
+`Sourced<T>` 保留标量字段的值来源，也可保留环境引用的名称和回退元数据。它与 `T`
+具有相同的 Schema 形态；引用只适用于获授权的标量或可选标量字段。该类型不实现
+`Debug`，避免意外打印秘密值或回退值。
 
-手写实现通过 `LoadedSchema::bind_trusted` 或 `TypedSchema::bind_trusted` 接入，返回的 `TrustedBoundSchema` 或 `TrustedTypedSchema` 会保留这一路径标识。受信任回调使用 `DescribeContext`、`ConversionContext` 和子类型分发时，对应的库管理工作仍受现有额度约束；库无法限制回调直接分配、阻塞或执行任意计算，也不重新校验手写解码器返回的 Rust 值。`BudgetedTypol` 只是常规 API 的能力标记，不是沙箱或防止恶意伪造的安全边界。需要约束不可信实现时，必须另行使用进程或 Wasm 隔离。
+不启用 `std` 时可使用 `OrderedMap<T>`；启用 `std` 后可用 `HashMap<String, T>`，也可通过
+可选 feature 使用 `hashbrown` 或 `btree-map` 实现。`OrderedMap` 按键排序，哈希 map
+会在解码前预留容量。BTreeMap 使用经过检查的逻辑额度估算；由于没有可失败的
+节点预留接口，节点分配仍遵循全局分配器。
 
-普通记录和枚举映射应优先使用 derive；只有存在特殊映射且应用已审查并信任其回调时才手写实现。迁移时检查直接 `impl Typol`，以及 derive 类型字段/载荷的传递嵌套；含手写类型的整个父类型都改为 `bind_trusted`，或把映射重构成普通字段和枚举后使用 derive。配置读取应显式执行 Schema 编译、类型绑定和读取；手写类型通过加载后调用 `bind_trusted`。
-
-内建 map 绑定支持无需 `std` 的 `OrderedMap<T>`、启用 `std` 后的 `std::collections::HashMap<String, T>`、启用可选 `hashbrown` feature 后的 `hashbrown::HashMap<String, T>`，以及启用可选 `btree-map` feature 后的 `alloc::collections::BTreeMap<String, T>`。BTreeMap 实现也适用于 `std::collections::BTreeMap`，且 `btree-map` 不会启用 `std`。`OrderedMap` 按 Rust 字符串序保存键；其可失败插入会替换重复键并返回旧值，而转换解码会拒绝重复输入键。解码先对输入键引用排序，再预留最终向量容量，避免构造 map 时发生二次方级元素移动。哈希 map 会在解码条目前预留容量；`OrderedMap` 和哈希 map 路径都按实际元素容量记入目标额度，并单独统计拥有型键文本。哈希 map 的额度估算不包含哈希表控制字节和 allocator 元数据。hashbrown 当前默认的 foldhash 构建器通常不防御 HashDoS，键可由攻击者控制的应用应评估这一取舍。标准库 `HashMap` 仍可使用，并保留其不同的默认哈希构建器。BTreeMap 解码以 checked multiplication 计算每个 `size_of::<(String, T)>()` 逻辑条目的估算额度，另计拥有型键文本，并直接将条目插入树中。该估算不包含树节点布局或 allocator 元数据。BTreeMap 没有可失败的节点预留接口，因此节点分配失败遵循全局分配器行为，可能 panic 或终止进程；不会返回结构化分配错误。
-
-同时启用 `serde` 和 `hashbrown` 时，Typol 会转发 hashbrown 的 Serde 支持。Serde 自身的 `Deserialize` 回调可能独立分配内存，不经过上述可失败的预留路径。
-
-文本解析、外来 `ConfigValue` 规范化和 Rust 序列化使用共享的完整树 Schema 校验入口。Rust 值不能跳过字段/集合约束或完整树断言；序列化输出按 Schema 字段顺序和 map 解码键序构造。上下文 serde 方法在绑定后使用同一验证路径；无 Schema 上下文的普通 serde trait 调用不承诺验证实际 `.tschem`。
-
-`BoundSchema::write(value, sink, options, out)` 和受 feature 控制的 `write_serde` 使用 `WriteOptions`；`WriteOptions::default()` 选择 `TextLayout::Compact`，并在调用方未显式覆盖时继承加载 Schema 的转换额度。`with_layout(TextLayout::Pretty)` 会将非空结构体、map 和数组展开为四空格缩进的多行文本，每行一个条目并带尾逗号；单值枚举载荷使用多行分组且不带载荷逗号。空容器仍保持内联。Pretty 输出以 LF 结尾，与 `config fmt` 布局一致；紧凑输出保持单行且无末尾换行。`TypedSchema::serialize` 和 `serialize_serde` 使用相同选项并写入调用方提供的 sink。格式空白会计入输出和执行额度；编码器仍使用迭代路径。写出前会完成转换和完整 Schema 校验；sink 或输出额度错误可能留下已写入的前缀。输出仍包含 `@secret` 的实际值。
-
-### Serde 桥接支持矩阵
-
-`TypedSchema::serialize_serde` 和 `TypedSchema::deserialize_serde` 是 Typol 提供的上下文桥接：它们在成功绑定的 Schema 下消费/产生 Serde 数据模型事件。应用直接把普通 Serde trait 交给自选的 serializer/deserializer 时，不经过该桥接，也没有实际 `.tschem` 的校验保证。无论绑定是否带有 `BudgetedTypol`，调用方提供的 `Serialize`/`Deserialize` 实现都属于用户代码信任边界；桥接只计量其控制的操作，不能限制这些回调的直接分配、阻塞或任意计算。完整矩阵也列于 `typol` crate 的 Rust 文档。
+文本解析会执行完整校验。外部 `ConfigValue` 规范化只检查形态并补齐默认值；
+之后还需调用 `ConfigValueProcessor::validate` 检查约束和断言。Rust 序列化与上下文
+Serde 也会校验完整值，因此 Rust 值不能跳过 Schema 规则。文本 writer 在写入前
+校验，按 Schema 字段顺序输出，并提供紧凑和易读两种布局。
 
 | Serde 数据模型操作 | `serialize_serde` | `deserialize_serde` |
 | --- | --- | --- |
-| bool、整数、有限浮点数、字符串 | 支持 | 支持 |
+| `bool`、整数、有限浮点数、字符串 | 支持 | 支持 |
 | `Option<T>` | 支持；拒绝嵌套 option | 支持；拒绝嵌套 option |
-| 序列 | 支持，按 Schema 数组编码 | 支持，按 Schema 数组解码 |
-| tuple | 支持，但必须映射到长度相同的 Schema 定长数组 | 支持，但必须映射到长度相同的 Schema 定长数组 |
-| map | 支持，键必须是字符串 | 支持，键必须是字符串 |
-| 命名结构体 | 支持，类型名和字段名须匹配 Schema | 支持，类型名和字段名须匹配 Schema |
-| 枚举变体 | 支持 unit、newtype 和命名字段载荷 | 支持 unit、newtype 和命名字段载荷 |
-| `serialize_char`、bytes、独立 unit、unit/newtype/tuple struct、tuple enum variant、`collect_str` | 拒绝 | 不适用 |
-| `deserialize_any`、`deserialize_ignored_any`、根级 `deserialize_identifier`、`char`、bytes、独立 unit、unit/newtype/tuple struct、tuple enum variant | 不适用 | 拒绝 |
+| `sequence` | 按 Schema 数组处理 | 按 Schema 数组处理 |
+| `tuple` | 长度相同的 Schema 定长数组 | 长度相同的 Schema 定长数组 |
+| `map` | 仅支持字符串键 | 仅支持字符串键 |
+| 命名结构体 | 类型名和字段名必须匹配 | 类型名和字段名必须匹配 |
+| 枚举变体 | `unit`、`newtype`、命名字段载荷 | `unit`、`newtype`、命名字段载荷 |
+| 其他：`char`、`bytes`、`unit`、`tuple struct/variant`、`collect_str` | 拒绝 | 不适用 |
+| `deserialize_any`/`ignored-any`、根级 `identifier`、`char`/`bytes`/`unit`、`tuple struct/variant` | 不适用 | 拒绝 |
 
-Serde 桥接会拒绝使用三个稳定的 `DiagnosticContext::failure_point()` 标识，且它们共用 `RUST_CONVERSION_ERROR` 诊断码：
+桥接会通过稳定的 `DiagnosticContext::failure_point()` 标识报告不支持的操作、
+用户回调拒绝和 Schema 形态不匹配。自定义 Serde 错误文本不会保存或展示。回调
+仍属于用户代码信任边界，桥接只能计量自己控制的工作。
 
-- `serde-data-model-operation-unsupported`：请求了矩阵未支持的 serde 数据模型操作。
-- `serde-user-custom-rejection`：Serde 实现通过 `serde::de::Error::custom` 或 `serde::ser::Error::custom` 拒绝操作。
-- `serde-schema-shape-mismatch`：已支持的操作与绑定 Schema 的类型、名称、字段、枚举载荷或定长数组形状不匹配。
+`typol-std` 提供文件、reader、进程环境和诊断适配器。`std` 与 `no_std + alloc`
+构建共用相同的加载、绑定和错误类型；调用方显式传入 `Environment`。
 
-Serde 在读取结构体字段名和枚举变体名时会内部使用 `deserialize_identifier` 读取字符串标识符；矩阵中的“根级”限定表示直接把目标类型作为 identifier 解码不受支持。
+## 8. 安全与源码片段
 
-调用方可从 `CodecErrors::diagnostic_context(index)` 获取相应静态上下文。自定义错误文本不会保存在错误载体中，也不会进入 `Display`、`Debug` 或诊断，避免泄漏敏感输入。完整 Schema 值校验在 serde 序列化事件转换后执行；资源、分配和 Schema 校验错误仍使用各自的诊断类别。
+`@secret` 及从别名传播的标记会在诊断和安全展示中隐藏敏感消息，并将路径截断到
+秘密边界。Rust 转换错误遵循相同策略。若路径无法安全映射，或脱敏时资源不足，
+系统不会暴露原始路径。
 
-`typol-std` 提供 `FileSchemaResolver`/`FileSchemaCompiler` 与 `ProcessEnvironment` 等标准库适配。`SchemaLoader` 和 `LoadedSchema` 组织 Schema 加载、源名称、类型绑定和配置读取；核心 parser/compiler 不调用文件 API、`std::env` 或终端输出。
+源码快照只保存有界的安全行。发布片段前会遮罩已知默认值范围和秘密配置值；秘密
+map 项同时隐藏键和值。若无法证明遮罩完整，系统会省略片段，不会输出原始内容。
 
-加载 facade 在 `no_std + alloc` 和 `std` 构建中使用同一组 `SchemaLoader`、`LoadedSchema`、`BoundSchema`、`ReadRequest`、`TypolError` 与 `TypolStage` 类型。共有读取入口显式接收 `Environment`；文件和 reader 来源及进程环境快捷入口仅由宿主适配器提供。
+片段限制覆盖总字节数、单行字节数、记录数和上下文行数。列按 Unicode 标量计数，
+制表符占一列，CRLF 不计入行文本。截断会保持 UTF-8 边界；缺少片段时不会回读源
+文件来补齐。
 
-## 8. 安全和数据处理要求
+成功值和序列化输出仍包含秘密数据。安全展示和诊断脱敏不等于加密；应用仍须保护
+自己保存或写出的实际值。
 
-- 源位置内部始终使用字节偏移；格式化时才换算为行列。
-- 环境原始字节缓存仅存在于单次配置调用，不把原始值拷入普通诊断。
-- `@secret` 以及别名传播的秘密位驱动安全诊断/展示；敏感容器隐藏子项路径和 map 键。
-- `TypedSchema::serialize` 和 `TypedSchema::deserialize` 产生的 Rust 值转换诊断，在进入 `CodecErrors` 前按同一秘密边界隐藏消息并裁剪路径；无法解析的路径会被清除，脱敏资源失败不会回退到原始路径。
-- 默认值源范围及秘密配置子树在源码快照发布前遮罩；秘密 map 项同时遮罩键和值。若遮罩范围无法完整确认，则省略该行，不输出原始源码。
-- 错误和编译产物只保留有界安全源码行，不保留完整输入；环境原值、真实文件路径和原生 OS 错误文本不进入默认报告。
-- 值的实际编码必须保留秘密数据以支持还原；安全展示与序列化是不同用途。
-- `ConfigValue`、Schema token 和编译错误的通用 `Debug` 不得递归暴露可能敏感的字面值。
-- 资源或分配失败不得 panic、无限递归或返回部分 AST、部分 Schema、部分配置值。
-- Unicode 字符长度、正则字符、源列和 map 键等价规则分别遵循 DSL 定义；不可用 UTF-8 字节数、区域设置或隐式归一化替代。
+## 9. 维护
 
-## 9. 验收与维护
+维护时应覆盖 lexer 与 AST、导入图、名称和类型解析、递归类型、注解、默认值、
+表达式类型、正则限制、诊断、资源失败、运行期校验及 Rust 绑定。断言结果时应
+比较稳定错误码、位置和结构化数据，不依赖调试字符串。
 
-维护实现时至少按层覆盖：词法与 AST 结构；导入缺失/环/重复身份；名称空间和根入口；路径解析、别名环及类型递归；注解适用性和边界冲突；默认值递归完整性及约束；表达式类型/上下文；正则子集与累计额度；源位置、诊断上限和分配故障；配置期对编译记录的实际消费；Rust 类型绑定与上下文编解码。
-
-测试应比较稳定诊断码、位置和结构化结果，不依赖调试字符串。规范示例的公共端到端验收与资源策略复核应纳入回归测试。若实现与 Schema DSL 规范冲突，先登记并修订规范/决策记录，再调整实现，不能由 parser 或编译器私自确立新语义。
-
-### 9.1 有界诊断源码快照
-
-`SchemaLimits::excerpts()` 提供独立的 `ExcerptLimits`：总存储字节、单行字节、记录数量和每个跨度的上下文行数。零额度关闭片段。每个跨度从起始行选取有限窗口，超出窗口的跨行范围标记为截断；上下文行总数在起始行前后各分配一半。候选窗口、脱敏范围缓冲和最终快照各自受字节上限约束，全部计入调用工作区；可选申请失败不改变业务诊断。片段通过 `SourceExcerptSet` 拥有，状态为 `Complete`、`Truncated` 或 `Unavailable`；缺失记录不得回退读取或显示原文。列使用 Unicode 标量计数，制表符占一列，CRLF 不进入行内容；裁剪只能落在 UTF-8 边界，裁剪行带省略标记。
-
-配置流式输入维护受限候选和近期行窗口，诊断引用的窗口行固定至调用结束；延迟诊断只能使用仍保留的候选。解析结束只发布实际诊断及其上下文引用的安全行。已知秘密值和秘密 map 的源范围进入遮罩，未完成秘密值遮罩延伸到输入末尾。恢复跳过或尚未绑定的内容保守隐藏；范围记录失败则片段不可用。环境原值不进入行窗口。Schema 候选仅在完整 AST 上应用默认值遮罩，随后提取诊断和编译记录引用的行；语法失败、边界无法证明或捕获失败时丢弃原始候选。错误及编译产物不保存完整源，所有新增类型的 `Debug` 仅显示状态及数量。
+若实现与 Schema DSL 冲突，应先修订规范或决策记录，再修改 parser 或编译器语义。
+实现文档描述当前源码，不独立确立语言规则。

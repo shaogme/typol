@@ -9,13 +9,12 @@ use super::{
     context::{ParserContext, ParserControl, ValueCallContext},
     recovery::ParseFailure,
 };
-use crate::{
-    context::CompletionState, diagnostics::DiagnosticFactory, scalar::Scalar, value::ValueFactory,
-};
+use crate::{diagnostics::DiagnosticFactory, scalar::Scalar, value::ValueFactory};
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    ConfigValue, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage, InstancePath,
-    LocatedSpan, ValueError, ValueErrorKind, ValueSource, diagnostic_context,
+    CapacityExceeded, ConfigValue, Diagnostic, DiagnosticCode, DiagnosticContext,
+    DiagnosticMessage, InstancePath, InternalError, LocatedSpan, ResourceLimit, ValueError,
+    ValueErrorKind, ValueSource, diagnostic_context,
 };
 use typol_syntax::{BuiltinType, Keyword, Symbol, TokenKind};
 
@@ -24,7 +23,7 @@ use typol_i18n::t;
 #[cfg(test)]
 use typol_core::{BudgetError, SourceId, SourceSpan, Span};
 #[cfg(test)]
-use typol_test_support::{TestFailure, TestResult, test_eq};
+use typol_test_support::{TestFailure, TestResult, test_assert, test_eq};
 
 static PARSER_SCALAR_TOKEN_PAYLOAD: DiagnosticContext = diagnostic_context!(
     "typol-config",
@@ -38,6 +37,49 @@ static PARSER_SCALAR_INTEGER_TYPE: DiagnosticContext = diagnostic_context!(
 );
 
 #[derive(Clone, Copy)]
+enum ValueConstructionFailure {
+    ResourceLimit(ResourceLimit),
+    Allocation,
+    CapacityExceeded(CapacityExceeded),
+    Internal(InternalError),
+    Invalid(Option<DiagnosticContext>),
+}
+
+impl ValueConstructionFailure {
+    fn from_error(error: ValueError) -> Self {
+        match error.kind() {
+            ValueErrorKind::ResourceLimit(limit) => Self::ResourceLimit(limit),
+            ValueErrorKind::AllocationFailed => Self::Allocation,
+            ValueErrorKind::CapacityExceeded(capacity) => Self::CapacityExceeded(capacity),
+            ValueErrorKind::Internal(internal) => Self::Internal(internal),
+            ValueErrorKind::DuplicateMapKey
+            | ValueErrorKind::DuplicateFieldName
+            | ValueErrorKind::EnvironmentReferenceRequired => {
+                Self::Invalid(ValueFactory::failure_context(error))
+            }
+        }
+    }
+
+    const fn code(self) -> DiagnosticCode {
+        match self {
+            Self::ResourceLimit(limit) => limit.diagnostic_code(),
+            Self::Allocation => DiagnosticCode::ALLOCATION_FAILED,
+            Self::CapacityExceeded(capacity) => capacity.diagnostic_code(),
+            Self::Internal(error) => error.diagnostic_code(),
+            Self::Invalid(_) => DiagnosticCode::CONFIG_VALUE_ERROR,
+        }
+    }
+
+    const fn context(self) -> Option<DiagnosticContext> {
+        match self {
+            Self::Internal(error) => Some(error.context()),
+            Self::Invalid(context) => context,
+            Self::ResourceLimit(_) | Self::Allocation | Self::CapacityExceeded(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 enum ScalarFailureKind {
     ExpectedValue,
     TypeMismatch,
@@ -47,10 +89,7 @@ enum ScalarFailureKind {
     IntegerOutOfRange,
     FloatOutOfRange,
     IntegerTypeUnavailable,
-    ValueConstruction {
-        kind: ValueErrorKind,
-        context: Option<DiagnosticContext>,
-    },
+    ValueConstruction { failure: ValueConstructionFailure },
 }
 
 impl ScalarFailureKind {
@@ -62,11 +101,16 @@ impl ScalarFailureKind {
             Self::TypeMismatch | Self::IntegerOutOfRange | Self::FloatOutOfRange => {
                 DiagnosticCode::CONFIG_VALUE_ERROR
             }
-            Self::StringTokenPayloadMissing | Self::IntegerTypeUnavailable => {
-                DiagnosticCode::INTERNAL_ERROR
+            Self::StringTokenPayloadMissing => {
+                InternalError::ConfigParserInvariantFailure(PARSER_SCALAR_TOKEN_PAYLOAD)
+                    .diagnostic_code()
             }
-            Self::StringLimitExceeded => DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-            Self::ValueConstruction { kind, .. } => ValueFactory::failure_code_for_kind(kind),
+            Self::IntegerTypeUnavailable => {
+                InternalError::ConfigParserInvariantFailure(PARSER_SCALAR_INTEGER_TYPE)
+                    .diagnostic_code()
+            }
+            Self::StringLimitExceeded => DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED,
+            Self::ValueConstruction { failure } => failure.code(),
         }
     }
 
@@ -74,7 +118,7 @@ impl ScalarFailureKind {
         match self {
             Self::StringTokenPayloadMissing => Some(PARSER_SCALAR_TOKEN_PAYLOAD),
             Self::IntegerTypeUnavailable => Some(PARSER_SCALAR_INTEGER_TYPE),
-            Self::ValueConstruction { context, .. } => context,
+            Self::ValueConstruction { failure } => failure.context(),
             Self::ExpectedValue
             | Self::TypeMismatch
             | Self::NegativeWithoutNumber
@@ -100,7 +144,6 @@ struct ValueToken<'a> {
 pub(super) struct ParsedValue {
     pub(super) value: ConfigValue,
     pub(super) span: LocatedSpan,
-    pub(super) completion: CompletionState,
 }
 
 pub(super) struct ExpectedSymbol {
@@ -270,8 +313,7 @@ impl LiteralParser {
                 let error = caught.take();
                 Err(ScalarFailure {
                     kind: ScalarFailureKind::ValueConstruction {
-                        kind: error.kind(),
-                        context: ValueFactory::failure_context(error),
+                        failure: ValueConstructionFailure::from_error(error),
                     },
                     span,
                 })
@@ -284,6 +326,20 @@ impl LiteralParser {
         expected: BuiltinType,
         mut out: Out<'slot, '_, ParseFailure>,
     ) -> OResult<'slot, ParsedValue> {
+        match Self::parse_scalar_value(context, expected, out.reborrow())? {
+            Ok((value, span)) => {
+                context.cursor.bump(out.reborrow())?;
+                Ok(ParsedValue { value, span })
+            }
+            Err(failure) => Self::scalar_failure(context, failure, out.reborrow()),
+        }
+    }
+
+    fn parse_scalar_value<'slot>(
+        context: &mut ParserContext<'_, '_, '_>,
+        expected: BuiltinType,
+        mut out: Out<'slot, '_, ParseFailure>,
+    ) -> OResult<'slot, Result<(ConfigValue, LocatedSpan), ScalarFailure>> {
         let negative_span = if is_numeric(expected) {
             let span = {
                 let token = context.cursor.peek(out.reborrow())?;
@@ -529,119 +585,104 @@ impl LiteralParser {
             }
         };
 
-        match parsed {
-            Ok((value, span)) => {
-                context.cursor.bump(out.reborrow())?;
-                Ok(ParsedValue {
-                    value,
-                    span,
-                    completion: CompletionState::ChildrenComplete,
-                })
-            }
-            Err(failure) if failure.kind.code() == DiagnosticCode::ALLOCATION_FAILED => {
-                let span = failure.span;
-                let mut diagnostic = DiagnosticFactory::allocation_diagnostic(
-                    Some(span),
-                    None,
-                    Some(context.value_source),
-                    context.session.translator(),
-                );
-                diagnostic.set_context(failure.kind.context());
-                Err(out.fail(diagnostic.into()))
-            }
-            Err(failure) => {
-                let translator = context.session.translator();
-                let code = failure.kind.code();
-                let message = match failure.kind {
-                    ScalarFailureKind::ExpectedValue => t! {
-                        name: "diagnostic.config.expected_value",
-                        locale: translator,
-                    }
-                    .into(),
-                    ScalarFailureKind::TypeMismatch => t! {
-                        name: "diagnostic.config.scalar_type_mismatch",
-                        locale: translator,
-                    }
-                    .into(),
-                    ScalarFailureKind::NegativeWithoutNumber => t! {
-                        name: "diagnostic.syntax.expected_decimal_after_minus",
-                        locale: translator,
-                    }
-                    .into(),
-                    ScalarFailureKind::StringTokenPayloadMissing => t! {
-                        name: "diagnostic.config.string_token_payload_missing",
-                        locale: translator,
-                    }
-                    .into(),
-                    ScalarFailureKind::StringLimitExceeded => t! {
-                        name: "diagnostic.config.decoded_string_limit_exceeded",
-                        locale: translator,
-                    }
-                    .into(),
-                    ScalarFailureKind::IntegerOutOfRange | ScalarFailureKind::FloatOutOfRange => {
-                        t! {
-                            name: "diagnostic.config.scalar_out_of_range",
-                            locale: translator,
-                        }
-                        .into()
-                    }
-                    ScalarFailureKind::IntegerTypeUnavailable => t! {
-                        name: "diagnostic.config.integer_type_unavailable",
-                        locale: translator,
-                    }
-                    .into(),
-                    ScalarFailureKind::ValueConstruction { kind, .. } => match kind {
-                        ValueErrorKind::ResourceLimitExceeded => t! {
-                            name: "diagnostic.config.value_construction_resource_limit",
-                            locale: translator,
-                        }
-                        .into(),
-                        ValueErrorKind::AllocationFailed => t! {
-                            name: "diagnostic.config.value_construction_allocation_failed",
-                            locale: translator,
-                        }
-                        .into(),
-                        ValueErrorKind::CapacityExceeded => t! {
-                            name: "diagnostic.config.value_construction_capacity_exceeded",
-                            locale: translator,
-                        }
-                        .into(),
-                        ValueErrorKind::DuplicateMapKey
-                        | ValueErrorKind::DuplicateFieldName
-                        | ValueErrorKind::EnvironmentReferenceRequired
-                        | ValueErrorKind::InternalInvariantFailure => t! {
-                            name: "diagnostic.config.value_construction_internal_failure",
-                            locale: translator,
-                        }
-                        .into(),
-                    },
-                };
-                let value_source = if code == DiagnosticCode::CONFIG_SYNTAX_ERROR {
-                    None
-                } else {
-                    Some(context.value_source)
-                };
-                let diagnostic = ParserControl::diagnostic_call(
-                    &context.diagnostic_errors,
-                    |diagnostic_out| {
-                        LiteralParser::context_diagnostic(
-                            ContextDiagnosticRequest {
-                                context,
-                                code,
-                                message,
-                                span: failure.span,
-                                value_source,
-                            },
-                            diagnostic_out,
-                        )
-                    },
-                    out.reborrow(),
-                )?;
-                let mut diagnostic = diagnostic;
-                diagnostic.set_context(failure.kind.context());
-                Err(out.fail(diagnostic.into()))
-            }
+        Ok(parsed)
+    }
+
+    fn scalar_failure<'slot>(
+        context: &ParserContext<'_, '_, '_>,
+        failure: ScalarFailure,
+        mut out: Out<'slot, '_, ParseFailure>,
+    ) -> OResult<'slot, ParsedValue> {
+        if failure.kind.code() == DiagnosticCode::ALLOCATION_FAILED {
+            let mut diagnostic = DiagnosticFactory::allocation_diagnostic(
+                Some(failure.span),
+                None,
+                Some(context.value_source),
+                context.session.translator(),
+            );
+            diagnostic.set_context(failure.kind.context());
+            return Err(out.fail(diagnostic.into()));
         }
+        let translator = context.session.translator();
+        let code = failure.kind.code();
+        let message = match failure.kind {
+            ScalarFailureKind::ExpectedValue => t! {
+                name: "diagnostic.config.expected_value",
+                locale: translator,
+            }
+            .into(),
+            ScalarFailureKind::TypeMismatch => t! {
+                name: "diagnostic.config.scalar_type_mismatch",
+                locale: translator,
+            }
+            .into(),
+            ScalarFailureKind::NegativeWithoutNumber => t! {
+                name: "diagnostic.syntax.expected_decimal_after_minus",
+                locale: translator,
+            }
+            .into(),
+            ScalarFailureKind::StringTokenPayloadMissing => t! {
+                name: "diagnostic.config.string_token_payload_missing",
+                locale: translator,
+            }
+            .into(),
+            ScalarFailureKind::StringLimitExceeded => t! {
+                name: "diagnostic.config.decoded_string_limit_exceeded",
+                locale: translator,
+            }
+            .into(),
+            ScalarFailureKind::IntegerOutOfRange | ScalarFailureKind::FloatOutOfRange => t! {
+                name: "diagnostic.config.scalar_out_of_range",
+                locale: translator,
+            }
+            .into(),
+            ScalarFailureKind::IntegerTypeUnavailable => t! {
+                name: "diagnostic.config.integer_type_unavailable",
+                locale: translator,
+            }
+            .into(),
+            ScalarFailureKind::ValueConstruction { failure } => match failure {
+                ValueConstructionFailure::ResourceLimit(limit) => {
+                    limit.emergency_message(translator).into()
+                }
+                ValueConstructionFailure::Allocation => t! {
+                    name: "diagnostic.config.value_construction_allocation_failed",
+                    locale: translator,
+                }
+                .into(),
+                ValueConstructionFailure::CapacityExceeded(capacity) => {
+                    capacity.emergency_message(translator).into()
+                }
+                ValueConstructionFailure::Invalid(_) | ValueConstructionFailure::Internal(_) => {
+                    t! {
+                        name: "diagnostic.config.value_construction_internal_failure",
+                        locale: translator,
+                    }
+                    .into()
+                }
+            },
+        };
+        let value_source =
+            (code != DiagnosticCode::CONFIG_SYNTAX_ERROR).then_some(context.value_source);
+        let diagnostic = ParserControl::diagnostic_call(
+            &context.diagnostic_errors,
+            |diagnostic_out| {
+                LiteralParser::context_diagnostic(
+                    ContextDiagnosticRequest {
+                        context,
+                        code,
+                        message,
+                        span: failure.span,
+                        value_source,
+                    },
+                    diagnostic_out,
+                )
+            },
+            out.reborrow(),
+        )?;
+        let mut diagnostic = diagnostic;
+        diagnostic.set_context(failure.kind.context());
+        Err(out.fail(diagnostic.into()))
     }
 
     pub(super) fn take_none<'slot>(
@@ -671,11 +712,7 @@ impl LiteralParser {
             },
             out.reborrow(),
         )?;
-        Ok(Some(ParsedValue {
-            completion: CompletionState::ChildrenComplete,
-            value,
-            span,
-        }))
+        Ok(Some(ParsedValue { value, span }))
     }
 
     pub(super) fn context_diagnostic<'slot>(
@@ -700,7 +737,7 @@ impl LiteralParser {
 fn internal_scalar_contexts_are_selected_by_failure_kind() -> TestResult<()> {
     test_eq!(
         ScalarFailureKind::StringTokenPayloadMissing.code(),
-        DiagnosticCode::INTERNAL_ERROR
+        InternalError::ConfigParserInvariantFailure(PARSER_SCALAR_TOKEN_PAYLOAD).diagnostic_code()
     )?;
     test_eq!(
         ScalarFailureKind::StringTokenPayloadMissing.context(),
@@ -708,7 +745,7 @@ fn internal_scalar_contexts_are_selected_by_failure_kind() -> TestResult<()> {
     )?;
     test_eq!(
         ScalarFailureKind::IntegerTypeUnavailable.code(),
-        DiagnosticCode::INTERNAL_ERROR
+        InternalError::ConfigParserInvariantFailure(PARSER_SCALAR_INTEGER_TYPE).diagnostic_code()
     )?;
     test_eq!(
         ScalarFailureKind::IntegerTypeUnavailable.context(),
@@ -737,23 +774,23 @@ fn scalar_construction_failure_retains_the_original_value_error() -> TestResult<
     .ok_or_else(|| TestFailure::new("test value construction should fail"))?;
 
     let ScalarFailure {
-        kind: ScalarFailureKind::ValueConstruction { kind, context },
+        kind: ScalarFailureKind::ValueConstruction { failure },
         span: failure_span,
     } = failure
     else {
         return Err(TestFailure::new(
-            "scalar failure should preserve the ValueError",
+            "scalar failure should preserve the internal diagnostic context",
         ));
     };
-    test_eq!(kind, ValueErrorKind::InternalInvariantFailure)?;
-    test_eq!(context, Some(TEST_SCALAR_INVARIANT))?;
+    test_assert!(matches!(failure, ValueConstructionFailure::Internal(_)))?;
+    test_eq!(failure.context(), Some(TEST_SCALAR_INVARIANT))?;
     test_eq!(failure_span, span)?;
     test_eq!(
-        ScalarFailureKind::ValueConstruction { kind, context }.code(),
-        DiagnosticCode::INTERNAL_ERROR
+        ScalarFailureKind::ValueConstruction { failure }.code(),
+        InternalError::BudgetInvariantFailure(TEST_SCALAR_INVARIANT).diagnostic_code()
     )?;
     test_eq!(
-        ScalarFailureKind::ValueConstruction { kind, context }.context(),
+        ScalarFailureKind::ValueConstruction { failure }.context(),
         Some(TEST_SCALAR_INVARIANT)
     )?;
 

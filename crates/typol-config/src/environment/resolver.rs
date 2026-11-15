@@ -163,7 +163,7 @@ impl EnvironmentResolver {
         if valid && authorized {
             match authorization {
                 Some(authorization) => Ok(authorization),
-                None => Err(out.fail(DiagnosticFactory::internal(
+                None => Err(out.fail(DiagnosticFactory::environment_internal(
                     ENVIRONMENT_AUTHORIZATION_MISSING,
                     Some(span),
                     None,
@@ -340,7 +340,7 @@ impl EnvironmentResolver {
                     (true, ValueKind::Optional(Some(value))) => value,
                     (false, _) => fallback.value.root(),
                     _ => {
-                        return Err(out.fail(DiagnosticFactory::internal(
+                        return Err(out.fail(DiagnosticFactory::environment_internal(
                             ENVIRONMENT_INTERNAL_FALLBACK,
                             Some(fallback.span),
                             None,
@@ -357,7 +357,7 @@ impl EnvironmentResolver {
                     ValueKind::String(value) => ValueScalar::String(value),
                     ValueKind::Bool(value) => ValueScalar::Bool(value),
                     _ => {
-                        return Err(out.fail(DiagnosticFactory::internal(
+                        return Err(out.fail(DiagnosticFactory::environment_internal(
                             ENVIRONMENT_INTERNAL_FALLBACK,
                             Some(fallback.span),
                             None,
@@ -420,7 +420,7 @@ impl EnvironmentResolver {
     ) -> Diagnostic {
         Self::environment_error(
             EnvironmentDiagnosticRequest {
-                code: DiagnosticCode::INTERNAL_ERROR,
+                code: DiagnosticCode::ENVIRONMENT_INVARIANT_FAILURE,
                 message: DiagnosticMessage::from(
                     t! { name: "diagnostic.environment.target_type_invalid", locale: translator },
                 ),

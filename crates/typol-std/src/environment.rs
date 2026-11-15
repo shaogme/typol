@@ -2,7 +2,7 @@ use std::{env::var_os, ffi::OsString, fmt};
 
 use opeo::{ErrSlot, OResult, Out};
 use typol_config::{Environment, EnvironmentError, EnvironmentReadContext};
-use typol_core::{BudgetError, ChargedVec, ExecutionBudget};
+use typol_core::{BudgetError, ChargedVec, ExecutionBudget, ResourceLimit};
 
 use crate::ProcessEnvironmentLimits;
 
@@ -11,6 +11,9 @@ use std::os::unix::ffi::OsStringExt;
 
 #[cfg(windows)]
 use opeo::ResultOutExt;
+
+#[cfg(windows)]
+use typol_core::CapacityExceeded;
 
 #[cfg(windows)]
 use std::{char::from_u32, os::windows::ffi::OsStrExt};
@@ -41,15 +44,14 @@ pub struct ProcessEnvironment {
 impl EnvironmentFailure {
     const fn public_error(self) -> EnvironmentError {
         match self {
-            Self::Budget(
-                BudgetError::Resource
-                | BudgetError::RegexSteps
-                | BudgetError::RegexSearchSteps
-                | BudgetError::RegexWorkspace,
-            ) => EnvironmentError::ResourceLimitExceeded,
+            Self::Budget(BudgetError::ResourceLimit(limit)) => {
+                EnvironmentError::ResourceLimit(limit)
+            }
             Self::Budget(BudgetError::Allocation) => EnvironmentError::AllocationFailed,
-            Self::Budget(BudgetError::CapacityExceeded) => EnvironmentError::CapacityExceeded,
-            Self::Budget(BudgetError::InvariantViolation(_)) => EnvironmentError::InternalError,
+            Self::Budget(BudgetError::CapacityExceeded(capacity)) => {
+                EnvironmentError::CapacityExceeded(capacity)
+            }
+            Self::Budget(BudgetError::Internal(internal)) => EnvironmentError::Internal(internal),
             Self::Host => EnvironmentError::HostFailure,
         }
     }
@@ -77,7 +79,11 @@ impl ProcessEnvironment {
         mut out: Out<'slot, '_, EnvironmentFailure>,
     ) -> OResult<'slot, ()> {
         if name.len() > limits.max_environment_name_bytes() {
-            return Err(out.fail(EnvironmentFailure::Budget(BudgetError::Resource)));
+            return Err(
+                out.fail(EnvironmentFailure::Budget(BudgetError::ResourceLimit(
+                    ResourceLimit::StringBytes,
+                ))),
+            );
         }
         if name.is_empty() {
             return Err(out.fail(EnvironmentFailure::Host));
@@ -115,8 +121,13 @@ impl Environment for ProcessEnvironment {
             let max_value_bytes = limits
                 .max_environment_value_bytes()
                 .min(context.max_value_bytes());
+            let value_limit = if limits.max_environment_value_bytes() <= context.max_value_bytes() {
+                ResourceLimit::EnvironmentBytes
+            } else {
+                context.value_limit()
+            };
             match self.failures.try_call(|inner| {
-                EnvironmentBytes::from_native(value, max_value_bytes, budget, inner)
+                EnvironmentBytes::from_native(value, max_value_bytes, value_limit, budget, inner)
             }) {
                 Ok(value) => self.current = Some(value),
                 Err(caught) => return Self::fail_environment(out, *caught.get()),
@@ -148,13 +159,18 @@ impl EnvironmentBytes {
     pub(crate) fn from_native<'slot>(
         value: OsString,
         limit: usize,
+        value_limit: ResourceLimit,
         budget: &ExecutionBudget,
         mut out: Out<'slot, '_, EnvironmentFailure>,
     ) -> OResult<'slot, Self> {
         let native = value.into_vec();
         budget.consume(1, out.reborrow())?;
         if native.len() > limit {
-            return Err(out.fail(EnvironmentFailure::Budget(BudgetError::Resource)));
+            return Err(
+                out.fail(EnvironmentFailure::Budget(BudgetError::ResourceLimit(
+                    value_limit,
+                ))),
+            );
         }
         let bytes = ChargedVec::try_from_vec_with_budget(native, budget, out.reborrow())?;
         Ok(Self { bytes })
@@ -164,6 +180,7 @@ impl EnvironmentBytes {
     pub(crate) fn from_native<'slot>(
         value: OsString,
         limit: usize,
+        value_limit: ResourceLimit,
         budget: &ExecutionBudget,
         mut out: Out<'slot, '_, EnvironmentFailure>,
     ) -> OResult<'slot, Self> {
@@ -172,9 +189,17 @@ impl EnvironmentBytes {
         while let Some(scalar) = Self::scalar(&mut units, budget, out.reborrow())? {
             length = length
                 .checked_add(scalar.len_utf8())
-                .filter(|length| *length <= limit)
-                .ok_or(EnvironmentFailure::Budget(BudgetError::Resource))
+                .ok_or(EnvironmentFailure::Budget(BudgetError::CapacityExceeded(
+                    CapacityExceeded::EnvironmentCache,
+                )))
                 .store_err_into(out.reborrow())?;
+            if length > limit {
+                return Err(
+                    out.fail(EnvironmentFailure::Budget(BudgetError::ResourceLimit(
+                        value_limit,
+                    ))),
+                );
+            }
         }
         let mut output = ChargedVec::new(Some(budget), out.reborrow())?;
         output.try_reserve_exact(length, out.reborrow())?;
@@ -223,6 +248,7 @@ impl EnvironmentBytes {
     pub(crate) fn from_native<'slot, 'borrow>(
         _: OsString,
         _: usize,
+        _: ResourceLimit,
         _: &ExecutionBudget,
         out: Out<'slot, 'borrow, EnvironmentFailure>,
     ) -> OResult<'slot, Self> {
@@ -235,7 +261,8 @@ mod tests {
     use std::{error::Error, ffi::OsString, io::Error as IoError};
 
     use opeo::{ErrSlot, OResult, Out};
-    use typol_core::{BudgetError, ExecutionBudget, ExecutionLimits};
+    use typol_core::{BudgetError, ExecutionBudget, ExecutionLimits, ResourceLimit};
+    use typol_opeo_test_support::{ensure, ensure_eq};
 
     use crate::environment::{EnvironmentBytes, EnvironmentFailure};
 
@@ -255,36 +282,6 @@ mod tests {
         }
     }
 
-    macro_rules! ensure {
-        ($condition:expr $(,)?) => {
-            if !$condition {
-                return Err(IoError::other(concat!("assertion failed: ", stringify!($condition))).into());
-            }
-        };
-        ($condition:expr, $($argument:tt)+) => {
-            if !$condition {
-                return Err(IoError::other(format!($($argument)+)).into());
-            }
-        };
-    }
-
-    macro_rules! ensure_eq {
-        ($left:expr, $right:expr $(,)?) => {{
-            let left = &$left;
-            let right = &$right;
-            if left != right {
-                return Err(IoError::other(format!(
-                    "assertion failed: {} and {} differ (actual {:?}, expected {:?})",
-                    stringify!($left),
-                    stringify!($right),
-                    left,
-                    right,
-                ))
-                .into());
-            }
-        }};
-    }
-
     #[cfg(unix)]
     #[test]
     fn transferred_native_capacity_and_steps_are_bounded() -> Result<(), Box<dyn Error>> {
@@ -300,10 +297,13 @@ mod tests {
             call_opeo(|out| EnvironmentBytes::from_native(
                 OsString::from_vec(raw),
                 1,
+                ResourceLimit::EnvironmentBytes,
                 &budget,
                 out,
             )),
-            Err(EnvironmentFailure::Budget(BudgetError::Resource))
+            Err(EnvironmentFailure::Budget(BudgetError::ResourceLimit(
+                ResourceLimit::WorkspaceBytes
+            )))
         ));
         ensure_eq!(budget.workspace_bytes(), overhead);
 
@@ -314,7 +314,13 @@ mod tests {
             ExecutionBudget::new(ExecutionLimits::new(2, overhead + capacity), out)
         })?;
         let result = call_opeo(|out| {
-            EnvironmentBytes::from_native(OsString::from_vec(raw), 1, &budget, out)
+            EnvironmentBytes::from_native(
+                OsString::from_vec(raw),
+                1,
+                ResourceLimit::EnvironmentBytes,
+                &budget,
+                out,
+            )
         });
         let value = result
             .as_ref()
@@ -334,16 +340,27 @@ mod tests {
             call_opeo(|out| EnvironmentBytes::from_native(
                 OsString::from_vec(raw),
                 1,
+                ResourceLimit::EnvironmentBytes,
                 &budget,
                 out,
             )),
-            Err(EnvironmentFailure::Budget(BudgetError::Resource))
+            Err(EnvironmentFailure::Budget(BudgetError::ResourceLimit(
+                ResourceLimit::EnvironmentBytes
+            )))
         ));
         ensure_eq!(budget.workspace_bytes(), overhead);
         let budget = call_opeo(|out| ExecutionBudget::new(ExecutionLimits::new(0, 4096), out))?;
         ensure!(matches!(
-            call_opeo(|out| EnvironmentBytes::from_native(OsString::from("x"), 1, &budget, out,)),
-            Err(EnvironmentFailure::Budget(BudgetError::Resource))
+            call_opeo(|out| EnvironmentBytes::from_native(
+                OsString::from("x"),
+                1,
+                ResourceLimit::EnvironmentBytes,
+                &budget,
+                out,
+            )),
+            Err(EnvironmentFailure::Budget(BudgetError::ResourceLimit(
+                ResourceLimit::ExecutionSteps
+            )))
         ));
         Ok(())
     }
@@ -361,7 +378,13 @@ mod tests {
                 call_opeo(|out| ExecutionBudget::new(ExecutionLimits::new(100, 4096), out))?;
             let overhead = budget.workspace_bytes();
             let result = call_opeo(|out| {
-                EnvironmentBytes::from_native(OsString::from_wide(units), 100, &budget, out)
+                EnvironmentBytes::from_native(
+                    OsString::from_wide(units),
+                    100,
+                    ResourceLimit::EnvironmentBytes,
+                    &budget,
+                    out,
+                )
             });
             ensure!(matches!(result, Err(EnvironmentFailure::Host)));
             ensure_eq!(budget.workspace_bytes(), overhead);
@@ -371,6 +394,7 @@ mod tests {
             EnvironmentBytes::from_native(
                 OsString::from_wide(&[0x754c, 0xd83d, 0xde00]),
                 7,
+                ResourceLimit::EnvironmentBytes,
                 &budget,
                 out,
             )

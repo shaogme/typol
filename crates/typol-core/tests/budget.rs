@@ -2,40 +2,11 @@ use core::mem::size_of;
 use std::{error::Error, io::Error as IoError};
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, ConfigValueBuilder, Diagnostic, DiagnosticCode,
-    DiagnosticLabelInput, ExecutionBudget, ExecutionLimits, InstancePath, NamedValue, PathSegment,
-    RelatedLocationRole, SourceId, SourceSpan, Span, ValueErrorKind, ValueKind, ValueSource,
+    DiagnosticLabelInput, ExecutionBudget, ExecutionLimits, InstancePath, InternalError,
+    NamedValue, PathSegment, RelatedLocationRole, ResourceLimit, SourceId, SourceSpan, Span,
+    ValueErrorKind, ValueKind, ValueSource,
 };
-use typol_opeo_test_support::TestOpeo;
-
-macro_rules! ensure {
-    ($condition:expr $(,)?) => {
-        if !$condition {
-            return Err(IoError::other(concat!("assertion failed: ", stringify!($condition))).into());
-        }
-    };
-    ($condition:expr, $($argument:tt)+) => {
-        if !$condition {
-            return Err(IoError::other(format!($($argument)+)).into());
-        }
-    };
-}
-
-macro_rules! ensure_eq {
-    ($left:expr, $right:expr $(,)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(IoError::other(format!(
-                "assertion failed: {} and {} differ (actual {:?}, expected {:?})",
-                stringify!($left),
-                stringify!($right),
-                left,
-                right,
-            ))
-            .into());
-        }
-    }};
-}
+use typol_opeo_test_support::{TestOpeo, ensure, ensure_eq};
 
 fn make_budget(steps: usize) -> Result<ExecutionBudget, BudgetError> {
     TestOpeo::call(|out| ExecutionBudget::new(ExecutionLimits::new(steps, 1_048_576), out))
@@ -50,9 +21,25 @@ fn shared_steps_accept_exact_limit_and_stop_before_the_next_unit() -> Result<(),
     ensure_eq!(budget.steps(), 3);
     ensure_eq!(
         TestOpeo::call::<BudgetError, _>(|out| shared.consume(1, out)),
-        Err(BudgetError::Resource)
+        Err(BudgetError::ResourceLimit(ResourceLimit::ExecutionSteps))
     );
     ensure_eq!(budget.steps(), 3);
+    ensure!(budget.exhausted());
+    Ok(())
+}
+
+#[test]
+fn constructed_text_limit_keeps_its_resource_category() -> Result<(), Box<dyn Error>> {
+    let budget = make_budget(100)?;
+    ensure_eq!(
+        TestOpeo::call::<BudgetError, _>(|out| budget.construct_text(2, 1, out)),
+        Err(BudgetError::ResourceLimit(ResourceLimit::ConfigTextBytes))
+    );
+    ensure_eq!(budget.constructed_text_bytes(), 0);
+    ensure_eq!(
+        budget.failure(),
+        Some(BudgetError::ResourceLimit(ResourceLimit::ConfigTextBytes))
+    );
     ensure!(budget.exhausted());
     Ok(())
 }
@@ -219,7 +206,7 @@ fn arena_rejects_foreign_ids_and_duplicate_names_without_copying_them() -> Resul
     let foreign = TestOpeo::call(|out| second.add_array(&[child], ValueSource::ConfigLiteral, out));
     ensure!(matches!(
         foreign,
-        Err(error) if error.kind() == ValueErrorKind::InternalInvariantFailure
+        Err(error) if matches!(error.kind(), ValueErrorKind::Internal(InternalError::ValueStructureInvariantFailure(_)))
     ));
 
     let left = TestOpeo::call(|out| first.add_unsigned(2, ValueSource::ConfigLiteral, out))?;
@@ -243,7 +230,7 @@ fn diagnostic_rejects_a_path_owned_by_another_execution() -> Result<(), Box<dyn 
     let second = make_budget(1_000)?;
     let mut diagnostic = TestOpeo::call(|out| {
         Diagnostic::try_new(
-            DiagnosticCode::INTERNAL_ERROR,
+            DiagnosticCode::BUDGET_INVARIANT_FAILURE,
             "diagnostic",
             Some(&first),
             out,
@@ -253,7 +240,9 @@ fn diagnostic_rejects_a_path_owned_by_another_execution() -> Result<(), Box<dyn 
     TestOpeo::call::<BudgetError, _>(|out| path.push_field("field", out))?;
     ensure!(matches!(
         TestOpeo::call(|out| diagnostic.try_set_path(Some(path), Some(&first), out)),
-        Err(BudgetError::InvariantViolation(_))
+        Err(BudgetError::Internal(
+            InternalError::BudgetInvariantFailure(_)
+        ))
     ));
     ensure!(diagnostic.path().is_none());
     Ok(())
@@ -273,12 +262,13 @@ fn failed_emergency_promotion_preserves_the_original_diagnostic_code() -> Result
     })?;
     let mut path = TestOpeo::call(|out| InstancePath::new(Some(&budget), out))?;
     TestOpeo::call::<BudgetError, _>(|out| path.push_index(0, out))?;
-    let mut diagnostic = Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR, "internal error");
+    let mut diagnostic =
+        Diagnostic::emergency(DiagnosticCode::BUDGET_INVARIANT_FAILURE, "internal error");
     ensure!(matches!(
         TestOpeo::call(|out| diagnostic.try_set_path(Some(path), Some(&budget), out)),
-        Err(BudgetError::Resource)
+        Err(BudgetError::ResourceLimit(ResourceLimit::WorkspaceBytes))
     ));
-    ensure_eq!(diagnostic.code(), DiagnosticCode::INTERNAL_ERROR);
+    ensure_eq!(diagnostic.code(), DiagnosticCode::BUDGET_INVARIANT_FAILURE);
     ensure!(diagnostic.path().is_none());
     Ok(())
 }
@@ -289,7 +279,7 @@ fn diagnostic_body_labels_and_path_share_one_budget() -> Result<(), Box<dyn Erro
     let initial = budget.workspace_bytes();
     let mut diagnostic = TestOpeo::call(|out| {
         Diagnostic::try_new(
-            DiagnosticCode::INTERNAL_ERROR,
+            DiagnosticCode::BUDGET_INVARIANT_FAILURE,
             "message",
             Some(&budget),
             out,

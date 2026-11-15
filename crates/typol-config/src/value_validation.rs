@@ -7,9 +7,7 @@ mod tests;
 use crate::{
     ConfigParseErrors, ConfigValidationOptions,
     context::{CompletionState, SemanticStatus},
-    diagnostics::{
-        BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticBuffer, DiagnosticFactory,
-    },
+    diagnostics::{BudgetDiagnostic, DiagnosticBuffer, DiagnosticFactory},
     instance::{LocationIndex, Member, NodeId},
     session::ValidationResources,
     validation::{AssertionsRequest, Validator},
@@ -18,13 +16,19 @@ use crate::{
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedVec, ConfigValue, Diagnostic, DiagnosticCode, ExecutionBudget,
-    InstancePath, LocatedSpan, RegexExecutionBudget,
+    BudgetError, ChargedVec, ConfigValue, Diagnostic, DiagnosticContext, ExecutionBudget,
+    InstancePath, InternalError, LocatedSpan, RegexExecutionBudget, ValueSource,
+    diagnostic_context,
 };
-use typol_i18n::t;
 use typol_semantic::{
     CompiledSchema, ConstraintList, FieldView, RegexExecutor, TypeView, VariantView,
 };
+
+static NORMALIZED_VALUE_MISSING: DiagnosticContext = diagnostic_context!(
+    "typol-config",
+    "value-validation",
+    "normalized-value-missing",
+);
 
 #[derive(Clone, Copy)]
 pub(crate) struct TreeTarget<'schema> {
@@ -140,6 +144,8 @@ impl ValueValidation {
                             text_limit: options.config().max_constructed_text_bytes(),
                             schema_default: false,
                             allow_unvalidated_environment_sources: true,
+                            existing_nodes_precounted: false,
+                            missing_value_source: ValueSource::RustValue,
                         },
                         &mut nodes,
                         options.config().values(),
@@ -163,17 +169,13 @@ impl ValueValidation {
             (None, Some(value)) => (value, false),
             _ => {
                 return Err(out.fail(ConfigParseErrors::emergency(
-                    DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
-                        code: DiagnosticCode::INTERNAL_ERROR,
-                        message:
-                            t! { name: "diagnostic.emergency.internal_error", locale: translator }
-                                .into(),
-                        primary: None,
-                        path: None,
-                        value_source: None,
-                        context: None,
+                    DiagnosticFactory::internal_error(
+                        InternalError::ConfigValidationInvariantFailure(NORMALIZED_VALUE_MISSING),
+                        None,
+                        None,
+                        None,
                         translator,
-                    }),
+                    ),
                     None,
                     translator,
                 )));

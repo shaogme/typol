@@ -2,8 +2,8 @@ use opeo::{ErrSlot, OResult, Out};
 use typol_semantic::SourceLookup;
 
 use typol_core::{
-    BudgetError, ChargedVec, DiagnosticCode, ExecutionBudget, Read, RegexExecutionBudget, SourceId,
-    SourceReadError, SourceSpan, Span,
+    BudgetError, CapacityExceeded, ChargedVec, DiagnosticCode, ExecutionBudget, Read,
+    RegexExecutionBudget, ResourceLimit, SourceId, SourceReadError, SourceSpan, Span,
 };
 use typol_i18n::{Translator, t};
 use typol_policy::{RegexLimits, RegexOptions};
@@ -247,30 +247,42 @@ impl CompileBudget {
         &self.limits
     }
 
-    pub(crate) fn request_limit(&self, depth: usize) -> Option<usize> {
-        if depth > self.limits.max_nesting_depth()
-            || self.source_files >= self.limits.max_schema_files()
-        {
-            return None;
+    pub(crate) fn request_limit(
+        &self,
+        depth: usize,
+    ) -> Result<(usize, ResourceLimit), ResourceLimit> {
+        if depth > self.limits.max_nesting_depth() {
+            return Err(ResourceLimit::SchemaImportDepth);
         }
-        Some(
-            self.limits.max_source_bytes().min(
-                self.limits
-                    .max_schema_total_bytes()
-                    .checked_sub(self.source_bytes)?,
-            ),
-        )
+        if self.source_files >= self.limits.max_schema_files() {
+            return Err(ResourceLimit::SchemaSourceCount);
+        }
+        let total_remaining = self
+            .limits
+            .max_schema_total_bytes()
+            .checked_sub(self.source_bytes)
+            .ok_or(ResourceLimit::SchemaTotalBytes)?;
+        let source_limit = self.limits.max_source_bytes();
+        let (limit, kind) = if source_limit <= total_remaining {
+            (source_limit, ResourceLimit::SourceBytes)
+        } else {
+            (total_remaining, ResourceLimit::SchemaTotalBytes)
+        };
+        Ok((limit, kind))
     }
 
-    pub(crate) fn register_source(&mut self) -> bool {
-        let Some(files) = self.source_files.checked_add(1) else {
-            return false;
-        };
+    pub(crate) fn register_source(&mut self) -> Result<(), BudgetError> {
+        let files = self
+            .source_files
+            .checked_add(1)
+            .ok_or(BudgetError::CapacityExceeded(
+                CapacityExceeded::SchemaStorage,
+            ))?;
         if files > self.limits.max_schema_files() {
-            return false;
+            return Err(BudgetError::ResourceLimit(ResourceLimit::SchemaSourceCount));
         }
         self.source_files = files;
-        true
+        Ok(())
     }
 
     pub(crate) fn charge_source_bytes(&mut self, bytes: usize) -> Option<bool> {

@@ -654,6 +654,31 @@ fn schema_format_rejects_oversized_input_as_a_host_failure() -> Result<(), Box<d
 }
 
 #[test]
+fn json_host_errors_keep_the_specific_source_limit() -> Result<(), Box<dyn Error>> {
+    let path = temp_dir().join(format!("typol-json-schema-large-{}.tschem", id()));
+    fs::write(&path, vec![b' '; 1_048_577])?;
+    let output = run_cli(vec![
+        argument("--format=json"),
+        argument("schema"),
+        argument("check"),
+        path.clone().into_os_string(),
+    ])?;
+    fs::remove_file(path)?;
+    ensure_equal(output.status.code(), Some(3), "resource limit exit code")?;
+    ensure(output.stdout.is_empty(), "JSON errors must use stderr")?;
+    let value: Value = from_slice(&output.stderr)?;
+    ensure_equal(
+        value
+            .get("host_error")
+            .and_then(|error| error.get("category"))
+            .and_then(Value::as_str),
+        Some("resource_limit_source_bytes"),
+        "source byte limit host category",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn export_ir_writes_to_stdout() -> Result<(), Box<dyn Error>> {
     let output = run_cli(config_arguments(
         "export-ir",

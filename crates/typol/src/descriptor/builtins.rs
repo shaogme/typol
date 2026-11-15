@@ -7,7 +7,7 @@ use crate::{
 use alloc::{string::String, vec::Vec};
 use core::mem::size_of;
 use opeo::{OResult, Out};
-use typol_core::ValueId;
+use typol_core::{BudgetError, CapacityExceeded, ValueId};
 use typol_model::BuiltinType;
 
 #[cfg(any(feature = "btree-map", feature = "hashbrown", feature = "std"))]
@@ -316,7 +316,8 @@ impl<T: Typol> Typol for Vec<T> {
             ContainerConversions::read_sequence::<T>(value.view(), context, out.reborrow())?
                 .into_unmetered_vec();
         let Some(bytes) = values.capacity().checked_mul(size_of::<T>()) else {
-            return Err(out.fail(ConversionContext::resource_error(
+            return Err(out.fail(ConversionContext::budget_error(
+                BudgetError::CapacityExceeded(CapacityExceeded::RustConversion),
                 context.session().translator(),
             )));
         };

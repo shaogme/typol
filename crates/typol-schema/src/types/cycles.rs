@@ -9,7 +9,6 @@ use crate::{
     symbols::{SymbolState, SymbolTable, TypeSymbolId},
     types::model::ResolvedTypeGraph,
 };
-use alloc::borrow::Cow;
 use opeo::{OResult, Out};
 use typol_core::{
     Diagnostic, DiagnosticCode, DiagnosticLabelInput, RelatedLocationRole, SourceSpan,
@@ -23,10 +22,10 @@ use edges::{GraphState, TypeEdge, TypeEdgeCollectionInput, TypeEdgeCollector, Ty
 use propagation::{InvalidTypePropagationInput, InvalidTypePropagator};
 
 pub(crate) struct TypeCycleReport<'a> {
-    pub(crate) message: Result<Cow<'static, str>, RenderError>,
+    pub(crate) message: Result<&'static str, RenderError>,
     pub(crate) primary: SourceSpan,
     pub(crate) cycle: &'a [TypeSymbolId],
-    pub(crate) label_message: Result<Cow<'static, str>, RenderError>,
+    pub(crate) label_message: Result<&'static str, RenderError>,
 }
 
 pub(crate) struct TypeCycles<'a, 'src, 'd> {
@@ -594,7 +593,7 @@ impl<'a, 'src, 'd> TypeCycles<'a, 'src, 'd> {
                     diagnostic.try_add_label_with_text(
                         DiagnosticLabelInput {
                             span: declaration.span(),
-                            text: label_message.as_ref(),
+                            text: label_message,
                             role: RelatedLocationRole::PreviousDeclaration,
                         },
                         Some(self.context.execution()),

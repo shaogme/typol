@@ -9,8 +9,8 @@ use typol_config::{
     ConfigParseErrors, ConfigParseOptions, ConfigValidationOptions, ConfigValueErrors,
 };
 use typol_core::{
-    BudgetError, ChargedString, ChargedVec, ExecutionBudget, ExecutionLimits, ValueError,
-    ValueScalar,
+    BudgetError, CapacityExceeded, ChargedString, ChargedVec, ExecutionBudget, ExecutionLimits,
+    ResourceLimit, ValueError, ValueScalar,
 };
 use typol_i18n::Translator;
 use typol_semantic::SchemaAccessError;
@@ -360,16 +360,20 @@ impl SessionBudget {
             budget_errors,
             ..
         } = self;
-        let Some(next) = output_bytes
-            .checked_add(bytes)
-            .filter(|next| *next <= *max_output_bytes)
-        else {
+        let Some(next) = output_bytes.checked_add(bytes) else {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Encoding,
-                Failure::Resource,
+                Failure::Capacity(CapacityExceeded::FormatOutput),
                 self.translator,
             )));
         };
+        if next > *max_output_bytes {
+            return Err(out.fail(CodecErrors::emergency(
+                CodecStage::Encoding,
+                Failure::ResourceLimit(ResourceLimit::ConfigFormatOutputBytes),
+                self.translator,
+            )));
+        }
         let mut budget_slot = budget_errors.borrow_mut();
         let result = budget_slot
             .get_or_insert_with(ErrSlot::new)
@@ -406,14 +410,14 @@ impl SessionBudget {
         if name.len() > self.max_string_bytes || fallback_bytes > self.max_string_bytes {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Conversion,
-                Failure::Resource,
+                Failure::ResourceLimit(ResourceLimit::StringBytes),
                 self.translator,
             )));
         }
         let Some(bytes) = name.len().checked_add(fallback_bytes) else {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Conversion,
-                Failure::Resource,
+                Failure::Capacity(CapacityExceeded::RustConversion),
                 self.translator,
             )));
         };
@@ -480,11 +484,18 @@ impl SessionBudget {
         bytes: usize,
         mut out: Out<'slot, '_, BudgetError>,
     ) -> OResult<'slot, ()> {
-        self.output_bytes
+        let next = self
+            .output_bytes
             .checked_add(bytes)
-            .filter(|next| *next <= self.max_output_bytes)
-            .ok_or_else(|| self.execution.resource_error())
+            .ok_or(BudgetError::CapacityExceeded(
+                CapacityExceeded::FormatOutput,
+            ))
             .store_err(out.reborrow())?;
+        if next > self.max_output_bytes {
+            return Err(out.fail(BudgetError::ResourceLimit(
+                ResourceLimit::ConfigFormatOutputBytes,
+            )));
+        }
         Ok(())
     }
 
@@ -548,7 +559,7 @@ impl NodeBudget {
         mut out: Out<'slot, '_, BudgetError>,
     ) -> OResult<'slot, ()> {
         if depth > self.max_depth {
-            return Err(out.fail(budget.resource_error()));
+            return Err(out.fail(BudgetError::ResourceLimit(ResourceLimit::TypeBindingDepth)));
         }
         budget.consume(1, out.reborrow())
     }
@@ -560,12 +571,17 @@ impl NodeBudget {
         mut out: Out<'slot, '_, BudgetError>,
     ) -> OResult<'slot, ()> {
         self.check_depth(depth, budget, out.reborrow())?;
-        self.nodes = self
+        let next = self
             .nodes
             .checked_add(1)
-            .filter(|next| *next <= self.max_nodes)
-            .ok_or_else(|| budget.resource_error())
+            .ok_or(BudgetError::CapacityExceeded(
+                CapacityExceeded::RustConversion,
+            ))
             .store_err(out.reborrow())?;
+        if next > self.max_nodes {
+            return Err(out.fail(BudgetError::ResourceLimit(ResourceLimit::TypeBindingNodes)));
+        }
+        self.nodes = next;
         Ok(())
     }
 

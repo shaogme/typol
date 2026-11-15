@@ -14,7 +14,7 @@ use core::{
     mem::{replace, size_of},
 };
 use opeo::{OResult, Out};
-use typol_core::{ChargedVec, NamedValue, ValueId, ValueView};
+use typol_core::{BudgetError, CapacityExceeded, ChargedVec, NamedValue, ValueId, ValueView};
 
 #[cfg(feature = "btree-map")]
 use alloc::collections::BTreeMap;
@@ -257,7 +257,8 @@ fn read_hash_map<'slot, T: Typol, Adapter: HashMapAdapter>(
         return context.reject_with_path(out.reborrow());
     };
     let Some(bytes) = entries.len().checked_mul(size_of::<(String, T)>()) else {
-        return Err(out.fail(ConversionContext::resource_error(
+        return Err(out.fail(ConversionContext::budget_error(
+            BudgetError::CapacityExceeded(CapacityExceeded::RustConversion),
             context.session().translator(),
         )));
     };
@@ -269,12 +270,14 @@ fn read_hash_map<'slot, T: Typol, Adapter: HashMapAdapter>(
         )));
     }
     let Some(actual) = Adapter::capacity(&result).checked_mul(size_of::<(String, T)>()) else {
-        return Err(out.fail(ConversionContext::resource_error(
+        return Err(out.fail(ConversionContext::budget_error(
+            BudgetError::CapacityExceeded(CapacityExceeded::RustConversion),
             context.session().translator(),
         )));
     };
     let Some(extra) = actual.checked_sub(bytes) else {
-        return Err(out.fail(ConversionContext::resource_error(
+        return Err(out.fail(ConversionContext::budget_error(
+            BudgetError::CapacityExceeded(CapacityExceeded::RustConversion),
             context.session().translator(),
         )));
     };
@@ -288,7 +291,7 @@ fn read_hash_map<'slot, T: Typol, Adapter: HashMapAdapter>(
         let Some(entry) = entry.as_named() else {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Conversion,
-                Failure::internal(NAMED_ENTRY_NAME_MISSING),
+                Failure::conversion_internal(NAMED_ENTRY_NAME_MISSING),
                 context.session().translator(),
             )));
         };
@@ -321,7 +324,8 @@ fn read_btree_map<'slot, T: Typol>(
         return context.reject_with_path(out.reborrow());
     };
     let Some(bytes) = entries.len().checked_mul(size_of::<(String, T)>()) else {
-        return Err(out.fail(ConversionContext::resource_error(
+        return Err(out.fail(ConversionContext::budget_error(
+            BudgetError::CapacityExceeded(CapacityExceeded::RustConversion),
             context.session().translator(),
         )));
     };
@@ -336,7 +340,7 @@ fn read_btree_map<'slot, T: Typol>(
         let Some(entry) = entry.as_named() else {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Conversion,
-                Failure::internal(NAMED_ENTRY_NAME_MISSING),
+                Failure::conversion_internal(NAMED_ENTRY_NAME_MISSING),
                 context.session().translator(),
             )));
         };
@@ -386,7 +390,7 @@ fn read_ordered_map<'slot, T: Typol>(
         let Some(entry) = entry.as_named() else {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Conversion,
-                Failure::internal(NAMED_ENTRY_NAME_MISSING),
+                Failure::conversion_internal(NAMED_ENTRY_NAME_MISSING),
                 context.session().translator(),
             )));
         };
@@ -428,7 +432,8 @@ fn read_ordered_map<'slot, T: Typol>(
         previous = Some(*key);
     }
     let Some(bytes) = sorted.len().checked_mul(size_of::<(String, T)>()) else {
-        return Err(out.fail(ConversionContext::resource_error(
+        return Err(out.fail(ConversionContext::budget_error(
+            BudgetError::CapacityExceeded(CapacityExceeded::RustConversion),
             context.session().translator(),
         )));
     };
@@ -440,12 +445,14 @@ fn read_ordered_map<'slot, T: Typol>(
         )));
     }
     let Some(actual) = values.capacity().checked_mul(size_of::<(String, T)>()) else {
-        return Err(out.fail(ConversionContext::resource_error(
+        return Err(out.fail(ConversionContext::budget_error(
+            BudgetError::CapacityExceeded(CapacityExceeded::RustConversion),
             context.session().translator(),
         )));
     };
     let Some(extra) = actual.checked_sub(bytes) else {
-        return Err(out.fail(ConversionContext::resource_error(
+        return Err(out.fail(ConversionContext::budget_error(
+            BudgetError::CapacityExceeded(CapacityExceeded::RustConversion),
             context.session().translator(),
         )));
     };

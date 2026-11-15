@@ -1,7 +1,9 @@
 #[path = "support/schema_compile.rs"]
 mod schema_support;
 
-use typol_core::{DiagnosticCode, ExcerptLimits, ExecutionBudget, ExecutionLimits, SourceLocation};
+use typol_core::{
+    DiagnosticCode, ExcerptLimits, ExecutionBudget, ExecutionLimits, ResourceLimit, SourceLocation,
+};
 use typol_schema::{
     LocationFailure, LocationStatus, ResolverError, SchemaCompileOptions, SchemaCompileStage,
     SchemaLimits, SchemaResolveRequest, SchemaResolver, SchemaSource,
@@ -101,11 +103,13 @@ fn records_locations_and_freezing_can_each_stop_the_public_entry() -> TestResult
         let errors = run.result.test_error()?;
         test_verify_eq!(
             errors.diagnostics().last().test_value()?.code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+            ResourceLimit::ExecutionSteps.diagnostic_code()
         );
         test_verify_eq!(
             errors.location_status(),
-            LocationStatus::Unavailable(LocationFailure::ResourceLimitExceeded)
+            LocationStatus::Unavailable(LocationFailure::ResourceLimit(
+                ResourceLimit::ExecutionSteps,
+            ))
         );
         test_verify!(run.context.usage().steps <= steps);
     }
@@ -196,11 +200,13 @@ fn semantic_error_survives_later_location_exhaustion() -> TestResult {
     );
     test_verify_eq!(
         errors.diagnostics().get(1).test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::ExecutionSteps.diagnostic_code()
     );
     test_verify_eq!(
         errors.location_status(),
-        LocationStatus::Unavailable(LocationFailure::ResourceLimitExceeded)
+        LocationStatus::Unavailable(LocationFailure::ResourceLimit(
+            ResourceLimit::ExecutionSteps,
+        ))
     );
     test_verify!(
         !errors

@@ -1,53 +1,16 @@
 use std::{error::Error, io::Error as IoError};
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, ConfigValueBuilder, DiagnosticContext, ExecutionBudget,
-    ExecutionLimits, NamedValue, ValueCopyLimits, ValueError, ValueKind, ValuePayload,
-    ValuePayloadView, ValueSource, diagnostic_context,
+    ExecutionLimits, NamedValue, ResourceLimit, ValueCopyLimits, ValueError, ValueKind,
+    ValuePayload, ValuePayloadView, ValueSource, diagnostic_context,
 };
-use typol_opeo_test_support::TestOpeo;
+use typol_opeo_test_support::{TestOpeo, ensure, ensure_eq};
 
 static MISSING_TEST_ITEM: DiagnosticContext = diagnostic_context!(
     "typol-core-tests",
     "evaluation-storage",
     "expected-item-missing",
 );
-
-macro_rules! ensure {
-    ($condition:expr $(,)?) => {
-        if !$condition {
-            return Err(IoError::other(concat!("assertion failed: ", stringify!($condition))).into());
-        }
-    };
-    ($condition:expr, $($argument:tt)+) => {
-        if !$condition {
-            return Err(IoError::other(format!($($argument)+)).into());
-        }
-    };
-}
-
-macro_rules! ensure_eq {
-    ($left:expr, $right:expr $(,)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(IoError::other(format!(
-                "assertion failed: {} and {} differ (actual {:?}, expected {:?})",
-                stringify!($left),
-                stringify!($right),
-                left,
-                right,
-            ))
-            .into());
-        }
-    }};
-    ($left:expr, $right:expr, $($argument:tt)+) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(IoError::other(format!($($argument)+)).into());
-        }
-    }};
-}
 
 #[test]
 fn metered_storage_keeps_exact_capacity_through_iteration_and_drop() -> Result<(), Box<dyn Error>> {
@@ -78,7 +41,7 @@ fn sorting_propagates_exhaustion_and_releases_storage_after_failure() -> Result<
     }
     ensure_eq!(
         TestOpeo::call::<BudgetError, _>(|out| values.sort_by(|a, b, _out| Ok(a.cmp(b)), out)),
-        Err(BudgetError::Resource)
+        Err(BudgetError::ResourceLimit(ResourceLimit::ExecutionSteps))
     );
     ensure!(budget.exhausted());
     drop(values);
@@ -96,7 +59,7 @@ fn capacity_is_rejected_before_growth_and_old_items_survive() -> Result<(), Box<
     TestOpeo::call::<BudgetError, _>(|out| values.resize(4, 3u64, out))?;
     ensure_eq!(
         TestOpeo::call::<BudgetError, _>(|out| values.try_reserve_exact(8, out)),
-        Err(BudgetError::Resource)
+        Err(BudgetError::ResourceLimit(ResourceLimit::WorkspaceBytes))
     );
     ensure_eq!(&*values, &[3, 3, 3, 3]);
     ensure!(budget.peak_workspace_bytes() <= 128);
@@ -141,7 +104,7 @@ fn standard_container_sort_charges_moves_even_when_comparison_is_free() -> Resul
     }
     ensure_eq!(
         TestOpeo::call::<BudgetError, _>(|out| values.sort_by(|a, b, _out| Ok(a.cmp(b)), out)),
-        Err(BudgetError::Resource)
+        Err(BudgetError::ResourceLimit(ResourceLimit::ExecutionSteps))
     );
     ensure!(budget.exhausted());
     drop(values);

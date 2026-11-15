@@ -10,16 +10,17 @@ use crate::{
     value_normalization::{
         builder::NormalizeBuilder,
         model::{
-            Input, NormalizeBudgetErrors, NormalizeErrors, NormalizeOps, NormalizeSchemaErrors,
-            NormalizeState, NormalizeValueErrors, Plan, PlanChild, Task,
+            Input, NORMALIZE_FINISH_INVARIANT, NormalizeBudgetErrors, NormalizeErrors,
+            NormalizeOps, NormalizeSchemaErrors, NormalizeState, NormalizeValueErrors, Plan,
+            PlanChild, Task,
         },
         planner::NormalizePlanner,
     },
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedVec, ConfigValue, Diagnostic, ExecutionBudget, InstancePath, ValueKind,
-    ValuePayloadView, ValueView,
+    BudgetError, CapacityExceeded, ChargedVec, ConfigValue, Diagnostic, ExecutionBudget,
+    InstancePath, InternalError, ResourceLimit, ValueKind, ValuePayloadView, ValueView,
 };
 use typol_policy::ValueLimits;
 use typol_semantic::TypeKind;
@@ -172,6 +173,7 @@ impl<'schema> NormalizeWork<'schema> {
                     field: None,
                     hidden: false,
                     schema_default: state.request.schema_default,
+                    environment_root: state.request.value.environment_reference().is_some(),
                 },
                 state.request.depth,
             ),
@@ -195,7 +197,9 @@ impl<'schema> NormalizeWork<'schema> {
         match self.values.pop() {
             Some(value) => Ok(value),
             None => Err(out.fail(BudgetDiagnostic::from_error(
-                BudgetError::Resource,
+                BudgetError::Internal(InternalError::ConfigValueInvariantFailure(
+                    NORMALIZE_FINISH_INVARIANT,
+                )),
                 state.request.translator,
             ))),
         }
@@ -241,11 +245,11 @@ impl<'schema> NormalizeWork<'schema> {
     ) -> OResult<'slot, ()> {
         if !state.limits.allows_depth(depth) {
             return Err(out.fail(BudgetDiagnostic::from_error(
-                BudgetError::Resource,
+                BudgetError::ResourceLimit(ResourceLimit::ConfigValueDepth),
                 state.request.translator,
             )));
         }
-        NormalizePlanner::node(state, out.reborrow())?;
+        NormalizePlanner::node(state, input, out.reborrow())?;
         let field_hidden = if let Some(field) = input.field {
             NormalizeOps::schema_call(
                 &mut state.errors.schema,
@@ -269,14 +273,14 @@ impl<'schema> NormalizeWork<'schema> {
         let plan = NormalizePlanner::plan(state, input, &self.path, out.reborrow())?;
         let Some(count) = plan.children.len().checked_add(1) else {
             return Err(out.fail(BudgetDiagnostic::from_error(
-                BudgetError::Resource,
+                BudgetError::CapacityExceeded(CapacityExceeded::ConfigValue),
                 state.request.translator,
             )));
         };
         NormalizeOps::reserve(&mut self.tasks, &mut state.errors, count, out.reborrow())?;
         let Some(next) = depth.checked_add(1) else {
             return Err(out.fail(BudgetDiagnostic::from_error(
-                BudgetError::Resource,
+                BudgetError::CapacityExceeded(CapacityExceeded::ConfigValue),
                 state.request.translator,
             )));
         };
@@ -289,13 +293,13 @@ impl<'schema> NormalizeWork<'schema> {
         ));
         if extra != 0 && !state.limits.allows_depth(next) {
             return Err(out.fail(BudgetDiagnostic::from_error(
-                BudgetError::Resource,
+                BudgetError::ResourceLimit(ResourceLimit::ConfigValueDepth),
                 state.request.translator,
             )));
         }
         let Some(next) = next.checked_add(extra) else {
             return Err(out.fail(BudgetDiagnostic::from_error(
-                BudgetError::Resource,
+                BudgetError::CapacityExceeded(CapacityExceeded::ConfigValue),
                 state.request.translator,
             )));
         };

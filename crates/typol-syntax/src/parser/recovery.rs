@@ -236,7 +236,10 @@ mod tests {
         SourceId,
     };
     use typol_i18n::{Language, Translator};
-    use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome};
+    use typol_test_support::{
+        TestFailure as OpeoTestFailure, TestOpeoOutcome, test_assert_early as test_assert,
+        test_assert_eq_early as test_assert_eq,
+    };
 
     #[derive(Debug)]
     struct TestFailure;
@@ -273,24 +276,6 @@ mod tests {
         fn test_value(self) -> TestResult<T> {
             self.ok_or(TestFailure)
         }
-    }
-
-    macro_rules! test_assert {
-        ($condition:expr $(, $($message:tt)*)?) => {{
-            if !$condition {
-                return Err(TestFailure);
-            }
-        }};
-    }
-
-    macro_rules! test_assert_eq {
-        ($left:expr, $right:expr $(, $($message:tt)*)?) => {{
-            let left = &$left;
-            let right = &$right;
-            if left != right {
-                return Err(TestFailure);
-            }
-        }};
     }
 
     #[test]
@@ -333,7 +318,7 @@ mod tests {
         };
         test_assert_eq!(
             recovery_error.code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+            DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED
         );
         call(&mut errors, |out| {
             ParserControl::push_diagnostic(&mut parser, recovery_error, out)
@@ -345,7 +330,7 @@ mod tests {
         test_assert_eq!(errors.diagnostics().len(), 1);
         test_assert_eq!(
             errors.diagnostics().first().test_value()?.code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+            DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED
         );
 
         Ok(())

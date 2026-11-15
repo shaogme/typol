@@ -2,8 +2,8 @@ mod text;
 
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 use typol_core::{
-    BudgetError, ChargedVec, ConfigValue, ExecutionBudget, ExecutionLimits, ValueEntries,
-    ValueKind, ValuePayloadView, ValueView,
+    BudgetError, CapacityExceeded, ChargedVec, ConfigValue, ExecutionBudget, ExecutionLimits,
+    ResourceLimit, ValueEntries, ValueKind, ValuePayloadView, ValueView,
 };
 use typol_model::BuiltinType;
 use typol_policy::ValueLimits;
@@ -204,12 +204,17 @@ impl Formatter {
         self.nodes = self
             .nodes
             .checked_add(1)
-            .ok_or(DisplayError::ResourceLimitExceeded)
+            .ok_or(DisplayError::CapacityExceeded(
+                CapacityExceeded::FormatOutput,
+            ))
             .store_err_into(out.reborrow())?;
-        if depth > self.resources.max_nesting_depth()
-            || self.nodes > self.resources.max_value_nodes()
-        {
-            return Err(out.fail(DisplayError::ResourceLimitExceeded));
+        if depth > self.resources.max_nesting_depth() {
+            return Err(out.fail(DisplayError::ResourceLimit(
+                ResourceLimit::FormattingNestingDepth,
+            )));
+        }
+        if self.nodes > self.resources.max_value_nodes() {
+            return Err(out.fail(DisplayError::ResourceLimit(ResourceLimit::ConfigValueNodes)));
         }
         Ok(())
     }
@@ -704,6 +709,8 @@ fn child_depth<'slot, 'borrow>(
 ) -> OResult<'slot, usize> {
     match depth.checked_add(1) {
         Some(depth) => Ok(depth),
-        None => Err(out.fail(DisplayError::ResourceLimitExceeded)),
+        None => Err(out.fail(DisplayError::CapacityExceeded(
+            CapacityExceeded::FormatOutput,
+        ))),
     }
 }

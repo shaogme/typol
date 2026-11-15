@@ -17,7 +17,8 @@ use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     AllocationError, BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticMessage,
     ExecutionBudget, ExecutionLimits, InstancePath, LineIndex, LocatedSpan, LocationError,
-    PathSegment, Read, RelatedLocationRole, SliceSource, SourceId, Span, SpanError, SpanLocation,
+    PathSegment, Read, RelatedLocationRole, ResourceLimit, SliceSource, SourceId, Span, SpanError,
+    SpanLocation,
 };
 use typol_i18n::{Language, Translator};
 use typol_policy::{ExcerptLimits, RegexOptions};
@@ -394,7 +395,7 @@ fn environment_cache_capacity_failure_precedes_provider_reads() -> TestResult<()
             )
         })
         .test_error()?;
-    test_eq!(error.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)?;
+    test_eq!(error.code(), DiagnosticCode::WORKSPACE_BYTES_LIMIT_EXCEEDED)?;
     test_eq!(provider.calls(), 0)?;
     test_eq!(budget.workspace_bytes(), before_read)?;
 
@@ -569,9 +570,17 @@ fn cache_limits_and_fatal_provider_errors_stop_before_later_references() -> Test
     let mut session_errors = TestSlot::default();
     let mut parse_errors = TestSlot::default();
     for (result, code) in [
-        (Err(EnvironmentError::ResourceLimitExceeded), 1),
+        (
+            Err(EnvironmentError::ResourceLimit(
+                ResourceLimit::EnvironmentBytes,
+            )),
+            ResourceLimit::EnvironmentBytes.diagnostic_code().get(),
+        ),
         (Err(EnvironmentError::AllocationFailed), 2),
-        (Ok(Some(&b"oversized"[..])), 1),
+        (
+            Ok(Some(&b"oversized"[..])),
+            ResourceLimit::StringBytes.diagnostic_code().get(),
+        ),
     ] {
         let mut limits = ConfigLimits::default();
         limits = limits.with_max_string_bytes(5);
@@ -691,7 +700,10 @@ fn reporter_hides_secret_paths_before_storage_and_rejects_unknown_dynamic_keys()
         } else {
             test_assert!(!keep_going)?;
             test_assert!(buffer.stopped())?;
-            test_eq!(diagnostic.code(), DiagnosticCode::INTERNAL_ERROR)?;
+            test_eq!(
+                diagnostic.code(),
+                DiagnosticCode::SECRET_POLICY_INVARIANT_FAILURE
+            )?;
             test_assert!(diagnostic.path().is_none())?;
         }
     }

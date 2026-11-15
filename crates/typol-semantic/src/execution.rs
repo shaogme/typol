@@ -2,7 +2,10 @@ use crate::{
     AllItemRequest, ComparisonOptions, CompiledSchema, ConstraintData, EvalError, EvalKind,
     ExpressionView, FieldList, StoredRuleView, SumBoundsRequest, TypeView, ValueComparison,
     ValueRules,
-    engine::{Bindings as RawBindings, EvalValue as RawValue, Evaluator as RawEvaluator},
+    engine::{
+        Bindings as RawBindings, EvalValue as RawValue, EvaluationInvariant,
+        Evaluator as RawEvaluator,
+    },
 };
 use core::{cmp::Ordering, ptr};
 use opeo::{OResult, Out, ResultOutExt};
@@ -127,15 +130,15 @@ impl<'model> SchemaEvaluator<'model> {
         RawEvaluator::new(self.schema, self.limits, self.regex_limits, self.budget)
     }
 
-    fn check(&self, ty: TypeView<'_>) -> Result<(), EvalError> {
+    fn check(&self, ty: TypeView<'_>) -> Result<(), EvaluationInvariant> {
         if ptr::eq(self.schema, ty.schema()) {
             Ok(())
         } else {
-            Err(EvalError::internal(SCHEMA_EVALUATION_INTERNAL))
+            Err(EvaluationInvariant::new(SCHEMA_EVALUATION_INTERNAL))
         }
     }
 
-    fn value<'a>(&self, value: SchemaValue<'a>) -> Result<RawValue<'a>, EvalError> {
+    fn value<'a>(&self, value: SchemaValue<'a>) -> Result<RawValue<'a>, EvaluationInvariant> {
         self.check(value.ty)?;
         Ok(value.raw())
     }

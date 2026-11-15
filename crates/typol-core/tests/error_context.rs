@@ -1,47 +1,23 @@
 use std::{error::Error, fmt::Debug, io::Error as IoError, mem::size_of, string::String};
 use typol_core::{
-    BudgetError, ConfigValueBuilder, Diagnostic, DiagnosticCode, DiagnosticContext,
-    DiagnosticFailure, DiagnosticFieldStatus, DiagnosticKind, DiagnosticLabelInput,
-    DiagnosticMessage, DiagnosticParameter, DiagnosticParameters, DiagnosticStage, ExecutionBudget,
-    ExecutionLimits, LocatedSpan, LocationError, LocationErrorKind, MAX_RELATED_LOCATIONS,
-    NamedValue, RelatedLocationRole, SourceId, SourceLocation, SourceReadError,
-    SourceReadErrorKind, SourceSpan, Span, SpanLocation, TerminalSlot, ValueError, ValueErrorKind,
-    ValueSource, diagnostic_context,
+    BudgetError, CapacityExceeded, ConfigValueBuilder, Diagnostic, DiagnosticCode,
+    DiagnosticContext, DiagnosticFailure, DiagnosticFieldStatus, DiagnosticKind,
+    DiagnosticLabelInput, DiagnosticMessage, DiagnosticParameter, DiagnosticParameters,
+    DiagnosticStage, ExecutionBudget, ExecutionLimits, InternalError, LocatedSpan, LocationError,
+    LocationErrorKind, MAX_RELATED_LOCATIONS, NamedValue, RelatedLocationRole, ResourceLimit,
+    SourceId, SourceLocation, SourceReadError, SourceReadErrorKind, SourceSpan, Span, SpanLocation,
+    TerminalSlot, ValueError, ValueErrorKind, ValueSource, diagnostic_context,
 };
-use typol_opeo_test_support::TestOpeo;
+use typol_i18n::{Language, Translator};
+use typol_opeo_test_support::{TestOpeo, ensure, ensure_eq};
 use u18n::RenderError;
 
 static TEST_CONTEXT: DiagnosticContext =
     diagnostic_context!("typol-core-tests", "error-context", "stable-failure-point");
 static CONVERSION_CONTEXT: DiagnosticContext =
     diagnostic_context!("typol", "conversion", "conversion-depth-limit");
-
-macro_rules! ensure {
-    ($condition:expr $(,)?) => {
-        if !$condition {
-            return Err(
-                IoError::other(concat!("assertion failed: ", stringify!($condition))).into(),
-            );
-        }
-    };
-}
-
-macro_rules! ensure_eq {
-    ($left:expr, $right:expr $(,)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(IoError::other(format!(
-                "assertion failed: {} and {} differ (actual {:?}, expected {:?})",
-                stringify!($left),
-                stringify!($right),
-                left,
-                right,
-            ))
-            .into());
-        }
-    }};
-}
+static REGEX_COMPILE_CONTEXT: DiagnosticContext =
+    diagnostic_context!("typol-regex", "regex-compile", "budget-error-conversion");
 
 #[test]
 fn budget_invariant_context_survives_recording_and_diagnostic_conversion()
@@ -51,14 +27,49 @@ fn budget_invariant_context_survives_recording_and_diagnostic_conversion()
     let recorded = budget
         .failure()
         .ok_or_else(|| IoError::other("budget did not record the internal error"))?;
-    let mut diagnostic = Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR, "internal failure");
+    let mut diagnostic =
+        Diagnostic::emergency(DiagnosticCode::BUDGET_INVARIANT_FAILURE, "internal failure");
     diagnostic.set_context(error.context());
 
     ensure_eq!(recorded.context(), Some(TEST_CONTEXT));
-    ensure_eq!(diagnostic.code(), DiagnosticCode::INTERNAL_ERROR);
+    ensure_eq!(diagnostic.code(), DiagnosticCode::BUDGET_INVARIANT_FAILURE);
     ensure_eq!(diagnostic.context(), Some(TEST_CONTEXT));
     ensure_eq!(diagnostic.located_primary(), None);
     Ok(())
+}
+
+#[test]
+fn recorded_capacity_failure_preserves_its_category() -> Result<(), Box<dyn Error>> {
+    let budget = TestOpeo::call(|out| ExecutionBudget::new(ExecutionLimits::new(10, 10_000), out))?;
+    let error = BudgetError::CapacityExceeded(CapacityExceeded::HostSource);
+
+    budget.record_failure(error);
+
+    let recorded = budget
+        .failure()
+        .ok_or_else(|| IoError::other("budget did not record the capacity error"))?;
+    ensure_eq!(recorded, error);
+    ensure_eq!(
+        recorded.diagnostic_code(),
+        DiagnosticCode::HOST_SOURCE_CAPACITY_EXCEEDED
+    );
+    Ok(())
+}
+
+#[test]
+fn regex_compilation_diagnostics_report_the_compilation_stage() {
+    let capacity = Diagnostic::emergency(
+        DiagnosticCode::REGEX_COMPILATION_CAPACITY_EXCEEDED,
+        "capacity exceeded",
+    );
+    let mut invariant = Diagnostic::emergency(
+        DiagnosticCode::REGEX_COMPILATION_INVARIANT_FAILURE,
+        "internal failure",
+    );
+    invariant.set_context(Some(REGEX_COMPILE_CONTEXT));
+
+    assert_eq!(capacity.kind().stage(), DiagnosticStage::SchemaCompilation);
+    assert_eq!(invariant.kind().stage(), DiagnosticStage::SchemaCompilation);
 }
 
 #[test]
@@ -75,7 +86,8 @@ fn emergency_diagnostic_keeps_located_primary_without_workspace_growth()
     let end = SourceLocation::new(2, 6)
         .ok_or_else(|| IoError::other("line and column must be positive"))?;
     let primary = LocatedSpan::new(source, Some(SpanLocation { start, end }));
-    let mut diagnostic = Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR, "internal failure");
+    let mut diagnostic =
+        Diagnostic::emergency(DiagnosticCode::BUDGET_INVARIANT_FAILURE, "internal failure");
     diagnostic.set_context(Some(TEST_CONTEXT));
     diagnostic.set_located_primary(Some(primary));
     let slot = slot
@@ -108,7 +120,8 @@ fn primary_location_capacity_is_explicit() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| IoError::other("line and column must be positive"))?;
     let end = SourceLocation::new(u32::MAX as usize + 1, 2)
         .ok_or_else(|| IoError::other("line and column must be positive"))?;
-    let mut diagnostic = Diagnostic::emergency(DiagnosticCode::INTERNAL_ERROR, "internal failure");
+    let mut diagnostic =
+        Diagnostic::emergency(DiagnosticCode::BUDGET_INVARIANT_FAILURE, "internal failure");
     diagnostic.set_located_primary(Some(LocatedSpan::new(
         source,
         Some(SpanLocation { start, end }),
@@ -128,8 +141,10 @@ fn primary_location_capacity_is_explicit() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn emergency_diagnostics_expose_stable_kinds_and_nonempty_causes() {
-    let mut diagnostic =
-        Diagnostic::emergency(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED, "limit exceeded");
+    let mut diagnostic = Diagnostic::emergency(
+        DiagnosticCode::TYPE_BINDING_DEPTH_LIMIT_EXCEEDED,
+        "limit exceeded",
+    );
     diagnostic.set_context(Some(CONVERSION_CONTEXT));
 
     assert_eq!(
@@ -142,6 +157,45 @@ fn emergency_diagnostics_expose_stable_kinds_and_nonempty_causes() {
             .message()
             .is_ok_and(|message| !message.is_empty())
     );
+}
+
+#[test]
+fn type_binding_node_limit_has_stable_code_and_stage() {
+    let code = DiagnosticCode::TYPE_BINDING_NODES_LIMIT_EXCEEDED;
+    let diagnostic = Diagnostic::emergency(code, "limit exceeded");
+
+    assert_eq!(ResourceLimit::TypeBindingNodes.diagnostic_code(), code);
+    assert_eq!(
+        ResourceLimit::from_diagnostic_code(code),
+        Some(ResourceLimit::TypeBindingNodes)
+    );
+    assert!(code.is_resource_limit());
+    assert_eq!(code.name(), "TYPE_BINDING_NODES_LIMIT_EXCEEDED");
+    assert_eq!(diagnostic.kind().stage(), DiagnosticStage::TypeBinding);
+}
+
+#[test]
+fn every_resource_limit_code_has_a_non_internal_stage() -> Result<(), Box<dyn Error>> {
+    for value in DiagnosticCode::SOURCE_BYTES_LIMIT_EXCEEDED.get()
+        ..=DiagnosticCode::TYPE_BINDING_NODES_LIMIT_EXCEEDED.get()
+    {
+        let code = DiagnosticCode::new(value)
+            .ok_or_else(|| IoError::other("resource limit code should be nonzero"))?;
+        let diagnostic = Diagnostic::emergency(code, "limit exceeded");
+        ensure!(code.is_resource_limit());
+        ensure!(diagnostic.kind().stage() != DiagnosticStage::Internal);
+    }
+    let execution = Diagnostic::emergency(
+        DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED,
+        "limit exceeded",
+    );
+    let workspace = Diagnostic::emergency(
+        DiagnosticCode::WORKSPACE_BYTES_LIMIT_EXCEEDED,
+        "limit exceeded",
+    );
+    ensure_eq!(execution.kind().stage(), DiagnosticStage::ExecutionBudget);
+    ensure_eq!(workspace.kind().stage(), DiagnosticStage::ExecutionBudget);
+    Ok(())
 }
 
 #[test]
@@ -158,8 +212,10 @@ fn emergency_diagnostic_keeps_final_text_without_allocating() {
 
 #[test]
 fn translation_failures_remain_errors_without_a_text_fallback() {
-    let diagnostic =
-        Diagnostic::translation_failure(DiagnosticCode::INTERNAL_ERROR, RenderError::WriteFailed);
+    let diagnostic = Diagnostic::translation_failure(
+        DiagnosticCode::BUDGET_INVARIANT_FAILURE,
+        RenderError::WriteFailed,
+    );
 
     assert_eq!(
         diagnostic.message(),
@@ -291,10 +347,12 @@ fn bounded_errors_expose_safe_numeric_context() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| IoError::other("expected a reversed range to be rejected"))?;
     ensure_eq!(span_error.attempted_range(), (9, 4));
 
-    let read_error = SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-        .with_offset(12)
-        .with_requested_bytes(5)
-        .with_context(TEST_CONTEXT);
+    let read_error = SourceReadError::new(SourceReadErrorKind::Internal(
+        InternalError::SourceInputInvariantFailure(TEST_CONTEXT),
+    ))
+    .with_offset(12)
+    .with_requested_bytes(5)
+    .with_context(TEST_CONTEXT);
     ensure_eq!(read_error.offset(), Some(12));
     ensure_eq!(read_error.requested_bytes(), Some(5));
     ensure_eq!(read_error.context(), Some(TEST_CONTEXT));
@@ -331,6 +389,55 @@ fn duplicate_value_error_reports_indices_without_copying_names() -> Result<(), B
     ensure_eq!(error.kind(), ValueErrorKind::DuplicateMapKey);
     ensure_eq!(error.duplicate_indices(), Some((0, 1)));
     ensure!(!debug.contains("private-key-name"));
+    Ok(())
+}
+
+#[test]
+fn every_resource_limit_has_emergency_text_in_each_locale() -> Result<(), Box<dyn Error>> {
+    let limits = [
+        ResourceLimit::SourceBytes,
+        ResourceLimit::SchemaTotalBytes,
+        ResourceLimit::SchemaSourceCount,
+        ResourceLimit::SchemaImportDepth,
+        ResourceLimit::ExecutionSteps,
+        ResourceLimit::WorkspaceBytes,
+        ResourceLimit::SchemaParseDepth,
+        ResourceLimit::TokenBytes,
+        ResourceLimit::StringBytes,
+        ResourceLimit::SchemaAstNodes,
+        ResourceLimit::ConfigParseDepth,
+        ResourceLimit::ConfigValueDepth,
+        ResourceLimit::ConfigValueNodes,
+        ResourceLimit::ConfigTextBytes,
+        ResourceLimit::EnvironmentEntries,
+        ResourceLimit::EnvironmentBytes,
+        ResourceLimit::ValidationTraversal,
+        ResourceLimit::RegexCompilationBudget,
+        ResourceLimit::RegexPatternBytes,
+        ResourceLimit::RegexNestingDepth,
+        ResourceLimit::RegexInstructionCount,
+        ResourceLimit::RegexCharacterRanges,
+        ResourceLimit::RegexExecutionSteps,
+        ResourceLimit::RegexSearchSteps,
+        ResourceLimit::RegexWorkspaceBytes,
+        ResourceLimit::RegexScratchStates,
+        ResourceLimit::TypeBindingDepth,
+        ResourceLimit::SchemaFormatOutputBytes,
+        ResourceLimit::ConfigFormatOutputBytes,
+        ResourceLimit::FormattingWorkspaceBytes,
+        ResourceLimit::FormattingNestingDepth,
+        ResourceLimit::TypeBindingNodes,
+    ];
+
+    for language in [Language::English, Language::Chinese] {
+        let translator = Translator::new(language);
+        for limit in limits {
+            let message = limit
+                .emergency_message(translator)
+                .map_err(|_| IoError::other("resource-limit message translation failed"))?;
+            ensure!(!message.is_empty());
+        }
+    }
     Ok(())
 }
 

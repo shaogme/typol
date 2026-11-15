@@ -1,5 +1,5 @@
 use opeo::{OResult, Out};
-use typol_core::{ChargedVec, SourceId, SourceSpan, Span};
+use typol_core::{ChargedVec, ResourceLimit, SourceId, SourceSpan, Span};
 use typol_syntax::{
     AstAccessError, Declaration, DeclarationList, EnumDecl, StructDecl, TypeAliasDecl,
 };
@@ -700,18 +700,21 @@ impl<'a> TreeBuilder<'a, '_> {
         span: SourceSpan,
         out: Out<'slot, '_, BuildFailure>,
     ) -> OResult<'slot, usize> {
-        match depth
-            .checked_add(1)
-            .filter(|next| *next <= self.context.limits().max_nesting_depth())
-        {
-            Some(next) => Ok(next),
-            None => {
-                self.diagnostics.abort(EmergencyDiagnostics::resource(
-                    span,
-                    self.diagnostics.translator(),
-                ));
-                Err(out.fail(BuildFailure::empty()))
-            }
+        let Some(next) = depth.checked_add(1) else {
+            self.diagnostics.abort(EmergencyDiagnostics::capacity(
+                span,
+                self.diagnostics.translator(),
+            ));
+            return Err(out.fail(BuildFailure::empty()));
+        };
+        if next > self.context.limits().max_nesting_depth() {
+            self.diagnostics.abort(EmergencyDiagnostics::resource(
+                ResourceLimit::SchemaImportDepth,
+                span,
+                self.diagnostics.translator(),
+            ));
+            return Err(out.fail(BuildFailure::empty()));
         }
+        Ok(next)
     }
 }

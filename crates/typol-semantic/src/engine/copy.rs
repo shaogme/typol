@@ -1,8 +1,8 @@
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 use typol_core::{
-    BudgetError, ChargedVec, ConfigValue, ConfigValueBuilder, DiagnosticContext, ExecutionBudget,
-    NamedValue, ValueError, ValueErrorKind, ValueKind, ValuePayload, ValuePayloadView, ValueView,
-    diagnostic_context,
+    BudgetError, CapacityExceeded, ChargedVec, ConfigValue, ConfigValueBuilder, DiagnosticContext,
+    ExecutionBudget, InternalError, NamedValue, ResourceLimit, ValueError, ValueErrorKind,
+    ValueKind, ValuePayload, ValuePayloadView, ValueView, diagnostic_context,
 };
 use typol_policy::ValueLimits;
 
@@ -25,22 +25,23 @@ enum Task<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CopyError {
-    Resource,
+    ResourceLimit(ResourceLimit),
     Allocation,
-    Capacity,
-    Internal,
-    InternalAt(DiagnosticContext),
+    CapacityExceeded(CapacityExceeded),
+    Internal(InternalError),
+    InternalSource(ValueError),
     InvalidValue(ValueError),
 }
 
 impl CopyError {
     pub const fn internal(context: DiagnosticContext) -> Self {
-        Self::InternalAt(context)
+        Self::Internal(InternalError::ValueCopyInvariantFailure(context))
     }
 
     pub const fn context(self) -> Option<DiagnosticContext> {
         match self {
-            Self::InternalAt(context) => Some(context),
+            Self::Internal(error) => Some(error.context()),
+            Self::InternalSource(error) => error.context(),
             Self::InvalidValue(error) => match error.context() {
                 Some(context) => Some(context),
                 None => {
@@ -55,19 +56,34 @@ impl CopyError {
                     })
                 }
             },
-            Self::Resource | Self::Allocation | Self::Capacity | Self::Internal => None,
+            Self::ResourceLimit(_) | Self::Allocation | Self::CapacityExceeded(_) => None,
         }
     }
 
     pub const fn is_internal(self) -> bool {
         matches!(
             self,
-            Self::Internal | Self::InternalAt(_) | Self::InvalidValue(_)
+            Self::Internal(_) | Self::InternalSource(_) | Self::InvalidValue(_)
         )
+    }
+
+    pub const fn internal_error(self) -> Option<InternalError> {
+        match self {
+            Self::Internal(error) => Some(error),
+            Self::InternalSource(error) => match error.kind() {
+                ValueErrorKind::Internal(internal) => Some(internal),
+                _ => None,
+            },
+            Self::ResourceLimit(_)
+            | Self::Allocation
+            | Self::CapacityExceeded(_)
+            | Self::InvalidValue(_) => None,
+        }
     }
 
     pub const fn value_error(self) -> Option<ValueError> {
         match self {
+            Self::InternalSource(source) => Some(source),
             Self::InvalidValue(error) => Some(error),
             _ => None,
         }
@@ -97,9 +113,9 @@ fn reserve<'slot, T>(
     buffer.try_reserve(count, out.reborrow())
 }
 
-fn count_node(nodes: &mut usize, limits: &ValueLimits) -> Result<(), CopyError> {
+fn count_node(nodes: &mut usize, limits: &ValueLimits) -> Result<(), ResourceLimit> {
     if *nodes >= limits.max_value_nodes() {
-        return Err(CopyError::Resource);
+        return Err(ResourceLimit::ConfigValueNodes);
     }
     *nodes += 1;
     Ok(())
@@ -112,7 +128,7 @@ fn check_text<'slot>(
     mut out: Out<'slot, '_, CopyError>,
 ) -> OResult<'slot, ()> {
     if text.len() > limits.max_string_bytes() {
-        return Err(out.fail(CopyError::Resource));
+        return Err(out.fail(CopyError::ResourceLimit(ResourceLimit::ConfigTextBytes)));
     }
     if let Some(budget) = options.budget {
         budget.construct_text(text.len(), options.max_text_bytes, out.reborrow())?;
@@ -122,11 +138,11 @@ fn check_text<'slot>(
 
 fn value_error(error: ValueError) -> CopyError {
     match error.kind() {
-        ValueErrorKind::ResourceLimitExceeded => CopyError::Resource,
+        ValueErrorKind::ResourceLimit(limit) => CopyError::ResourceLimit(limit),
         ValueErrorKind::AllocationFailed => CopyError::Allocation,
-        ValueErrorKind::CapacityExceeded => CopyError::Capacity,
-        ValueErrorKind::InternalInvariantFailure
-        | ValueErrorKind::EnvironmentReferenceRequired
+        ValueErrorKind::CapacityExceeded(capacity) => CopyError::CapacityExceeded(capacity),
+        ValueErrorKind::Internal(_) => CopyError::InternalSource(error),
+        ValueErrorKind::EnvironmentReferenceRequired
         | ValueErrorKind::DuplicateMapKey
         | ValueErrorKind::DuplicateFieldName => CopyError::InvalidValue(error),
     }
@@ -135,14 +151,17 @@ fn value_error(error: ValueError) -> CopyError {
 impl From<BudgetError> for CopyError {
     fn from(error: BudgetError) -> Self {
         match error {
-            BudgetError::Resource
-            | BudgetError::RegexSteps
-            | BudgetError::RegexSearchSteps
-            | BudgetError::RegexWorkspace => Self::Resource,
+            BudgetError::ResourceLimit(limit) => Self::ResourceLimit(limit),
             BudgetError::Allocation => Self::Allocation,
-            BudgetError::CapacityExceeded => Self::Capacity,
-            BudgetError::InvariantViolation(context) => Self::internal(*context),
+            BudgetError::CapacityExceeded(capacity) => Self::CapacityExceeded(capacity),
+            BudgetError::Internal(error) => Self::Internal(error),
         }
+    }
+}
+
+impl From<ResourceLimit> for CopyError {
+    fn from(limit: ResourceLimit) -> Self {
+        Self::ResourceLimit(limit)
     }
 }
 
@@ -220,7 +239,9 @@ impl ValueCopy {
             match task {
                 Task::Enter(value, depth) => {
                     if !limits.allows_depth(depth) {
-                        return Err(out.fail(CopyError::Resource));
+                        return Err(
+                            out.fail(CopyError::ResourceLimit(ResourceLimit::ConfigValueDepth))
+                        );
                     }
                     count_node(nodes, limits).store_err_into(out.reborrow())?;
                     let start = values.len();
@@ -238,13 +259,13 @@ impl ValueCopy {
                     };
                     let capacity = children
                         .checked_add(1)
-                        .ok_or(CopyError::Resource)
+                        .ok_or(CopyError::CapacityExceeded(CapacityExceeded::ConfigValue))
                         .store_err_into(out.reborrow())?;
                     tasks.try_reserve(capacity, out.reborrow())?;
                     tasks.try_push(Task::Finish(value, start), out.reborrow())?;
                     let next_depth = depth
                         .checked_add(1)
-                        .ok_or(CopyError::Resource)
+                        .ok_or(CopyError::CapacityExceeded(CapacityExceeded::ConfigValue))
                         .store_err_into(out.reborrow())?;
                     match value.as_ref() {
                         ValueKind::Optional(Some(child)) => {
@@ -283,7 +304,9 @@ impl ValueCopy {
                             ValuePayloadView::Structure(fields) => {
                                 let next_depth = next_depth
                                     .checked_add(options.enum_structure_depth)
-                                    .ok_or(CopyError::Resource)
+                                    .ok_or(CopyError::CapacityExceeded(
+                                        CapacityExceeded::ConfigValue,
+                                    ))
                                     .store_err_into(out.reborrow())?;
                                 for field in fields {
                                     if let Some(budget) = options.budget {

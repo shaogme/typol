@@ -10,7 +10,9 @@ use typol_config::{
     ConfigParseOptions, ConfigParseRequest, ConfigParser, Environment, EnvironmentError,
     EnvironmentReadContext,
 };
-use typol_core::{ConfigValue, ExecutionLimits, SliceSource, TextLayout, ValueKind};
+use typol_core::{
+    ConfigValue, DiagnosticCode, ExecutionLimits, SliceSource, TextLayout, ValueKind,
+};
 use typol_i18n::{Language, Translator};
 use typol_semantic::CompiledSchema;
 use typol_test_support::{TestResult, test_verify as assert, test_verify_eq as assert_eq};
@@ -164,7 +166,10 @@ fn pretty_whitespace_counts_toward_output_and_failure_returns_no_fragment() -> T
             }
             TestOpeoOutcome::Error(errors) => {
                 assert!(!succeeds);
-                assert_eq!(BindingTestSupport::code(errors)?, 1);
+                assert_eq!(
+                    BindingTestSupport::code(errors)?,
+                    DiagnosticCode::CONFIG_FORMAT_OUTPUT_BYTES_LIMIT_EXCEEDED.get()
+                );
             }
         }
     }

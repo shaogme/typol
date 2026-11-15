@@ -2,9 +2,12 @@ use core::{cell::RefCell, cmp::Ordering};
 use typol_i18n::{Translator, t};
 
 use opeo::{ErrSlot, OResult, Out};
-use typol_core::{BudgetError, Diagnostic, ExecutionBudget, RegexExecutionBudget, SourceSpan};
+use typol_core::{
+    BudgetError, Diagnostic, ExecutionBudget, InternalError, RegexExecutionBudget, SourceSpan,
+};
 use typol_policy::RegexLimits;
-use typol_semantic::{BuildError, EvalFailure};
+use typol_regex::{RegexMatchError, RegexScratchError};
+use typol_semantic::{BuildError, EvalFailure, RegexExecutionError, RegexExecutionFailure};
 use typol_syntax::AstAccessError;
 
 use crate::{
@@ -40,6 +43,8 @@ pub(crate) struct CompileContextOptions<'a> {
     pub(crate) regex_execution: &'a RegexExecutionBudget,
     pub(crate) translator: Translator,
 }
+
+pub(crate) struct RegexExecutionDiagnostics;
 
 impl CompileContext {
     pub(crate) fn new<'slot, E>(
@@ -295,56 +300,158 @@ fn builder_diagnostic(
     span: SourceSpan,
     diagnostics: &DiagnosticCollector,
 ) -> Diagnostic {
-    let span = error.source_span().unwrap_or(span);
-    if let Some(access) = error.schema_access() {
-        EmergencyDiagnostics::internal(
-            span,
-            EmergencyDiagnostics::schema_access_context(access),
-            diagnostics.translator(),
-        )
-    } else if let Some(context) = error.context() {
-        EmergencyDiagnostics::internal(span, context, diagnostics.translator())
-    } else {
-        match error {
-            BuildError::Allocation => {
-                EmergencyDiagnostics::allocation(span, diagnostics.translator())
-            }
-            BuildError::Resource => EmergencyDiagnostics::resource(span, diagnostics.translator()),
-            BuildError::Capacity => EmergencyDiagnostics::capacity(span, diagnostics.translator()),
-            BuildError::Internal
-            | BuildError::InternalAt { .. }
-            | BuildError::SchemaAccess(_)
-            | BuildError::SchemaAccessAt { .. } => schema_internal!(diagnostics.translator(), span),
-            BuildError::DefaultConstraintAt { .. } => diagnostics.make_semantic(
-                t! {
-                    name: "diagnostic.schema.default_constraint_failed",
-                    locale: diagnostics.translator(),
-                },
+    match error {
+        BuildError::Allocation => EmergencyDiagnostics::allocation(span, diagnostics.translator()),
+        BuildError::ResourceLimit(limit) => {
+            EmergencyDiagnostics::resource(limit, span, diagnostics.translator())
+        }
+        BuildError::CapacityExceeded(capacity) => {
+            EmergencyDiagnostics::capacity_error(span, capacity, diagnostics.translator())
+        }
+        BuildError::Internal { error, .. } => {
+            EmergencyDiagnostics::internal_error(span, error, diagnostics.translator())
+        }
+        BuildError::SchemaAccess(error) | BuildError::SchemaAccessAt { error, .. } => {
+            EmergencyDiagnostics::internal_error(
                 span,
-            ),
-            BuildError::DefaultEvaluationAt { failure, .. } => match failure {
-                EvalFailure::Arithmetic => diagnostics.make_semantic(
-                    t! {
-                        name: "diagnostic.schema.default_numeric_evaluation_failed",
-                        locale: diagnostics.translator(),
-                    },
-                    span,
+                InternalError::SchemaAccessInvariantFailure(
+                    EmergencyDiagnostics::schema_access_context(error),
                 ),
-                EvalFailure::Resource => {
-                    EmergencyDiagnostics::resource(span, diagnostics.translator())
-                }
-                EvalFailure::Allocation => {
-                    EmergencyDiagnostics::allocation(span, diagnostics.translator())
-                }
-                EvalFailure::Capacity => {
-                    EmergencyDiagnostics::capacity(span, diagnostics.translator())
-                }
-                EvalFailure::Internal
-                | EvalFailure::InternalAt(_)
-                | EvalFailure::SchemaAccess(_) => {
-                    schema_internal!(diagnostics.translator(), span)
-                }
+                diagnostics.translator(),
+            )
+        }
+        BuildError::DefaultConstraintAt { .. } => diagnostics.make_semantic(
+            t! {
+                name: "diagnostic.schema.default_constraint_failed",
+                locale: diagnostics.translator(),
             },
+            span,
+        ),
+        BuildError::DefaultEvaluationAt { failure, .. } => {
+            eval_failure_diagnostic(failure, span, diagnostics)
+        }
+        BuildError::RegexExecutionAt { error, .. } => {
+            RegexExecutionDiagnostics::map(error, span, diagnostics)
+        }
+    }
+}
+
+fn eval_failure_diagnostic(
+    failure: EvalFailure,
+    span: SourceSpan,
+    diagnostics: &DiagnosticCollector,
+) -> Diagnostic {
+    match failure {
+        EvalFailure::Internal(error) => {
+            EmergencyDiagnostics::internal_error(span, error, diagnostics.translator())
+        }
+        EvalFailure::SchemaAccess(error) => EmergencyDiagnostics::internal_error(
+            span,
+            InternalError::SchemaAccessInvariantFailure(
+                EmergencyDiagnostics::schema_access_context(error),
+            ),
+            diagnostics.translator(),
+        ),
+        EvalFailure::RegexExecution(error) => {
+            RegexExecutionDiagnostics::map(error, span, diagnostics)
+        }
+        EvalFailure::ResourceLimit(limit) => {
+            EmergencyDiagnostics::resource(limit, span, diagnostics.translator())
+        }
+        EvalFailure::Arithmetic => diagnostics.make_semantic(
+            t! {
+                name: "diagnostic.schema.default_numeric_evaluation_failed",
+                locale: diagnostics.translator(),
+            },
+            span,
+        ),
+        EvalFailure::Allocation => EmergencyDiagnostics::allocation(span, diagnostics.translator()),
+        EvalFailure::CapacityExceeded(capacity) => {
+            EmergencyDiagnostics::capacity_error(span, capacity, diagnostics.translator())
+        }
+    }
+}
+
+impl RegexExecutionDiagnostics {
+    pub(crate) fn map(
+        error: RegexExecutionError,
+        span: SourceSpan,
+        diagnostics: &DiagnosticCollector,
+    ) -> Diagnostic {
+        let span = error.source_span().unwrap_or(span);
+        match error {
+            RegexExecutionError::Scratch(error) => {
+                regex_scratch_diagnostic(error, span, diagnostics)
+            }
+            RegexExecutionError::Match(error) => regex_match_diagnostic(error, span, diagnostics),
+            RegexExecutionError::Budget(error) => {
+                BudgetDiagnostics::make(error, span, diagnostics.translator())
+            }
+            RegexExecutionError::Internal { error, .. } => {
+                EmergencyDiagnostics::internal_error(span, error, diagnostics.translator())
+            }
+            RegexExecutionError::Located { error, .. } => {
+                regex_execution_failure_diagnostic(error, span, diagnostics)
+            }
+        }
+    }
+}
+
+fn regex_execution_failure_diagnostic(
+    failure: RegexExecutionFailure,
+    span: SourceSpan,
+    diagnostics: &DiagnosticCollector,
+) -> Diagnostic {
+    match failure {
+        RegexExecutionFailure::Scratch(error) => regex_scratch_diagnostic(error, span, diagnostics),
+        RegexExecutionFailure::Match(error) => regex_match_diagnostic(error, span, diagnostics),
+        RegexExecutionFailure::Budget(error) => {
+            BudgetDiagnostics::make(error, span, diagnostics.translator())
+        }
+        RegexExecutionFailure::Internal(error) => {
+            EmergencyDiagnostics::internal_error(span, error, diagnostics.translator())
+        }
+    }
+}
+
+fn regex_scratch_diagnostic(
+    error: RegexScratchError,
+    span: SourceSpan,
+    diagnostics: &DiagnosticCollector,
+) -> Diagnostic {
+    match error {
+        RegexScratchError::ResourceLimit(limit) => {
+            EmergencyDiagnostics::resource(limit, span, diagnostics.translator())
+        }
+        RegexScratchError::AllocationFailed => {
+            EmergencyDiagnostics::allocation(span, diagnostics.translator())
+        }
+        RegexScratchError::CapacityExceeded(capacity) => {
+            EmergencyDiagnostics::capacity_error(span, capacity, diagnostics.translator())
+        }
+        RegexScratchError::Internal { error, .. } => {
+            EmergencyDiagnostics::internal_error(span, error, diagnostics.translator())
+        }
+    }
+}
+
+fn regex_match_diagnostic(
+    error: RegexMatchError,
+    span: SourceSpan,
+    diagnostics: &DiagnosticCollector,
+) -> Diagnostic {
+    match error {
+        RegexMatchError::ResourceLimit(limit) => {
+            EmergencyDiagnostics::resource(limit, span, diagnostics.translator())
+        }
+        RegexMatchError::AllocationFailed => {
+            EmergencyDiagnostics::allocation(span, diagnostics.translator())
+        }
+        RegexMatchError::CapacityExceeded(capacity) => {
+            EmergencyDiagnostics::capacity_error(span, capacity, diagnostics.translator())
+        }
+        RegexMatchError::Internal { error, .. } => {
+            EmergencyDiagnostics::internal_error(span, error, diagnostics.translator())
         }
     }
 }

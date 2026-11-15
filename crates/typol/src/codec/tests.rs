@@ -35,6 +35,7 @@ struct EncodingLimitsCase {
     capacity: usize,
     text: usize,
     succeeds: bool,
+    expected_code: DiagnosticCode,
 }
 
 struct FloatEncodingCase {
@@ -483,7 +484,10 @@ fn output_steps_capacity_and_text_limits_are_atomic() -> TestResult {
             TestOpeoOutcome::Value(_) => assert!(success),
             TestOpeoOutcome::Error(error) => {
                 assert!(!success);
-                assert_eq!(BindingTestSupport::code(error)?, 1);
+                assert_eq!(
+                    BindingTestSupport::code(error)?,
+                    DiagnosticCode::CONFIG_FORMAT_OUTPUT_BYTES_LIMIT_EXCEEDED.get()
+                );
             }
         }
     }
@@ -505,24 +509,28 @@ fn output_steps_capacity_and_text_limits_are_atomic() -> TestResult {
             capacity: peak,
             text: 10,
             succeeds: true,
+            expected_code: DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED,
         },
         EncodingLimitsCase {
             steps: steps - 1,
             capacity: peak,
             text: 10,
             succeeds: false,
+            expected_code: DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED,
         },
         EncodingLimitsCase {
             steps,
             capacity: peak - 1,
             text: 10,
             succeeds: false,
+            expected_code: DiagnosticCode::WORKSPACE_BYTES_LIMIT_EXCEEDED,
         },
         EncodingLimitsCase {
             steps,
             capacity: peak,
             text: 9,
             succeeds: false,
+            expected_code: DiagnosticCode::CONFIG_TEXT_BYTES_LIMIT_EXCEEDED,
         },
     ] {
         let mut call = session_with_limits(
@@ -542,7 +550,7 @@ fn output_steps_capacity_and_text_limits_are_atomic() -> TestResult {
             TestOpeoOutcome::Value(_) => assert!(case.succeeds),
             TestOpeoOutcome::Error(error) => {
                 assert!(!case.succeeds);
-                assert_eq!(BindingTestSupport::code(error)?, 1);
+                assert_eq!(BindingTestSupport::code(error)?, case.expected_code.get());
             }
         }
         assert_eq!(shared.workspace_bytes(), initial);
@@ -651,7 +659,10 @@ fn prior_session_work_is_not_reset_by_encoding() -> TestResult {
         &mut Provider(Vec::new()),
         &mut call,
     )?;
-    assert_eq!(BindingTestSupport::code(encode_error(&mut verified)?)?, 1);
+    assert_eq!(
+        BindingTestSupport::code(encode_error(&mut verified)?)?,
+        DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED.get()
+    );
     Ok(())
 }
 
@@ -679,7 +690,10 @@ fn sorting_and_unicode_scanning_can_stop_midway_without_leaks() -> TestResult {
             &mut Provider(Vec::new()),
             &mut call,
         )?;
-        assert_eq!(BindingTestSupport::code(encode_error(&mut verified)?)?, 1);
+        assert_eq!(
+            BindingTestSupport::code(encode_error(&mut verified)?)?,
+            DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED.get()
+        );
         assert_eq!(shared.workspace_bytes(), initial);
     }
     Ok(())
@@ -776,7 +790,10 @@ fn float_spelling_uses_original_width_and_expands_exponents() -> TestResult {
             &mut Provider(Vec::new()),
             &mut call,
         )?;
-        assert_eq!(BindingTestSupport::code(encode_error(&mut verified)?)?, 1);
+        assert_eq!(
+            BindingTestSupport::code(encode_error(&mut verified)?)?,
+            DiagnosticCode::CONFIG_FORMAT_OUTPUT_BYTES_LIMIT_EXCEEDED.get()
+        );
     }
     Ok(())
 }

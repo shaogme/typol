@@ -9,7 +9,7 @@ use typol_core::{BudgetError, RegexExecutionBudget};
 use typol_policy::RegexLimits;
 use typol_regex::{RegexCompileError, RegexCompiler, RegexScratchError};
 use typol_semantic::{RegexExecutionError, RegexExecutor, RegexMatchOptions};
-use typol_test_support::{TestOpeo, TestOpeoOutcome, TestSlot};
+use typol_test_support::{TestOpeo, TestOpeoOutcome, TestSlot, check_eq};
 
 struct FailNextAllocation;
 
@@ -43,7 +43,7 @@ static ALLOCATOR: FailNextAllocation = FailNextAllocation;
 enum TestError {
     Budget(BudgetError),
     Compile(RegexCompileError),
-    Execution(RegexExecutionError),
+    Execution(Box<RegexExecutionError>),
     MissingExpectedError,
     Assertion(&'static str),
 }
@@ -74,21 +74,11 @@ impl From<RegexCompileError> for TestError {
 
 impl From<RegexExecutionError> for TestError {
     fn from(error: RegexExecutionError) -> Self {
-        Self::Execution(error)
+        Self::Execution(Box::new(error))
     }
 }
 
 type TestResult<T> = Result<T, TestError>;
-
-macro_rules! check_eq {
-    ($actual:expr, $expected:expr $(,)?) => {{
-        let actual = &$actual;
-        let expected = &$expected;
-        if actual != expected {
-            return Err(TestError::Assertion(stringify!($actual)));
-        }
-    }};
-}
 
 #[test]
 fn scratch_allocation_failure_is_structured() -> TestResult<()> {
@@ -115,13 +105,13 @@ fn scratch_allocation_failure_is_structured() -> TestResult<()> {
         )
     }) {
         TestOpeoOutcome::Value(_) => return Err(TestError::MissingExpectedError),
-        TestOpeoOutcome::Error(error) => check_eq!(
+        TestOpeoOutcome::Error(error) => check_eq!(TestError::Assertion;
             error,
             RegexExecutionError::Scratch(RegexScratchError::AllocationFailed)
         ),
     }
 
-    check_eq!(
+    check_eq!(TestError::Assertion;
         execution_errors.access(|out| {
             pool.is_match_budgeted(
                 &regex,
@@ -153,13 +143,13 @@ fn scratch_allocation_failure_is_structured() -> TestResult<()> {
         )
     }) {
         TestOpeoOutcome::Value(_) => return Err(TestError::MissingExpectedError),
-        TestOpeoOutcome::Error(error) => check_eq!(
+        TestOpeoOutcome::Error(error) => check_eq!(TestError::Assertion;
             error,
             RegexExecutionError::Scratch(RegexScratchError::AllocationFailed)
         ),
     }
-    check_eq!(compilation.workspace_bytes(), retained_bytes);
-    check_eq!(
+    check_eq!(TestError::Assertion; compilation.workspace_bytes(), retained_bytes);
+    check_eq!(TestError::Assertion;
         execution_errors.access(|out| {
             pool.is_match_budgeted(
                 &regex,

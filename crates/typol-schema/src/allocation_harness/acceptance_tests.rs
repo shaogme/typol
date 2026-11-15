@@ -8,7 +8,7 @@ use alloc::string::String;
 use core::cell::Cell;
 use opeo::{OResult, Out};
 use typol_core::{
-    BudgetError, DiagnosticCode, ExcerptLimits, ExecutionLimits, RegexExecutionBudget,
+    BudgetError, ExcerptLimits, ExecutionLimits, RegexExecutionBudget, ResourceLimit,
 };
 use typol_policy::{RegexExecutionLimits, RegexOptions};
 use typol_test_support::*;
@@ -138,9 +138,14 @@ fn acceptance_measure(
     if let Err(errors) = &result {
         test_verify!(!errors.diagnostics().is_empty());
         if usage.failure.is_some() || usage.regex_failure.is_some() {
-            test_verify_eq!(
-                errors.diagnostics().last().into_test_value()?.code(),
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+            test_verify!(
+                errors
+                    .diagnostics()
+                    .last()
+                    .into_test_value()?
+                    .code()
+                    .is_resource_limit(),
+                "allocation failure must preserve a resource-limit diagnostic"
             );
         }
     }
@@ -181,9 +186,15 @@ fn complete_public_compilation_scales_and_stops_at_exact_shared_limits() -> Test
             .into_test_value()?;
             test_verify_eq!(exact.succeeded, sample.succeeded);
             test_verify_eq!(exact.usage, sample.usage);
-            for execution in [
-                ExecutionLimits::new(sample.usage.steps - 1, 67_108_864),
-                ExecutionLimits::new(67_108_864, sample.usage.peak_workspace_bytes - 1),
+            for (execution, expected_failure) in [
+                (
+                    ExecutionLimits::new(sample.usage.steps - 1, 67_108_864),
+                    BudgetError::ResourceLimit(ResourceLimit::ExecutionSteps),
+                ),
+                (
+                    ExecutionLimits::new(67_108_864, sample.usage.peak_workspace_bytes - 1),
+                    BudgetError::ResourceLimit(ResourceLimit::WorkspaceBytes),
+                ),
             ] {
                 let failure = acceptance_measure(
                     &source,
@@ -194,7 +205,7 @@ fn complete_public_compilation_scales_and_stops_at_exact_shared_limits() -> Test
                 )
                 .into_test_value()?;
                 test_verify!(!failure.succeeded);
-                test_verify_eq!(failure.usage.failure, Some(BudgetError::Resource));
+                test_verify_eq!(failure.usage.failure, Some(expected_failure));
             }
             if kind == "regex" {
                 for regex_execution in [

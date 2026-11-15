@@ -57,6 +57,7 @@ pub(crate) struct LocationNode<'schema> {
     variant: Option<VariantView<'schema>>,
     path_depth: usize,
     complete: bool,
+    validated: bool,
     children: ChargedVec<NodeId>,
     slots: ChargedVec<Option<NodeId>>,
 }
@@ -131,7 +132,7 @@ impl<'schema> LocationIndex<'schema> {
         if self.nodes.len() >= limit {
             return Err(out.fail(DiagnosticFactory::make_diagnostic(
                 DetailedDiagnosticRequest {
-                    code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                    code: DiagnosticCode::CONFIG_IR_INVARIANT_FAILURE,
                     message:
                         t! { name: "diagnostic.config.located_node_limit", locale: self.translator }
                             .into(),
@@ -208,6 +209,36 @@ impl<'schema> LocationIndex<'schema> {
         self.nodes.get(id.0)
     }
 
+    pub(crate) fn root_node(&self) -> Option<NodeId> {
+        self.nodes.iter().enumerate().find_map(|(index, node)| {
+            (node.parent.is_none() && matches!(node.member, Member::Root)).then_some(NodeId(index))
+        })
+    }
+
+    pub(crate) fn existing_child<'slot>(
+        &self,
+        parent: NodeId,
+        member: Member<'schema>,
+        mut out: Out<'slot, '_, Diagnostic>,
+    ) -> OResult<'slot, Option<NodeId>> {
+        let slot = schema_access(
+            &self.access_errors,
+            self.translator,
+            |access_out| member.slot(access_out),
+            out.reborrow(),
+        )?;
+        let Some(parent) = self.nodes.get(parent.0) else {
+            return Err(out.fail(internal(None, self.translator)));
+        };
+        let Some(id) = parent.slots.get(slot).copied().flatten() else {
+            return Ok(None);
+        };
+        if self.nodes.get(id.0).is_none() {
+            return Err(out.fail(internal(None, self.translator)));
+        }
+        Ok(Some(id))
+    }
+
     pub(crate) fn item(&self, parent: NodeId, index: usize) -> Option<&LocationNode<'schema>> {
         let id = self.get(parent)?.slots.get(index)?.as_ref()?;
         let node = self.get(*id)?;
@@ -229,6 +260,19 @@ impl<'schema> LocationIndex<'schema> {
         Ok(())
     }
 
+    pub(crate) fn mark_validated<'slot, 'borrow>(
+        &mut self,
+        id: NodeId,
+        span: Option<LocatedSpan>,
+        out: Out<'slot, 'borrow, Diagnostic>,
+    ) -> OResult<'slot, ()> {
+        let Some(node) = self.nodes.get_mut(id.0) else {
+            return Err(out.fail(internal(span, self.translator)));
+        };
+        node.validated = true;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn path<'slot>(
         &self,
@@ -237,7 +281,7 @@ impl<'schema> LocationIndex<'schema> {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, InstancePath> {
         let Some(node) = self.get(id) else {
-            return Err(out.fail(DiagnosticFactory::internal(
+            return Err(out.fail(DiagnosticFactory::value_internal(
                 INSTANCE_LOCATION_NODE_MISSING.with_object_id(id.0 as u64),
                 None,
                 None,
@@ -278,7 +322,7 @@ impl<'schema> LocationIndex<'schema> {
                         return Err(out.fail(internal(span, self.translator)));
                     };
                     let Some(field) = field.as_named() else {
-                        return Err(out.fail(DiagnosticFactory::internal(
+                        return Err(out.fail(DiagnosticFactory::value_internal(
                             NAMED_ENTRY_NAME_MISSING,
                             span,
                             None,
@@ -317,7 +361,7 @@ impl<'schema> LocationIndex<'schema> {
                         return Err(out.fail(internal(span, self.translator)));
                     };
                     let Some(entry) = entry.as_named() else {
-                        return Err(out.fail(DiagnosticFactory::internal(
+                        return Err(out.fail(DiagnosticFactory::value_internal(
                             NAMED_ENTRY_NAME_MISSING,
                             span,
                             None,
@@ -397,7 +441,7 @@ impl<'schema> LocationIndex<'schema> {
                         return Err(out.fail(internal(span, self.translator)));
                     };
                     let Some(field) = field.as_named() else {
-                        return Err(out.fail(DiagnosticFactory::internal(
+                        return Err(out.fail(DiagnosticFactory::value_internal(
                             NAMED_ENTRY_NAME_MISSING,
                             span,
                             None,
@@ -430,6 +474,10 @@ impl<'schema> LocationNode<'schema> {
 
     pub(crate) fn span(&self) -> Option<LocatedSpan> {
         self.span
+    }
+
+    pub(crate) const fn validated(&self) -> bool {
+        self.validated
     }
 
     pub(crate) fn expected(&self) -> TypeView<'schema> {
@@ -651,6 +699,7 @@ impl<'schema> LocationNode<'schema> {
             variant: None,
             path_depth,
             complete: false,
+            validated: false,
             children: ChargedVec::unmetered(),
             slots: ChargedVec::unmetered(),
         }
@@ -658,7 +707,7 @@ impl<'schema> LocationNode<'schema> {
 }
 
 fn internal(span: Option<LocatedSpan>, translator: Translator) -> Diagnostic {
-    DiagnosticFactory::internal(INSTANCE_LOCATION_INVARIANT, span, None, None, translator)
+    DiagnosticFactory::value_internal(INSTANCE_LOCATION_INVARIANT, span, None, None, translator)
 }
 
 impl Member<'_> {
@@ -793,7 +842,7 @@ impl<'index, 'schema, 'value> InstanceWalk<'index, 'schema, 'value> {
                     && !matches!(frame.depth.checked_add(1), Some(depth) if depth <= self.limit)
                 {
                     return Err(out.fail(DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
-                        code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                        code: DiagnosticCode::VALIDATION_TRAVERSAL_LIMIT_EXCEEDED,
                         message: t! { name: "diagnostic.config.assertion_traversal_limit", locale: self.locations.translator }.into(),
                         primary: node.span,
                         path: None,
@@ -827,7 +876,7 @@ impl<'index, 'schema, 'value> InstanceWalk<'index, 'schema, 'value> {
                 ));
                 let Some(depth) = frame.depth.checked_add(1 + extra) else {
                     return Err(out.fail(DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
-                        code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                        code: DiagnosticCode::CONFIG_VALIDATION_INVARIANT_FAILURE,
                         message: t! { name: "diagnostic.config.assertion_traversal_limit", locale: self.locations.translator }.into(),
                         primary: child.span,
                         path: None,
@@ -838,7 +887,7 @@ impl<'index, 'schema, 'value> InstanceWalk<'index, 'schema, 'value> {
                 };
                 if depth > self.limit {
                     return Err(out.fail(DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
-                        code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                        code: DiagnosticCode::VALIDATION_TRAVERSAL_LIMIT_EXCEEDED,
                         message: t! { name: "diagnostic.config.assertion_traversal_limit", locale: self.locations.translator }.into(),
                         primary: child.span,
                         path: None,
@@ -869,5 +918,5 @@ impl<'index, 'schema, 'value> InstanceWalk<'index, 'schema, 'value> {
 }
 
 fn internal_fallback(translator: Translator) -> Diagnostic {
-    DiagnosticFactory::internal(INSTANCE_LOCATION_NODE_MISSING, None, None, None, translator)
+    DiagnosticFactory::value_internal(INSTANCE_LOCATION_NODE_MISSING, None, None, None, translator)
 }

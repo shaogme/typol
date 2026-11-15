@@ -22,7 +22,7 @@ use typol::{
     },
     core::{
         BudgetError, ConfigValueBuilder, DiagnosticCode, ExecutionBudget, ExecutionLimits,
-        SliceSource, SourceId, ValueSource,
+        ResourceLimit, SliceSource, SourceId, ValueSource,
     },
     host::{
         FileConfigInput, FileConfigInputLimits, FileSchemaCompileErrors, HostError, HostErrorKind,
@@ -599,7 +599,7 @@ fn file_write_enforces_input_file_limit_and_exact_snapshot_fails_closed() -> Tes
     );
     assert!(matches!(
         limited,
-        Err(SourceCommitError::ResourceLimitExceeded)
+        Err(SourceCommitError::ResourceLimit(ResourceLimit::SourceBytes))
     ));
     assert!(!limited_target.exists());
 
@@ -983,7 +983,9 @@ fn failed_name_snapshot_does_not_block_success_and_preserves_original_errors() -
     assert_eq!(errors.stage(), TypolStage::Binding);
     assert_eq!(
         errors.names_failure(),
-        Some(HostErrorKind::ResourceLimitExceeded)
+        Some(HostErrorKind::ResourceLimit(
+            ResourceLimit::SchemaSourceCount
+        ))
     );
     assert_eq!(
         errors
@@ -1015,7 +1017,9 @@ fn failed_name_snapshot_does_not_block_success_and_preserves_original_errors() -
     assert!(errors.codec_errors().is_some());
     assert_eq!(
         errors.names_failure(),
-        Some(HostErrorKind::ResourceLimitExceeded)
+        Some(HostErrorKind::ResourceLimit(
+            ResourceLimit::SchemaSourceCount
+        ))
     );
     let errors = load_error(|mut out| {
         loaded
@@ -1029,7 +1033,9 @@ fn failed_name_snapshot_does_not_block_success_and_preserves_original_errors() -
     );
     assert_eq!(
         errors.names_failure(),
-        Some(HostErrorKind::ResourceLimitExceeded)
+        Some(HostErrorKind::ResourceLimit(
+            ResourceLimit::SchemaSourceCount
+        ))
     );
     Ok(())
 }
@@ -1241,7 +1247,7 @@ fn typed_loading_keeps_parser_and_conversion_on_one_budget() -> TestResult {
             .first()
             .test_expect("diagnostic list should not be empty")?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED
     );
     Ok(())
 }
@@ -1260,7 +1266,9 @@ fn observer_failure_retains_schema_error_and_name_failure() -> TestResult {
     assert_eq!(errors.stage(), TypolStage::SchemaCompile);
     assert_eq!(
         errors.names_failure(),
-        Some(HostErrorKind::ResourceLimitExceeded)
+        Some(HostErrorKind::ResourceLimit(
+            ResourceLimit::SchemaSourceCount
+        ))
     );
     assert_eq!(
         errors
@@ -1268,7 +1276,7 @@ fn observer_failure_retains_schema_error_and_name_failure() -> TestResult {
             .first()
             .test_expect("diagnostic list should not be empty")?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::SCHEMA_SOURCE_COUNT_LIMIT_EXCEEDED
     );
     Ok(())
 }
@@ -1299,23 +1307,35 @@ fn file_and_memory_compile_failures_retain_name_limits_without_copying() -> Test
     assert_eq!(file_errors.source_name(SourceId::new(1)), None);
     assert_eq!(
         file_errors.names_failure(),
-        Some(HostErrorKind::ResourceLimitExceeded)
+        Some(HostErrorKind::ResourceLimit(
+            ResourceLimit::SchemaSourceCount
+        ))
     );
     assert_eq!(file_errors.diagnostics().len(), 1);
     assert_eq!(memory_errors.stage(), TypolStage::SchemaCompile);
     assert_eq!(
         memory_errors.names_failure(),
-        Some(HostErrorKind::ResourceLimitExceeded)
+        Some(HostErrorKind::ResourceLimit(
+            ResourceLimit::SchemaSourceCount
+        ))
+    );
+    assert_eq!(
+        file_errors
+            .diagnostics()
+            .first()
+            .test_expect("diagnostic list should not be empty")?
+            .code(),
+        DiagnosticCode::SCHEMA_SOURCE_COUNT_LIMIT_EXCEEDED
+    );
+    assert_eq!(
+        memory_errors
+            .diagnostics()
+            .first()
+            .test_expect("diagnostic list should not be empty")?
+            .code(),
+        DiagnosticCode::SCHEMA_SOURCE_COUNT_LIMIT_EXCEEDED
     );
     for errors in [&file_errors, &memory_errors] {
-        assert_eq!(
-            errors
-                .diagnostics()
-                .first()
-                .test_expect("diagnostic list should not be empty")?
-                .code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
-        );
         TestOpeo::value(|out| errors.render(RenderOptions::default(), out))?;
     }
     Ok(())
@@ -1351,7 +1371,7 @@ fn error_storage_reservation_is_independent_of_name_edit_limits() -> TestResult 
     );
     assert_eq!(
         errors.names_failure(),
-        Some(HostErrorKind::ResourceLimitExceeded)
+        Some(HostErrorKind::ResourceLimit(ResourceLimit::WorkspaceBytes))
     );
     let mut loaded = load(
         "entry struct Root { value: u8, optional: option<string> }",
@@ -1612,7 +1632,7 @@ fn reader_invariant_errors_keep_their_context_and_offset() -> TestResult {
         load_error(|out| loaded.read_io_with_process_environment(&mut reader, "reader", out))?;
     let host_error = errors.host_error().test_value()?;
     assert_eq!(errors.stage(), TypolStage::ConfigRead);
-    assert_eq!(host_error.kind(), HostErrorKind::InternalError);
+    assert!(matches!(host_error.kind(), HostErrorKind::Internal(_)));
     assert_eq!(host_error.offset(), Some(0));
     assert!(errors.to_string().contains("read-count-exceeds-request"));
     assert!(!errors.to_string().contains("reader-budget-clone-failure"));
@@ -1661,7 +1681,7 @@ fn reader_budget_and_parse_limits_keep_distinct_error_stages() -> TestResult {
     assert_eq!(input_error.stage(), TypolStage::ConfigRead);
     assert_eq!(
         input_error.host_error().test_value()?.kind(),
-        HostErrorKind::ResourceLimitExceeded
+        HostErrorKind::ResourceLimit(ResourceLimit::ExecutionSteps)
     );
     assert!(interrupted.attempts < 10_000);
     let mut config = *defaults.config();
@@ -1690,7 +1710,7 @@ fn reader_budget_and_parse_limits_keep_distinct_error_stages() -> TestResult {
             .first()
             .test_expect("diagnostic list should not be empty")?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::CONFIG_VALUE_NODES_LIMIT_EXCEEDED
     );
     Ok(())
 }
@@ -1715,7 +1735,7 @@ fn reader_source_limit_maps_to_host_resource_error() -> TestResult {
     assert_eq!(errors.stage(), TypolStage::ConfigRead);
     assert_eq!(
         errors.host_error().test_value()?.kind(),
-        HostErrorKind::ResourceLimitExceeded
+        HostErrorKind::ResourceLimit(ResourceLimit::SourceBytes)
     );
     Ok(())
 }

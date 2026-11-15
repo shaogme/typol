@@ -478,7 +478,7 @@ fn shared_budget_and_snapshots() {
     assert_eq!(errors.stage(), CodecStage::Conversion);
     assert_eq!(
         errors.diagnostics().first().map(|diagnostic| diagnostic.code()),
-        Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+        Some(DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED)
     );
     let errors: CodecErrors = invoke_error(|out| {
         binding.serialize_serde_to_string(&Scalar { value: 1 }, WriteOptions::default(), out)
@@ -654,7 +654,7 @@ fn loaded_serde() {
     );
     assert_eq!(
         errors.diagnostics().first().map(|diagnostic| diagnostic.code()),
-        Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+        Some(DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED)
     );
 }
 

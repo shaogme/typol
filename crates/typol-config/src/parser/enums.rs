@@ -1,5 +1,4 @@
 use crate::{
-    context::CompletionState,
     diagnostics::{BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticFactory},
     parser::{
         context::{ParserContext, ParserControl, ValueCallContext},
@@ -13,23 +12,12 @@ use crate::{
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, LocatedSpan,
-    SecretRange, ValueError, ValueErrorKind, ValueSource, diagnostic_context,
+    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, LocatedSpan, SecretRange, ValueError,
+    ValueErrorKind, ValueSource,
 };
 use typol_i18n::{Translator, t};
 use typol_semantic::{SchemaAccessError, TypeView, VariantPayloadInfo, VariantView};
 use typol_syntax::{Symbol, TokenKind};
-
-static PARSER_ENUM_PAYLOAD_INVARIANT: DiagnosticContext = diagnostic_context!(
-    "typol-config",
-    "parser-enum-payload",
-    "compiled-payload-shape-invalid",
-);
-static PARSER_ENUM_FIELDS_DUPLICATE: DiagnosticContext = diagnostic_context!(
-    "typol-config",
-    "parser-enum-payload",
-    "compiled-variant-fields-duplicate",
-);
 
 struct EnumVariantToken {
     kind: TokenKind,
@@ -101,7 +89,7 @@ impl<'schema> EnumFrame<'schema> {
         if too_long {
             return Err(out.fail(
                 DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
-                    code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                    code: DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED,
                     message: t! {
                         name: "diagnostic.config.enum_variant_name_byte_limit",
                         locale: context.session.translator(),
@@ -377,7 +365,6 @@ impl<'schema> EnumFrame<'schema> {
             out.reborrow(),
         )?;
         Ok(ParsedValue {
-            completion: CompletionState::ChildrenComplete,
             value,
             span: ParserControl::diagnostic_call(
                 &context.diagnostic_errors,
@@ -404,7 +391,7 @@ fn push_variant_path<'slot>(
     if name.len() > context.limits.max_string_bytes() {
         return Err(out.fail(
             DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
-                code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                code: DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED,
                 message: t! {
                     name: "diagnostic.config.enum_variant_name_byte_limit",
                     locale: context.session.translator(),
@@ -485,14 +472,10 @@ fn value_error(
     translator: Translator,
 ) -> Diagnostic {
     match error.kind() {
-        ValueErrorKind::ResourceLimitExceeded => {
+        ValueErrorKind::ResourceLimit(limit) => {
             DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
-                code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                message: t! {
-                    name: "diagnostic.config.enum_payload_resource_limit",
-                    locale: translator,
-                }
-                .into(),
+                code: limit.diagnostic_code(),
+                message: limit.emergency_message(translator).into(),
                 primary: Some(span),
                 path: None,
                 value_source: Some(source),
@@ -503,16 +486,12 @@ fn value_error(
         ValueErrorKind::AllocationFailed => {
             DiagnosticFactory::allocation_diagnostic(Some(span), None, Some(source), translator)
         }
-        ValueErrorKind::CapacityExceeded => {
-            BudgetDiagnostic::from_error(BudgetError::CapacityExceeded, translator)
+        ValueErrorKind::CapacityExceeded(capacity) => {
+            BudgetDiagnostic::from_error(BudgetError::CapacityExceeded(capacity), translator)
         }
-        ValueErrorKind::InternalInvariantFailure => DiagnosticFactory::internal(
-            error.context().unwrap_or(PARSER_ENUM_PAYLOAD_INVARIANT),
-            Some(span),
-            None,
-            Some(source),
-            translator,
-        ),
+        ValueErrorKind::Internal(internal) => {
+            DiagnosticFactory::internal_error(internal, Some(span), None, Some(source), translator)
+        }
         ValueErrorKind::EnvironmentReferenceRequired => {
             DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
                 code: DiagnosticCode::CONFIG_VALUE_ERROR,
@@ -528,18 +507,35 @@ fn value_error(
                 translator,
             })
         }
-        ValueErrorKind::DuplicateFieldName | ValueErrorKind::DuplicateMapKey => {
-            DiagnosticFactory::internal(
-                error
-                    .duplicate_indices()
-                    .map_or(PARSER_ENUM_FIELDS_DUPLICATE, |(index, _)| {
-                        PARSER_ENUM_FIELDS_DUPLICATE.with_object_id(index as u64)
-                    }),
-                Some(span),
-                None,
-                Some(source),
+        ValueErrorKind::DuplicateFieldName => {
+            DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                code: DiagnosticCode::CONFIG_VALUE_ERROR,
+                message: t! {
+                    name: "diagnostic.config.duplicate_object_field",
+                    locale: translator,
+                }
+                .into(),
+                primary: Some(span),
+                path: None,
+                value_source: Some(source),
+                context: None,
                 translator,
-            )
+            })
+        }
+        ValueErrorKind::DuplicateMapKey => {
+            DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
+                code: DiagnosticCode::CONFIG_VALUE_ERROR,
+                message: t! {
+                    name: "diagnostic.config.duplicate_map_key",
+                    locale: translator,
+                }
+                .into(),
+                primary: Some(span),
+                path: None,
+                value_source: Some(source),
+                context: None,
+                translator,
+            })
         }
     }
 }

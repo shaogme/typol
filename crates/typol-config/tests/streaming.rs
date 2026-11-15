@@ -1,4 +1,4 @@
-use typol_test_support::{ConfigTestSupport as Support, TestOpeoOutcome};
+use typol_test_support::TestOpeoOutcome;
 
 use std::{cell::Cell, rc::Rc};
 use typol_config::{
@@ -7,14 +7,23 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{
-    AllocationError, BudgetError, ConfigValue, DiagnosticCode, ExcerptLimits, ExecutionBudget,
-    ExecutionLimits, LineIndex, LocationError, Read, SliceSource, SourceId, SourceReadError,
-    SourceReadErrorKind, ValueKind, ValuePayloadView,
+    AllocationError, BudgetError, ConfigValue, DiagnosticCode, DiagnosticContext, ExcerptLimits,
+    ExecutionBudget, ExecutionLimits, InternalError, LineIndex, LocationError, Read, SliceSource,
+    SourceId, SourceReadError, SourceReadErrorKind, ValueKind, ValuePayloadView,
+    diagnostic_context,
 };
 use typol_i18n::{Language, Translator};
-use typol_schema::{SchemaCompileOptions, SchemaSource};
+use typol_schema::{
+    SchemaCompileOptions, SchemaCompiler, SchemaResolver, SchemaSource, SourceObserver,
+};
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
+
+static SOURCE_RANGE_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-config-tests",
+    "stream-input",
+    "source-range-unavailable",
+);
 
 fn require_opeo<T, E>(
     errors: &mut TestSlot<E>,
@@ -26,12 +35,22 @@ fn require_opeo<T, E>(
 }
 
 fn compile(text: &str) -> TestResult<CompiledSchema> {
-    Support::compile_schema(
-        SchemaCompileOptions::default(),
-        SchemaSource::from_str(b"stream", text),
-        None,
-        None,
-    )
+    TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::default();
+        let source = SchemaSource::from_str(b"stream", text);
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()
 }
 
@@ -83,20 +102,26 @@ impl Read for Source<'_> {
         let count = output.len().min(end - self.offset);
         let Some(end_offset) = self.offset.checked_add(count) else {
             return Err(out.fail(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::SourceInputInvariantFailure(SOURCE_RANGE_INVARIANT),
+                ))
+                .with_input(source_id, offset),
             ));
         };
         let Some(target) = output.get_mut(..count) else {
             return Err(out.fail(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::SourceInputInvariantFailure(SOURCE_RANGE_INVARIANT),
+                ))
+                .with_input(source_id, offset),
             ));
         };
         let Some(source) = self.bytes.get(self.offset..end_offset) else {
             return Err(out.fail(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::SourceInputInvariantFailure(SOURCE_RANGE_INVARIANT),
+                ))
+                .with_input(source_id, offset),
             ));
         };
         target.copy_from_slice(source);
@@ -133,15 +158,18 @@ fn run(
     chunk: usize,
 ) -> TestResult<TestOpeoOutcome<ConfigValue, ConfigParseErrors>> {
     let stream = StreamLimits::try_new(chunk, 1_048_576).test_value()?;
-    Ok(Support::parse(
-        schema,
-        ConfigParseRequest::new(
-            source,
-            "stream-config",
-            ConfigParseOptions::default().with_stream(stream),
-        ),
-        &mut Provider::default(),
-    ))
+    Ok(TestOpeo::outcome(|out| {
+        ConfigParser::new(schema).parse(
+            ConfigParseRequest::new(
+                source,
+                "stream-config",
+                ConfigParseOptions::default().with_stream(stream),
+            ),
+            &mut Provider::default(),
+            out,
+        )
+    })
+    .map(|value| value.into_config_value()))
 }
 
 #[test]
@@ -263,16 +291,19 @@ fn environment_is_evaluated_before_the_tail_is_read_and_failed_tail_skips_assert
             source_bytes: Some(source.consumed.clone()),
             ..Provider::default()
         };
-        let errors = Support::parse(
-            &schema,
-            ConfigParseRequest::new(
-                &mut source,
-                "stream-config",
-                ConfigParseOptions::default()
-                    .with_stream(StreamLimits::try_new(7, 1024).test_value()?),
-            ),
-            &mut provider,
-        )
+        let stream_limits = StreamLimits::try_new(7, 1024).test_value()?;
+        let errors = TestOpeo::outcome(|out| {
+            ConfigParser::new(&schema).parse(
+                ConfigParseRequest::new(
+                    &mut source,
+                    "stream-config",
+                    ConfigParseOptions::default().with_stream(stream_limits),
+                ),
+                &mut provider,
+                out,
+            )
+        })
+        .map(|value| value.into_config_value())
         .test_error()?;
         test_eq!(provider.calls, 1)?;
         test_assert!(provider.first_read_at.test_value()? < 32)?;
@@ -312,17 +343,20 @@ fn source_limit_requires_exactly_one_byte_eof_probe() -> TestResult<()> {
             *options.execution(),
         )
         .with_stream(StreamLimits::try_new(7, 1024).test_value()?);
-        let result = Support::parse(
-            &schema,
-            ConfigParseRequest::new(&mut source, "probe", options),
-            &mut Provider::default(),
-        );
+        let result = TestOpeo::outcome(|out| {
+            ConfigParser::new(&schema).parse(
+                ConfigParseRequest::new(&mut source, "probe", options),
+                &mut Provider::default(),
+                out,
+            )
+        })
+        .map(|value| value.into_config_value());
         if length == 3 {
             test_assert!(result.is_ok())?;
         } else {
             test_eq!(
                 TestCheck::item(result.test_error()?.diagnostics(), 0)?.code(),
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+                DiagnosticCode::SOURCE_BYTES_LIMIT_EXCEEDED
             )?;
             test_eq!(source.offset, length + 1)?;
         }
@@ -391,11 +425,14 @@ fn diagnostic_limit_and_token_limit_stop_reads_and_environment_calls() -> TestRe
         *defaults.execution(),
     )
     .with_stream(StreamLimits::try_new(1, 1024).test_value()?);
-    let errors = Support::parse(
-        &schema,
-        ConfigParseRequest::new(&mut source, "capped", options),
-        &mut provider,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            ConfigParseRequest::new(&mut source, "capped", options),
+            &mut provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_eq!(
         TestCheck::item(errors.diagnostics(), 0)?.code(),
@@ -406,19 +443,19 @@ fn diagnostic_limit_and_token_limit_stop_reads_and_environment_calls() -> TestRe
     test_eq!(provider.calls, 0)?;
     let long = format!("{{n: {}}}", "0".repeat(1000));
     let mut source = Source::new(long.as_bytes(), vec![]);
-    let errors = Support::parse(
-        &schema,
-        ConfigParseRequest::new(
-            &mut source,
-            "token",
-            defaults.with_stream(StreamLimits::try_new(1, 4).test_value()?),
-        ),
-        &mut provider,
-    )
+    let stream_limits = StreamLimits::try_new(1, 4).test_value()?;
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            ConfigParseRequest::new(&mut source, "token", defaults.with_stream(stream_limits)),
+            &mut provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_eq!(
         TestCheck::item(errors.diagnostics(), 0)?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::TOKEN_BYTES_LIMIT_EXCEEDED
     )?;
     test_assert!(source.offset <= 10)?;
 
@@ -508,8 +545,11 @@ fn input_failure_preserves_earlier_diagnostics_and_uses_explicit_stage() -> Test
         "input-failure",
         ConfigParseOptions::default().with_translator(Translator::new(Language::Chinese)),
     );
-    let translated_errors =
-        Support::parse(&schema, request, &mut Provider::default()).test_error()?;
+    let translated_errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(request, &mut Provider::default(), out)
+    })
+    .map(|value| value.into_config_value())
+    .test_error()?;
     test_eq!(
         TestCheck::item(translated_errors.diagnostics(), 1)?.message(),
         Ok("无法处理来源输入")

@@ -3,8 +3,7 @@ use crate::{
     storage::{Annotation, ArrayLength, Id, Name, Storage, TypeExpr, TypeExprKind, TypePath},
 };
 use opeo::{OResult, Out};
-use typol_core::{ChargedVec, Diagnostic, DiagnosticCode, SourceSpan};
-use typol_i18n::t;
+use typol_core::{ChargedVec, Diagnostic, SourceSpan, diagnostic_context};
 use typol_model::BuiltinType;
 
 pub(crate) struct TypeBuilder;
@@ -106,13 +105,10 @@ impl TypeBuilder {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Id<TypePath>> {
         if segments.is_empty() {
-            return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
-                DiagnosticCode::INTERNAL_ERROR,
-                t! {
-                    name: "diagnostic.emergency.internal_error",
-                    locale: storage.translator(),
-                },
+            return Err(out.reborrow().fail(SyntaxDiagnostic::internal(
+                diagnostic_context!("typol-syntax", "ast-storage", "empty-type-path"),
                 span,
+                storage.translator(),
             )));
         }
         let segments = storage.store_list(segments, span, out.reborrow())?;

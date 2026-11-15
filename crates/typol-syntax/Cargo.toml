@@ -3,10 +3,10 @@ name = "typol-syntax"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+authors.workspace = true
 description = "Lexer, Schema parser, and syntax tree for Typol."
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
@@ -15,7 +15,6 @@ typol-core.workspace = true
 typol-i18n.workspace = true
 u18n.workspace = true
 typol-model.workspace = true
-typol-policy.workspace = true
 
 [dev-dependencies]
 typol-test-support.workspace = true

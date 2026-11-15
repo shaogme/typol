@@ -1,14 +1,12 @@
-use alloc::borrow::Cow;
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedString, ChargedVec, ConfigValue, ConfigValueBuilder, Diagnostic,
-    DiagnosticCode, DiagnosticContext, ExecutionBudget, LocatedSpan, NamedValue, ValueCopyLimits,
-    ValueEntries, ValueError, ValueErrorKind, ValueId, ValueKind, ValuePayload, ValueScalar,
-    ValueSource, ValueView, diagnostic_context,
+    BudgetError, CapacityExceeded, ChargedString, ChargedVec, ConfigValue, ConfigValueBuilder,
+    Diagnostic, DiagnosticCode, DiagnosticContext, ExecutionBudget, InternalError, LocatedSpan,
+    NamedValue, ValueCopyLimits, ValueEntries, ValueError, ValueErrorKind, ValueId, ValueKind,
+    ValuePayload, ValueScalar, ValueSource, ValueView, diagnostic_context,
 };
 use typol_i18n::{Translator, t};
 use typol_semantic::{CompiledSchema, SchemaIdentity};
-use u18n::RenderError;
 
 /// A schema-shaped value with defaults applied, before constraints and assertions run.
 #[derive(Debug)]
@@ -71,6 +69,10 @@ static VALUE_SCALAR_KIND_REQUIRED: DiagnosticContext = diagnostic_context!(
     "scalar-constructor-received-container",
 );
 
+fn value_invariant(context: DiagnosticContext) -> BudgetError {
+    BudgetError::Internal(InternalError::ConfigValueInvariantFailure(context))
+}
+
 pub(crate) struct OwnedNamedValue {
     name: ChargedString,
     value: ConfigValue,
@@ -90,7 +92,7 @@ impl OwnedNamedValue {
         E: From<BudgetError>,
     {
         if !same_budget(value.budget(), budget) {
-            return Err(out.fail(E::from(BudgetError::invariant(&VALUE_BUDGET_MISMATCH))));
+            return Err(out.fail(E::from(value_invariant(VALUE_BUDGET_MISMATCH))));
         }
         let mut errors = ErrSlot::new();
         let name = match errors.try_call(|budget_out| ChargedString::copy(name, budget, budget_out))
@@ -162,9 +164,7 @@ impl ValueFactory {
         };
         let (mut builder, root) = Self::continue_from(value, budget, out.reborrow())?;
         let Some(references) = references.get(..count) else {
-            return Err(out.fail(ValueError::from(BudgetError::invariant(
-                &VALUE_INTERNAL_FAILURE,
-            ))));
+            return Err(out.fail(ValueError::from(value_invariant(VALUE_INTERNAL_FAILURE))));
         };
         builder.add_environment_reference(references, name, fallback, out.reborrow())?;
         builder.finish(root, out.reborrow())
@@ -183,8 +183,8 @@ impl ValueFactory {
             ValueKind::Float64(value) => Self::float64(value, source, budget, out),
             ValueKind::Bool(value) => Self::boolean(value, source, budget, out),
             ValueKind::String(value) => Self::string(value, source, budget, out),
-            _ => Err(out.fail(ValueError::from(BudgetError::invariant(
-                &VALUE_SCALAR_KIND_REQUIRED,
+            _ => Err(out.fail(ValueError::from(value_invariant(
+                VALUE_SCALAR_KIND_REQUIRED,
             )))),
         }
     }
@@ -196,12 +196,13 @@ impl ValueFactory {
     pub(crate) const fn failure_code_for_kind(kind: ValueErrorKind) -> DiagnosticCode {
         match kind {
             ValueErrorKind::EnvironmentReferenceRequired => DiagnosticCode::CONFIG_VALUE_ERROR,
-            ValueErrorKind::ResourceLimitExceeded => DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+            ValueErrorKind::ResourceLimit(limit) => limit.diagnostic_code(),
             ValueErrorKind::AllocationFailed => DiagnosticCode::ALLOCATION_FAILED,
-            ValueErrorKind::CapacityExceeded => DiagnosticCode::CAPACITY_EXCEEDED,
-            ValueErrorKind::DuplicateMapKey
-            | ValueErrorKind::DuplicateFieldName
-            | ValueErrorKind::InternalInvariantFailure => DiagnosticCode::INTERNAL_ERROR,
+            ValueErrorKind::CapacityExceeded(capacity) => capacity.diagnostic_code(),
+            ValueErrorKind::Internal(error) => error.diagnostic_code(),
+            ValueErrorKind::DuplicateMapKey | ValueErrorKind::DuplicateFieldName => {
+                DiagnosticCode::CONFIG_VALUE_ERROR
+            }
         }
     }
 
@@ -214,12 +215,10 @@ impl ValueFactory {
                         VALUE_DUPLICATE_ENTRY.with_object_id(first as u64)
                     }),
             ),
-            ValueErrorKind::InternalInvariantFailure => {
-                Some(error.context().unwrap_or(VALUE_INTERNAL_FAILURE))
-            }
+            ValueErrorKind::Internal(internal) => Some(internal.context()),
             ValueErrorKind::AllocationFailed
-            | ValueErrorKind::ResourceLimitExceeded
-            | ValueErrorKind::CapacityExceeded
+            | ValueErrorKind::ResourceLimit(_)
+            | ValueErrorKind::CapacityExceeded(_)
             | ValueErrorKind::EnvironmentReferenceRequired => error.context(),
         }
     }
@@ -236,28 +235,24 @@ impl ValueFactory {
                 name: "diagnostic.emergency.allocation_failed",
                 locale: translator,
             },
-            ValueErrorKind::ResourceLimitExceeded => t! {
-                name: "diagnostic.emergency.resource_limit_exceeded",
-                locale: translator,
-            },
-            ValueErrorKind::CapacityExceeded => t! {
-                name: "diagnostic.emergency.capacity_exceeded",
-                locale: translator,
-            },
+            ValueErrorKind::ResourceLimit(limit) => limit.emergency_message(translator),
+            ValueErrorKind::CapacityExceeded(capacity) => capacity.emergency_message(translator),
             ValueErrorKind::EnvironmentReferenceRequired => t! {
                 name: "diagnostic.config.environment_reference_metadata_required",
                 locale: translator,
             },
-            ValueErrorKind::DuplicateMapKey
-            | ValueErrorKind::DuplicateFieldName
-            | ValueErrorKind::InternalInvariantFailure => t! {
-                name: "diagnostic.emergency.internal_error",
+            ValueErrorKind::DuplicateMapKey => t! {
+                name: "diagnostic.config.duplicate_map_key",
                 locale: translator,
             },
+            ValueErrorKind::DuplicateFieldName => t! {
+                name: "diagnostic.config.duplicate_object_field",
+                locale: translator,
+            },
+            ValueErrorKind::Internal(error) => error.emergency_message(translator),
         };
         let mut diagnostic = match message {
-            Ok(Cow::Borrowed(message)) => Diagnostic::emergency(code, message),
-            Ok(Cow::Owned(_)) => Diagnostic::translation_failure(code, RenderError::InvalidCatalog),
+            Ok(message) => Diagnostic::emergency(code, message),
             Err(error) => Diagnostic::translation_failure(code, error),
         };
         diagnostic.set_context(Self::failure_context(error));
@@ -406,7 +401,9 @@ impl ValueFactory {
         if values.len() == 1 {
             let value = values.pop().ok_or_else(|| {
                 out.reborrow()
-                    .fail(ValueError::from(BudgetError::CapacityExceeded))
+                    .fail(ValueError::from(BudgetError::CapacityExceeded(
+                        CapacityExceeded::ConfigValue,
+                    )))
             })?;
             let (mut builder, child) = Self::continue_from(value, budget, out.reborrow())?;
             let children = [child];
@@ -452,7 +449,9 @@ impl ValueFactory {
         named.try_reserve_exact(values.len(), out.reborrow())?;
         for entry in values {
             let Some(name) = entry.name() else {
-                return Err(out.fail(ValueError::from(BudgetError::CapacityExceeded)));
+                return Err(out.fail(ValueError::from(BudgetError::CapacityExceeded(
+                    CapacityExceeded::ConfigValue,
+                ))));
             };
             let value = Self::copy_into(&mut builder, entry.value(), out.reborrow())?;
             named.try_push(NamedValue::new(name, value), out.reborrow())?;
@@ -483,7 +482,9 @@ impl ValueFactory {
             EnumPayload::Structure(mut fields) if fields.len() == 1 => {
                 let field = fields.pop().ok_or_else(|| {
                     out.reborrow()
-                        .fail(ValueError::from(BudgetError::CapacityExceeded))
+                        .fail(ValueError::from(BudgetError::CapacityExceeded(
+                            CapacityExceeded::ConfigValue,
+                        )))
                 })?;
                 let OwnedNamedValue { name, value } = field;
                 let (mut builder, child) = Self::continue_from(value, budget, out.reborrow())?;
@@ -554,14 +555,10 @@ impl ValueFactory {
         out: Out<'slot, '_, ValueError>,
     ) -> OResult<'slot, ConfigValue> {
         let Some(value) = values.pop() else {
-            return Err(out.fail(ValueError::from(BudgetError::invariant(
-                &VALUE_INTERNAL_FAILURE,
-            ))));
+            return Err(out.fail(ValueError::from(value_invariant(VALUE_INTERNAL_FAILURE))));
         };
         if !values.is_empty() {
-            return Err(out.fail(ValueError::from(BudgetError::invariant(
-                &VALUE_INTERNAL_FAILURE,
-            ))));
+            return Err(out.fail(ValueError::from(value_invariant(VALUE_INTERNAL_FAILURE))));
         }
         Ok(value)
     }
@@ -576,7 +573,9 @@ impl ValueFactory {
         if values.len() == 1 {
             let field = values.pop().ok_or_else(|| {
                 out.reborrow()
-                    .fail(ValueError::from(BudgetError::CapacityExceeded))
+                    .fail(ValueError::from(BudgetError::CapacityExceeded(
+                        CapacityExceeded::ConfigValue,
+                    )))
             })?;
             let OwnedNamedValue { name, value } = field;
             let (mut builder, child) = Self::continue_from(value, budget, out.reborrow())?;
@@ -618,9 +617,7 @@ impl ValueFactory {
         out: Out<'slot, '_, ValueError>,
     ) -> OResult<'slot, (ConfigValueBuilder, ValueId)> {
         if !same_budget(value.budget(), budget) {
-            return Err(out.fail(ValueError::from(BudgetError::invariant(
-                &VALUE_BUDGET_MISMATCH,
-            ))));
+            return Err(out.fail(ValueError::from(value_invariant(VALUE_BUDGET_MISMATCH))));
         }
         Ok(ConfigValueBuilder::from_value(value))
     }
@@ -657,8 +654,9 @@ mod test {
     use super::ValueFactory;
     use opeo::ErrSlot;
     use typol_core::{
-        BudgetError, ConfigValueBuilder, DiagnosticCode, DiagnosticContext, LocatedSpan,
-        NamedValue, SourceId, SourceSpan, Span, ValueError, ValueErrorKind, ValueSource,
+        BudgetError, CapacityExceeded, ConfigValueBuilder, DiagnosticCode, DiagnosticContext,
+        LocatedSpan, NamedValue, ResourceLimit, SourceId, SourceSpan, Span, ValueError,
+        ValueErrorKind, ValueSource,
     };
     use typol_i18n::{Language, Translator};
     use typol_test_support::{TestFailure, TestResult, test_eq};
@@ -701,8 +699,10 @@ mod test {
         let duplicate_structure_context = ValueFactory::failure_context(duplicate_structure_error);
         let errors = [
             ValueFailureCase {
-                error: ValueError::from(BudgetError::Resource),
-                code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                error: ValueError::from(BudgetError::ResourceLimit(
+                    ResourceLimit::ConfigValueNodes,
+                )),
+                code: DiagnosticCode::CONFIG_VALUE_NODES_LIMIT_EXCEEDED,
                 context: None,
             },
             ValueFailureCase {
@@ -711,18 +711,20 @@ mod test {
                 context: None,
             },
             ValueFailureCase {
-                error: ValueError::from(BudgetError::CapacityExceeded),
-                code: DiagnosticCode::CAPACITY_EXCEEDED,
+                error: ValueError::from(BudgetError::CapacityExceeded(
+                    CapacityExceeded::ConfigValue,
+                )),
+                code: DiagnosticCode::CONFIG_VALUE_CAPACITY_EXCEEDED,
                 context: None,
             },
             ValueFailureCase {
                 error: duplicate_map_error,
-                code: DiagnosticCode::INTERNAL_ERROR,
+                code: DiagnosticCode::CONFIG_VALUE_ERROR,
                 context: duplicate_map_context,
             },
             ValueFailureCase {
                 error: duplicate_structure_error,
-                code: DiagnosticCode::INTERNAL_ERROR,
+                code: DiagnosticCode::CONFIG_VALUE_ERROR,
                 context: duplicate_structure_context,
             },
         ];
@@ -769,7 +771,7 @@ mod test {
             .err()
             .ok_or_else(|| TestFailure::new("non-scalar input should fail"))?;
         let error = caught.take();
-        test_eq!(error.kind(), ValueErrorKind::InternalInvariantFailure)?;
+        test_eq!(matches!(error.kind(), ValueErrorKind::Internal(_)), true)?;
         let context = error.context().ok_or_else(|| {
             TestFailure::new("non-scalar error should include diagnostic context")
         })?;

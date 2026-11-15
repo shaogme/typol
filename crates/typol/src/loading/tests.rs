@@ -1,7 +1,8 @@
 use super::loader::LoadSupport;
 use crate::TypolStage;
 use typol_core::{
-    DiagnosticContext, SourceId, SourceReadError, SourceReadErrorKind, diagnostic_context,
+    CapacityExceeded, DiagnosticContext, InternalError, ResourceLimit, SourceId, SourceReadError,
+    SourceReadErrorKind, diagnostic_context,
 };
 use typol_i18n::{Language, Translator};
 use typol_std::{HostError, HostErrorKind, HostOperation};
@@ -23,21 +24,25 @@ fn host_error(kind: SourceReadErrorKind) -> TestResult<HostError> {
 fn source_read_errors_keep_their_host_categories_and_location() -> TestResult {
     let cases = [
         (
-            SourceReadErrorKind::ResourceLimitExceeded,
-            HostErrorKind::ResourceLimitExceeded,
+            SourceReadErrorKind::ResourceLimit(ResourceLimit::SourceBytes),
+            HostErrorKind::ResourceLimit(ResourceLimit::SourceBytes),
         ),
         (
             SourceReadErrorKind::AllocationFailed,
             HostErrorKind::AllocationFailed,
         ),
         (
-            SourceReadErrorKind::CapacityExceeded,
-            HostErrorKind::CapacityExceeded,
+            SourceReadErrorKind::CapacityExceeded(CapacityExceeded::HostSource),
+            HostErrorKind::CapacityExceeded(CapacityExceeded::HostSource),
         ),
         (SourceReadErrorKind::HostFailure, HostErrorKind::ReadFailure),
         (
-            SourceReadErrorKind::InternalInvariantFailure,
-            HostErrorKind::InternalError,
+            SourceReadErrorKind::Internal(InternalError::HostAdapterInvariantFailure(
+                READER_FAILURE_CONTEXT,
+            )),
+            HostErrorKind::Internal(InternalError::HostAdapterInvariantFailure(
+                READER_FAILURE_CONTEXT,
+            )),
         ),
     ];
     for (source_kind, host_kind) in cases {
@@ -52,8 +57,10 @@ fn source_read_errors_keep_their_host_categories_and_location() -> TestResult {
 
 #[test]
 fn source_read_invariant_uses_source_or_generic_context() -> TestResult {
-    let source_error = SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-        .with_context(READER_FAILURE_CONTEXT);
+    let source_error = SourceReadError::new(SourceReadErrorKind::Internal(
+        InternalError::HostAdapterInvariantFailure(READER_FAILURE_CONTEXT),
+    ))
+    .with_context(READER_FAILURE_CONTEXT);
     let mapped = LoadSupport::read_source_error(source_error, Translator::new(Language::English));
     let host = mapped.host_error().test_value()?;
     assert_eq!(
@@ -63,13 +70,15 @@ fn source_read_invariant_uses_source_or_generic_context() -> TestResult {
         "host-reader-call"
     );
 
-    let fallback = host_error(SourceReadErrorKind::InternalInvariantFailure)?;
+    let fallback = host_error(SourceReadErrorKind::Internal(
+        InternalError::HostAdapterInvariantFailure(READER_FAILURE_CONTEXT),
+    ))?;
     assert_eq!(
         fallback
             .source_context()
             .test_expect("a generic invariant context should be provided when context is missing")?
             .failure_point(),
-        "source-read-invariant"
+        "host-reader-call"
     );
     Ok(())
 }

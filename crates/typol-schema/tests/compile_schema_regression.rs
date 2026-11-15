@@ -11,7 +11,8 @@ use typol_i18n::{Language, Translator};
 use typol_test_support::*;
 
 use typol_core::{
-    DiagnosticCode, ExecutionBudget, ExecutionLimits, SliceSource, SourceId, ValueKind,
+    DiagnosticCode, ExecutionBudget, ExecutionLimits, ResourceLimit, SliceSource, SourceId,
+    ValueKind,
 };
 use typol_policy::{RegexExecutionLimits, RegexLimits, RegexOptions};
 use typol_schema::{
@@ -47,6 +48,12 @@ struct DefaultDiagnosticCase {
     source: &'static str,
     expected_message: &'static str,
     has_constraint_label: bool,
+}
+
+struct ImportDepthCase {
+    depth: usize,
+    expected_requests: usize,
+    expected_limit: ResourceLimit,
 }
 
 fn access<T>(
@@ -164,6 +171,7 @@ impl SchemaResolver for MemoryResolver {
         let from_identity = request.from_identity;
         let module_name = request.module_name;
         let source_byte_limit = request.source_byte_limit;
+        let source_byte_limit_kind = request.source_byte_limit_kind;
         let Ok(from_identity) = from_utf8(from_identity) else {
             return Err(out.fail(ResolverError::HostFailure));
         };
@@ -195,7 +203,7 @@ impl SchemaResolver for MemoryResolver {
             return Err(out.fail(ResolverError::NotFound));
         };
         if source.text.len() > source_byte_limit {
-            return Err(out.fail(ResolverError::ResourceLimitExceeded));
+            return Err(out.fail(ResolverError::ResourceLimit(source_byte_limit_kind)));
         }
         self.selected.push(source.path.clone());
         self.source.replace(source.text);
@@ -507,8 +515,8 @@ fn resolver_errors_have_stable_diagnostic_codes_and_hide_host_errors() -> TestRe
     for (failure, expected_code) in [
         (None, DiagnosticCode::SCHEMA_SEMANTIC_ERROR.get()),
         (
-            Some(ResolverError::ResourceLimitExceeded),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED.get(),
+            Some(ResolverError::ResourceLimit(ResourceLimit::SourceBytes)),
+            ResourceLimit::SourceBytes.diagnostic_code().get(),
         ),
         (
             Some(ResolverError::AllocationFailed),
@@ -610,7 +618,7 @@ fn source_file_and_total_byte_limits_are_checked_at_boundaries() -> TestResult {
         .test_error()?;
     test_verify_eq!(
         diagnostic_codes(&errors),
-        [DiagnosticCode::RESOURCE_LIMIT_EXCEEDED.get()]
+        [ResourceLimit::SourceBytes.diagnostic_code().get()]
     );
     test_verify!(root_resolver.requests.is_empty());
 
@@ -623,7 +631,7 @@ fn source_file_and_total_byte_limits_are_checked_at_boundaries() -> TestResult {
         .test_error()?;
     test_verify_eq!(
         diagnostic_codes(&errors),
-        [DiagnosticCode::RESOURCE_LIMIT_EXCEEDED.get()]
+        [ResourceLimit::SchemaTotalBytes.diagnostic_code().get()]
     );
     test_verify_eq!(
         total_resolver
@@ -643,7 +651,7 @@ fn source_file_and_total_byte_limits_are_checked_at_boundaries() -> TestResult {
         .test_error()?;
     test_verify_eq!(
         diagnostic_codes(&errors),
-        [DiagnosticCode::RESOURCE_LIMIT_EXCEEDED.get()]
+        [ResourceLimit::SchemaSourceCount.diagnostic_code().get()]
     );
 
     Ok(())
@@ -694,7 +702,9 @@ fn regex_resources_are_aggregated_across_imported_sources() -> TestResult {
         .test_error()?;
     test_verify_eq!(
         diagnostic_codes(&errors),
-        [DiagnosticCode::RESOURCE_LIMIT_EXCEEDED.get()]
+        [ResourceLimit::RegexCompilationBudget
+            .diagnostic_code()
+            .get()]
     );
 
     Ok(())
@@ -1002,7 +1012,7 @@ fn nested_schema_depth_is_limited() -> TestResult {
         .test_error()?;
     test_verify_eq!(
         diagnostic_codes(&errors),
-        [DiagnosticCode::RESOURCE_LIMIT_EXCEEDED.get()]
+        [ResourceLimit::SchemaParseDepth.diagnostic_code().get()]
     );
 
     Ok(())
@@ -1024,7 +1034,7 @@ fn default_value_depth_limit_is_inclusive_and_shared_with_freeze() -> TestResult
         .test_error()?;
     test_verify_eq!(
         diagnostic_codes(&errors),
-        [DiagnosticCode::RESOURCE_LIMIT_EXCEEDED.get()]
+        [ResourceLimit::ConfigValueDepth.diagnostic_code().get()]
     );
 
     Ok(())
@@ -1347,7 +1357,7 @@ fn schema_node_budget_is_per_file_and_independent_of_configuration_nodes() -> Te
         .test_error()?;
     test_verify_eq!(
         errors.diagnostics().last().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::SchemaAstNodes.diagnostic_code()
     );
 
     Ok(())
@@ -1448,7 +1458,15 @@ fn resource_terminal_stays_after_later_semantic_error_and_stops_import_requests(
             )),
         )
         .test_error()?;
-    test_verify_eq!(diagnostic_codes(&errors), [7, 1]);
+    test_verify_eq!(
+        diagnostic_codes(&errors),
+        [
+            DiagnosticCode::SCHEMA_SEMANTIC_ERROR.get(),
+            ResourceLimit::RegexCompilationBudget
+                .diagnostic_code()
+                .get(),
+        ]
+    );
     let ordinary = errors
         .diagnostics()
         .first()
@@ -1470,7 +1488,10 @@ fn resource_terminal_stays_after_later_semantic_error_and_stops_import_requests(
     );
 
     let mut resolver = MemoryResolver::new();
-    resolver.fail_module("first", ResolverError::ResourceLimitExceeded);
+    resolver.fail_module(
+        "first",
+        ResolverError::ResourceLimit(ResourceLimit::SchemaSourceCount),
+    );
     resolver
         .compile(
             "root",
@@ -1752,21 +1773,38 @@ fn loading_and_semantic_passes_share_diagnostic_budget_and_terminal_tail() -> Te
 #[test]
 fn import_depth_and_file_budget_stop_before_resolver_requests() -> TestResult {
     let root = "extern mod child; entry struct Root {}";
-    for (depth, expected_requests) in [(0, 0), (1, 1)] {
+    for case in [
+        ImportDepthCase {
+            depth: 0,
+            expected_requests: 0,
+            expected_limit: ResourceLimit::SchemaParseDepth,
+        },
+        ImportDepthCase {
+            depth: 1,
+            expected_requests: 1,
+            expected_limit: ResourceLimit::SchemaImportDepth,
+        },
+    ] {
         let mut limits = SchemaLimits::default();
-        limits.set_max_nesting_depth(depth);
+        limits.set_max_nesting_depth(case.depth);
         let mut resolver = MemoryResolver::new();
         resolver.add("child.tschem", "child", "extern mod next; struct Child {}");
         let errors = resolver.compile("root", root, &limits).test_error()?;
-        test_verify_eq!(diagnostic_codes(&errors), [1]);
-        test_verify_eq!(resolver.requests.len(), expected_requests);
+        test_verify_eq!(
+            diagnostic_codes(&errors),
+            [case.expected_limit.diagnostic_code().get()]
+        );
+        test_verify_eq!(resolver.requests.len(), case.expected_requests);
     }
     let mut limits = SchemaLimits::default();
     limits.set_max_schema_files(1);
     let mut resolver = MemoryResolver::new();
     resolver.add("child.tschem", "root", root);
     let errors = resolver.compile("root", root, &limits).test_error()?;
-    test_verify_eq!(diagnostic_codes(&errors), [1]);
+    test_verify_eq!(
+        diagnostic_codes(&errors),
+        [ResourceLimit::SchemaSourceCount.diagnostic_code().get()]
+    );
     test_verify!(resolver.requests.is_empty());
 
     Ok(())
@@ -1784,7 +1822,7 @@ fn failed_source_bytes_are_charged_and_fatal_errors_stop_all_later_work() -> Tes
     let errors = resolver.compile("root", root, &limits).test_error()?;
     test_verify_eq!(
         errors.diagnostics().last().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::SchemaTotalBytes.diagnostic_code()
     );
     test_verify!(
         errors
@@ -1795,7 +1833,9 @@ fn failed_source_bytes_are_charged_and_fatal_errors_stop_all_later_work() -> Tes
     test_verify_eq!(resolver.requests.get(1).test_value()?.source_byte_limit, 0);
     test_verify_eq!(
         errors.location_status(),
-        LocationStatus::Unavailable(LocationFailure::ResourceLimitExceeded)
+        LocationStatus::Unavailable(LocationFailure::ResourceLimit(
+            ResourceLimit::SchemaTotalBytes,
+        ))
     );
 
     Ok(())

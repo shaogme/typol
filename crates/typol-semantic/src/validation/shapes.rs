@@ -103,10 +103,10 @@ fn add<'slot>(
     children.try_push(id, out.reborrow())
 }
 
-fn ensure(valid: bool) -> Result<(), BuildError> {
+fn ensure(valid: bool) -> Result<(), DiagnosticContext> {
     if valid {
         Ok(())
     } else {
-        Err(BuildError::internal(SHAPE_VALIDATION_INTERNAL))
+        Err(SHAPE_VALIDATION_INTERNAL)
     }
 }

@@ -8,7 +8,10 @@ use typol_syntax::{
     TokenKind,
     opeo::{OResult, Out},
 };
-use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
+use typol_test_support::{
+    TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot, test_assert_early as test_assert,
+    test_assert_eq_early as test_assert_eq,
+};
 
 struct TestErrors {
     budget: TestSlot<BudgetError>,
@@ -42,24 +45,6 @@ impl From<OpeoTestFailure> for TestFailure {
     fn from(_: OpeoTestFailure) -> Self {
         Self
     }
-}
-
-macro_rules! test_assert {
-    ($condition:expr $(, $($message:tt)*)?) => {{
-        if !$condition {
-            return Err(TestFailure);
-        }
-    }};
-}
-
-macro_rules! test_assert_eq {
-    ($left:expr, $right:expr $(, $($message:tt)*)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(TestFailure);
-        }
-    }};
 }
 
 type TestResult<T = ()> = Result<T, TestFailure>;
@@ -940,7 +925,10 @@ fn decoded_string_limit_counts_decoded_utf8_bytes() -> TestResult {
         .test_value()?
         .diagnostic()
         .test_value()?;
-    test_assert_eq!(diagnostic.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED);
+    test_assert_eq!(
+        diagnostic.code(),
+        DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED
+    );
 
     Ok(())
 }
@@ -981,7 +969,11 @@ fn block_string_limits_count_source_token_and_decoded_output_separately() -> Tes
             } else {
                 test_assert_eq!(
                     event.diagnostic().test_value()?.code(),
-                    DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+                    if token_limit < source.len() {
+                        DiagnosticCode::TOKEN_BYTES_LIMIT_EXCEEDED
+                    } else {
+                        DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED
+                    }
                 );
             }
         }

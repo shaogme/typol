@@ -13,7 +13,10 @@ use super::{
     copy::{self, ValueCopyLimits},
     views::{ConfigValue, ConfigValueParts},
 };
-use crate::{BudgetError, ExecutionBudget, storage::WorkspaceString, workspace::WorkspaceVec};
+use crate::{
+    BudgetError, CapacityExceeded, ExecutionBudget, storage::WorkspaceString,
+    workspace::WorkspaceVec,
+};
 use core::cmp::Ordering;
 use opeo::{OResult, Out, ResultOutExt};
 
@@ -126,7 +129,9 @@ impl ConfigValueBuilder {
             let reference =
                 ArenaRebase::environment_reference(reference, text_offset).ok_or_else(|| {
                     out.reborrow()
-                        .fail(ValueError::from(BudgetError::CapacityExceeded))
+                        .fail(ValueError::from(BudgetError::CapacityExceeded(
+                            CapacityExceeded::BudgetBookkeeping,
+                        )))
                 })?;
             self.environment_references
                 .try_push(reference, out.reborrow())?;
@@ -134,13 +139,17 @@ impl ConfigValueBuilder {
         for edge in edges {
             let child = edge.child.checked_add(node_offset).ok_or_else(|| {
                 out.reborrow()
-                    .fail(ValueError::from(BudgetError::CapacityExceeded))
+                    .fail(ValueError::from(BudgetError::CapacityExceeded(
+                        CapacityExceeded::BudgetBookkeeping,
+                    )))
             })?;
             let name = match edge.name {
                 Some(range) => {
                     Some(ArenaRebase::text_range(range, text_offset).ok_or_else(|| {
                         out.reborrow()
-                            .fail(ValueError::from(BudgetError::CapacityExceeded))
+                            .fail(ValueError::from(BudgetError::CapacityExceeded(
+                                CapacityExceeded::BudgetBookkeeping,
+                            )))
                     })?)
                 }
                 None => None,
@@ -152,7 +161,9 @@ impl ConfigValueBuilder {
             let kind = ArenaRebase::node_kind(node.kind, node_offset, edge_offset, text_offset)
                 .ok_or_else(|| {
                     out.reborrow()
-                        .fail(ValueError::from(BudgetError::CapacityExceeded))
+                        .fail(ValueError::from(BudgetError::CapacityExceeded(
+                            CapacityExceeded::BudgetBookkeeping,
+                        )))
                 })?;
             self.nodes.try_push(
                 ValueNode {
@@ -161,8 +172,11 @@ impl ConfigValueBuilder {
                     environment: match node.environment {
                         Some(reference) => {
                             Some(reference.checked_add(environment_offset).ok_or_else(|| {
-                                out.reborrow()
-                                    .fail(ValueError::from(BudgetError::CapacityExceeded))
+                                out.reborrow().fail(ValueError::from(
+                                    BudgetError::CapacityExceeded(
+                                        CapacityExceeded::BudgetBookkeeping,
+                                    ),
+                                ))
                             })?)
                         }
                         None => None,
@@ -173,7 +187,9 @@ impl ConfigValueBuilder {
         }
         let index = root_index.checked_add(node_offset).ok_or_else(|| {
             out.reborrow()
-                .fail(ValueError::from(BudgetError::CapacityExceeded))
+                .fail(ValueError::from(BudgetError::CapacityExceeded(
+                    CapacityExceeded::BudgetBookkeeping,
+                )))
         })?;
         Ok(ValueId {
             arena_id: self.arena_id,
@@ -186,7 +202,7 @@ impl ConfigValueBuilder {
     /// The root has depth zero; optional children, container entries, and single enum payloads
     /// add one level. Enum structure payload fields add two levels because their anonymous
     /// structure contributes an additional level. A depth equal to the limit is accepted.
-    /// Depth violations return `ResourceLimitExceeded`; depth arithmetic overflow returns
+    /// Depth violations return `ResourceLimit`; depth arithmetic overflow returns
     /// `CapacityExceeded`. Frame and child storage uses the builder's execution budget when set.
     pub fn append_view<'slot>(
         &mut self,
@@ -739,7 +755,9 @@ impl ConfigValueBuilder {
         mut out: Out<'slot, '_, ValueError>,
     ) -> OResult<'slot, TextRange> {
         let Some(text) = self.text.get_mut(0) else {
-            return Err(out.fail(ValueError::from(BudgetError::CapacityExceeded)));
+            return Err(out.fail(ValueError::from(BudgetError::CapacityExceeded(
+                CapacityExceeded::BudgetBookkeeping,
+            ))));
         };
         let start = text.len();
         text.try_push_str(value, out.reborrow())?;

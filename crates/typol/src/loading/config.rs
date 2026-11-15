@@ -26,7 +26,7 @@ use std::{fmt, io::Read as IoRead, path::Path};
 #[cfg(feature = "std")]
 use typol_config::{SourceCommitError, SourceExpectation, SourceRevision};
 #[cfg(feature = "std")]
-use typol_core::{ExecutionLimits, SourceId};
+use typol_core::{ExecutionLimits, ResourceLimit, SourceId};
 #[cfg(feature = "std")]
 use typol_std::{
     FileConfigInput, FileSchemaCompilation, FileSourceWriter, HostError, HostOperation, ReadSource,
@@ -399,7 +399,7 @@ impl LoadedSchema {
             .max_source_bytes()
             .min(self.options.file_input_limits().max_file_bytes());
         if document.source().len() > max_bytes {
-            return Err(SourceCommitError::ResourceLimitExceeded);
+            return Err(SourceCommitError::ResourceLimit(ResourceLimit::SourceBytes));
         }
         let mut writer = FileSourceWriter::new(self.options.file_input_limits().max_path_bytes());
         document.write_source(path, &mut writer, expectation)

@@ -5,10 +5,10 @@ use crate::{
 };
 use opeo::{OResult, Out};
 use typol_core::{
-    ChargedBox, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, SourceId, SourceSpan,
+    ChargedBox, ChargedVec, Diagnostic, ExecutionBudget, ResourceLimit, SourceId, SourceSpan,
     diagnostic_context,
 };
-use typol_i18n::{Translator, t};
+use typol_i18n::Translator;
 
 pub(crate) struct DelimiterFrame {
     pub(crate) close: Symbol,
@@ -60,13 +60,10 @@ impl SyntaxBudget {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ()> {
         if self.frames >= self.frame_limit {
-            return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                t! {
-                    name: "diagnostic.emergency.resource_limit_exceeded",
-                    locale: self.translator,
-                },
+            return Err(out.reborrow().fail(SyntaxDiagnostic::resource_limit(
+                ResourceLimit::SchemaParseDepth,
                 span,
+                self.translator,
             )));
         }
         self.frames += 1;

@@ -4,7 +4,7 @@ use crate::{
     session::SessionBudget,
 };
 use opeo::{OResult, Out, ResultOutExt};
-use typol_core::{BudgetError, ChargedString, ChargedVec};
+use typol_core::{BudgetError, CapacityExceeded, ChargedString, ChargedVec};
 use typol_model::BuiltinType;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -368,7 +368,9 @@ fn extend_path<'slot>(
                 .len()
                 .checked_add(separator.len())
                 .and_then(|length| length.checked_add(segment.len()))
-                .ok_or(BudgetError::CapacityExceeded)
+                .ok_or(BudgetError::CapacityExceeded(
+                    CapacityExceeded::RustConversion,
+                ))
                 .store_err(budget_out.reborrow())?;
             session.execution().construct_text(
                 capacity,

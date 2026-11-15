@@ -1,4 +1,4 @@
-use typol_core::{FmtWriteSink, Write, WriteError};
+use typol_core::{FmtWriteSink, InternalError, Write, WriteError};
 
 #[test]
 fn string_and_vector_sinks_append_complete_fragments() {
@@ -14,10 +14,12 @@ fn string_and_vector_sinks_append_complete_fragments() {
 #[test]
 fn string_sink_rejects_non_utf8_fragments_without_mutating_output() {
     let mut text = String::from("safe");
-    assert_eq!(
+    assert!(matches!(
         text.write_all(&[0xff]),
-        Err(WriteError::InternalInvariantFailure)
-    );
+        Err(WriteError::Internal(
+            InternalError::SourceInputInvariantFailure(_)
+        ))
+    ));
     assert_eq!(text, "safe");
 }
 

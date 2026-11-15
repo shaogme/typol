@@ -2,7 +2,7 @@ use crate::{
     diagnostics::{BuildFailure, DiagnosticCollector, EmergencyDiagnostics},
     test_support::TestOperation,
 };
-use typol_core::{DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId, SourceSpan, Span};
+use typol_core::{ExecutionBudget, ExecutionLimits, ResourceLimit, SourceId, SourceSpan, Span};
 use typol_i18n::{Language, Translator};
 use typol_syntax::AstAccessError;
 use typol_test_support::*;
@@ -42,6 +42,7 @@ fn stable_order_uses_both_endpoints_and_terminal_stays_last() -> TestResult {
         collector.push(collector.make_semantic(message, location));
     }
     collector.abort(EmergencyDiagnostics::resource(
+        ResourceLimit::ExecutionSteps,
         span(&mut operations, 0, 0)?,
         Translator::new(Language::English),
     ));
@@ -68,7 +69,7 @@ fn stable_order_uses_both_endpoints_and_terminal_stays_last() -> TestResult {
     );
     test_verify_eq!(
         errors.last().into_test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::ExecutionSteps.diagnostic_code()
     );
     test_verify!(
         !errors

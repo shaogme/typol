@@ -1,7 +1,7 @@
 use crate::{
     BuildError, ClosureLocalId, CompiledSchema, ExpressionBinding, ExpressionMethod,
-    ExpressionNodeId, FieldId, NumberValue, StoredTypeKind, TypeId, TypedExpression,
-    TypedExpressionKind, TypedLiteral, TypedMethodArgument,
+    ExpressionNodeId, FieldId, NumberValue, SchemaAccessError, StoredTypeKind, TypeId,
+    TypedExpression, TypedExpressionKind, TypedLiteral, TypedMethodArgument,
     validation::defaults::DefaultValidation,
 };
 use opeo::{OResult, Out, ResultOutExt};
@@ -23,6 +23,11 @@ pub(crate) struct ProgramBindings {
     key: bool,
 }
 
+pub(crate) enum ProgramBindingsError {
+    Internal(DiagnosticContext),
+    SchemaAccess(SchemaAccessError),
+}
+
 impl ProgramBindings {
     pub(crate) fn assertion(self_type: Option<TypeId>) -> Self {
         Self {
@@ -34,7 +39,10 @@ impl ProgramBindings {
         }
     }
 
-    pub(super) fn all(schema: &CompiledSchema, target: TypeId) -> Result<Self, BuildError> {
+    pub(super) fn all(
+        schema: &CompiledSchema,
+        target: TypeId,
+    ) -> Result<Self, ProgramBindingsError> {
         let mut result = Self {
             self_type: None,
             root: false,
@@ -42,17 +50,19 @@ impl ProgramBindings {
             value: None,
             key: false,
         };
-        match schema
-            .type_info(target)?
-            .ok_or(BuildError::internal(PROGRAM_VALIDATION_INTERNAL))?
-            .kind()
-        {
+        let info = schema
+            .type_info(target)
+            .map_err(ProgramBindingsError::SchemaAccess)?
+            .ok_or(ProgramBindingsError::Internal(PROGRAM_VALIDATION_INTERNAL))?;
+        match info.kind() {
             StoredTypeKind::Array { element, .. } => result.item = Some(element),
             StoredTypeKind::Map { value } => {
                 result.value = Some(value);
                 result.key = true;
             }
-            _ => return Err(BuildError::internal(PROGRAM_VALIDATION_INTERNAL)),
+            _ => {
+                return Err(ProgramBindingsError::Internal(PROGRAM_VALIDATION_INTERNAL));
+            }
         };
         Ok(result)
     }
@@ -555,12 +565,12 @@ impl<'schema, 'program, 'execution> ProgramValidationState<'schema, 'program, 'e
         }
     }
 
-    fn child_type(&self, id: ExpressionNodeId) -> Result<TypeId, BuildError> {
+    fn child_type(&self, id: ExpressionNodeId) -> Result<TypeId, DiagnosticContext> {
         self.program
             .nodes()
             .get(id.index())
             .map(|node| node.ty())
-            .ok_or(BuildError::internal(PROGRAM_VALIDATION_INTERNAL))
+            .ok_or(PROGRAM_VALIDATION_INTERNAL)
     }
 
     fn scope_type<'slot>(
@@ -684,11 +694,11 @@ impl<'schema, 'program, 'execution> ProgramValidationState<'schema, 'program, 'e
         }
     }
 
-    pub(super) fn ensure(valid: bool) -> Result<(), BuildError> {
+    pub(super) fn ensure(valid: bool) -> Result<(), DiagnosticContext> {
         if valid {
             Ok(())
         } else {
-            Err(BuildError::internal(PROGRAM_VALIDATION_INTERNAL))
+            Err(PROGRAM_VALIDATION_INTERNAL)
         }
     }
 

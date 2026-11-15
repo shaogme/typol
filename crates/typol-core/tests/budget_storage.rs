@@ -7,11 +7,11 @@ use std::{
     rc::Rc,
     thread,
 };
-use typol_opeo_test_support::TestOpeo;
+use typol_opeo_test_support::{TestOpeo, ensure, ensure_eq};
 
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, DiagnosticContext, ExecutionBudget, ExecutionLimits,
-    TerminalSlot, diagnostic_context,
+    ResourceLimit, TerminalSlot, diagnostic_context,
 };
 
 static MISSING_TEST_ITEM: DiagnosticContext = diagnostic_context!(
@@ -20,42 +20,6 @@ static MISSING_TEST_ITEM: DiagnosticContext = diagnostic_context!(
     "expected-item-missing",
 );
 
-macro_rules! ensure {
-    ($condition:expr $(,)?) => {
-        if !$condition {
-            return Err(IoError::other(concat!("assertion failed: ", stringify!($condition))).into());
-        }
-    };
-    ($condition:expr, $($argument:tt)+) => {
-        if !$condition {
-            return Err(IoError::other(format!($($argument)+)).into());
-        }
-    };
-}
-
-macro_rules! ensure_eq {
-    ($left:expr, $right:expr $(,)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(IoError::other(format!(
-                "assertion failed: {} and {} differ (actual {:?}, expected {:?})",
-                stringify!($left),
-                stringify!($right),
-                left,
-                right,
-            ))
-            .into());
-        }
-    }};
-    ($left:expr, $right:expr, $($argument:tt)+) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(IoError::other(format!($($argument)+)).into());
-        }
-    }};
-}
 fn budget() -> Result<ExecutionBudget, BudgetError> {
     TestOpeo::call(|out| ExecutionBudget::new(ExecutionLimits::new(1_000_000, 1_048_576), out))
 }
@@ -96,7 +60,7 @@ fn capacity_rejection_preserves_old_elements_and_exhaustion_allows_cleanup()
     TestOpeo::call::<BudgetError, _>(|out| values.try_push(42, out))?;
     ensure_eq!(
         TestOpeo::call::<BudgetError, _>(|out| values.try_reserve_exact(1, out)),
-        Err(BudgetError::Resource)
+        Err(BudgetError::ResourceLimit(ResourceLimit::WorkspaceBytes))
     );
     ensure_eq!(values.capacity(), 1);
     ensure_eq!(values.as_slice(), [42]);
@@ -164,7 +128,7 @@ fn step_rejection_happens_before_growth_and_keeps_text_valid() -> Result<(), Box
     let held = budget.workspace_bytes();
     ensure_eq!(
         TestOpeo::call::<BudgetError, _>(|out| text.try_push_char('🙂', out)),
-        Err(BudgetError::Resource)
+        Err(BudgetError::ResourceLimit(ResourceLimit::ExecutionSteps))
     );
     ensure_eq!(text.as_str(), "€");
     ensure_eq!(text.capacity(), 3);
@@ -233,7 +197,9 @@ fn capacity_overflow_is_rejected_before_allocating_or_initializing() -> Result<(
         TestOpeo::call::<BudgetError, _>(|out| ChargedVec::<u64>::new(Some(&budget), out))?;
     ensure_eq!(
         TestOpeo::call::<BudgetError, _>(|out| values.try_reserve_exact(usize::MAX, out)),
-        Err(BudgetError::CapacityExceeded)
+        Err(BudgetError::CapacityExceeded(
+            typol_core::CapacityExceeded::BudgetBookkeeping,
+        ))
     );
     ensure_eq!(budget.steps(), steps);
     ensure_eq!(budget.peak_workspace_bytes(), peak);
@@ -333,7 +299,9 @@ fn zero_size_capacity_growth_overflow_preserves_budget_state() -> Result<(), Box
     let peak = budget.peak_workspace_bytes();
     ensure_eq!(
         TestOpeo::call::<BudgetError, _>(|out| values.try_reserve(usize::MAX, out)),
-        Err(BudgetError::CapacityExceeded)
+        Err(BudgetError::CapacityExceeded(
+            typol_core::CapacityExceeded::BudgetBookkeeping,
+        ))
     );
     ensure_eq!(values.capacity(), usize::MAX);
     ensure_eq!(values.len(), 1);
@@ -420,7 +388,9 @@ fn terminal_slot_keeps_ownership_after_exhaustion_and_drops_once() -> Result<(),
     let retained = budget.workspace_bytes();
     ensure_eq!(
         TestOpeo::call::<BudgetError, _>(|out| budget.consume(usize::MAX, out)),
-        Err(BudgetError::Resource)
+        Err(BudgetError::CapacityExceeded(
+            typol_core::CapacityExceeded::BudgetBookkeeping,
+        ))
     );
     let slot = slot
         .store(value)

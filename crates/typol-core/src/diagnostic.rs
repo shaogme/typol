@@ -4,7 +4,8 @@ mod parameters;
 mod related;
 
 pub use foundation::{
-    DiagnosticCode, DiagnosticContext, DiagnosticContextDescriptor, DiagnosticObjectIdentifier,
+    CapacityExceeded, DiagnosticCode, DiagnosticContext, DiagnosticContextDescriptor,
+    DiagnosticObjectIdentifier, InternalError,
 };
 pub use kind::{DiagnosticFieldStatus, DiagnosticKind, DiagnosticStage};
 pub use parameters::{
@@ -12,8 +13,6 @@ pub use parameters::{
     MAX_DIAGNOSTIC_PARAMETER_NAME_BYTES, MAX_DIAGNOSTIC_PARAMETERS,
 };
 pub use related::{DiagnosticLabel, DiagnosticLabelInput, RelatedLocation, RelatedLocationRole};
-
-use alloc::borrow::Cow;
 
 use crate::{
     BudgetError, ExecutionBudget, InstancePath, LocatedSpan, SourceId, SourceLocation,
@@ -91,7 +90,7 @@ struct DiagnosticDetails {
 
 enum DiagnosticStorage {
     Emergency {
-        message: Cow<'static, str>,
+        message: &'static str,
         failure: Option<DiagnosticFailure>,
         context: Option<DiagnosticContext>,
         value_source: Option<ValueSource>,
@@ -101,7 +100,7 @@ enum DiagnosticStorage {
 }
 
 struct DiagnosticEmergencyState {
-    message: Cow<'static, str>,
+    message: &'static str,
     failure: Option<DiagnosticFailure>,
     context: Option<DiagnosticContext>,
     value_source: Option<ValueSource>,
@@ -244,7 +243,7 @@ impl Diagnostic {
             primary: DiagnosticPrimary::EMPTY,
             statuses: DiagnosticStatuses::EMPTY,
             storage: DiagnosticStorage::Emergency {
-                message: Cow::Borrowed(message),
+                message,
                 failure: None,
                 context: None,
                 value_source: None,
@@ -257,9 +256,10 @@ impl Diagnostic {
         Self::failure(code, DiagnosticFailure::Translation(error))
     }
 
+    /// Stores localized static emergency text or preserves its translation failure.
     pub fn translated_emergency(
         code: DiagnosticCode,
-        message: Result<Cow<'static, str>, RenderError>,
+        message: Result<&'static str, RenderError>,
     ) -> Self {
         match message {
             Ok(message) => Self {
@@ -284,7 +284,7 @@ impl Diagnostic {
             primary: DiagnosticPrimary::EMPTY,
             statuses: DiagnosticStatuses::EMPTY,
             storage: DiagnosticStorage::Emergency {
-                message: Cow::Borrowed(""),
+                message: "",
                 failure: Some(failure),
                 context: None,
                 value_source: None,
@@ -368,7 +368,7 @@ impl Diagnostic {
                 value_source,
                 kind_override,
             } => DiagnosticEmergencyState {
-                message: message.clone(),
+                message,
                 failure: *failure,
                 context: *context,
                 value_source: *value_source,
@@ -383,7 +383,7 @@ impl Diagnostic {
             value_source,
             kind_override,
         } = emergency_state;
-        let message = WorkspaceString::copy(message.as_ref(), budget, out.reborrow())?;
+        let message = WorkspaceString::copy(message, budget, out.reborrow())?;
         let labels = WorkspaceVec::new(budget, out.reborrow())?;
         let details = DiagnosticDetails {
             message,
@@ -502,7 +502,7 @@ impl Diagnostic {
             } => kind_override.unwrap_or_else(|| DiagnosticKind::emergency(self.code, *context)),
             DiagnosticStorage::Complete(details) => details
                 .kind_override
-                .unwrap_or_else(|| DiagnosticKind::custom(self.code)),
+                .unwrap_or_else(|| DiagnosticKind::custom(self.code, details.context)),
         }
     }
 
@@ -514,7 +514,7 @@ impl Diagnostic {
         match &self.storage {
             DiagnosticStorage::Emergency {
                 message, failure, ..
-            } => failure.map_or(Ok(message.as_ref()), Err),
+            } => failure.map_or(Ok(*message), Err),
             DiagnosticStorage::Complete(details) => {
                 details.failure.map_or(Ok(details.message.as_str()), Err)
             }

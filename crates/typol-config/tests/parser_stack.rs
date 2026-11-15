@@ -1,5 +1,3 @@
-use typol_test_support::ConfigTestSupport as Support;
-
 use std::{
     env,
     process::{Command, Stdio},
@@ -7,17 +5,27 @@ use std::{
     time::{Duration, Instant},
 };
 use typol_config::{
-    ConfigLimits, ConfigParseOptions, ConfigParseRequest, Environment, EnvironmentError,
-    EnvironmentReadContext,
+    ConfigLimits, ConfigParseOptions, ConfigParseRequest, ConfigParser, Environment,
+    EnvironmentError, EnvironmentReadContext,
     opeo::{OResult, Out},
 };
 use typol_core::{
-    DiagnosticCode, ExecutionLimits, Read, SliceSource, ValueKind, ValuePayloadView, ValueView,
+    DiagnosticCode, DiagnosticContext, ExecutionLimits, InternalError, Read, SliceSource,
+    ValueKind, ValuePayloadView, ValueView, diagnostic_context,
 };
 use typol_policy::{ExcerptLimits, RegexOptions};
-use typol_schema::{SchemaCompileOptions, SchemaLimits, SchemaSource};
+use typol_schema::{
+    SchemaCompileOptions, SchemaCompiler, SchemaLimits, SchemaResolver, SchemaSource,
+    SourceObserver,
+};
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
+
+static ENVIRONMENT_TEST_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-config-tests",
+    "environment-provider",
+    "injected-internal-failure",
+);
 
 struct NoHost;
 
@@ -28,17 +36,29 @@ impl Environment for NoHost {
         _: EnvironmentReadContext<'_>,
         out: Out<'slot, 'borrow, EnvironmentError>,
     ) -> OResult<'slot, Option<&'env [u8]>> {
-        Err(out.fail(EnvironmentError::InternalError))
+        Err(out.fail(EnvironmentError::Internal(
+            InternalError::EnvironmentInvariantFailure(ENVIRONMENT_TEST_INVARIANT),
+        )))
     }
 }
 
 fn compile(text: &str, limits: SchemaLimits) -> TestResult<CompiledSchema> {
-    Support::compile_schema(
-        SchemaCompileOptions::new(limits),
-        SchemaSource::from_str(b"schema", text),
-        None,
-        None,
-    )
+    TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::new(limits);
+        let source = SchemaSource::from_str(b"schema", text);
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()
 }
 
@@ -167,14 +187,17 @@ fn verify_deep_value(
     config_limits: ConfigLimits,
 ) -> TestResult<()> {
     let source = input.source("{n:1}", "2");
-    let value = Support::parse(
-        schema,
-        config_request(
-            (&mut SliceSource::new(source.as_bytes()), "config"),
-            &config_limits,
-        ),
-        &mut NoHost,
-    )
+    let value = TestOpeo::outcome(|out| {
+        ConfigParser::new(schema).parse(
+            config_request(
+                (&mut SliceSource::new(source.as_bytes()), "config"),
+                &config_limits,
+            ),
+            &mut NoHost,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_value()?;
     test_eq!(leaf_number(value.root())?, 1)?;
     drop(value);
@@ -192,14 +215,17 @@ fn verify_deep_errors(
         ("{n:0}", DiagnosticCode::CONFIG_VALIDATION_ERROR),
     ] {
         let source = input.source(leaf, if leaf == "{n:999}" { "999" } else { "2" });
-        let errors = Support::parse(
-            schema,
-            config_request(
-                (&mut SliceSource::new(source.as_bytes()), "config"),
-                &config_limits,
-            ),
-            &mut NoHost,
-        )
+        let errors = TestOpeo::outcome(|out| {
+            ConfigParser::new(schema).parse(
+                config_request(
+                    (&mut SliceSource::new(source.as_bytes()), "config"),
+                    &config_limits,
+                ),
+                &mut NoHost,
+                out,
+            )
+        })
+        .map(|value| value.into_config_value())
         .test_error()?;
         let first_error = TestCheck::item(errors.diagnostics(), 0)?;
         test_eq!(first_error.code(), code)?;
@@ -227,29 +253,35 @@ fn verify_deep_errors(
 
     let limited = config_limits.with_max_nesting_depth(depth);
     let source = input.source("{n:0}", "2");
-    let errors = Support::parse(
-        schema,
-        config_request(
-            (&mut SliceSource::new(source.as_bytes()), "config"),
-            &limited,
-        ),
-        &mut NoHost,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(schema).parse(
+            config_request(
+                (&mut SliceSource::new(source.as_bytes()), "config"),
+                &limited,
+            ),
+            &mut NoHost,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_eq!(
         errors.diagnostics().last().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::CONFIG_VALUE_DEPTH_LIMIT_EXCEEDED
     )?;
 
     let truncated = format!("{{value:{}{{n:1", input.prefix);
-    let errors = Support::parse(
-        schema,
-        config_request(
-            (&mut SliceSource::new(truncated.as_bytes()), "config"),
-            &config_limits,
-        ),
-        &mut NoHost,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(schema).parse(
+            config_request(
+                (&mut SliceSource::new(truncated.as_bytes()), "config"),
+                &config_limits,
+            ),
+            &mut NoHost,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_eq!(
         errors.diagnostics().last().test_value()?.code(),
@@ -260,14 +292,17 @@ fn verify_deep_errors(
     }))?;
 
     let mismatched = format!("{{value:{}{{n:1]", input.prefix);
-    let errors = Support::parse(
-        schema,
-        config_request(
-            (&mut SliceSource::new(mismatched.as_bytes()), "config"),
-            &config_limits,
-        ),
-        &mut NoHost,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(schema).parse(
+            config_request(
+                (&mut SliceSource::new(mismatched.as_bytes()), "config"),
+                &config_limits,
+            ),
+            &mut NoHost,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_eq!(
         errors.diagnostics().last().test_value()?.code(),
@@ -381,14 +416,17 @@ fn explicit_container_depth_and_node_limits_accept_exact_boundaries() -> TestRes
         limits = limits.with_max_nesting_depth(nesting);
         limits = limits.with_max_value_nodes(nodes);
         drop(
-            Support::parse(
-                &schema,
-                config_request(
-                    (&mut SliceSource::new(source.as_bytes()), "config"),
-                    &limits,
-                ),
-                &mut NoHost,
-            )
+            TestOpeo::outcome(|out| {
+                ConfigParser::new(&schema).parse(
+                    config_request(
+                        (&mut SliceSource::new(source.as_bytes()), "config"),
+                        &limits,
+                    ),
+                    &mut NoHost,
+                    out,
+                )
+            })
+            .map(|value| value.into_config_value())
             .test_value()?,
         );
         for reduced in ["depth", "nodes"] {
@@ -398,18 +436,25 @@ fn explicit_container_depth_and_node_limits_accept_exact_boundaries() -> TestRes
             } else {
                 limited = limited.with_max_value_nodes(nodes - 1);
             }
-            let errors = Support::parse(
-                &schema,
-                config_request(
-                    (&mut SliceSource::new(source.as_bytes()), "config"),
-                    &limited,
-                ),
-                &mut NoHost,
-            )
+            let errors = TestOpeo::outcome(|out| {
+                ConfigParser::new(&schema).parse(
+                    config_request(
+                        (&mut SliceSource::new(source.as_bytes()), "config"),
+                        &limited,
+                    ),
+                    &mut NoHost,
+                    out,
+                )
+            })
+            .map(|value| value.into_config_value())
             .test_error()?;
             test_eq!(
                 errors.diagnostics().last().test_value()?.code(),
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+                if reduced == "depth" {
+                    DiagnosticCode::CONFIG_VALUE_DEPTH_LIMIT_EXCEEDED
+                } else {
+                    DiagnosticCode::CONFIG_VALUE_NODES_LIMIT_EXCEEDED
+                }
             )?;
         }
     }

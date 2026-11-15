@@ -1,4 +1,4 @@
-use typol_test_support::{ConfigTestSupport as Support, TestOpeoOutcome};
+use typol_test_support::TestOpeoOutcome;
 
 use typol_config::{
     ConfigLimits, ConfigParseOptions, ConfigParseRequest, ConfigParser, Environment,
@@ -6,12 +6,21 @@ use typol_config::{
     opeo::{OResult, Out},
 };
 use typol_core::{
-    BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read, SliceSource,
+    BudgetError, DiagnosticCode, DiagnosticContext, ExecutionBudget, ExecutionLimits,
+    InternalError, Read, ResourceLimit, SliceSource, diagnostic_context,
 };
 use typol_policy::{ExcerptLimits, RegexExecutionLimits, RegexOptions};
-use typol_schema::{SchemaCompileOptions, SchemaSource};
+use typol_schema::{
+    SchemaCompileOptions, SchemaCompiler, SchemaResolver, SchemaSource, SourceObserver,
+};
 use typol_semantic::{CompiledSchema, SchemaAccessError};
 use typol_test_support::*;
+
+static ENVIRONMENT_TEST_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-config-tests",
+    "environment-provider",
+    "injected-internal-failure",
+);
 
 struct SharedExecutionCase {
     prefix: &'static str,
@@ -36,7 +45,9 @@ impl Environment for NoHost {
         _: EnvironmentReadContext<'_>,
         out: Out<'slot, 'borrow, EnvironmentError>,
     ) -> OResult<'slot, Option<&'env [u8]>> {
-        Err(out.fail(EnvironmentError::InternalError))
+        Err(out.fail(EnvironmentError::Internal(
+            InternalError::EnvironmentInvariantFailure(ENVIRONMENT_TEST_INVARIANT),
+        )))
     }
 }
 
@@ -192,12 +203,22 @@ fn config_regex_steps_and_workspace_are_isolated_from_caller_budget() -> TestRes
         .join("|");
     let pattern = format!("^({alternatives})+$");
     let schema_text = format!("entry struct Root {{ value: string @regex(\"{pattern}\") }}");
-    let schema = Support::compile_schema(
-        SchemaCompileOptions::default(),
-        SchemaSource::from_str(b"regex-budget", &schema_text),
-        None,
-        None,
-    )
+    let schema = TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::default();
+        let source = SchemaSource::from_str(b"regex-budget", &schema_text);
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()?;
     let value = "a000".repeat(12);
     let config = format!("{{ value: \"{value}\" }}");
@@ -224,7 +245,7 @@ fn config_regex_steps_and_workspace_are_isolated_from_caller_budget() -> TestRes
     let failed = observe_regex_parse(&schema, &config, regex_limited, generous)?;
     test_eq!(
         failed.diagnostic,
-        Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+        Some(DiagnosticCode::REGEX_EXECUTION_STEPS_LIMIT_EXCEEDED)
     )?;
     test_assert!(failed.failure.is_none())?;
 
@@ -234,7 +255,7 @@ fn config_regex_steps_and_workspace_are_isolated_from_caller_budget() -> TestRes
     let failed = observe_regex_parse(&schema, &config, workspace_limited, generous)?;
     test_eq!(
         failed.diagnostic,
-        Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+        Some(DiagnosticCode::REGEX_WORKSPACE_BYTES_LIMIT_EXCEEDED)
     )?;
     test_assert!(failed.failure.is_none())?;
     Ok(())
@@ -242,25 +263,45 @@ fn config_regex_steps_and_workspace_are_isolated_from_caller_budget() -> TestRes
 
 #[test]
 fn config_regex_steps_accumulate_across_constraints() -> TestResult<()> {
-    let single_schema = Support::compile_schema(
-        SchemaCompileOptions::default(),
-        SchemaSource::from_str(
+    let single_schema = TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::default();
+        let source = SchemaSource::from_str(
             b"single-regex-budget",
             r#"entry struct Root { first: string @regex("^a+$") }"#,
-        ),
-        None,
-        None,
-    )
+        );
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()?;
-    let pair_schema = Support::compile_schema(
-        SchemaCompileOptions::default(),
-        SchemaSource::from_str(
+    let pair_schema = TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::default();
+        let source = SchemaSource::from_str(
             b"pair-regex-budget",
             r#"entry struct Root { first: string @regex("^a+$"), second: string @regex("^a+$") }"#,
-        ),
-        None,
-        None,
-    )
+        );
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()?;
     let single_config = r#"{ first: "aaaaaaaaaaaaaaaa" }"#;
     let pair_config = r#"{ first: "aaaaaaaaaaaaaaaa", second: "aaaaaaaaaaaaaaaa" }"#;
@@ -276,7 +317,7 @@ fn config_regex_steps_accumulate_across_constraints() -> TestResult<()> {
     let exhausted = observe_regex_parse(&pair_schema, pair_config, exact, execution)?;
     test_eq!(
         exhausted.diagnostic,
-        Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+        Some(DiagnosticCode::REGEX_EXECUTION_STEPS_LIMIT_EXCEEDED)
     )?;
     test_assert!(exhausted.failure.is_none())?;
     Ok(())
@@ -287,38 +328,52 @@ fn compiled_enum_index_bounds_lookup_work_and_preserves_budget_errors() -> TestR
     let variants = (0..256)
         .map(|index| format!("V{index:03},"))
         .collect::<String>();
-    let schema = Support::compile_schema(
-        SchemaCompileOptions::default(),
-        SchemaSource::from_str(
-            b"wide-enum",
-            &format!("enum E {{{variants}}} entry struct Root {{ e: E, }}"),
-        ),
-        None,
-        None,
-    )
+    let schema_text = format!("enum E {{{variants}}} entry struct Root {{ e: E, }}");
+    let schema = TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::default();
+        let source = SchemaSource::from_str(b"wide-enum", &schema_text);
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()?;
     for variant in ["V000", "V128", "V255"] {
         let config = format!("{{ e: .{variant} }}");
-        let parsed = Support::parse(
-            &schema,
+        let parsed = TestOpeo::outcome(|out| {
+            ConfigParser::new(&schema).parse(
+                ConfigParseRequest::new(
+                    &mut SliceSource::new(config.as_bytes()),
+                    "wide-enum",
+                    ConfigParseOptions::default(),
+                ),
+                &mut NoHost,
+                out,
+            )
+        })
+        .map(|value| value.into_config_value());
+        test_assert!(parsed.is_ok())?;
+    }
+    let unknown = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
             ConfigParseRequest::new(
-                &mut SliceSource::new(config.as_bytes()),
+                &mut SliceSource::new(b"{ e: .Unknown }"),
                 "wide-enum",
                 ConfigParseOptions::default(),
             ),
             &mut NoHost,
-        );
-        test_assert!(parsed.is_ok())?;
-    }
-    let unknown = Support::parse(
-        &schema,
-        ConfigParseRequest::new(
-            &mut SliceSource::new(b"{ e: .Unknown }"),
-            "wide-enum",
-            ConfigParseOptions::default(),
-        ),
-        &mut NoHost,
-    )
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_eq!(
         TestCheck::item(unknown.diagnostics(), 0)?.code(),
@@ -359,7 +414,7 @@ fn compiled_enum_index_bounds_lookup_work_and_preserves_budget_errors() -> TestR
         }
         Err(error) => error,
     };
-    test_assert!(exhausted == BudgetError::Resource)?;
+    test_assert!(exhausted == BudgetError::ResourceLimit(ResourceLimit::ExecutionSteps))?;
 
     Ok(())
 }
@@ -512,12 +567,22 @@ fn independent_examples_have_the_same_default_and_explicit_value_results() -> Te
             "{} entry struct Root {{ value: {} = {} }}",
             case.prefix, case.value_type, case.value
         );
-        let result = Support::compile_schema(
-            SchemaCompileOptions::default(),
-            SchemaSource::from_str(b"defaults", &defaults),
-            None,
-            None,
-        );
+        let result = TestOpeo::outcome(|mut out| {
+            let options = SchemaCompileOptions::default();
+            let source = SchemaSource::from_str(b"defaults", &defaults);
+            let resolver: Option<&mut dyn SchemaResolver> = None;
+            let observer: Option<&mut dyn SourceObserver> = None;
+            let compiler = SchemaCompiler::new(options, out.reborrow())?;
+            match resolver {
+                Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+                None => match observer {
+                    Some(observer) => {
+                        compiler.compile_without_imports_with_observer(source, observer, out)
+                    }
+                    None => compiler.compile_without_imports(source, out),
+                },
+            }
+        });
         test_eq!(result.is_ok(), case.expected)?;
         if let TestOpeoOutcome::Error(errors) = result {
             test_assert!(
@@ -531,22 +596,35 @@ fn independent_examples_have_the_same_default_and_explicit_value_results() -> Te
             "{} entry struct Root {{ value: {} }}",
             case.prefix, case.value_type
         );
-        let schema = Support::compile_schema(
-            SchemaCompileOptions::default(),
-            SchemaSource::from_str(b"runtime", &source),
-            None,
-            None,
-        )
+        let schema = TestOpeo::outcome(|mut out| {
+            let options = SchemaCompileOptions::default();
+            let source = SchemaSource::from_str(b"runtime", &source);
+            let resolver: Option<&mut dyn SchemaResolver> = None;
+            let observer: Option<&mut dyn SourceObserver> = None;
+            let compiler = SchemaCompiler::new(options, out.reborrow())?;
+            match resolver {
+                Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+                None => match observer {
+                    Some(observer) => {
+                        compiler.compile_without_imports_with_observer(source, observer, out)
+                    }
+                    None => compiler.compile_without_imports(source, out),
+                },
+            }
+        })
         .test_value()?;
         let config = format!("{{value: {}}}", case.value);
-        let result = Support::parse(
-            &schema,
-            config_request(
-                (&mut SliceSource::new(config.as_bytes()), "explicit"),
-                &limits,
-            ),
-            &mut NoHost,
-        );
+        let result = TestOpeo::outcome(|out| {
+            ConfigParser::new(&schema).parse(
+                config_request(
+                    (&mut SliceSource::new(config.as_bytes()), "explicit"),
+                    &limits,
+                ),
+                &mut NoHost,
+                out,
+            )
+        })
+        .map(|value| value.into_config_value());
         test_eq!(result.is_ok(), case.expected)?;
         if let TestOpeoOutcome::Error(errors) = result {
             test_assert!(
@@ -565,29 +643,43 @@ fn independent_examples_have_the_same_default_and_explicit_value_results() -> Te
 fn defaults_skip_assertions_and_runtime_uses_the_real_root() -> TestResult<()> {
     let limits = ExcerptLimits::default();
     let source = "struct Child { n: u8 = 1 } @assert(self.n > root.limit, \"child rule\") entry struct Root { child: Child = {}, limit: u8 = 2 }";
-    let schema = Support::compile_schema(
-        SchemaCompileOptions::default(),
-        SchemaSource::from_str(b"schema", source),
-        None,
-        None,
-    )
+    let schema = TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::default();
+        let source = SchemaSource::from_str(b"schema", source);
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()?;
     test_assert!(
-        Support::parse(
-            &schema,
+        TestOpeo::outcome(|out| ConfigParser::new(&schema).parse(
             config_request(
                 (&mut SliceSource::new(("{limit: 0}").as_bytes()), "pass"),
                 &limits
             ),
-            &mut NoHost
-        )
+            &mut NoHost,
+            out
+        ))
+        .map(|value| value.into_config_value())
         .is_ok()
     )?;
-    let errors = Support::parse(
-        &schema,
-        config_request((&mut SliceSource::new(("{}").as_bytes()), "fail"), &limits),
-        &mut NoHost,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            config_request((&mut SliceSource::new(("{}").as_bytes()), "fail"), &limits),
+            &mut NoHost,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_eq!(errors.diagnostics().len(), 1)?;
     test_eq!(
@@ -607,12 +699,22 @@ fn shared_all_keeps_phase_specific_messages_and_element_locations() -> TestResul
         let source = format!(
             "entry struct Root {{ values: [u8] {secret} @all(item > 0, \"PRIVATE\") = [0, 0] }}"
         );
-        let errors = Support::compile_schema(
-            SchemaCompileOptions::default(),
-            SchemaSource::from_str(b"schema", &source),
-            None,
-            None,
-        )
+        let errors = TestOpeo::outcome(|mut out| {
+            let options = SchemaCompileOptions::default();
+            let source = SchemaSource::from_str(b"schema", &source);
+            let resolver: Option<&mut dyn SchemaResolver> = None;
+            let observer: Option<&mut dyn SourceObserver> = None;
+            let compiler = SchemaCompiler::new(options, out.reborrow())?;
+            match resolver {
+                Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+                None => match observer {
+                    Some(observer) => {
+                        compiler.compile_without_imports_with_observer(source, observer, out)
+                    }
+                    None => compiler.compile_without_imports(source, out),
+                },
+            }
+        })
         .test_error()?;
         test_eq!(errors.diagnostics().len(), 2)?;
         for d in errors.diagnostics() {
@@ -623,22 +725,35 @@ fn shared_all_keeps_phase_specific_messages_and_element_locations() -> TestResul
         }
         let source =
             format!("entry struct Root {{ values: [u8] {secret} @all(item > 0, \"PRIVATE\") }}");
-        let schema = Support::compile_schema(
-            SchemaCompileOptions::default(),
-            SchemaSource::from_str(b"schema", &source),
-            None,
-            None,
-        )
+        let schema = TestOpeo::outcome(|mut out| {
+            let options = SchemaCompileOptions::default();
+            let source = SchemaSource::from_str(b"schema", &source);
+            let resolver: Option<&mut dyn SchemaResolver> = None;
+            let observer: Option<&mut dyn SourceObserver> = None;
+            let compiler = SchemaCompiler::new(options, out.reborrow())?;
+            match resolver {
+                Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+                None => match observer {
+                    Some(observer) => {
+                        compiler.compile_without_imports_with_observer(source, observer, out)
+                    }
+                    None => compiler.compile_without_imports(source, out),
+                },
+            }
+        })
         .test_value()?;
         let text = "{values: [0, 0]}";
-        let errors = Support::parse(
-            &schema,
-            config_request(
-                (&mut SliceSource::new((text).as_bytes()), "config"),
-                &limits,
-            ),
-            &mut NoHost,
-        )
+        let errors = TestOpeo::outcome(|out| {
+            ConfigParser::new(&schema).parse(
+                config_request(
+                    (&mut SliceSource::new((text).as_bytes()), "config"),
+                    &limits,
+                ),
+                &mut NoHost,
+                out,
+            )
+        })
+        .map(|value| value.into_config_value())
         .test_error()?;
         test_eq!(errors.diagnostics().len(), 2)?;
         for d in errors.diagnostics() {
@@ -665,12 +780,22 @@ fn recovered_schema_uses_exact_host_text_in_independent_defaults() -> TestResult
         let text = format!(
             "type Host = string @host; struct Row {{ a: Host, b: Host }} entry struct Root {{ broken: Missing, rows: [Row] @all(item.a == item.b, \"PRIVATE\") = [{{a: \"Example.COM.\", b: \"{right}\"}}] }}"
         );
-        let errors = Support::compile_schema(
-            SchemaCompileOptions::default(),
-            SchemaSource::from_str(b"schema", &text),
-            None,
-            None,
-        )
+        let errors = TestOpeo::outcome(|mut out| {
+            let options = SchemaCompileOptions::default();
+            let source = SchemaSource::from_str(b"schema", &text);
+            let resolver: Option<&mut dyn SchemaResolver> = None;
+            let observer: Option<&mut dyn SourceObserver> = None;
+            let compiler = SchemaCompiler::new(options, out.reborrow())?;
+            match resolver {
+                Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+                None => match observer {
+                    Some(observer) => {
+                        compiler.compile_without_imports_with_observer(source, observer, out)
+                    }
+                    None => compiler.compile_without_imports(source, out),
+                },
+            }
+        })
         .test_error()?;
         test_eq!(errors.diagnostics().len(), expected_count)?;
         test_assert!(errors.diagnostics().iter().all(|d| {
@@ -699,20 +824,33 @@ fn large_array_and_map_all_constraints_fit_default_execution_budget() -> TestRes
             mapping: map<string, u32> @all(key.starts_with("item") && value > 0, "positive"),
         }
     "#;
-    let schema = Support::compile_schema(
-        SchemaCompileOptions::default(),
-        SchemaSource::from_str(b"schema", schema_source),
-        None,
-        None,
-    )
+    let schema = TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::default();
+        let source = SchemaSource::from_str(b"schema", schema_source);
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()?;
     let config = format!("{{ values: [{array}], mapping: {{ {map} }} }}");
     let mut input = SliceSource::new(config.as_bytes());
-    let parsed = Support::parse(
-        &schema,
-        ConfigParseRequest::new(&mut input, "large-config", ConfigParseOptions::default()),
-        &mut NoHost,
-    );
+    let parsed = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            ConfigParseRequest::new(&mut input, "large-config", ConfigParseOptions::default()),
+            &mut NoHost,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value());
     parsed.test_value()?;
 
     Ok(())

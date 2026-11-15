@@ -382,22 +382,24 @@ fn report_annotation_error(
                 diagnostics.translator(),
             ));
         }
-        AnnotationError::Resource => {
+        AnnotationError::ResourceLimit(limit) => {
             diagnostics.push(EmergencyDiagnostics::resource(
+                limit,
                 fallback,
                 diagnostics.translator(),
             ));
         }
-        AnnotationError::Capacity => {
-            diagnostics.push(EmergencyDiagnostics::capacity(
+        AnnotationError::CapacityExceeded(capacity) => {
+            diagnostics.push(EmergencyDiagnostics::capacity_error(
                 fallback,
+                capacity,
                 diagnostics.translator(),
             ));
         }
-        AnnotationError::Internal(context) => {
-            diagnostics.abort(EmergencyDiagnostics::internal(
+        AnnotationError::Internal(error) => {
+            diagnostics.abort(EmergencyDiagnostics::internal_error(
                 fallback,
-                context,
+                error,
                 diagnostics.translator(),
             ));
         }

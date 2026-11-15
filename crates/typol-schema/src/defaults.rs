@@ -6,7 +6,7 @@ mod value_transfer;
 
 use crate::{
     annotations::AnnotationCompilation,
-    context::CompileContext,
+    context::{CompileContext, RegexExecutionDiagnostics},
     defaults::{build::DefaultBuilder, compiler::DefaultCompiler},
     diagnostics::{BuildFailure, DiagnosticCollector, EmergencyDiagnostics},
     expressions::ExpressionCompilation,
@@ -20,7 +20,8 @@ use typol_syntax::{NumberKind, NumberLiteral};
 use opeo::{OResult, Out};
 use typol_core::{
     ChargedVec, ConfigValue, Diagnostic, DiagnosticCode, DiagnosticLabelInput, DiagnosticMessage,
-    FloatConversionError, NumericLiteral, RelatedLocationRole, SourceSpan, ValueKind,
+    FloatConversionError, InternalError, NumericLiteral, RelatedLocationRole, SourceSpan,
+    ValueKind,
 };
 use typol_model::BuiltinType;
 
@@ -442,7 +443,7 @@ impl DefaultDiagnostic {
                 input.diagnostic.try_add_label_with_text(
                     DiagnosticLabelInput {
                         span: input.constraint,
-                        text: message.as_ref(),
+                        text: message,
                         role: RelatedLocationRole::ConstraintDefinition,
                     },
                     Some(input.context.execution()),
@@ -495,34 +496,41 @@ impl DefaultDiagnostic {
         span: SourceSpan,
         diagnostics: &DiagnosticCollector,
     ) -> Diagnostic {
-        let span = error.source_span().unwrap_or(span);
-        if let Some(access) = error.schema_access() {
-            return EmergencyDiagnostics::internal(
-                span,
-                EmergencyDiagnostics::schema_access_context(access),
-                diagnostics.translator(),
-            );
-        }
-        if let Some(context) = error.context() {
-            return EmergencyDiagnostics::internal(span, context, diagnostics.translator());
-        }
+        let diagnostic_span = error.source_span().unwrap_or(span);
         match error.kind() {
-            EvalFailure::Internal | EvalFailure::InternalAt(_) => {
-                schema_internal!(diagnostics.translator(), span)
+            EvalFailure::Internal(internal) => EmergencyDiagnostics::internal_error(
+                diagnostic_span,
+                internal,
+                diagnostics.translator(),
+            ),
+            EvalFailure::RegexExecution(error) => {
+                RegexExecutionDiagnostics::map(error, span, diagnostics)
             }
+            EvalFailure::SchemaAccess(error) => EmergencyDiagnostics::internal_error(
+                diagnostic_span,
+                InternalError::SchemaAccessInvariantFailure(
+                    EmergencyDiagnostics::schema_access_context(error),
+                ),
+                diagnostics.translator(),
+            ),
             EvalFailure::Allocation => {
-                EmergencyDiagnostics::allocation(span, diagnostics.translator())
+                EmergencyDiagnostics::allocation(diagnostic_span, diagnostics.translator())
             }
-            EvalFailure::Resource => EmergencyDiagnostics::resource(span, diagnostics.translator()),
-            EvalFailure::Capacity => EmergencyDiagnostics::capacity(span, diagnostics.translator()),
+            EvalFailure::ResourceLimit(limit) => {
+                EmergencyDiagnostics::resource(limit, diagnostic_span, diagnostics.translator())
+            }
+            EvalFailure::CapacityExceeded(capacity) => EmergencyDiagnostics::capacity_error(
+                diagnostic_span,
+                capacity,
+                diagnostics.translator(),
+            ),
             EvalFailure::Arithmetic => diagnostics.make_semantic(
                 t! {
                     name: "diagnostic.schema.default_numeric_evaluation_failed",
                     locale: diagnostics.translator(),
                 },
-                span,
+                diagnostic_span,
             ),
-            EvalFailure::SchemaAccess(_) => schema_internal!(diagnostics.translator(), span),
         }
     }
 }

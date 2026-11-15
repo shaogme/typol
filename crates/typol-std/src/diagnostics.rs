@@ -9,8 +9,8 @@ pub use localized::{
 use std::{error::Error, fmt};
 
 use typol_core::{
-    BudgetError, DiagnosticContext as ErrorContext, ExecutionLimits, SourceExcerptSet, SourceId,
-    SourceSpan, diagnostic_context,
+    BudgetError, CapacityExceeded, DiagnosticContext as ErrorContext, ExecutionLimits,
+    InternalError, ResourceLimit, SourceExcerptSet, SourceId, SourceSpan, diagnostic_context,
 };
 use typol_semantic::{SchemaAccessError, SpanLocation};
 
@@ -77,14 +77,36 @@ impl DisplayFailurePoint {
     }
 }
 
+const fn display_internal_error(failure_point: DisplayFailurePoint) -> InternalError {
+    let context = failure_point.context();
+    match failure_point {
+        DisplayFailurePoint::BudgetInvariant => InternalError::BudgetInvariantFailure(context),
+        DisplayFailurePoint::SchemaAccess => InternalError::SchemaAccessInvariantFailure(context),
+        DisplayFailurePoint::NumberFormatting
+        | DisplayFailurePoint::FloatExpansion
+        | DisplayFailurePoint::LiteralBufferAccess
+        | DisplayFailurePoint::LiteralUtf8Validation
+        | DisplayFailurePoint::OutputNumberFormatting
+        | DisplayFailurePoint::OutputUtf8Validation
+        | DisplayFailurePoint::OutputWrite
+        | DisplayFailurePoint::TranslationFailure
+        | DisplayFailurePoint::CollectionInvariant
+        | DisplayFailurePoint::EnumStructureLookup
+        | DisplayFailurePoint::DepthIncrement => {
+            InternalError::DiagnosticRenderingInvariantFailure(context)
+        }
+    }
+}
+
 /// Rendering failures are separate from business diagnostics and carry no input or partial output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DisplayError {
-    ResourceLimitExceeded,
+    ResourceLimit(ResourceLimit),
     AllocationFailed,
-    CapacityExceeded,
+    CapacityExceeded(CapacityExceeded),
     ShapeMismatch,
-    InternalError {
+    Internal {
+        error: InternalError,
         failure_point: DisplayFailurePoint,
         source_context: Option<ErrorContext>,
     },
@@ -99,7 +121,8 @@ impl DisplayError {
         failure_point: DisplayFailurePoint,
         source_context: Option<ErrorContext>,
     ) -> Self {
-        Self::InternalError {
+        Self::Internal {
+            error: display_internal_error(failure_point),
             failure_point,
             source_context,
         }
@@ -107,20 +130,20 @@ impl DisplayError {
 
     pub const fn context(&self) -> Option<ErrorContext> {
         match self {
-            Self::InternalError { failure_point, .. } => Some(failure_point.context()),
-            Self::ResourceLimitExceeded
+            Self::Internal { failure_point, .. } => Some(failure_point.context()),
+            Self::ResourceLimit(_)
             | Self::AllocationFailed
-            | Self::CapacityExceeded
+            | Self::CapacityExceeded(_)
             | Self::ShapeMismatch => None,
         }
     }
 
     pub const fn source_context(&self) -> Option<ErrorContext> {
         match self {
-            Self::InternalError { source_context, .. } => *source_context,
-            Self::ResourceLimitExceeded
+            Self::Internal { source_context, .. } => *source_context,
+            Self::ResourceLimit(_)
             | Self::AllocationFailed
-            | Self::CapacityExceeded
+            | Self::CapacityExceeded(_)
             | Self::ShapeMismatch => None,
         }
     }
@@ -129,38 +152,55 @@ impl DisplayError {
 impl From<BudgetError> for DisplayError {
     fn from(error: BudgetError) -> Self {
         match error {
-            BudgetError::Resource
-            | BudgetError::RegexSteps
-            | BudgetError::RegexSearchSteps
-            | BudgetError::RegexWorkspace => Self::ResourceLimitExceeded,
-            BudgetError::Allocation => Self::AllocationFailed,
-            BudgetError::CapacityExceeded => Self::CapacityExceeded,
-            BudgetError::InvariantViolation(context) => {
-                Self::internal_with_source(DisplayFailurePoint::BudgetInvariant, Some(*context))
+            BudgetError::ResourceLimit(ResourceLimit::WorkspaceBytes) => {
+                Self::ResourceLimit(ResourceLimit::FormattingWorkspaceBytes)
             }
+            BudgetError::ResourceLimit(ResourceLimit::ConfigTextBytes) => {
+                Self::ResourceLimit(ResourceLimit::ConfigFormatOutputBytes)
+            }
+            BudgetError::ResourceLimit(limit) => Self::ResourceLimit(limit),
+            BudgetError::Allocation => Self::AllocationFailed,
+            BudgetError::CapacityExceeded(capacity) => Self::CapacityExceeded(capacity),
+            BudgetError::Internal(internal) => Self::Internal {
+                error: internal,
+                failure_point: DisplayFailurePoint::BudgetInvariant,
+                source_context: Some(internal.context()),
+            },
         }
     }
 }
 
 impl From<SchemaAccessError> for DisplayError {
     fn from(error: SchemaAccessError) -> Self {
-        Self::internal_with_source(DisplayFailurePoint::SchemaAccess, Some(error.context()))
+        Self::Internal {
+            error: InternalError::SchemaAccessInvariantFailure(error.context()),
+            failure_point: DisplayFailurePoint::SchemaAccess,
+            source_context: Some(error.context()),
+        }
     }
 }
 
 impl fmt::Display for DisplayError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::ResourceLimitExceeded => "Diagnostic rendering failed: resource limit exceeded",
-            Self::AllocationFailed => "Diagnostic rendering failed: memory allocation failed",
-            Self::CapacityExceeded => "Diagnostic rendering failed: workspace capacity exceeded",
-            Self::ShapeMismatch => {
-                "Diagnostic rendering failed: value does not match the schema shape"
+        match self {
+            Self::ResourceLimit(limit) => {
+                write!(
+                    formatter,
+                    "Diagnostic rendering failed: {limit} limit exceeded"
+                )
             }
-            Self::InternalError { .. } => {
-                "Diagnostic rendering failed: invalid internal relationship"
+            Self::AllocationFailed => {
+                formatter.write_str("Diagnostic rendering failed: memory allocation failed")
             }
-        })
+            Self::CapacityExceeded(_) => {
+                formatter.write_str("Diagnostic rendering failed: workspace capacity exceeded")
+            }
+            Self::ShapeMismatch => formatter
+                .write_str("Diagnostic rendering failed: value does not match the schema shape"),
+            Self::Internal { .. } => {
+                formatter.write_str("Diagnostic rendering failed: invalid internal relationship")
+            }
+        }
     }
 }
 

@@ -13,6 +13,7 @@ use super::{
     Parser,
     frames::ValueParser,
     recovery::{ParseFailure, Recovery},
+    semantics::SubtreeValidator,
 };
 use crate::{
     ConfigLimits, ConfigParseOptions, ConfigParseRequest, ConfigParser,
@@ -448,10 +449,22 @@ fn resource_failure_is_fatal_and_shares_the_budget() -> TestResult<()> {
     let mut limits = ConfigLimits::default();
     limits = limits.with_max_value_nodes(2);
     let errors = parse(&schema, "{ a: 999, b: [999] }", &limits).test_error()?;
-    test_eq!(codes(&errors), [11, 1])?;
+    test_eq!(
+        codes(&errors),
+        [
+            DiagnosticCode::CONFIG_VALUE_ERROR.get(),
+            DiagnosticCode::CONFIG_VALUE_NODES_LIMIT_EXCEEDED.get()
+        ]
+    )?;
     limits = limits.with_max_diagnostics(2);
     let errors = parse(&schema, "{ a: 999, b: [999] }", &limits).test_error()?;
-    test_eq!(codes(&errors), [11, 1])?;
+    test_eq!(
+        codes(&errors),
+        [
+            DiagnosticCode::CONFIG_VALUE_ERROR.get(),
+            DiagnosticCode::CONFIG_VALUE_NODES_LIMIT_EXCEEDED.get()
+        ]
+    )?;
 
     Ok(())
 }
@@ -461,24 +474,36 @@ fn source_and_string_limits_apply_before_value_publication() -> TestResult<()> {
     let schema = compile("entry struct Root { name: string = \"long\", }")?;
     let mut limits = ConfigLimits::default();
     limits = limits.with_max_source_bytes(1);
-    test_eq!(codes(&parse(&schema, "{}", &limits).test_error()?), [1])?;
+    test_eq!(
+        codes(&parse(&schema, "{}", &limits).test_error()?),
+        [DiagnosticCode::SOURCE_BYTES_LIMIT_EXCEEDED.get()]
+    )?;
     limits = limits.with_max_diagnostics(1);
-    test_eq!(codes(&parse(&schema, "{}", &limits).test_error()?), [1])?;
+    test_eq!(
+        codes(&parse(&schema, "{}", &limits).test_error()?),
+        [DiagnosticCode::SOURCE_BYTES_LIMIT_EXCEEDED.get()]
+    )?;
     limits = ConfigLimits::default();
     limits = limits.with_max_string_bytes(3);
     for source in ["{}", "{ name: \"x\" }"] {
-        test_eq!(codes(&parse(&schema, source, &limits).test_error()?), [1])?;
+        test_eq!(
+            codes(&parse(&schema, source, &limits).test_error()?),
+            [DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED.get()]
+        )?;
     }
     let enum_schema = compile("enum E { Long, } entry struct Root { e: E, }")?;
     for source in ["{ e: .Long }", "{ e: .Unknown }"] {
         test_eq!(
             codes(&parse(&enum_schema, source, &limits).test_error()?),
-            [1]
+            [DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED.get()]
         )?;
     }
     let schema = compile("entry struct Root { m: map<string, string>, }")?;
     for source in [r#"{ m: { "long": "x" } }"#, r#"{ m: { "x": "long" } }"#] {
-        test_eq!(codes(&parse(&schema, source, &limits).test_error()?), [1])?;
+        test_eq!(
+            codes(&parse(&schema, source, &limits).test_error()?),
+            [DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED.get()]
+        )?;
     }
 
     Ok(())
@@ -679,7 +704,36 @@ fn parse_local_value<'schema>(
     });
     let mut context = context.into_inner();
     match result {
-        TestOpeoOutcome::Value(parsed) => Ok((parsed.value, context.locations)),
+        TestOpeoOutcome::Value(parsed) => {
+            let span = parsed.span;
+            let value = if context.needs_normalization {
+                parse_errors
+                    .run(|out| {
+                        SubtreeValidator::normalize_complete_root(
+                            &mut context,
+                            schema.entry(),
+                            span,
+                            &parsed.value,
+                            out,
+                        )
+                    })
+                    .test_value()?
+            } else {
+                parsed.value
+            };
+            parse_errors
+                .run(|out| {
+                    SubtreeValidator::validate_complete_root(
+                        &mut context,
+                        schema.entry(),
+                        span,
+                        &value,
+                        out,
+                    )
+                })
+                .test_value()?;
+            Ok((value, context.locations))
+        }
         TestOpeoOutcome::Error(failure) => {
             Recovery::record_failure(&mut context, failure);
             let errors =

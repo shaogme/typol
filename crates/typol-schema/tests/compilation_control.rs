@@ -1,7 +1,10 @@
 #[path = "support/schema_compile.rs"]
 mod schema_support;
 
-use typol_core::{DiagnosticCode, ExecutionBudget, ExecutionLimits, SliceSource, SourceId};
+use typol_core::{
+    CapacityExceeded, DiagnosticCode, DiagnosticContext, ExecutionBudget, ExecutionLimits,
+    InternalError, ResourceLimit, SliceSource, SourceId, diagnostic_context,
+};
 use typol_policy::{RegexExecutionLimits, RegexOptions};
 use typol_schema::{
     LocationFailure, LocationStatus, ResolverError, SchemaCompileErrors, SchemaCompileOptions,
@@ -12,6 +15,11 @@ use typol_schema::{
 use typol_test_support::*;
 
 use typol_syntax::{SchemaParseOptions, SchemaParser, StreamLimits};
+
+static SOURCE_OBSERVER_INVARIANT: DiagnosticContext =
+    diagnostic_context!("typol-schema", "source-observer", "source-loaded-invariant",);
+static RESOLVER_CALLBACK_INVARIANT: DiagnosticContext =
+    diagnostic_context!("typol-schema", "resolver-callback", "resolve-invariant",);
 
 struct Sources {
     requests: Vec<String>,
@@ -71,23 +79,39 @@ fn observer_failure_is_terminal_before_current_parse_and_later_imports() -> Test
     for limit in [0, 1, 4] {
         for (error, code) in [
             (
-                SourceObserverError::ResourceLimitExceeded,
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                SourceObserverError::ResourceLimit(ResourceLimit::SchemaSourceCount),
+                ResourceLimit::SchemaSourceCount.diagnostic_code(),
             ),
             (
                 SourceObserverError::AllocationFailed,
                 DiagnosticCode::ALLOCATION_FAILED,
             ),
             (
+                SourceObserverError::CapacityExceeded(CapacityExceeded::SchemaStorage),
+                DiagnosticCode::SCHEMA_STORAGE_CAPACITY_EXCEEDED,
+            ),
+            (
                 SourceObserverError::HostFailure,
                 DiagnosticCode::SCHEMA_RESOLVER_ERROR,
             ),
             (
-                SourceObserverError::InternalInvariantFailure,
-                DiagnosticCode::INTERNAL_ERROR,
+                SourceObserverError::Internal(InternalError::SchemaResolverInvariantFailure(
+                    SOURCE_OBSERVER_INVARIANT,
+                )),
+                DiagnosticCode::SCHEMA_RESOLVER_INVARIANT_FAILURE,
             ),
         ] {
             for stop_at in [0, 1] {
+                let error = match error {
+                    SourceObserverError::Internal(
+                        InternalError::SchemaResolverInvariantFailure(context),
+                    ) => SourceObserverError::Internal(
+                        InternalError::SchemaResolverInvariantFailure(
+                            context.with_object_id(stop_at as u64),
+                        ),
+                    ),
+                    error => error,
+                };
                 let mut observer = Observer {
                     stop_at: SourceId::new(stop_at),
                     error,
@@ -123,10 +147,10 @@ fn observer_failure_is_terminal_before_current_parse_and_later_imports() -> Test
                         );
                         test_verify!(errors.span_location(span).is_none());
                     }
-                    SourceObserverError::ResourceLimitExceeded => {
+                    SourceObserverError::ResourceLimit(limit) => {
                         test_verify_eq!(
                             errors.location_status(),
-                            LocationStatus::Unavailable(LocationFailure::ResourceLimitExceeded)
+                            LocationStatus::Unavailable(LocationFailure::ResourceLimit(limit))
                         );
                         test_verify!(errors.span_location(span).is_none());
                     }
@@ -137,14 +161,14 @@ fn observer_failure_is_terminal_before_current_parse_and_later_imports() -> Test
                         );
                         test_verify!(errors.span_location(span).is_none());
                     }
-                    SourceObserverError::CapacityExceeded => {
+                    SourceObserverError::CapacityExceeded(_) => {
                         test_verify_eq!(
                             errors.location_status(),
                             LocationStatus::Unavailable(LocationFailure::CapacityExceeded)
                         );
                         test_verify!(errors.span_location(span).is_none());
                     }
-                    SourceObserverError::InternalInvariantFailure => {
+                    SourceObserverError::Internal(_) => {
                         test_verify_eq!(
                             errors.location_status(),
                             LocationStatus::Unavailable(LocationFailure::InternalError)
@@ -189,7 +213,7 @@ fn schema_limits_configure_token_window_and_maximum_token_size() -> TestResult {
     .test_error()?;
     test_verify_eq!(
         errors.diagnostics().first().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::TokenBytes.diagnostic_code()
     );
 
     Ok(())
@@ -264,7 +288,11 @@ impl SchemaResolver for InternalResolver {
         _request: SchemaResolveRequest<'_>,
         out: Out<'slot, '_, ResolverError>,
     ) -> OResult<'slot, SchemaSource<'src>> {
-        Err(out.fail(ResolverError::InternalInvariantFailure))
+        Err(out.fail(ResolverError::Internal(
+            InternalError::SchemaResolverInvariantFailure(
+                RESOLVER_CALLBACK_INVARIANT.with_object_id(0),
+            ),
+        )))
     }
 }
 
@@ -281,7 +309,10 @@ fn resolver_internal_failure_keeps_callback_and_import_context() -> TestResult {
     let span = diagnostic.primary().test_value()?;
     let context = diagnostic.context().test_value()?;
 
-    test_verify_eq!(diagnostic.code(), DiagnosticCode::INTERNAL_ERROR);
+    test_verify_eq!(
+        diagnostic.code(),
+        DiagnosticCode::SCHEMA_RESOLVER_INVARIANT_FAILURE
+    );
     test_verify_eq!(span.source_id(), SourceId::new(0));
     test_verify_eq!(context.subsystem(), "typol-schema");
     test_verify_eq!(context.stage(), "resolver-callback");
@@ -328,15 +359,24 @@ fn compile_with_regex_execution(
 #[test]
 fn compiler_execution_is_independent_of_source_byte_limits() -> TestResult {
     let source = "entry struct Root {}";
-    for execution in [
-        ExecutionLimits::new(0, 67_108_864),
-        ExecutionLimits::new(67_108_864, 0),
-        ExecutionLimits::new(67_108_864, 256),
+    for (execution, resource) in [
+        (
+            ExecutionLimits::new(0, 67_108_864),
+            ResourceLimit::ExecutionSteps,
+        ),
+        (
+            ExecutionLimits::new(67_108_864, 0),
+            ResourceLimit::WorkspaceBytes,
+        ),
+        (
+            ExecutionLimits::new(67_108_864, 256),
+            ResourceLimit::WorkspaceBytes,
+        ),
     ] {
         let errors = compile_with_execution(source, execution).test_error()?;
         test_verify_eq!(
             errors.diagnostics().last().test_value()?.code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+            resource.diagnostic_code()
         );
     }
     compile_with_execution(source, ExecutionLimits::new(67_108_864, 67_108_864)).test_value()?;
@@ -361,7 +401,7 @@ fn identity_storage_is_charged_before_observer_notification() -> TestResult {
     .test_error()?;
     test_verify_eq!(
         errors.diagnostics().first().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::WorkspaceBytes.diagnostic_code()
     );
     test_verify!(observer.notified.is_empty());
 
@@ -379,7 +419,10 @@ fn nested_default_quantifiers_use_compiler_execution_budget() -> TestResult {
     let errors = compile_with_execution(&source, ExecutionLimits::new(1_000_000, 67_108_864))
         .test_error()?;
     let diagnostic = errors.diagnostics().last().test_value()?;
-    test_verify_eq!(diagnostic.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED);
+    test_verify_eq!(
+        diagnostic.code(),
+        ResourceLimit::ExecutionSteps.diagnostic_code()
+    );
     test_verify_eq!(
         diagnostic.primary().test_value()?.span().start(),
         source.find("item.all(").test_value()?
@@ -419,7 +462,10 @@ fn default_regex_searches_share_one_cumulative_budget() -> TestResult {
             }
             schema_support::TestOpeoOutcome::Error(errors) => {
                 let diagnostic = errors.diagnostics().last().test_value()?;
-                test_verify_eq!(diagnostic.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED);
+                test_verify_eq!(
+                    diagnostic.code(),
+                    ResourceLimit::RegexExecutionSteps.diagnostic_code()
+                );
                 let start = diagnostic.primary().test_value()?.span().start();
                 if start == second_default {
                     break (execution, errors);
@@ -432,7 +478,10 @@ fn default_regex_searches_share_one_cumulative_budget() -> TestResult {
     };
     compile_with_regex_execution(&single, execution).test_value()?;
     let diagnostic = errors.diagnostics().last().test_value()?;
-    test_verify_eq!(diagnostic.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED);
+    test_verify_eq!(
+        diagnostic.code(),
+        ResourceLimit::RegexExecutionSteps.diagnostic_code()
+    );
     test_verify_eq!(
         diagnostic.primary().test_value()?.span().start(),
         second_default
@@ -513,7 +562,10 @@ fn compiler_budget_is_cumulative_across_imports_without_defaults() -> TestResult
     )
     .test_error()?;
     let terminal = errors.diagnostics().last().test_value()?;
-    test_verify_eq!(terminal.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED);
+    test_verify_eq!(
+        terminal.code(),
+        ResourceLimit::ExecutionSteps.diagnostic_code()
+    );
     test_verify_eq!(resolver.requests, 1);
 
     Ok(())

@@ -12,10 +12,11 @@ use crate::{
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage,
-    ExecutionBudget, LocatedSpan, ValueSource, diagnostic_context,
+    BudgetError, CapacityExceeded, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext,
+    DiagnosticMessage, ExecutionBudget, InternalError, LocatedSpan, ResourceLimit, ValueSource,
+    diagnostic_context,
 };
-use typol_i18n::{Translator, t};
+use typol_i18n::Translator;
 use typol_semantic::EnvironmentAuthorization;
 
 #[cfg(test)]
@@ -27,18 +28,13 @@ use typol_test_support::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EnvironmentError {
-    ResourceLimitExceeded,
+    ResourceLimit(ResourceLimit),
     AllocationFailed,
-    CapacityExceeded,
-    InternalError,
+    CapacityExceeded(CapacityExceeded),
+    Internal(InternalError),
     HostFailure,
 }
 
-static ENVIRONMENT_PROVIDER_READ: DiagnosticContext = diagnostic_context!(
-    "typol-config",
-    "environment-read",
-    "provider-internal-error",
-);
 static ENVIRONMENT_CACHE_SLOT: DiagnosticContext = diagnostic_context!(
     "typol-config",
     "environment-cache",
@@ -60,6 +56,7 @@ pub(super) static ENVIRONMENT_INTERNAL_FALLBACK: DiagnosticContext =
 pub struct EnvironmentReadContext<'budget> {
     execution: &'budget ExecutionBudget,
     max_value_bytes: usize,
+    value_limit: ResourceLimit,
 }
 
 impl<'budget> EnvironmentReadContext<'budget> {
@@ -68,7 +65,13 @@ impl<'budget> EnvironmentReadContext<'budget> {
         Self {
             execution,
             max_value_bytes,
+            value_limit: ResourceLimit::EnvironmentBytes,
         }
+    }
+
+    pub const fn with_value_limit(mut self, value_limit: ResourceLimit) -> Self {
+        self.value_limit = value_limit;
+        self
     }
 
     pub const fn execution(&self) -> &'budget ExecutionBudget {
@@ -78,6 +81,10 @@ impl<'budget> EnvironmentReadContext<'budget> {
     /// Returns the maximum bytes allowed for this read, including the config layer's remaining cumulative quota.
     pub const fn max_value_bytes(&self) -> usize {
         self.max_value_bytes
+    }
+
+    pub const fn value_limit(&self) -> ResourceLimit {
+        self.value_limit
     }
 }
 
@@ -170,7 +177,11 @@ impl EnvironmentCache {
         let name = authorization.name();
         let index = authorization.slot();
         if name.len() > limits.max_string_bytes() {
-            return Err(out.fail(EnvironmentDiagnostics::resource(span, self.translator)));
+            return Err(out.fail(EnvironmentDiagnostics::resource(
+                ResourceLimit::StringBytes,
+                span,
+                self.translator,
+            )));
         }
         if index >= authorization.slot_count() {
             return Err(out.fail(cache_internal(
@@ -212,7 +223,10 @@ impl EnvironmentCache {
         };
         let Some(insertion_steps) = shifted_entries.checked_add(1) else {
             return Err(out.fail(EnvironmentDiagnostics::located_error(
-                BudgetDiagnostic::from_error(BudgetError::CapacityExceeded, self.translator),
+                BudgetDiagnostic::from_error(
+                    BudgetError::CapacityExceeded(CapacityExceeded::EnvironmentCache),
+                    self.translator,
+                ),
                 span,
             )));
         };
@@ -232,12 +246,15 @@ impl EnvironmentCache {
             out.reborrow(),
         )?;
 
-        let read_context = EnvironmentReadContext::new(
-            self.budget.execution(),
-            self.budget
-                .environment_bytes_remaining()
-                .min(limits.max_string_bytes()),
-        );
+        let environment_bytes_remaining = self.budget.environment_bytes_remaining();
+        let max_string_bytes = limits.max_string_bytes();
+        let (max_value_bytes, value_limit) = if environment_bytes_remaining <= max_string_bytes {
+            (environment_bytes_remaining, ResourceLimit::EnvironmentBytes)
+        } else {
+            (max_string_bytes, ResourceLimit::StringBytes)
+        };
+        let read_context = EnvironmentReadContext::new(self.budget.execution(), max_value_bytes)
+            .with_value_limit(value_limit);
         let value = match self
             .provider_errors
             .try_call(|provider_out| provider.read(name, read_context, provider_out))
@@ -252,31 +269,43 @@ impl EnvironmentCache {
                         self.translator,
                     )));
                 }
-                EnvironmentError::ResourceLimitExceeded => {
-                    return Err(out.fail(EnvironmentDiagnostics::resource(span, self.translator)));
+                EnvironmentError::ResourceLimit(limit) => {
+                    return Err(out.fail(EnvironmentDiagnostics::resource(
+                        limit,
+                        span,
+                        self.translator,
+                    )));
                 }
-                EnvironmentError::CapacityExceeded => {
+                EnvironmentError::CapacityExceeded(capacity) => {
                     return Err(out.fail(EnvironmentDiagnostics::located_error(
                         BudgetDiagnostic::from_error(
-                            BudgetError::CapacityExceeded,
+                            BudgetError::CapacityExceeded(capacity),
                             self.translator,
                         ),
                         span,
                     )));
                 }
-                EnvironmentError::InternalError => {
-                    return Err(out.fail(cache_internal(
-                        ENVIRONMENT_PROVIDER_READ,
-                        index,
+                EnvironmentError::Internal(internal) => {
+                    return Err(out.fail(EnvironmentDiagnostics::located_error(
+                        DiagnosticFactory::internal_error(
+                            internal,
+                            Some(span),
+                            None,
+                            Some(ValueSource::EnvironmentVariable),
+                            self.translator,
+                        ),
                         span,
-                        self.translator,
                     )));
                 }
             },
             Ok(None) => CachedEnvironment::Missing,
             Ok(Some(bytes)) => {
                 if bytes.len() > read_context.max_value_bytes() {
-                    return Err(out.fail(EnvironmentDiagnostics::resource(span, self.translator)));
+                    return Err(out.fail(EnvironmentDiagnostics::resource(
+                        read_context.value_limit(),
+                        span,
+                        self.translator,
+                    )));
                 }
                 self.budget.environment_bytes(bytes.len(), out.reborrow())?;
                 let mut copy = ChargedVec::new(self.entries.budget(), out.reborrow())?;
@@ -395,8 +424,8 @@ fn cache_internal(
     span: LocatedSpan,
     translator: Translator,
 ) -> Diagnostic {
-    DiagnosticFactory::internal(
-        context.with_object_id(slot as u64),
+    DiagnosticFactory::internal_error(
+        InternalError::EnvironmentInvariantFailure(context.with_object_id(slot as u64)),
         Some(span),
         None,
         None,
@@ -423,12 +452,14 @@ impl EnvironmentDiagnostics {
         diagnostic
     }
 
-    pub(super) fn resource(span: LocatedSpan, translator: Translator) -> Diagnostic {
+    pub(super) fn resource(
+        limit: ResourceLimit,
+        span: LocatedSpan,
+        translator: Translator,
+    ) -> Diagnostic {
         DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
-            code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-            message: DiagnosticMessage::from(
-                t! { name: "diagnostic.environment.resource_limit", locale: translator },
-            ),
+            code: limit.diagnostic_code(),
+            message: limit.emergency_message(translator).into(),
             primary: Some(span),
             path: None,
             value_source: None,
@@ -463,7 +494,7 @@ impl EnvironmentDiagnostics {
         diagnostic.set_located_primary(Some(span));
         diagnostic.set_value_source(Some(ValueSource::EnvironmentVariable));
         diagnostic.set_context(context);
-        if code == DiagnosticCode::INTERNAL_ERROR {
+        if code.is_internal_error() {
             diagnostic.set_context(Some(context.unwrap_or(ENVIRONMENT_INTERNAL_FALLBACK)));
         }
         diagnostic

@@ -11,10 +11,9 @@ use typol_core::{
     SourceId, SourceSpan, Span, SpanError,
 };
 use typol_i18n::{Language, Translator};
-use typol_test_support::TestSlot;
-
-#[derive(Debug)]
-struct TestFailure;
+use typol_test_support::{
+    TestFailure, TestSlot, test_assert_early as test_assert, test_assert_eq_early as test_assert_eq,
+};
 
 type TestResult<T = ()> = Result<T, TestFailure>;
 
@@ -24,13 +23,13 @@ trait TestValue<T> {
 
 impl<T, E> TestValue<T> for Result<T, E> {
     fn test_value(self) -> TestResult<T> {
-        self.map_err(|_| TestFailure)
+        self.map_err(|_| TestFailure::new("test result was unavailable"))
     }
 }
 
 impl<T> TestValue<T> for Option<T> {
     fn test_value(self) -> TestResult<T> {
-        self.ok_or(TestFailure)
+        self.ok_or_else(|| TestFailure::new("test value was missing"))
     }
 }
 
@@ -40,26 +39,9 @@ trait TestError<T> {
 
 impl<T, E> TestError<E> for Result<T, E> {
     fn test_error(self) -> TestResult<E> {
-        self.err().ok_or(TestFailure)
+        self.err()
+            .ok_or_else(|| TestFailure::new("expected test error was missing"))
     }
-}
-
-macro_rules! test_assert {
-    ($condition:expr $(, $($message:tt)*)?) => {{
-        if !$condition {
-            return Err(TestFailure);
-        }
-    }};
-}
-
-macro_rules! test_assert_eq {
-    ($left:expr, $right:expr $(, $($message:tt)*)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(TestFailure);
-        }
-    }};
 }
 
 #[test]
@@ -119,14 +101,14 @@ fn construction_rejects_foreign_and_out_of_bounds_spans_without_mutation() -> Te
                 .access(|out| storage.name_try_new("bad", invalid, out))
                 .test_error()?
                 .code(),
-            DiagnosticCode::INTERNAL_ERROR
+            DiagnosticCode::SYNTAX_STORAGE_INVARIANT_FAILURE
         );
         test_assert_eq!(
             diagnostic_errors
                 .access(|out| storage.expr_set_span(expression, invalid, out))
                 .test_error()?
                 .code(),
-            DiagnosticCode::INTERNAL_ERROR
+            DiagnosticCode::SYNTAX_STORAGE_INVARIANT_FAILURE
         );
         test_assert_eq!(
             access_errors
@@ -148,7 +130,7 @@ fn construction_rejects_foreign_and_out_of_bounds_spans_without_mutation() -> Te
             .access(|out| TypeBuilder::type_path_new(&mut storage, empty_segments, valid, out))
             .test_error()?
             .code(),
-        DiagnosticCode::INTERNAL_ERROR
+        DiagnosticCode::SYNTAX_STORAGE_INVARIANT_FAILURE
     );
     test_assert!(storage.type_path.is_empty());
     test_assert!(storage.name_edges.is_empty());
@@ -197,7 +179,7 @@ fn rejected_node_growth_does_not_mutate_tables_text_or_counter() -> TestResult {
             .access(|out| storage.name_try_new("new", span, out))
             .test_error()?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::SCHEMA_AST_NODES_LIMIT_EXCEEDED
     );
     test_assert_eq!(storage.node_count(), 1);
     test_assert_eq!(
@@ -238,7 +220,7 @@ fn rejected_node_growth_does_not_mutate_tables_text_or_counter() -> TestResult {
             })
             .test_error()?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::SYNTAX_STORAGE_CAPACITY_EXCEEDED
     );
     test_assert_eq!(storage.type_expr.len(), 1);
     test_assert_eq!(storage.node_count(), 1);
@@ -303,7 +285,10 @@ fn invalid_node_ids_fail_reads_and_writes_without_mutating_live_nodes() -> TestR
     let error = diagnostic_errors
         .access(|out| storage.expr_set_span(invalid_expression, replacement, out))
         .test_error()?;
-    test_assert_eq!(error.code(), DiagnosticCode::INTERNAL_ERROR);
+    test_assert_eq!(
+        error.code(),
+        DiagnosticCode::SYNTAX_STORAGE_INVARIANT_FAILURE
+    );
     let context = error.context().test_value()?;
     test_assert_eq!(context.subsystem(), "typol-syntax");
     test_assert_eq!(context.stage(), "ast-storage");

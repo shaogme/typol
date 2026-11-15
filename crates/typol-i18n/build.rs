@@ -10,12 +10,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             SourceFile::new("locales/zh-CN.u18n", include_str!("locales/zh-CN.u18n")),
         ],
     );
-    let generated = Compiler::new(
-        CompilerOptions::default()
-            .with_locale_tag_fallback(true)
-            .with_cow_macro_output(true),
-    )
-    .compile(input)?;
+    let generated =
+        Compiler::new(CompilerOptions::default().with_locale_tag_fallback(true)).compile(input)?;
     let output =
         PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unset")?).join("typol_messages.rs");
     fs::write(output, generated.source())?;

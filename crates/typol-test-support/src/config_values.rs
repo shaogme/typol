@@ -4,8 +4,9 @@ use crate::{TestFailure, TestOpeo, TestResult};
 use alloc::{borrow::ToOwned, boxed::Box, string::String, vec, vec::Vec};
 use opeo::{OResult, Out};
 use typol_core::{
-    AllocationError, BudgetError, ConfigValue, ConfigValueBuilder, NamedValue, ValueEntryView,
-    ValueError, ValueId, ValueKind, ValuePayload, ValuePayloadView, ValueSource, ValueView,
+    AllocationError, BudgetError, CapacityExceeded, ConfigValue, ConfigValueBuilder, NamedValue,
+    ValueEntryView, ValueError, ValueId, ValueKind, ValuePayload, ValuePayloadView, ValueSource,
+    ValueView,
 };
 
 pub struct Named {
@@ -371,8 +372,9 @@ fn copy_into<'slot, 'a>(
                     CopyShape::Optional(has_value) => {
                         let child = if has_value {
                             Some(*children.first().ok_or_else(|| {
-                                out.reborrow()
-                                    .fail(ValueError::from(BudgetError::CapacityExceeded))
+                                out.reborrow().fail(ValueError::from(
+                                    BudgetError::CapacityExceeded(CapacityExceeded::ConfigValue),
+                                ))
                             })?)
                         } else {
                             None
@@ -401,7 +403,9 @@ fn copy_into<'slot, 'a>(
                     CopyShape::EnumSingle(variant) => {
                         let child = *children.first().ok_or_else(|| {
                             out.reborrow()
-                                .fail(ValueError::from(BudgetError::CapacityExceeded))
+                                .fail(ValueError::from(BudgetError::CapacityExceeded(
+                                    CapacityExceeded::ConfigValue,
+                                )))
                         })?;
                         builder.add_enumeration(
                             variant,
@@ -428,7 +432,9 @@ fn copy_into<'slot, 'a>(
     }
     values.pop().ok_or_else(|| {
         out.reborrow()
-            .fail(ValueError::from(BudgetError::CapacityExceeded))
+            .fail(ValueError::from(BudgetError::CapacityExceeded(
+                CapacityExceeded::ConfigValue,
+            )))
     })
 }
 
@@ -441,7 +447,7 @@ fn named_ids<'a>(
         .zip(values)
         .map(|(name, value)| {
             name.map(|name| NamedValue::new(name, value))
-                .ok_or(BudgetError::CapacityExceeded)
+                .ok_or(BudgetError::CapacityExceeded(CapacityExceeded::ConfigValue))
         })
         .collect()
 }

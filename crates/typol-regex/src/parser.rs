@@ -3,12 +3,11 @@ mod character_class;
 use core::{fmt, mem::replace};
 
 use opeo::{OResult, Out, ResultOutExt};
-use typol_core::{ChargedVec, RegexExecutionBudget};
+use typol_core::{ChargedVec, RegexExecutionBudget, ResourceLimit};
 use typol_policy::RegexLimits;
 
 use crate::{
-    PatternSpan, RegexCompileError, RegexErrorContext, RegexResource, RegexSyntaxError,
-    RegexSyntaxErrorKind,
+    PatternSpan, RegexCompileError, RegexErrorContext, RegexSyntaxError, RegexSyntaxErrorKind,
     char_class::{CharClass, CharClassBuilder},
     error::{
         AST_NODE_MISSING, GROUP_FRAME_CURRENT_MISSING, GROUP_FRAME_POP_MISSING,
@@ -88,9 +87,9 @@ impl Ast {
     ) -> OResult<'slot, &Node> {
         self.nodes
             .get(id.0)
-            .ok_or(RegexCompileError::InternalInvariantFailure(
-                RegexErrorContext::new(AST_NODE_MISSING),
-            ))
+            .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                AST_NODE_MISSING,
+            )))
             .store_err_into(out.reborrow())
     }
 }
@@ -114,8 +113,8 @@ impl Parser<'_> {
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, Ast> {
         if pattern.len() > limits.max_regex_pattern_bytes() {
-            return Err(out.fail(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::PatternBytes,
+            return Err(out.fail(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexPatternBytes,
             )));
         }
 
@@ -159,8 +158,8 @@ impl Parser<'_> {
             match self.current_char(out.reborrow())? {
                 Some('(') => {
                     if frames.len() > self.limits.max_regex_nesting_depth() {
-                        return Err(out.fail(RegexCompileError::ResourceLimitExceeded(
-                            RegexResource::NestingDepth,
+                        return Err(out.fail(RegexCompileError::ResourceLimit(
+                            ResourceLimit::RegexNestingDepth,
                         )));
                     }
                     let start = self.position;
@@ -215,9 +214,9 @@ impl Parser<'_> {
                             .branches
                             .first()
                             .copied()
-                            .ok_or(RegexCompileError::InternalInvariantFailure(
-                                RegexErrorContext::new(PARSER_ALTERNATION_BRANCH_MISSING),
-                            ))
+                            .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                                PARSER_ALTERNATION_BRANCH_MISSING,
+                            )))
                             .store_err_into(out.reborrow())?;
                         let start = self.node(first_branch, out.reborrow())?.span.start();
                         self.push_node(
@@ -267,17 +266,17 @@ impl Parser<'_> {
             ),
             1 => match children.pop() {
                 Some(child) => Ok(child),
-                None => Err(out.fail(RegexCompileError::InternalInvariantFailure(
-                    RegexErrorContext::new(PARSER_SINGLE_CHILD_MISSING),
-                ))),
+                None => Err(out.fail(RegexCompileError::internal(RegexErrorContext::new(
+                    PARSER_SINGLE_CHILD_MISSING,
+                )))),
             },
             _ => {
                 let first_child = children
                     .first()
                     .copied()
-                    .ok_or(RegexCompileError::InternalInvariantFailure(
-                        RegexErrorContext::new(PARSER_FIRST_CHILD_MISSING),
-                    ))
+                    .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                        PARSER_FIRST_CHILD_MISSING,
+                    )))
                     .store_err_into(out.reborrow())?;
                 let start = self.node(first_child, out.reborrow())?.span.start();
                 let empty = ChargedVec::new_regex(Some(self.execution), out.reborrow())?;
@@ -616,9 +615,9 @@ impl Parser<'_> {
     ) -> OResult<'slot, &Node> {
         self.nodes
             .get(id.0)
-            .ok_or(RegexCompileError::InternalInvariantFailure(
-                RegexErrorContext::new(PARSER_NODE_MISSING),
-            ))
+            .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                PARSER_NODE_MISSING,
+            )))
             .store_err_into(out.reborrow())
     }
 
@@ -630,13 +629,13 @@ impl Parser<'_> {
         let total = self
             .range_count
             .checked_add(count)
-            .ok_or(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::CharacterRangeCount,
+            .ok_or(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexCharacterRanges,
             ))
             .store_err_into(out.reborrow())?;
         if total > self.max_ranges {
-            return Err(out.fail(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::CharacterRangeCount,
+            return Err(out.fail(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexCharacterRanges,
             )));
         }
         self.range_count = total;
@@ -809,9 +808,9 @@ impl GroupFrames {
     ) -> OResult<'slot, GroupFrame> {
         self.values
             .pop()
-            .ok_or(RegexCompileError::InternalInvariantFailure(
-                RegexErrorContext::new(GROUP_FRAME_POP_MISSING),
-            ))
+            .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                GROUP_FRAME_POP_MISSING,
+            )))
             .store_err_into(out.reborrow())
     }
 
@@ -821,9 +820,9 @@ impl GroupFrames {
     ) -> OResult<'slot, &mut GroupFrame> {
         self.values
             .last_mut()
-            .ok_or(RegexCompileError::InternalInvariantFailure(
-                RegexErrorContext::new(GROUP_FRAME_CURRENT_MISSING),
-            ))
+            .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                GROUP_FRAME_CURRENT_MISSING,
+            )))
             .store_err_into(out.reborrow())
     }
 
@@ -857,11 +856,11 @@ mod tests {
     use core::fmt::{Debug, Display, Formatter, Result as FmtResult};
     use opeo::{ErrSlot, OResult, Out};
 
-    use typol_core::{BudgetError, RegexExecutionBudget};
+    use typol_core::{BudgetError, RegexExecutionBudget, ResourceLimit};
     use typol_policy::RegexLimits;
 
     use crate::{
-        RegexCompileError, RegexResource, RegexSyntaxErrorKind,
+        RegexCompileError, RegexSyntaxErrorKind,
         char_class::{CharClass, ScalarRange},
         parser::{Ast, Node, NodeId, NodeKind, Repetition},
     };
@@ -986,10 +985,10 @@ mod tests {
 
     fn assert_resource(
         result: Attempt<Ast, RegexCompileError>,
-        expected: RegexResource,
+        expected: ResourceLimit,
     ) -> Result<(), TestFailure> {
         match result {
-            Attempt::Failure(RegexCompileError::ResourceLimitExceeded(actual)) => {
+            Attempt::Failure(RegexCompileError::ResourceLimit(actual)) => {
                 check_eq(actual, expected, "resource limit kind does not match")
             }
             other => Err(TestFailure(format!(
@@ -1427,7 +1426,7 @@ mod tests {
         limits.set_max_regex_pattern_bytes(1);
         assert_resource(
             parse("ab", &limits, &mut errors),
-            RegexResource::PatternBytes,
+            ResourceLimit::RegexPatternBytes,
         )?;
 
         let mut at_limit = RegexLimits::default();
@@ -1440,14 +1439,14 @@ mod tests {
         let too_deep = format!("{}a{}", "(".repeat(65), ")".repeat(65));
         assert_resource(
             parse(&too_deep, &RegexLimits::default(), &mut errors),
-            RegexResource::NestingDepth,
+            ResourceLimit::RegexNestingDepth,
         )?;
 
         let mut no_ranges = RegexLimits::default();
         no_ranges.set_max_regex_ranges_per_pattern(0);
         assert_resource(
             parse("[a]", &no_ranges, &mut errors),
-            RegexResource::CharacterRangeCount,
+            ResourceLimit::RegexCharacterRanges,
         )?;
 
         let mut one_range = RegexLimits::default();
@@ -1471,7 +1470,7 @@ mod tests {
         )?;
         assert_resource(
             parse(r"[a][b]", &one_range, &mut errors),
-            RegexResource::CharacterRangeCount,
+            ResourceLimit::RegexCharacterRanges,
         )
     }
 

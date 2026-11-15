@@ -3,7 +3,7 @@ use crate::{
     FieldRecord, NumberValue, RefinementInput, ShapeKind, SpanLocation, StoredConstraintData,
     TypeId, TypeRecord, TypeRecordOptions,
 };
-use alloc::{string::String, vec};
+use alloc::{boxed::Box, string::String, vec};
 use core::fmt::{Debug, Formatter, Result as FmtResult};
 use opeo::{OResult, Out};
 use typol_core::{
@@ -16,7 +16,7 @@ use typol_policy::{RegexLimits, ValueLimits};
 use typol_test_support::TestSlot;
 
 enum TestError {
-    Build(BuildError),
+    Build(Box<BuildError>),
     Budget(BudgetError),
     Value(ValueError),
     Span(SpanError),
@@ -39,7 +39,7 @@ impl Debug for TestError {
 
 impl From<BuildError> for TestError {
     fn from(error: BuildError) -> Self {
-        Self::Build(error)
+        Self::Build(Box::new(error))
     }
 }
 
@@ -83,8 +83,8 @@ impl TestSlots {
     fn build<T>(
         &mut self,
         operation: impl for<'slot> FnOnce(Out<'slot, 'slot, BuildError>) -> OResult<'slot, T>,
-    ) -> Result<T, BuildError> {
-        self.build_errors.access(operation)
+    ) -> TestResult<T> {
+        self.build_errors.access(operation).map_err(Into::into)
     }
 
     fn budget<T>(

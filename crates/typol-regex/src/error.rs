@@ -1,4 +1,7 @@
-use typol_core::{BudgetError, DiagnosticContext, diagnostic_context};
+use typol_core::{
+    BudgetError, CapacityExceeded, DiagnosticCode, DiagnosticContext, InternalError, ResourceLimit,
+    diagnostic_context,
+};
 
 pub(crate) static COMPILE_BUDGET_ERROR: DiagnosticContext =
     diagnostic_context!("typol-regex", "regex-compile", "budget-error-conversion",);
@@ -184,54 +187,95 @@ impl RegexSyntaxError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RegexResource {
-    CompilationBudget,
-    ExecutionSteps,
-    WorkspaceBytes,
-    PatternBytes,
-    NestingDepth,
-    InstructionCount,
-    CharacterRangeCount,
-    ScratchStateCount,
-    SearchSteps,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegexCompileError {
     Syntax(RegexSyntaxError),
-    ResourceLimitExceeded(RegexResource),
+    ResourceLimit(ResourceLimit),
     AllocationFailed,
-    CapacityExceeded,
-    InternalInvariantFailure(RegexErrorContext),
+    CapacityExceeded(CapacityExceeded),
+    Internal {
+        error: InternalError,
+        context: RegexErrorContext,
+    },
 }
 
 impl RegexCompileError {
     pub const fn context(&self) -> Option<RegexErrorContext> {
         match self {
-            Self::InternalInvariantFailure(context) => Some(*context),
+            Self::Internal { context, .. } => Some(*context),
             Self::Syntax(_)
-            | Self::ResourceLimitExceeded(_)
+            | Self::ResourceLimit(_)
             | Self::AllocationFailed
-            | Self::CapacityExceeded => None,
+            | Self::CapacityExceeded(_) => None,
+        }
+    }
+
+    pub const fn internal_error(&self) -> Option<InternalError> {
+        match self {
+            Self::Internal { error, .. } => Some(*error),
+            Self::Syntax(_)
+            | Self::ResourceLimit(_)
+            | Self::AllocationFailed
+            | Self::CapacityExceeded(_) => None,
+        }
+    }
+
+    pub const fn diagnostic_code(&self) -> DiagnosticCode {
+        match self {
+            Self::Syntax(_) => DiagnosticCode::REGEX_SYNTAX_ERROR,
+            Self::ResourceLimit(limit) => limit.diagnostic_code(),
+            Self::AllocationFailed => DiagnosticCode::ALLOCATION_FAILED,
+            Self::CapacityExceeded(capacity) => capacity.diagnostic_code(),
+            Self::Internal { error, .. } => error.diagnostic_code(),
+        }
+    }
+
+    pub(crate) const fn internal(context: RegexErrorContext) -> Self {
+        Self::Internal {
+            error: InternalError::RegexCompilationInvariantFailure(context.diagnostic_context()),
+            context,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegexScratchError {
-    ResourceLimitExceeded(RegexResource),
+    ResourceLimit(ResourceLimit),
     AllocationFailed,
-    CapacityExceeded,
-    InternalInvariantFailure(RegexErrorContext),
+    CapacityExceeded(CapacityExceeded),
+    Internal {
+        error: InternalError,
+        context: RegexErrorContext,
+    },
 }
 
 impl RegexScratchError {
     pub const fn context(&self) -> Option<RegexErrorContext> {
         match self {
-            Self::InternalInvariantFailure(context) => Some(*context),
-            Self::ResourceLimitExceeded(_) | Self::AllocationFailed | Self::CapacityExceeded => {
-                None
-            }
+            Self::Internal { context, .. } => Some(*context),
+            Self::ResourceLimit(_) | Self::AllocationFailed | Self::CapacityExceeded(_) => None,
+        }
+    }
+
+    pub const fn internal_error(&self) -> Option<InternalError> {
+        match self {
+            Self::Internal { error, .. } => Some(*error),
+            Self::ResourceLimit(_) | Self::AllocationFailed | Self::CapacityExceeded(_) => None,
+        }
+    }
+
+    pub const fn diagnostic_code(&self) -> DiagnosticCode {
+        match self {
+            Self::ResourceLimit(limit) => limit.diagnostic_code(),
+            Self::AllocationFailed => DiagnosticCode::ALLOCATION_FAILED,
+            Self::CapacityExceeded(capacity) => capacity.diagnostic_code(),
+            Self::Internal { error, .. } => error.diagnostic_code(),
+        }
+    }
+
+    pub(crate) const fn internal(context: RegexErrorContext) -> Self {
+        Self::Internal {
+            error: InternalError::RegexExecutionInvariantFailure(context.diagnostic_context()),
+            context,
         }
     }
 }
@@ -239,40 +283,69 @@ impl RegexScratchError {
 impl From<BudgetError> for RegexScratchError {
     fn from(error: BudgetError) -> Self {
         match error {
-            BudgetError::Resource | BudgetError::RegexSteps => {
-                Self::ResourceLimitExceeded(RegexResource::ExecutionSteps)
-            }
-            BudgetError::RegexWorkspace => {
-                Self::ResourceLimitExceeded(RegexResource::WorkspaceBytes)
-            }
-            BudgetError::RegexSearchSteps => {
-                Self::ResourceLimitExceeded(RegexResource::SearchSteps)
-            }
+            BudgetError::ResourceLimit(limit) => Self::ResourceLimit(match limit {
+                ResourceLimit::ExecutionSteps | ResourceLimit::RegexExecutionSteps => {
+                    ResourceLimit::RegexExecutionSteps
+                }
+                ResourceLimit::WorkspaceBytes | ResourceLimit::RegexWorkspaceBytes => {
+                    ResourceLimit::RegexWorkspaceBytes
+                }
+                ResourceLimit::RegexSearchSteps => ResourceLimit::RegexSearchSteps,
+                other => other,
+            }),
             BudgetError::Allocation => Self::AllocationFailed,
-            BudgetError::CapacityExceeded => Self::CapacityExceeded,
-            BudgetError::InvariantViolation(source_context) => Self::InternalInvariantFailure(
-                RegexErrorContext::new(SCRATCH_STATE_BUFFER_INITIALIZATION)
-                    .with_source_context(*source_context),
-            ),
+            BudgetError::CapacityExceeded(CapacityExceeded::BudgetBookkeeping) => {
+                Self::CapacityExceeded(CapacityExceeded::RegexExecution)
+            }
+            BudgetError::CapacityExceeded(capacity) => Self::CapacityExceeded(capacity),
+            BudgetError::Internal(error) => Self::Internal {
+                error,
+                context: RegexErrorContext::new(SCRATCH_STATE_BUFFER_INITIALIZATION)
+                    .with_source_context(error.context()),
+            },
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegexMatchError {
-    ResourceLimitExceeded(RegexResource),
+    ResourceLimit(ResourceLimit),
     AllocationFailed,
-    CapacityExceeded,
-    InternalInvariantFailure(RegexErrorContext),
+    CapacityExceeded(CapacityExceeded),
+    Internal {
+        error: InternalError,
+        context: RegexErrorContext,
+    },
 }
 
 impl RegexMatchError {
     pub const fn context(&self) -> Option<RegexErrorContext> {
         match self {
-            Self::InternalInvariantFailure(context) => Some(*context),
-            Self::ResourceLimitExceeded(_) | Self::AllocationFailed | Self::CapacityExceeded => {
-                None
-            }
+            Self::Internal { context, .. } => Some(*context),
+            Self::ResourceLimit(_) | Self::AllocationFailed | Self::CapacityExceeded(_) => None,
+        }
+    }
+
+    pub const fn internal_error(&self) -> Option<InternalError> {
+        match self {
+            Self::Internal { error, .. } => Some(*error),
+            Self::ResourceLimit(_) | Self::AllocationFailed | Self::CapacityExceeded(_) => None,
+        }
+    }
+
+    pub const fn diagnostic_code(&self) -> DiagnosticCode {
+        match self {
+            Self::ResourceLimit(limit) => limit.diagnostic_code(),
+            Self::AllocationFailed => DiagnosticCode::ALLOCATION_FAILED,
+            Self::CapacityExceeded(capacity) => capacity.diagnostic_code(),
+            Self::Internal { error, .. } => error.diagnostic_code(),
+        }
+    }
+
+    pub(crate) const fn internal(context: RegexErrorContext) -> Self {
+        Self::Internal {
+            error: InternalError::RegexExecutionInvariantFailure(context.diagnostic_context()),
+            context,
         }
     }
 }
@@ -280,20 +353,26 @@ impl RegexMatchError {
 impl From<BudgetError> for RegexCompileError {
     fn from(error: BudgetError) -> Self {
         match error {
-            BudgetError::Resource | BudgetError::RegexSteps => {
-                Self::ResourceLimitExceeded(RegexResource::CompilationBudget)
-            }
-            BudgetError::RegexWorkspace => {
-                Self::ResourceLimitExceeded(RegexResource::WorkspaceBytes)
-            }
-            BudgetError::RegexSearchSteps => {
-                Self::ResourceLimitExceeded(RegexResource::SearchSteps)
-            }
+            BudgetError::ResourceLimit(limit) => Self::ResourceLimit(match limit {
+                ResourceLimit::ExecutionSteps | ResourceLimit::RegexExecutionSteps => {
+                    ResourceLimit::RegexCompilationBudget
+                }
+                ResourceLimit::WorkspaceBytes | ResourceLimit::RegexWorkspaceBytes => {
+                    ResourceLimit::RegexWorkspaceBytes
+                }
+                ResourceLimit::RegexSearchSteps => ResourceLimit::RegexSearchSteps,
+                other => other,
+            }),
             BudgetError::Allocation => Self::AllocationFailed,
-            BudgetError::CapacityExceeded => Self::CapacityExceeded,
-            BudgetError::InvariantViolation(source_context) => Self::InternalInvariantFailure(
-                RegexErrorContext::new(COMPILE_BUDGET_ERROR).with_source_context(*source_context),
-            ),
+            BudgetError::CapacityExceeded(CapacityExceeded::BudgetBookkeeping) => {
+                Self::CapacityExceeded(CapacityExceeded::RegexCompilation)
+            }
+            BudgetError::CapacityExceeded(capacity) => Self::CapacityExceeded(capacity),
+            BudgetError::Internal(error) => Self::Internal {
+                error,
+                context: RegexErrorContext::new(COMPILE_BUDGET_ERROR)
+                    .with_source_context(error.context()),
+            },
         }
     }
 }
@@ -301,20 +380,26 @@ impl From<BudgetError> for RegexCompileError {
 impl From<BudgetError> for RegexMatchError {
     fn from(error: BudgetError) -> Self {
         match error {
-            BudgetError::Resource | BudgetError::RegexSteps => {
-                Self::ResourceLimitExceeded(RegexResource::ExecutionSteps)
-            }
-            BudgetError::RegexSearchSteps => {
-                Self::ResourceLimitExceeded(RegexResource::SearchSteps)
-            }
-            BudgetError::RegexWorkspace => {
-                Self::ResourceLimitExceeded(RegexResource::WorkspaceBytes)
-            }
+            BudgetError::ResourceLimit(limit) => Self::ResourceLimit(match limit {
+                ResourceLimit::ExecutionSteps | ResourceLimit::RegexExecutionSteps => {
+                    ResourceLimit::RegexExecutionSteps
+                }
+                ResourceLimit::WorkspaceBytes | ResourceLimit::RegexWorkspaceBytes => {
+                    ResourceLimit::RegexWorkspaceBytes
+                }
+                ResourceLimit::RegexSearchSteps => ResourceLimit::RegexSearchSteps,
+                other => other,
+            }),
             BudgetError::Allocation => Self::AllocationFailed,
-            BudgetError::CapacityExceeded => Self::CapacityExceeded,
-            BudgetError::InvariantViolation(source_context) => Self::InternalInvariantFailure(
-                RegexErrorContext::new(MATCH_BUDGET_ERROR).with_source_context(*source_context),
-            ),
+            BudgetError::CapacityExceeded(CapacityExceeded::BudgetBookkeeping) => {
+                Self::CapacityExceeded(CapacityExceeded::RegexExecution)
+            }
+            BudgetError::CapacityExceeded(capacity) => Self::CapacityExceeded(capacity),
+            BudgetError::Internal(error) => Self::Internal {
+                error,
+                context: RegexErrorContext::new(MATCH_BUDGET_ERROR)
+                    .with_source_context(error.context()),
+            },
         }
     }
 }

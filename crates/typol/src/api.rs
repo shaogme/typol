@@ -44,11 +44,11 @@ pub mod core {
         DiagnosticParameterValue, DiagnosticStage, ExcerptLimits, ExcerptStatus, ExecutionBudget,
         ExecutionLimits, LocatedSpan, MAX_DIAGNOSTIC_PARAMETER_NAME_BYTES,
         MAX_DIAGNOSTIC_PARAMETERS, MAX_RELATED_LOCATIONS, NamedValue, NamedValueEntryView,
-        PathSegment, Read, RegexExecutionBudget, RelatedLocation, RelatedLocationRole, SliceSource,
-        SourceCapture, SourceCommitError, SourceExcerptSet, SourceExpectation, SourceId,
-        SourceLocation, SourceReadError, SourceRevision, SourceSpan, SourceWriter, TextLayout,
-        ValueCopyLimits, ValueEntries, ValueEntryView, ValueError, ValueId, ValueKind,
-        ValuePayload, ValuePayloadView, ValueSource, ValueView,
+        PathSegment, Read, RegexExecutionBudget, RelatedLocation, RelatedLocationRole,
+        ResourceLimit, SliceSource, SourceCapture, SourceCommitError, SourceExcerptSet,
+        SourceExpectation, SourceId, SourceLocation, SourceReadError, SourceRevision, SourceSpan,
+        SourceWriter, TextLayout, ValueCopyLimits, ValueEntries, ValueEntryView, ValueError,
+        ValueId, ValueKind, ValuePayload, ValuePayloadView, ValueSource, ValueView,
     };
 
     pub use crate::loading::SourceNames;

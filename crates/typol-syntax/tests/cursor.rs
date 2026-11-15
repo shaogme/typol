@@ -4,7 +4,10 @@ use typol_core::{
 };
 use typol_i18n::{Language, Translator};
 use typol_syntax::{InputConfig, LexEvent, StreamLimits, SyntaxLimits, TokenCursor, TokenKind};
-use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
+use typol_test_support::{
+    TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot, test_assert_early as test_assert,
+    test_assert_eq_early as test_assert_eq,
+};
 
 #[derive(Debug)]
 struct TestFailure;
@@ -13,24 +16,6 @@ impl From<OpeoTestFailure> for TestFailure {
     fn from(_: OpeoTestFailure) -> Self {
         Self
     }
-}
-
-macro_rules! test_assert {
-    ($condition:expr $(, $($message:tt)*)?) => {{
-        if !$condition {
-            return Err(TestFailure);
-        }
-    }};
-}
-
-macro_rules! test_assert_eq {
-    ($left:expr, $right:expr $(, $($message:tt)*)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(TestFailure);
-        }
-    }};
 }
 
 type TestResult<T = ()> = Result<T, TestFailure>;
@@ -257,7 +242,7 @@ fn fatal_event_is_stable_and_never_turns_into_eof() -> TestResult {
                     .diagnostic()
                     .test_value()?
                     .code(),
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+                DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED
             );
             test_assert!(matches!(
                 cursor.peek_next().test_value()?,
@@ -310,7 +295,10 @@ fn source_byte_limit_is_checked_when_bytes_are_consumed() -> TestResult {
     )
     .test_value()?;
     let diagnostic = cursor.peek().test_value()?.diagnostic().test_value()?;
-    test_assert_eq!(diagnostic.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED);
+    test_assert_eq!(
+        diagnostic.code(),
+        DiagnosticCode::SOURCE_BYTES_LIMIT_EXCEEDED
+    );
     test_assert_eq!(diagnostic.primary().test_value()?.span().start(), 3);
 
     Ok(())

@@ -27,7 +27,6 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 authors = ["Shao G. <shaogme@gmail.com>"]
 repository = "https://github.com/shaogme/typol"
-homepage = "https://github.com/shaogme/typol"
 readme = "README.md"
 
 [workspace.dependencies]

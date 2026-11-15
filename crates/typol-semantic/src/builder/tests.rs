@@ -7,7 +7,7 @@ use crate::{
     TypeRecord, TypeRecordOptions, TypedExpression, TypedExpressionKind, TypedExpressionNode,
     TypedLiteral,
 };
-use alloc::{format, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::fmt::{Debug, Formatter, Result as FmtResult};
 use opeo::{OResult, Out};
 use typol_core::{
@@ -17,10 +17,10 @@ use typol_core::{
 };
 use typol_model::{BinaryOperator, BuiltinType};
 use typol_policy::{RegexLimits, ValueLimits};
-use typol_test_support::TestSlot;
+use typol_test_support::{TestSlot, check, check_eq};
 
 enum TestError {
-    Build(BuildError),
+    Build(Box<BuildError>),
     Budget(BudgetError),
     Value(ValueError),
     Span(SpanError),
@@ -43,7 +43,7 @@ impl Debug for TestError {
 
 impl From<BuildError> for TestError {
     fn from(error: BuildError) -> Self {
-        Self::Build(error)
+        Self::Build(Box::new(error))
     }
 }
 
@@ -87,8 +87,8 @@ impl TestSlots {
     fn build<T>(
         &mut self,
         operation: impl for<'slot> FnOnce(Out<'slot, 'slot, BuildError>) -> OResult<'slot, T>,
-    ) -> Result<T, BuildError> {
-        self.build_errors.access(operation)
+    ) -> TestResult<T> {
+        self.build_errors.access(operation).map_err(Into::into)
     }
 
     fn budget<T>(
@@ -111,30 +111,6 @@ impl TestSlots {
     ) -> Result<T, ValueError> {
         self.value_errors.access(operation)
     }
-}
-
-macro_rules! check_eq {
-    ($actual:expr, $expected:expr $(,)?) => {{
-        let actual = &$actual;
-        let expected = &$expected;
-        if actual != expected {
-            return Err(TestError::Assertion(format!(
-                "assertion failed: {}; actual={actual:?}, expected={expected:?}",
-                stringify!($actual)
-            )));
-        }
-    }};
-}
-
-macro_rules! check {
-    ($condition:expr $(,)?) => {{
-        if !$condition {
-            return Err(TestError::Assertion(format!(
-                "assertion failed: {}",
-                stringify!($condition)
-            )));
-        }
-    }};
 }
 
 fn span(slots: &mut TestSlots) -> TestResult<SourceSpan> {
@@ -280,10 +256,10 @@ fn schema_access_build_error_preserves_the_table_and_index() -> TestResult<()> {
         "schema access context is missing",
     )))?;
 
-    check_eq!(error.schema_access(), Some(access));
-    check_eq!(context.subsystem(), "typol-semantic");
-    check_eq!(context.stage(), "schema-access");
-    check_eq!(context.object_id(), Some(23));
+    check_eq!((|message: &str| TestError::Assertion(message.into())); error.schema_access(), Some(access));
+    check_eq!((|message: &str| TestError::Assertion(message.into())); context.subsystem(), "typol-semantic");
+    check_eq!((|message: &str| TestError::Assertion(message.into())); context.stage(), "schema-access");
+    check_eq!((|message: &str| TestError::Assertion(message.into())); context.object_id(), Some(23));
     Ok(())
 }
 
@@ -337,7 +313,7 @@ fn freeze_failure(slots: &mut TestSlots, model: Builder, root: TypeId) -> TestRe
 
 fn freeze_error(slots: &mut TestSlots, model: Builder, root: TypeId) -> TestResult<()> {
     let error = freeze_failure(slots, model, root)?;
-    check!(error.is_internal() && error.context().is_some());
+    check!((|message: &str| TestError::Assertion(message.into())); error.is_internal() && error.context().is_some());
     Ok(())
 }
 
@@ -378,7 +354,7 @@ fn topology_rejects_missing_forward_and_cyclic_children_on_insertion() -> TestRe
             boolean,
             node_span,
         )];
-        check!(matches!(
+        check!((|message: &str| TestError::Assertion(message.into())); matches!(
             assertion(
                 &mut slots,
                 AssertionRequest {
@@ -534,8 +510,8 @@ fn defaults_are_checked_for_width_float_category_and_nested_values() -> TestResu
         let integer = scalar(&mut slots, &mut model, BuiltinType::U8)?;
         field(&mut slots, &mut model, root, integer, value)?;
         let error = freeze_failure(&mut slots, model, root)?;
-        check!(error.is_internal() && error.context().is_some());
-        check_eq!(error.source_span(), Some(span(&mut slots)?));
+        check!((|message: &str| TestError::Assertion(message.into())); error.is_internal() && error.context().is_some());
+        check_eq!((|message: &str| TestError::Assertion(message.into())); error.source_span(), Some(span(&mut slots)?));
     }
     let (mut model, base_ids) = base(&mut slots)?;
     let root = base_ids.root;
@@ -589,7 +565,7 @@ fn checked_shapes_rules_and_freeze_reject_invalid_references_and_cycles() -> Tes
     let execution = slots.budget(|out| model.execution().try_clone(out))?;
     let inner_shape = slots.build(|out| model.type_shape(boolean, out))?;
     let option = slots.build(|out| model.intern_shape(ShapeKind::Option(inner_shape), out))?;
-    check!(matches!(
+    check!((|message: &str| TestError::Assertion(message.into())); matches!(
         slots
             .build_errors
             .access(|out| model.intern_shape(ShapeKind::Option(option), out)),
@@ -673,7 +649,7 @@ fn checked_shapes_rules_and_freeze_reject_invalid_references_and_cycles() -> Tes
     let execution = slots.budget(|out| model.execution().try_clone(out))?;
     let source_locations = locations(&mut slots)?;
     let source_locations = budget_items(&mut slots, &source_locations, &execution)?;
-    check!(matches!(
+    check!((|message: &str| TestError::Assertion(message.into())); matches!(
         slots
             .build_errors
             .access(|out| model.freeze(root, &[] as &[&str; 0], source_locations, out)),
@@ -683,7 +659,7 @@ fn checked_shapes_rules_and_freeze_reject_invalid_references_and_cycles() -> Tes
     let root = base_ids.root;
     let execution = slots.budget(|out| model.execution().try_clone(out))?;
     let empty_locations = slots.budget(|out| ChargedVec::new(Some(&execution), out))?;
-    check!(matches!(
+    check!((|message: &str| TestError::Assertion(message.into())); matches!(
         slots
             .build_errors
             .access(|out| model.freeze(root, &[""], empty_locations, out)),
@@ -725,7 +701,7 @@ fn freeze_rejects_non_utf8_endpoints_and_out_of_source_ranges() -> TestResult<()
                 .ok_or(TestError::MissingLocation)?,
         ));
         let locations = budget_items(&mut slots, &records, &execution)?;
-        check!(matches!(
+        check!((|message: &str| TestError::Assertion(message.into())); matches!(
             slots
                 .build_errors
                 .access(|out| model.freeze(root, &["é"], locations, out)),

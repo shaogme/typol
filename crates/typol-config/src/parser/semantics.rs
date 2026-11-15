@@ -11,6 +11,7 @@ use crate::{
     },
     diagnostics::DiagnosticFactory,
     environment::{EnvironmentAuthorizationRequest, EnvironmentResolver},
+    instance::Member,
     parser::context::{ParserControl, ValueCallContext},
     session::{AssertionRequest, EnvironmentRequest},
     value::ValueFactory,
@@ -24,18 +25,13 @@ use typol_core::{
     ValueSource, diagnostic_context,
 };
 use typol_i18n::t;
-use typol_semantic::{FieldView, SchemaAccessError, TypeKind, TypeView};
+use typol_semantic::{SchemaAccessError, TypeKind, TypeView};
 use typol_syntax::{BuiltinType, Symbol, TokenKind};
 
 static PARSER_ENVIRONMENT_VALUE_SHAPE: DiagnosticContext = diagnostic_context!(
     "typol-config",
     "environment-resolution",
     "environment-name-is-not-string",
-);
-static PARSER_DEFAULT_SCHEMA_ACCESS: DiagnosticContext = diagnostic_context!(
-    "typol-config",
-    "value-normalization",
-    "default-field-schema-view-unavailable",
 );
 
 fn enrich_diagnostic(
@@ -113,6 +109,22 @@ impl SemanticParser {
         value: &ConfigValue,
         mut out: Out<'slot, '_, ParseFailure>,
     ) -> OResult<'slot, ()> {
+        if context.config_limits.max_diagnostics() > 2 {
+            return Ok(());
+        }
+        let kind = schema_call(
+            &mut context.session.validation().schema_access_errors,
+            |schema_out| target.expected.kind(schema_out),
+            out.reborrow(),
+        )?;
+        let eligible = match kind {
+            TypeKind::Builtin(_) => context.path.len() <= 1,
+            TypeKind::Array { .. } | TypeKind::Map { .. } => true,
+            _ => false,
+        };
+        if !eligible {
+            return Ok(());
+        }
         let AssignmentTarget {
             expected,
             field,
@@ -169,7 +181,19 @@ impl SemanticParser {
         if context.diagnostics.len() > before {
             return Err(out.fail(ParseFailure::reported()));
         }
-        status_result(status, out.reborrow())
+        status_result(status, out.reborrow())?;
+        if let Some(node) = context.current_node {
+            ParserControl::diagnostic_call(
+                &context.diagnostic_errors,
+                |diagnostic_out| {
+                    context
+                        .locations
+                        .mark_validated(node, Some(span), diagnostic_out)
+                },
+                out.reborrow(),
+            )?;
+        }
+        Ok(())
     }
 
     pub(super) fn check_assertions<'slot>(
@@ -316,7 +340,7 @@ impl SemanticParser {
         };
         let ValueKind::String(name) = name.value.as_ref() else {
             return Err(out.fail(
-                DiagnosticFactory::internal(
+                DiagnosticFactory::parser_internal(
                     PARSER_ENVIRONMENT_VALUE_SHAPE,
                     Some(name.span),
                     None,
@@ -562,58 +586,37 @@ impl SemanticParser {
                 count_result?;
             }
         }
-        Ok(ParsedValue {
-            value,
-            span,
-            completion: resolved.completion,
-        })
+        let location = ParserControl::begin_location(context, expected, span, out.reborrow())?;
+        ParserControl::diagnostic_call(
+            &context.diagnostic_errors,
+            |diagnostic_out| context.locations.complete(location, span, diagnostic_out),
+            out.reborrow(),
+        )?;
+        Ok(ParsedValue { value, span })
     }
 }
 
 pub(super) struct SubtreeValidator;
 
 impl SubtreeValidator {
-    pub(super) fn copy_default<'slot>(
-        context: &mut ParserContext<'_, '_, '_>,
+    pub(super) fn normalize_complete_root<'schema, 'slot>(
+        context: &mut ParserContext<'schema, '_, '_>,
+        expected: TypeView<'schema>,
+        span: LocatedSpan,
         value: &ConfigValue,
-        field: FieldView<'_>,
         mut out: Out<'slot, '_, ParseFailure>,
     ) -> OResult<'slot, ConfigValue> {
-        let translator = context.session.translator();
-        let metadata =
-            context
-                .session
-                .validation()
-                .schema_access_errors
-                .try_call(|mut schema_out| {
-                    let ty = field.ty(schema_out.reborrow())?;
-                    let span = field.span(schema_out.reborrow())?;
-                    Ok((ty, span))
-                });
-        let (expected, primary) = match metadata {
-            Ok(metadata) => metadata,
-            Err(caught) => {
-                return Err(out.fail(
-                    DiagnosticFactory::internal(
-                        PARSER_DEFAULT_SCHEMA_ACCESS.with_object_id(caught.take().index() as u64),
-                        None,
-                        None,
-                        None,
-                        translator,
-                    )
-                    .into(),
-                ));
-            }
-        };
         let request = NormalizeRequest {
-            translator,
+            translator: context.session.translator(),
             expected,
             value: value.root(),
-            depth: context.nesting_depth,
-            primary: Some(primary.into()),
+            depth: 0,
+            primary: Some(span),
             text_limit: context.config_limits.max_constructed_text_bytes(),
-            schema_default: true,
-            allow_unvalidated_environment_sources: false,
+            schema_default: false,
+            allow_unvalidated_environment_sources: true,
+            existing_nodes_precounted: true,
+            missing_value_source: context.value_source,
         };
         let value_nodes = &mut context.value_nodes;
         let limits = context.config_limits.values();
@@ -626,6 +629,32 @@ impl SubtreeValidator {
             out.reborrow(),
         )?;
         Ok(normalized.into_config_value())
+    }
+
+    pub(super) fn validate_complete_root<'schema, 'slot>(
+        context: &mut ParserContext<'schema, '_, '_>,
+        expected: TypeView<'schema>,
+        span: LocatedSpan,
+        value: &ConfigValue,
+        out: Out<'slot, '_, ParseFailure>,
+    ) -> OResult<'slot, ()> {
+        context.current_node = None;
+        context.next_member = Member::Root;
+        context.inherited_constraints.truncate(0);
+        context.path.truncate(0);
+        context.nesting_depth = 0;
+        Self::validate(
+            context,
+            AssignmentTarget {
+                expected,
+                field: None,
+                variant: None,
+                span,
+            },
+            value,
+            CompletionState::NeedsTraversalWithKnownShape,
+            out,
+        )
     }
 
     pub(super) fn validate<'schema, 'slot, 'borrow>(

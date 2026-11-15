@@ -5,7 +5,7 @@ use serde::{
     ser::{SerializeSeq, SerializeStruct},
 };
 use std::thread;
-use typol_core::ExecutionLimits;
+use typol_core::{DiagnosticCode, ExecutionLimits};
 use typol_test_support::{TestExtract, TestResult, test_verify_eq as assert_eq};
 
 #[test]
@@ -38,7 +38,7 @@ fn nested_calls_check_depth_on_a_small_stack() -> TestResult {
                     .err()
                     .test_value()?
                 )?,
-                1
+                DiagnosticCode::TYPE_BINDING_DEPTH_LIMIT_EXCEEDED.get()
             );
             drop(value);
             Ok(())
@@ -121,7 +121,7 @@ fn swallowed_errors_cannot_turn_failure_into_success() -> TestResult {
             .err()
             .test_value()?
         )?,
-        1
+        DiagnosticCode::TYPE_BINDING_NODES_LIMIT_EXCEEDED.get()
     );
 
     Ok(())

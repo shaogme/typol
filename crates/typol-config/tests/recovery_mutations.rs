@@ -1,14 +1,16 @@
-use typol_test_support::{ConfigTestSupport as Support, TestOpeoOutcome};
+use typol_test_support::TestOpeoOutcome;
 
 use std::string::String;
 use typol_config::{
-    ConfigLimits, ConfigParseOptions, ConfigParseRequest, Environment, EnvironmentError,
-    EnvironmentReadContext,
+    ConfigLimits, ConfigParseOptions, ConfigParseRequest, ConfigParser, Environment,
+    EnvironmentError, EnvironmentReadContext,
     opeo::{OResult, Out},
 };
 use typol_core::{ExecutionLimits, SliceSource};
 use typol_policy::{ExcerptLimits, RegexOptions};
-use typol_schema::{SchemaCompileOptions, SchemaSource};
+use typol_schema::{
+    SchemaCompileOptions, SchemaCompiler, SchemaResolver, SchemaSource, SourceObserver,
+};
 use typol_test_support::*;
 
 struct Provider {
@@ -32,9 +34,9 @@ impl Environment for Provider {
 #[test]
 fn deterministic_value_mutations_terminate_with_owned_safe_results_under_small_budgets()
 -> TestResult<()> {
-    let schema = Support::compile_schema(
-        SchemaCompileOptions::default(),
-        SchemaSource::from_str(
+    let schema = TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::default();
+        let source = SchemaSource::from_str(
             b"mutations",
             r#"
             enum E { Unit, One(u8), Object { value: u8 } }
@@ -45,10 +47,20 @@ fn deterministic_value_mutations_terminate_with_owned_safe_results_under_small_b
                 flag: option<bool> @env("X")
             }
         "#,
-        ),
-        None,
-        None,
-    )
+        );
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()?;
     let valid = r#"{values: [1, none, 2], keys: {"éøPRIVATE-MARKER": "PRIVATE-MARKER"}, variant: .Object {value: 1}, flag: env("X", true)}"#;
     let offsets: Vec<_> = valid
@@ -92,20 +104,23 @@ fn deterministic_value_mutations_terminate_with_owned_safe_results_under_small_b
                 calls: 0,
                 names: Vec::new(),
             };
-            let result = Support::parse(
-                &schema,
-                ConfigParseRequest::new(
-                    &mut SliceSource::new(source.as_bytes()),
-                    "mutations",
-                    ConfigParseOptions::new(
-                        ExcerptLimits::default(),
-                        RegexOptions::default(),
-                        ConfigLimits::default(),
-                        ExecutionLimits::new(steps, workspace),
+            let result = TestOpeo::outcome(|out| {
+                ConfigParser::new(&schema).parse(
+                    ConfigParseRequest::new(
+                        &mut SliceSource::new(source.as_bytes()),
+                        "mutations",
+                        ConfigParseOptions::new(
+                            ExcerptLimits::default(),
+                            RegexOptions::default(),
+                            ConfigLimits::default(),
+                            ExecutionLimits::new(steps, workspace),
+                        ),
                     ),
-                ),
-                &mut provider,
-            );
+                    &mut provider,
+                    out,
+                )
+            })
+            .map(|value| value.into_config_value());
             test_assert!(provider.calls <= 1)?;
             test_assert!(provider.names.iter().all(|name| name == "X"))?;
             test_assert!(!format!("{result:?}").contains("PRIVATE-MARKER"))?;

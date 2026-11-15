@@ -5,8 +5,10 @@ use typol_config::{
 };
 use typol_core::{AllocationError, ConfigValue, DiagnosticCode, ValueError};
 use typol_policy::ExcerptLimits;
-use typol_schema::{SchemaCompileOptions, SchemaLimits, SchemaSource};
-use typol_test_support::ConfigTestSupport as Support;
+use typol_schema::{
+    SchemaCompileOptions, SchemaCompiler, SchemaLimits, SchemaResolver, SchemaSource,
+    SourceObserver,
+};
 use typol_test_support::*;
 
 struct ValueSlots {
@@ -52,7 +54,6 @@ fn nested_value(depth: usize, slots: &mut ValueSlots) -> TestResult<ConfigValue>
 
 #[test]
 fn deep_dynamic_trees_use_an_explicit_stack_and_cleanup_on_failure() -> TestResult<()> {
-    let _ = Support::parse;
     thread::Builder::new()
         .stack_size(128 * 1024)
         .spawn(|| -> TestResult<()> {
@@ -72,12 +73,22 @@ fn deep_dynamic_trees_use_an_explicit_stack_and_cleanup_on_failure() -> TestResu
             schema_limits.set_max_nesting_depth(depth + 4);
             let mut config_limits = ConfigLimits::default();
             config_limits = config_limits.with_max_nesting_depth(depth + 4);
-            let schema = Support::compile_schema(
-                SchemaCompileOptions::new(schema_limits),
-                SchemaSource::from_str(b"root", &schema_text),
-                None,
-                None,
-            )
+            let schema = TestOpeo::outcome(|mut out| {
+                let options = SchemaCompileOptions::new(schema_limits);
+                let source = SchemaSource::from_str(b"root", &schema_text);
+                let resolver: Option<&mut dyn SchemaResolver> = None;
+                let observer: Option<&mut dyn SourceObserver> = None;
+                let compiler = SchemaCompiler::new(options, out.reborrow())?;
+                match resolver {
+                    Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+                    None => match observer {
+                        Some(observer) => {
+                            compiler.compile_without_imports_with_observer(source, observer, out)
+                        }
+                        None => compiler.compile_without_imports(source, out),
+                    },
+                }
+            })
             .test_value()?;
             let defaults = ConfigValidationOptions::default();
             let options = ConfigValidationOptions::new(
@@ -127,7 +138,7 @@ fn deep_dynamic_trees_use_an_explicit_stack_and_cleanup_on_failure() -> TestResu
             };
             test_eq!(
                 TestCheck::item(caught.diagnostics(), 0)?.code(),
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+                DiagnosticCode::CONFIG_VALUE_DEPTH_LIMIT_EXCEEDED
             )?;
             Ok(())
         })

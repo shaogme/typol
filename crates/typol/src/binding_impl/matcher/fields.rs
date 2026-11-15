@@ -316,7 +316,7 @@ impl FieldMatcher {
 fn internal_error(translator: Translator) -> CodecErrors {
     CodecErrors::emergency(
         CodecStage::Binding,
-        Failure::internal(FIELD_BINDING_INVARIANT),
+        Failure::binding_internal(FIELD_BINDING_INVARIANT),
         translator,
     )
 }

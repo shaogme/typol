@@ -3,8 +3,9 @@ mod tests;
 
 use crate::{
     AssertionInfo, CompiledRegexConstraints, CompiledSchema, ConstraintId, ConstraintRecord,
-    EvalFailure, FieldId, FieldRecord, ProgramId, RefinementId, SchemaAccessError, ShapeId,
-    ShapeKind, SpanLocation, TypeId, TypeRecord, TypeRecordOptions, VariantId, VariantRecord,
+    EvalFailure, FieldId, FieldRecord, ProgramId, RefinementId, RegexExecutionError,
+    SchemaAccessError, ShapeId, ShapeKind, SpanLocation, TypeId, TypeRecord, TypeRecordOptions,
+    VariantId, VariantRecord,
     constraints::{Refinement, RefinementSummary},
     indexes::SchemaIndexes,
     validation::{SchemaValidationRequest, Validation},
@@ -12,8 +13,8 @@ use crate::{
 use core::cmp::Ordering;
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
-    BudgetError, ChargedVec, DiagnosticContext, ExecutionBudget, RegexExecutionBudget, SourceId,
-    SourceSpan, diagnostic_context,
+    BudgetError, CapacityExceeded, ChargedVec, DiagnosticContext, ExecutionBudget, InternalError,
+    RegexExecutionBudget, ResourceLimit, SourceId, SourceSpan, diagnostic_context,
 };
 use typol_policy::{RegexLimits, ValueLimits};
 
@@ -23,11 +24,10 @@ static BUILDER_INTERNAL: DiagnosticContext =
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BuildError {
     Allocation,
-    Resource,
-    Capacity,
-    Internal,
-    InternalAt {
-        context: DiagnosticContext,
+    ResourceLimit(ResourceLimit),
+    CapacityExceeded(CapacityExceeded),
+    Internal {
+        error: InternalError,
         source_span: Option<SourceSpan>,
     },
     DefaultConstraintAt {
@@ -36,6 +36,10 @@ pub enum BuildError {
     /// The default-value expression failed during evaluation.
     DefaultEvaluationAt {
         failure: EvalFailure,
+        source_span: SourceSpan,
+    },
+    RegexExecutionAt {
+        error: RegexExecutionError,
         source_span: SourceSpan,
     },
     SchemaAccess(SchemaAccessError),
@@ -55,21 +59,28 @@ pub struct RefinementInput {
 
 impl BuildError {
     pub const fn internal(context: DiagnosticContext) -> Self {
-        Self::InternalAt {
-            context,
+        Self::Internal {
+            error: InternalError::SchemaCompilationInvariantFailure(context),
             source_span: None,
         }
     }
 
+    pub const fn with_internal_error(
+        error: InternalError,
+        source_span: Option<SourceSpan>,
+    ) -> Self {
+        Self::Internal { error, source_span }
+    }
+
     pub const fn context(self) -> Option<DiagnosticContext> {
         match self {
-            Self::InternalAt { context, .. } => Some(context),
+            Self::Internal { error, .. } => Some(error.context()),
             Self::SchemaAccess(error) | Self::SchemaAccessAt { error, .. } => Some(error.context()),
             Self::DefaultEvaluationAt { failure, .. } => failure.context(),
+            Self::RegexExecutionAt { error, .. } => error.context(),
             Self::Allocation
-            | Self::Resource
-            | Self::Capacity
-            | Self::Internal
+            | Self::ResourceLimit(_)
+            | Self::CapacityExceeded(_)
             | Self::DefaultConstraintAt { .. } => None,
         }
     }
@@ -77,19 +88,18 @@ impl BuildError {
     pub const fn is_internal(self) -> bool {
         matches!(
             self,
-            Self::Internal
-                | Self::InternalAt { .. }
-                | Self::SchemaAccess(_)
-                | Self::SchemaAccessAt { .. }
+            Self::Internal { .. } | Self::SchemaAccess(_) | Self::SchemaAccessAt { .. }
         ) || matches!(self, Self::DefaultEvaluationAt { failure, .. } if failure.is_internal())
+            || matches!(self, Self::RegexExecutionAt { error, .. } if error.is_internal())
     }
 
     pub const fn source_span(self) -> Option<SourceSpan> {
         match self {
-            Self::InternalAt { source_span, .. } => source_span,
+            Self::Internal { source_span, .. } => source_span,
             Self::SchemaAccessAt { source_span, .. } => Some(source_span),
             Self::DefaultConstraintAt { source_span } => Some(source_span),
             Self::DefaultEvaluationAt { source_span, .. } => Some(source_span),
+            Self::RegexExecutionAt { source_span, .. } => Some(source_span),
             _ => None,
         }
     }
@@ -104,15 +114,17 @@ impl BuildError {
 
     pub const fn with_source_span(self, source_span: SourceSpan) -> Self {
         match self {
-            Self::InternalAt { context, .. } => Self::InternalAt {
-                context,
+            Self::Internal { error, .. } => Self::Internal {
+                error,
                 source_span: Some(source_span),
             },
             Self::SchemaAccess(error) | Self::SchemaAccessAt { error, .. } => {
                 Self::SchemaAccessAt { error, source_span }
             }
-            Self::DefaultConstraintAt { .. } | Self::DefaultEvaluationAt { .. } => self,
-            Self::Allocation | Self::Resource | Self::Capacity | Self::Internal => self,
+            Self::DefaultConstraintAt { .. } => self,
+            Self::DefaultEvaluationAt { .. } => self,
+            Self::RegexExecutionAt { error, .. } => Self::RegexExecutionAt { error, source_span },
+            Self::Allocation | Self::ResourceLimit(_) | Self::CapacityExceeded(_) => self,
         }
     }
 }
@@ -120,14 +132,17 @@ impl BuildError {
 impl From<BudgetError> for BuildError {
     fn from(error: BudgetError) -> Self {
         match error {
-            BudgetError::Resource
-            | BudgetError::RegexSteps
-            | BudgetError::RegexSearchSteps
-            | BudgetError::RegexWorkspace => Self::Resource,
+            BudgetError::ResourceLimit(limit) => Self::ResourceLimit(limit),
             BudgetError::Allocation => Self::Allocation,
-            BudgetError::CapacityExceeded => Self::Capacity,
-            BudgetError::InvariantViolation(context) => Self::internal(*context),
+            BudgetError::CapacityExceeded(capacity) => Self::CapacityExceeded(capacity),
+            BudgetError::Internal(error) => Self::with_internal_error(error, None),
         }
+    }
+}
+
+impl From<DiagnosticContext> for BuildError {
+    fn from(context: DiagnosticContext) -> Self {
+        Self::internal(context)
     }
 }
 
@@ -476,7 +491,9 @@ impl Builder {
         let rule_count = rules
             .len()
             .checked_add(tail.len())
-            .ok_or(BuildError::Resource)
+            .ok_or(BuildError::CapacityExceeded(
+                CapacityExceeded::SchemaStorage,
+            ))
             .store_err_into(out.reborrow())?;
         self.execution().consume(rule_count, out.reborrow())?;
         if rules
@@ -535,7 +552,9 @@ impl Builder {
             .len()
             .checked_add(inherited)
             .and_then(|n| n.checked_add(tail.len()))
-            .ok_or(BuildError::Resource)
+            .ok_or(BuildError::CapacityExceeded(
+                CapacityExceeded::SchemaStorage,
+            ))
             .store_err_into(out.reborrow())?;
         self.schema
             .records_mut()

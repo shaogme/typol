@@ -57,7 +57,7 @@ impl AnnotationTaskCollector {
             .checked_add(symbols.fields().len())
             .and_then(|value| value.checked_add(symbols.variants().len()))
             .ok_or_else(|| {
-                diagnostics.push(EmergencyDiagnostics::resource(
+                diagnostics.push(EmergencyDiagnostics::capacity(
                     span,
                     diagnostics.translator(),
                 ));

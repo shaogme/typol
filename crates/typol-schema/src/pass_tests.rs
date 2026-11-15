@@ -1,7 +1,7 @@
-use alloc::{format, string::String, vec::Vec};
+use alloc::{boxed::Box, format, string::String, vec::Vec};
 use typol_core::{
     BudgetError, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits,
-    RegexExecutionBudget, SourceId, SourceSpan, Span,
+    RegexExecutionBudget, ResourceLimit, SourceId, SourceSpan, Span,
 };
 use typol_i18n::{Language, Translator};
 use typol_policy::{RegexExecutionLimits, RegexOptions};
@@ -42,10 +42,10 @@ impl EvalErrorSlot {
     fn call<T>(
         &mut self,
         operation: impl for<'slot> FnOnce(Out<'slot, 'slot, EvalError>) -> OResult<'slot, T>,
-    ) -> Result<T, EvalError> {
+    ) -> Result<T, Box<EvalError>> {
         match self.errors.access(operation) {
             Ok(value) => Ok(value),
-            Err(error) => Err(error),
+            Err(error) => Err(Box::new(error)),
         }
     }
 }
@@ -270,7 +270,7 @@ fn module_and_symbol_passes_stop_with_shared_budget_and_release_payloads() -> Te
         let errors = diagnostics.into_diagnostics();
         test_verify_eq!(
             errors.last().into_test_value()?.code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+            ResourceLimit::ExecutionSteps.diagnostic_code()
         );
         drop(errors);
         drop(sources);
@@ -304,11 +304,11 @@ fn lookup_exhaustion_is_distinct_from_missing_or_ambiguous_names() -> TestResult
     leave_one_step(&mut operations, &execution)?;
     test_verify_eq!(
         operations.budget(|out| symbols.lookup_field(owner, "field", out)),
-        Err(BudgetError::Resource)
+        Err(BudgetError::ResourceLimit(ResourceLimit::ExecutionSteps))
     );
     test_verify_eq!(
         operations.budget(|out| symbols.lookup_field(owner, "missing", out)),
-        Err(BudgetError::Resource)
+        Err(BudgetError::ResourceLimit(ResourceLimit::ExecutionSteps))
     );
 
     Ok(())
@@ -397,7 +397,10 @@ fn public_entry_stops_in_passes_and_propagates_type_lookup_exhaustion() -> TestR
         .into_test_error()?;
         test_verify_eq!(errors.diagnostics().len(), 1);
         let terminal = &errors.diagnostics().first().into_test_value()?;
-        test_verify_eq!(terminal.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED);
+        test_verify_eq!(
+            terminal.code(),
+            ResourceLimit::ExecutionSteps.diagnostic_code()
+        );
         let span = terminal.primary().into_test_value()?.span();
         test_verify_eq!(
             source.get(span.start()..span.end()).into_test_value()?,
@@ -451,7 +454,7 @@ fn module_and_symbol_allocations_are_rejected_before_capacity_limit() -> TestRes
                 .last()
                 .into_test_value()?
                 .code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+            ResourceLimit::WorkspaceBytes.diagnostic_code()
         );
         drop(reservation);
         drop(tree);
@@ -514,7 +517,7 @@ fn public_entry_can_stop_in_types_annotations_expressions_and_defaults() -> Test
             errors
                 .diagnostics()
                 .iter()
-                .any(|error| error.code() == DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+                .any(|error| error.code().is_resource_limit())
         );
         test_verify!(
             errors
@@ -560,15 +563,19 @@ fn controlled_navigation_never_turns_exhaustion_into_false_or_missing() -> TestR
         .into_test_value()?;
     test_verify_eq!(
         eval_errors.call(|out| model.same_type(ty, ty, out)),
-        Err(EvalError::Resource)
+        Err(Box::new(EvalError::ResourceLimit(
+            ResourceLimit::ExecutionSteps,
+        )))
     );
     test_verify_eq!(
         eval_errors.call(|out| model.host(ty, out)),
-        Err(EvalError::Resource)
+        Err(Box::new(EvalError::ResourceLimit(
+            ResourceLimit::ExecutionSteps,
+        )))
     );
     test_verify!(matches!(
         eval_errors.call(|out| model.field_info(field, out)),
-        Err(EvalError::Resource)
+        Err(error) if *error == EvalError::ResourceLimit(ResourceLimit::ExecutionSteps)
     ));
 
     Ok(())

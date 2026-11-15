@@ -164,6 +164,7 @@ name = "typol-core"
 version = "0.1.3"
 dependencies = [
  "opeo",
+ "typol-i18n",
  "typol-opeo-test-support",
  "u18n",
 ]
@@ -283,7 +284,6 @@ dependencies = [
  "typol-core",
  "typol-i18n",
  "typol-model",
- "typol-policy",
  "typol-test-support",
  "u18n",
 ]
@@ -293,11 +293,8 @@ name = "typol-test-support"
 version = "0.1.3"
 dependencies = [
  "opeo",
- "typol-config",
  "typol-core",
  "typol-opeo-test-support",
- "typol-schema",
- "typol-semantic",
 ]
 
 [[package]]

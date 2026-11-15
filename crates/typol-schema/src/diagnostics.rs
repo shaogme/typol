@@ -1,18 +1,18 @@
+mod emergency;
 #[cfg(test)]
 mod tests;
+pub(crate) use emergency::{BudgetDiagnostics, EmergencyDiagnostics};
 
-use alloc::borrow::Cow;
 use core::{cell::RefCell, cmp::Ordering, iter::Chain, ops::Deref, option::IntoIter, slice};
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 
 use typol_core::{
     BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticLabelInput,
-    DiagnosticMessage, ExecutionBudget, RelatedLocationRole, SourceSpan, diagnostic_context,
+    DiagnosticMessage, ExecutionBudget, InternalError, RelatedLocationRole, SourceSpan,
+    diagnostic_context,
 };
-use typol_i18n::{Translator, t};
-use typol_semantic::SchemaAccessError;
+use typol_i18n::Translator;
 use typol_syntax::AstAccessError;
-use u18n::RenderError;
 
 #[cfg(test)]
 use alloc::vec::Vec;
@@ -37,9 +37,12 @@ macro_rules! schema_context {
 
 macro_rules! schema_internal {
     ($translator:expr, $span:expr $(,)?) => {{
-        $crate::diagnostics::EmergencyDiagnostics::internal(
+        $crate::diagnostics::EmergencyDiagnostics::internal_error(
             $span,
-            schema_context!(module_path!(), "internal-invariant"),
+            typol_core::InternalError::SchemaCompilationInvariantFailure(schema_context!(
+                module_path!(),
+                "internal-invariant"
+            )),
             $translator,
         )
     }};
@@ -47,79 +50,63 @@ macro_rules! schema_internal {
 
 macro_rules! schema_invariant {
     ($stage:expr, $failure_point:literal) => {{
-        use typol_core::BudgetError;
+        use typol_core::{BudgetError, InternalError};
 
-        BudgetError::invariant(schema_context_ref!($stage, $failure_point))
+        BudgetError::Internal(InternalError::SchemaCompilationInvariantFailure(
+            *schema_context_ref!($stage, $failure_point),
+        ))
     }};
 }
 
 #[derive(Debug)]
 pub(crate) struct BuildFailure {
-    context: Option<DiagnosticContext>,
+    internal: Option<InternalError>,
     budget: Option<BudgetError>,
 }
 
 impl BuildFailure {
     pub(crate) const fn empty() -> Self {
         Self {
-            context: None,
+            internal: None,
             budget: None,
         }
     }
 
     pub(crate) const fn with_context(context: DiagnosticContext) -> Self {
         Self {
-            context: Some(context),
+            internal: Some(InternalError::SchemaCompilationInvariantFailure(context)),
             budget: None,
         }
     }
 
-    pub(crate) const fn context(&self) -> Option<DiagnosticContext> {
-        self.context
+    pub(crate) const fn with_internal(error: InternalError) -> Self {
+        Self {
+            internal: Some(error),
+            budget: None,
+        }
+    }
+
+    pub(crate) const fn internal(&self) -> Option<InternalError> {
+        self.internal
     }
 }
 
 impl From<AstAccessError> for BuildFailure {
     fn from(error: AstAccessError) -> Self {
-        Self::with_context(EmergencyDiagnostics::ast_access_context(error))
+        Self::with_internal(InternalError::SchemaAstAccessInvariantFailure(
+            EmergencyDiagnostics::ast_access_context(error),
+        ))
     }
 }
 
 impl From<BudgetError> for BuildFailure {
     fn from(error: BudgetError) -> Self {
         Self {
-            context: None,
+            internal: None,
             budget: Some(error),
         }
     }
 }
-
-static AST_NODE_ACCESS: DiagnosticContext =
-    diagnostic_context!("typol-schema", "ast-access", "invalid-node-id");
-static AST_LIST_ACCESS: DiagnosticContext =
-    diagnostic_context!("typol-schema", "ast-access", "invalid-list-range");
-static AST_TEXT_ACCESS: DiagnosticContext =
-    diagnostic_context!("typol-schema", "ast-access", "invalid-text-range");
-static AST_DECODED_TEXT_ACCESS: DiagnosticContext =
-    diagnostic_context!("typol-schema", "ast-access", "invalid-decoded-text-id");
-static SCHEMA_ACCESS_TYPE: DiagnosticContext =
-    diagnostic_context!("typol-schema", "schema-access", "type-table-index");
-static SCHEMA_ACCESS_FIELD: DiagnosticContext =
-    diagnostic_context!("typol-schema", "schema-access", "field-table-index");
-static SCHEMA_ACCESS_VARIANT: DiagnosticContext =
-    diagnostic_context!("typol-schema", "schema-access", "variant-table-index");
-static SCHEMA_ACCESS_PROGRAM: DiagnosticContext =
-    diagnostic_context!("typol-schema", "schema-access", "program-table-index");
-static SCHEMA_ACCESS_CONSTRAINT: DiagnosticContext =
-    diagnostic_context!("typol-schema", "schema-access", "constraint-table-index");
-static SCHEMA_ACCESS_REFINEMENT: DiagnosticContext =
-    diagnostic_context!("typol-schema", "schema-access", "refinement-table-index");
-static SCHEMA_ACCESS_SHAPE: DiagnosticContext =
-    diagnostic_context!("typol-schema", "schema-access", "shape-table-index");
-static SCHEMA_ACCESS_EXPRESSION: DiagnosticContext =
-    diagnostic_context!("typol-schema", "schema-access", "expression-table-index");
-static SCHEMA_ACCESS_OTHER: DiagnosticContext =
-    diagnostic_context!("typol-schema", "schema-access", "table-index");
 
 pub(crate) type BuildResult<T> = Result<T, BuildFailure>;
 
@@ -314,9 +301,9 @@ impl DiagnosticCollector {
                 self.fallback_span,
                 self.translator,
             ));
-        } else if let Some(context) = failure.context() {
-            self.abort(EmergencyDiagnostics::internal_without_span(
-                context,
+        } else if let Some(internal) = failure.internal() {
+            self.abort(EmergencyDiagnostics::internal_error_without_span(
+                internal,
                 self.translator,
             ));
         }
@@ -416,13 +403,13 @@ impl DiagnosticCollector {
         if self.is_stopped() {
             return;
         }
-        let fatal = matches!(
-            diagnostic.code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
-                | DiagnosticCode::ALLOCATION_FAILED
-                | DiagnosticCode::INTERNAL_ERROR
-                | DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED
-        ) || diagnostic.message().is_err();
+        let fatal = diagnostic.code().is_resource_limit()
+            || diagnostic.code().is_internal_error()
+            || matches!(
+                diagnostic.code(),
+                DiagnosticCode::ALLOCATION_FAILED | DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED
+            )
+            || diagnostic.message().is_err();
         if fatal {
             self.abort(diagnostic);
             return;
@@ -441,9 +428,8 @@ impl DiagnosticCollector {
                 .diagnostics
                 .budget()
                 .ok_or_else(|| {
-                    BudgetError::invariant(schema_context_ref!(
-                        "diagnostic-collection",
-                        "diagnostic-budget-missing"
+                    BudgetError::Internal(InternalError::DiagnosticCollectionInvariantFailure(
+                        *schema_context_ref!("diagnostic-collection", "diagnostic-budget-missing"),
                     ))
                 })
                 .store_err_into(out.reborrow())?;
@@ -562,179 +548,17 @@ impl InsertFailure {
             InsertOperation::Shift => INSERT_SHIFT_FAILURE,
         }
         .with_object_id(*index as u64);
-        EmergencyDiagnostics::internal(span, context, translator)
+        EmergencyDiagnostics::internal_error(
+            span,
+            InternalError::DiagnosticCollectionInvariantFailure(context),
+            translator,
+        )
     }
 }
 
 impl From<BudgetError> for InsertFailure {
     fn from(error: BudgetError) -> Self {
         Self::Budget(error)
-    }
-}
-
-pub(crate) struct BudgetDiagnostics;
-
-impl BudgetDiagnostics {
-    pub(crate) fn make(error: BudgetError, span: SourceSpan, translator: Translator) -> Diagnostic {
-        Self::make_optional(error, Some(span), translator)
-    }
-
-    pub(crate) fn make_optional(
-        error: BudgetError,
-        span: Option<SourceSpan>,
-        translator: Translator,
-    ) -> Diagnostic {
-        let message = match error {
-            BudgetError::Allocation => t! {
-                name: "diagnostic.emergency.allocation_failed",
-                locale: translator,
-            },
-            BudgetError::CapacityExceeded => t! {
-                name: "diagnostic.emergency.capacity_exceeded",
-                locale: translator,
-            },
-            BudgetError::InvariantViolation(_) => t! {
-                name: "diagnostic.emergency.internal_error",
-                locale: translator,
-            },
-            BudgetError::Resource
-            | BudgetError::RegexSteps
-            | BudgetError::RegexSearchSteps
-            | BudgetError::RegexWorkspace => t! {
-                name: "diagnostic.emergency.resource_limit_exceeded",
-                locale: translator,
-            },
-        };
-        let mut diagnostic =
-            EmergencyDiagnostics::translated(error.diagnostic_code(), message, span);
-        diagnostic.set_context(error.context());
-        diagnostic
-    }
-}
-
-pub(crate) struct EmergencyDiagnostics;
-
-impl EmergencyDiagnostics {
-    pub(crate) fn ast_access_context(error: AstAccessError) -> DiagnosticContext {
-        match error {
-            AstAccessError::InvalidNodeId { id } => AST_NODE_ACCESS
-                .with_object_id(id as u64)
-                .with_object_index(id),
-            AstAccessError::InvalidListRange { start, end } => AST_LIST_ACCESS
-                .with_object_id(start as u64)
-                .with_object_range(start, end),
-            AstAccessError::InvalidTextRange { start, end } => AST_TEXT_ACCESS
-                .with_object_id(start as u64)
-                .with_object_range(start, end),
-            AstAccessError::InvalidDecodedTextId { id } => AST_DECODED_TEXT_ACCESS
-                .with_object_id(id as u64)
-                .with_object_index(id),
-        }
-    }
-
-    pub(crate) fn schema_access_context(error: SchemaAccessError) -> DiagnosticContext {
-        let context = match error.table() {
-            "type" | "type owner" | "child type" => SCHEMA_ACCESS_TYPE,
-            "field" | "field index" | "field sort slot" | "field list slot" => SCHEMA_ACCESS_FIELD,
-            "variant" => SCHEMA_ACCESS_VARIANT,
-            "program" => SCHEMA_ACCESS_PROGRAM,
-            "constraint" => SCHEMA_ACCESS_CONSTRAINT,
-            "refinement" => SCHEMA_ACCESS_REFINEMENT,
-            "shape" => SCHEMA_ACCESS_SHAPE,
-            "expression node" => SCHEMA_ACCESS_EXPRESSION,
-            _ => SCHEMA_ACCESS_OTHER,
-        };
-        context.with_object_id(error.index() as u64)
-    }
-
-    pub(crate) fn translated(
-        code: DiagnosticCode,
-        message: Result<Cow<'static, str>, RenderError>,
-        span: Option<SourceSpan>,
-    ) -> Diagnostic {
-        let mut diagnostic = match message {
-            Ok(Cow::Borrowed(message)) => Diagnostic::emergency(code, message),
-            Ok(Cow::Owned(_)) => Diagnostic::translation_failure(code, RenderError::InvalidCatalog),
-            Err(error) => Diagnostic::translation_failure(code, error),
-        };
-        diagnostic.set_primary(span);
-        diagnostic
-    }
-
-    pub(crate) fn resource(span: SourceSpan, translator: Translator) -> Diagnostic {
-        Self::translated(
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-            t! {
-                name: "diagnostic.emergency.resource_limit_exceeded",
-                locale: translator,
-            },
-            Some(span),
-        )
-    }
-
-    pub(crate) fn allocation(span: SourceSpan, translator: Translator) -> Diagnostic {
-        Self::translated(
-            DiagnosticCode::ALLOCATION_FAILED,
-            t! {
-                name: "diagnostic.emergency.allocation_failed",
-                locale: translator,
-            },
-            Some(span),
-        )
-    }
-
-    pub(crate) fn internal(
-        span: SourceSpan,
-        context: DiagnosticContext,
-        translator: Translator,
-    ) -> Diagnostic {
-        Self::internal_at(Some(span), context, translator)
-    }
-
-    pub(crate) fn internal_without_span(
-        context: DiagnosticContext,
-        translator: Translator,
-    ) -> Diagnostic {
-        Self::internal_at(None, context, translator)
-    }
-
-    fn internal_at(
-        span: Option<SourceSpan>,
-        context: DiagnosticContext,
-        translator: Translator,
-    ) -> Diagnostic {
-        let mut diagnostic = Self::translated(
-            DiagnosticCode::INTERNAL_ERROR,
-            t! {
-                name: "diagnostic.emergency.internal_error",
-                locale: translator,
-            },
-            span,
-        );
-        diagnostic.set_context(Some(context));
-        diagnostic
-    }
-
-    pub(crate) fn capacity(span: SourceSpan, translator: Translator) -> Diagnostic {
-        Self::translated(
-            DiagnosticCode::CAPACITY_EXCEEDED,
-            t! {
-                name: "diagnostic.emergency.capacity_exceeded",
-                locale: translator,
-            },
-            Some(span),
-        )
-    }
-
-    pub(crate) fn limit_reached(span: Option<SourceSpan>, translator: Translator) -> Diagnostic {
-        Self::translated(
-            DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED,
-            t! {
-                name: "diagnostic.emergency.diagnostic_limit_reached",
-                locale: translator,
-            },
-            span,
-        )
     }
 }
 

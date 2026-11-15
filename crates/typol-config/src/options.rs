@@ -1,6 +1,8 @@
 use core::fmt;
 use opeo::{OResult, Out};
-use typol_core::{BudgetError, ExcerptLimits, ExecutionBudget, ExecutionLimits, Read};
+use typol_core::{
+    BudgetError, ExcerptLimits, ExecutionBudget, ExecutionLimits, Read, ResourceLimit,
+};
 use typol_i18n::{Language, Translator};
 use typol_policy::{RegexOptions, ValueLimits};
 use typol_syntax::{InputLimits, StreamLimits};
@@ -406,7 +408,9 @@ impl ConfigBudget {
             .checked_add(1)
             .filter(|count| *count <= self.limits.max_environment_entries())
         else {
-            return Err(out.fail(E::from(self.execution.resource_error())));
+            return Err(out.fail(E::from(BudgetError::ResourceLimit(
+                ResourceLimit::EnvironmentEntries,
+            ))));
         };
         self.entries = entries;
         Ok(())
@@ -425,7 +429,9 @@ impl ConfigBudget {
             .checked_add(bytes)
             .filter(|count| *count <= self.limits.max_environment_bytes())
         else {
-            return Err(out.fail(E::from(self.execution.resource_error())));
+            return Err(out.fail(E::from(BudgetError::ResourceLimit(
+                ResourceLimit::EnvironmentBytes,
+            ))));
         };
         self.environment_bytes = environment_bytes;
         Ok(())

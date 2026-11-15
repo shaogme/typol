@@ -1,6 +1,6 @@
 use crate::{
-    BudgetError, ExecutionBudget, RegexExecutionBudget, budget_sort::FallibleSort,
-    storage::WorkspaceCharge,
+    BudgetError, CapacityExceeded, ExecutionBudget, RegexExecutionBudget,
+    budget_sort::FallibleSort, storage::WorkspaceCharge,
 };
 use alloc::{
     alloc::Layout,
@@ -46,7 +46,7 @@ impl<T> WorkspaceVec<T> {
         E: From<BudgetError>,
     {
         let layout = Layout::array::<T>(values.capacity())
-            .map_err(|_| BudgetError::CapacityExceeded)
+            .map_err(|_| BudgetError::CapacityExceeded(CapacityExceeded::BudgetBookkeeping))
             .store_err_into(out.reborrow())?;
         let mut charge = WorkspaceCharge::new(Some(budget), out.reborrow())?;
         charge.add(layout.size(), out.reborrow())?;
@@ -158,7 +158,9 @@ impl<T> WorkspaceVec<T> {
             .values
             .len()
             .checked_add(additional)
-            .ok_or(BudgetError::CapacityExceeded)
+            .ok_or(BudgetError::CapacityExceeded(
+                CapacityExceeded::BudgetBookkeeping,
+            ))
             .store_err_into(out.reborrow())?;
         if required <= self.values.capacity() {
             return Ok(());
@@ -167,7 +169,9 @@ impl<T> WorkspaceVec<T> {
             .values
             .capacity()
             .checked_mul(2)
-            .ok_or(BudgetError::CapacityExceeded)
+            .ok_or(BudgetError::CapacityExceeded(
+                CapacityExceeded::BudgetBookkeeping,
+            ))
             .store_err_into(out.reborrow())?;
         self.grow(required.max(doubled), out.reborrow())
     }
@@ -184,7 +188,9 @@ impl<T> WorkspaceVec<T> {
             .values
             .len()
             .checked_add(additional)
-            .ok_or(BudgetError::CapacityExceeded)
+            .ok_or(BudgetError::CapacityExceeded(
+                CapacityExceeded::BudgetBookkeeping,
+            ))
             .store_err_into(out.reborrow())?;
         if required <= self.values.capacity() {
             return Ok(());
@@ -197,13 +203,15 @@ impl<T> WorkspaceVec<T> {
         E: From<BudgetError>,
     {
         let layout = Layout::array::<T>(capacity)
-            .map_err(|_| BudgetError::CapacityExceeded)
+            .map_err(|_| BudgetError::CapacityExceeded(CapacityExceeded::BudgetBookkeeping))
             .store_err_into(out.reborrow())?;
         let old_capacity_bytes = self
             .values
             .capacity()
             .checked_mul(size_of::<T>())
-            .ok_or(BudgetError::CapacityExceeded)
+            .ok_or(BudgetError::CapacityExceeded(
+                CapacityExceeded::BudgetBookkeeping,
+            ))
             .store_err_into(out.reborrow())?;
         let mut replacement_charge = self.charge.try_clone(out.reborrow())?;
         replacement_charge.add(layout.size(), out.reborrow())?;
@@ -215,7 +223,9 @@ impl<T> WorkspaceVec<T> {
         let actual = replacement
             .capacity()
             .checked_mul(size_of::<T>())
-            .ok_or(BudgetError::CapacityExceeded)
+            .ok_or(BudgetError::CapacityExceeded(
+                CapacityExceeded::BudgetBookkeeping,
+            ))
             .store_err_into(out.reborrow())?;
         if actual > layout.size() {
             replacement_charge.add(actual - layout.size(), out.reborrow())?;
@@ -240,7 +250,9 @@ impl<T> WorkspaceVec<T> {
             self.try_reserve(1, out.reborrow())?;
         }
         if !self.push_reserved(value) {
-            return Err(out.fail(E::from(BudgetError::CapacityExceeded)));
+            return Err(out.fail(E::from(BudgetError::CapacityExceeded(
+                CapacityExceeded::BudgetBookkeeping,
+            ))));
         }
         Ok(())
     }
@@ -268,7 +280,9 @@ impl<T> WorkspaceVec<T> {
                 self.try_reserve(1, out.reborrow())?;
             }
             if !self.push_reserved(value) {
-                return Err(out.fail(E::from(BudgetError::CapacityExceeded)));
+                return Err(out.fail(E::from(BudgetError::CapacityExceeded(
+                    CapacityExceeded::BudgetBookkeeping,
+                ))));
             }
         }
         Ok(())

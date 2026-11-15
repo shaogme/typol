@@ -8,8 +8,8 @@ use crate::{
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, ExecutionBudget,
-    LocatedSpan, Read, SourceId, SourceSpan, diagnostic_context,
+    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticStage,
+    ExecutionBudget, LocatedSpan, Read, SourceId, SourceSpan, diagnostic_context,
 };
 use typol_i18n::{Translator, t};
 use typol_semantic::SchemaAccessError;
@@ -95,6 +95,16 @@ impl ParseFailure {
 
     pub(super) const fn is_deferred_field(&self) -> bool {
         matches!(self.kind, ParseFailureKind::DeferredField)
+    }
+
+    pub(super) fn is_input_failure(&self) -> bool {
+        self.diagnostic
+            .as_ref()
+            .is_some_and(|diagnostic| diagnostic.kind().stage() == DiagnosticStage::Input)
+    }
+
+    pub(super) const fn is_reported(&self) -> bool {
+        matches!(self.kind, ParseFailureKind::Reported)
     }
 
     pub(super) fn into_diagnostic(self) -> Option<Diagnostic> {
@@ -262,7 +272,7 @@ impl<'source> RecoveryCursor<'source> {
     }
 
     fn halted_diagnostic(span: SourceSpan, translator: Translator) -> Diagnostic {
-        DiagnosticFactory::internal(
+        DiagnosticFactory::parser_internal(
             PARSER_RECOVERY_HALTED,
             Some(span.into()),
             None,
@@ -272,7 +282,13 @@ impl<'source> RecoveryCursor<'source> {
     }
 
     fn invalid_event_diagnostic(translator: Translator) -> Diagnostic {
-        DiagnosticFactory::internal(PARSER_RECOVERY_INVALID_EVENT, None, None, None, translator)
+        DiagnosticFactory::parser_internal(
+            PARSER_RECOVERY_INVALID_EVENT,
+            None,
+            None,
+            None,
+            translator,
+        )
     }
 
     pub(super) fn bump<'slot>(
@@ -290,7 +306,7 @@ impl<'source> RecoveryCursor<'source> {
                     return Err(
                         out.fail(ParseFailure::from(DiagnosticFactory::make_diagnostic(
                             DetailedDiagnosticRequest {
-                                code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                                code: DiagnosticCode::CONFIG_PARSE_DEPTH_LIMIT_EXCEEDED,
                                 message: t! {
                                     name: "diagnostic.config.delimiter_nesting_limit",
                                     locale: self.translator,
@@ -393,7 +409,7 @@ impl Recovery {
                     .current_node
                     .and_then(|node| context.locations.get(node))
                     .and_then(|node| node.span());
-                context.diagnostics.push(DiagnosticFactory::internal(
+                context.diagnostics.push(DiagnosticFactory::parser_internal(
                     PARSER_RECOVERY_DEFERRED_FIELD,
                     primary,
                     None,

@@ -3,7 +3,6 @@ mod structure;
 pub(super) use structure::StructureFrame;
 
 use crate::{
-    context::CompletionState,
     diagnostics::{BudgetDiagnostic, DetailedDiagnosticRequest, DiagnosticFactory},
     instance::Member,
     parser::{
@@ -19,8 +18,9 @@ use crate::{
 };
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedString, ChargedVec, ConfigValue, Diagnostic, DiagnosticCode,
-    DiagnosticContext, LocatedSpan, ValueError, ValueErrorKind, ValueSource, diagnostic_context,
+    BudgetError, CapacityExceeded, ChargedString, ChargedVec, ConfigValue, Diagnostic,
+    DiagnosticCode, DiagnosticContext, LocatedSpan, ValueError, ValueErrorKind, ValueSource,
+    diagnostic_context,
 };
 use typol_i18n::{Translator, t};
 use typol_semantic::{FieldView, TypeKind, TypeView};
@@ -40,11 +40,6 @@ static PARSER_CONTAINER_STATE: DiagnosticContext = diagnostic_context!(
     "typol-config",
     "parser-container",
     "field-or-item-state-invalid",
-);
-static PARSER_CONTAINER_VALUE_INVARIANT: DiagnosticContext = diagnostic_context!(
-    "typol-config",
-    "parser-container",
-    "container-value-invariant-failed",
 );
 
 enum CollectionKind<'schema> {
@@ -333,7 +328,7 @@ impl<'schema> CollectionFrame<'schema> {
             let Some(next_index) = index.checked_add(1) else {
                 return Err(out.fail(
                     DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
-                        code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                        code: CapacityExceeded::ConfigValue.diagnostic_code(),
                         message: t! {
                             name: "diagnostic.config.array_element_limit",
                             locale: context.session.translator(),
@@ -426,7 +421,6 @@ impl<'schema> CollectionFrame<'schema> {
             }
         };
         Ok(ParsedValue {
-            completion: CompletionState::ChildrenComplete,
             value,
             span: ParserControl::diagnostic_call(
                 &context.diagnostic_errors,
@@ -486,7 +480,7 @@ fn check_name<'slot, 'borrow>(
     if name.len() > context.limits.max_string_bytes() {
         return Err(out.fail(
             DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
-                code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                code: DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED,
                 message: t! {
                     name: "diagnostic.config.name_byte_limit",
                     locale: context.session.translator(),
@@ -505,7 +499,7 @@ fn check_name<'slot, 'borrow>(
 }
 
 fn internal_field(span: LocatedSpan, translator: Translator) -> Diagnostic {
-    DiagnosticFactory::internal(
+    DiagnosticFactory::parser_internal(
         PARSER_CONTAINER_METADATA,
         Some(span),
         None,
@@ -521,22 +515,18 @@ fn container_error(
     translator: Translator,
 ) -> Diagnostic {
     match error.kind() {
-        ValueErrorKind::ResourceLimitExceeded => {
-            BudgetDiagnostic::from_error(BudgetError::Resource, translator)
+        ValueErrorKind::ResourceLimit(limit) => {
+            BudgetDiagnostic::from_error(BudgetError::ResourceLimit(limit), translator)
         }
         ValueErrorKind::AllocationFailed => {
             DiagnosticFactory::allocation_diagnostic(Some(span), None, Some(source), translator)
         }
-        ValueErrorKind::CapacityExceeded => {
-            BudgetDiagnostic::from_error(BudgetError::CapacityExceeded, translator)
+        ValueErrorKind::CapacityExceeded(capacity) => {
+            BudgetDiagnostic::from_error(BudgetError::CapacityExceeded(capacity), translator)
         }
-        ValueErrorKind::InternalInvariantFailure => DiagnosticFactory::internal(
-            error.context().unwrap_or(PARSER_CONTAINER_VALUE_INVARIANT),
-            Some(span),
-            None,
-            Some(source),
-            translator,
-        ),
+        ValueErrorKind::Internal(internal) => {
+            DiagnosticFactory::internal_error(internal, Some(span), None, Some(source), translator)
+        }
         ValueErrorKind::EnvironmentReferenceRequired => {
             DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
                 code: DiagnosticCode::CONFIG_VALUE_ERROR,
@@ -586,7 +576,7 @@ fn container_error(
 }
 
 fn invalid_parser_state(span: Option<LocatedSpan>, translator: Translator) -> ParseFailure {
-    DiagnosticFactory::internal(PARSER_CONTAINER_STATE, span, None, None, translator).into()
+    DiagnosticFactory::parser_internal(PARSER_CONTAINER_STATE, span, None, None, translator).into()
 }
 
 fn current_span(context: &ParserContext<'_, '_, '_>) -> Option<LocatedSpan> {
@@ -709,7 +699,7 @@ impl ContainerSupport {
         if name.len() > context.limits.max_string_bytes() {
             return Err(out.fail(
                 DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
-                    code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                    code: DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED,
                     message: t! {
                         name: "diagnostic.config.field_name_byte_limit",
                         locale: context.session.translator(),

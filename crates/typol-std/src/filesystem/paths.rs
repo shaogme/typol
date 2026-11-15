@@ -5,7 +5,7 @@ use std::{
 };
 
 use opeo::{OResult, Out, ResultOutExt};
-use typol_core::{ChargedVec, ExecutionBudget};
+use typol_core::{CapacityExceeded, ChargedVec, ExecutionBudget, ResourceLimit};
 
 use crate::{HostError, HostErrorKind, HostFailureStep, HostOperation};
 
@@ -235,7 +235,7 @@ impl NativePath {
                 if count > max_path_bytes {
                     return Err(out.fail(HostError::new(
                         operation,
-                        HostErrorKind::ResourceLimitExceeded,
+                        HostErrorKind::ResourceLimit(ResourceLimit::StringBytes),
                     )));
                 }
                 encoded.truncate(count);
@@ -247,7 +247,7 @@ impl NativePath {
             if encoded.len() == maximum {
                 return Err(out.fail(HostError::new(
                     operation,
-                    HostErrorKind::ResourceLimitExceeded,
+                    HostErrorKind::ResourceLimit(ResourceLimit::StringBytes),
                 )));
             }
             let next = encoded.len().saturating_mul(2).min(maximum);
@@ -364,17 +364,22 @@ impl NativePath {
         let terminated = parent
             .last()
             .is_some_and(|byte| *byte == b'/' || (cfg!(windows) && *byte == b'\\'));
-        let _ = parent_length
+        let candidate_size = parent_length
             .checked_add(stem_length)
             .and_then(|size| size.checked_add(usize::from(!terminated) * unit))
             .and_then(|size| size.checked_add(usize::from(alternate) * unit))
             .and_then(|size| size.checked_add(module.len().checked_add(7)?.checked_mul(unit)?))
-            .filter(|size| *size <= max_path_bytes)
             .ok_or(HostError::new(
                 operation,
-                HostErrorKind::ResourceLimitExceeded,
+                HostErrorKind::CapacityExceeded(CapacityExceeded::HostSource),
             ))
             .store_err_into(out.reborrow())?;
+        if candidate_size > max_path_bytes {
+            return Err(out.fail(HostError::new(
+                operation,
+                HostErrorKind::ResourceLimit(ResourceLimit::StringBytes),
+            )));
+        }
         let size = parent
             .len()
             .checked_add(stem.len())
@@ -384,7 +389,7 @@ impl NativePath {
             .and_then(|size| size.checked_add(7))
             .ok_or(HostError::new(
                 operation,
-                HostErrorKind::ResourceLimitExceeded,
+                HostErrorKind::CapacityExceeded(CapacityExceeded::HostSource),
             ))
             .store_err_into(out.reborrow())?;
         let mut encoded =
@@ -446,7 +451,7 @@ impl NativePath {
             .checked_add(other.encoded.len())
             .ok_or(HostError::new(
                 HostOperation::SchemaRead,
-                HostErrorKind::ResourceLimitExceeded,
+                HostErrorKind::CapacityExceeded(CapacityExceeded::HostSource),
             ))
             .store_err_into(out.reborrow())?;
         budget.consume_with(size, out.reborrow(), |error| {
@@ -471,7 +476,7 @@ impl NativePath {
         if size > max_path_bytes {
             return Err(out.fail(HostError::new(
                 operation,
-                HostErrorKind::ResourceLimitExceeded,
+                HostErrorKind::ResourceLimit(ResourceLimit::StringBytes),
             )));
         }
         budget.consume_with(size, out.reborrow(), |error| {
@@ -497,7 +502,7 @@ impl NativePath {
             .checked_mul(2)
             .ok_or(HostError::new(
                 HostOperation::SchemaRead,
-                HostErrorKind::ResourceLimitExceeded,
+                HostErrorKind::CapacityExceeded(CapacityExceeded::HostSource),
             ));
         let length = length.store_err_into(out.reborrow())?;
         Ok(length)

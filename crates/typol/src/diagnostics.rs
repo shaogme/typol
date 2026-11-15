@@ -16,8 +16,8 @@ use typol_config::{
     ConfigDiagnosticRedactor, ConfigFailureStage, ConfigParseErrors, ConfigValueErrors,
 };
 use typol_core::{
-    BudgetError, ChargedString, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext,
-    DiagnosticFailure, SourceExcerptSet, SourceId, SourceSpan,
+    BudgetError, CapacityExceeded, ChargedString, ChargedVec, Diagnostic, DiagnosticCode,
+    DiagnosticContext, DiagnosticFailure, SourceExcerptSet, SourceId, SourceSpan, ValueError,
 };
 
 use typol_i18n::{Translator, t};
@@ -27,7 +27,7 @@ use typol_semantic::{CompiledSchema, SpanLocation};
 use conversion::ConversionDiagnostic;
 
 #[cfg(all(test, feature = "std"))]
-use typol_core::{ExecutionBudget, diagnostic_context};
+use typol_core::{ExecutionBudget, InternalError, diagnostic_context};
 
 static UNAVAILABLE_EXCERPTS: SourceExcerptSet = SourceExcerptSet::unavailable();
 #[cfg(all(test, feature = "std"))]
@@ -79,12 +79,16 @@ fn append_decimal<'slot>(
     loop {
         let digit = u8::try_from(value % 10)
             .ok()
-            .ok_or(BudgetError::CapacityExceeded)
+            .ok_or(BudgetError::CapacityExceeded(
+                CapacityExceeded::DiagnosticPayload,
+            ))
             .store_err(out.reborrow())?;
         if let Some(slot) = digits.get_mut(length) {
             *slot = b'0' + digit;
         } else {
-            return Err(out.fail(BudgetError::CapacityExceeded));
+            return Err(out.fail(BudgetError::CapacityExceeded(
+                CapacityExceeded::DiagnosticPayload,
+            )));
         }
         length += 1;
         value /= 10;
@@ -120,6 +124,7 @@ enum ErrorStorage {
 pub struct CodecErrors {
     storage: ErrorStorage,
     translator: Option<Translator>,
+    source: Option<ValueError>,
 }
 
 impl CodecErrors {
@@ -127,6 +132,7 @@ impl CodecErrors {
         Self {
             storage: ErrorStorage::Parsing(errors),
             translator: Some(translator),
+            source: None,
         }
     }
 
@@ -134,6 +140,7 @@ impl CodecErrors {
         Self {
             storage: ErrorStorage::Validation(errors),
             translator: Some(translator),
+            source: None,
         }
     }
 
@@ -216,7 +223,20 @@ impl CodecErrors {
         Self {
             storage: ErrorStorage::Emergency { stage, diagnostic },
             translator: Some(translator),
+            source: None,
         }
+    }
+
+    #[cfg(feature = "serde")]
+    pub(crate) fn emergency_with_source(
+        stage: CodecStage,
+        failure: Failure,
+        translator: Translator,
+        source: Option<ValueError>,
+    ) -> Self {
+        let mut errors = Self::emergency(stage, failure, translator);
+        errors.source = source;
+        errors
     }
 
     pub(crate) fn conversion<'slot>(
@@ -234,6 +254,7 @@ impl CodecErrors {
             Ok(()) => Ok(Self {
                 storage: ErrorStorage::Conversion(error),
                 translator: Some(session.translator()),
+                source: None,
             }),
             Err(caught) => Ok(Self::safe_diagnostic(
                 CodecStage::Conversion,
@@ -251,6 +272,7 @@ impl CodecErrors {
         Self {
             storage: ErrorStorage::Emergency { stage, diagnostic },
             translator,
+            source: None,
         }
     }
 
@@ -293,6 +315,7 @@ impl CodecErrors {
                 diagnostics,
             },
             translator: Some(session.translator()),
+            source: None,
         })
     }
 
@@ -316,7 +339,9 @@ impl CodecErrors {
                 let base_capacity = pieces
                     .iter()
                     .try_fold(0usize, |total, piece| total.checked_add(piece.len()))
-                    .ok_or(BudgetError::CapacityExceeded)
+                    .ok_or(BudgetError::CapacityExceeded(
+                        CapacityExceeded::DiagnosticPayload,
+                    ))
                     .store_err(budget_out.reborrow())?;
                 let expected = mismatch.expected();
                 let actual = mismatch.actual();
@@ -327,7 +352,9 @@ impl CodecErrors {
                     .and_then(|total| total.checked_add(shape_detail_len(expected)))
                     .and_then(|total| total.checked_add(actual.message().len()))
                     .and_then(|total| total.checked_add(shape_detail_len(actual)))
-                    .ok_or(BudgetError::CapacityExceeded)
+                    .ok_or(BudgetError::CapacityExceeded(
+                        CapacityExceeded::DiagnosticPayload,
+                    ))
                     .store_err(budget_out.reborrow())?;
                 session.execution().construct_text(
                     capacity,
@@ -433,8 +460,8 @@ impl fmt::Display for CodecErrors {
         }
         .map_err(|_| fmt::Error)?;
         DiagnosticReport::new(
-            title.as_ref(),
-            Some(stage.as_ref()),
+            title,
+            Some(stage),
             self.diagnostics(),
             ReportContext::new(&source_name, &span_location, self.excerpts()),
             translator,
@@ -481,10 +508,7 @@ impl ErrorBuffer {
             return false;
         }
         if failure.terminal() {
-            self.terminal = Some(Diagnostic::translated_emergency(
-                failure.code(),
-                t! { name: "diagnostic.emergency.internal_error", locale: self.translator },
-            ));
+            self.terminal = Some(failure.emergency_diagnostic(self.translator));
             return false;
         }
         let budget = &self.budget;
@@ -512,10 +536,8 @@ impl ErrorBuffer {
             Ok(())
         });
         if let Err(caught) = result {
-            self.terminal = Some(Diagnostic::translated_emergency(
-                Failure::from(caught.take()).code(),
-                t! { name: "diagnostic.emergency.internal_error", locale: self.translator },
-            ));
+            self.terminal =
+                Some(Failure::from(caught.take()).emergency_diagnostic(self.translator));
         }
         self.terminal.is_none()
     }
@@ -541,16 +563,14 @@ impl ErrorBuffer {
                 storage: ErrorStorage::Emergency {
                     stage: self.stage,
                     diagnostic: self.terminal.unwrap_or_else(|| {
-                        let diagnostic = Diagnostic::translated_emergency(
-                            DiagnosticCode::INTERNAL_ERROR,
-                            t! { name: "diagnostic.emergency.internal_error", locale: self.translator },
-                        );
-                        let mut diagnostic = diagnostic;
-                        diagnostic.set_context(Some(ERROR_BUFFER_CONTEXT));
-                        diagnostic
+                        Failure::Internal(InternalError::DiagnosticCollectionInvariantFailure(
+                            ERROR_BUFFER_CONTEXT,
+                        ))
+                        .emergency_diagnostic(self.translator)
                     }),
                 },
                 translator: Some(self.translator),
+                source: None,
             };
         }
         if let Some(terminal) = self.terminal.take() {
@@ -568,12 +588,16 @@ impl ErrorBuffer {
                 diagnostics: self.diagnostics,
             },
             translator: Some(self.translator),
+            source: None,
         }
     }
 }
 
 impl Error for CodecErrors {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
+        if let Some(source) = &self.source {
+            return Some(source);
+        }
         match &self.storage {
             ErrorStorage::Parsing(errors) => Some(errors),
             ErrorStorage::Validation(errors) => Some(errors),
@@ -594,6 +618,7 @@ impl From<BudgetError> for CodecErrors {
                 diagnostic: error.into(),
             },
             translator: None,
+            source: None,
         }
     }
 }
@@ -638,7 +663,10 @@ mod tests {
             .diagnostic_context(0)
             .test_expect("should preserve failure context")?;
 
-        assert_eq!(diagnostic.code(), DiagnosticCode::INTERNAL_ERROR);
+        assert_eq!(
+            diagnostic.code(),
+            DiagnosticCode::CONFIG_ENCODING_INVARIANT_FAILURE
+        );
         assert_eq!(context.subsystem(), "typol-test");
         assert_eq!(context.stage(), "encoding");
         assert_eq!(context.failure_point(), "test-invariant");
@@ -662,7 +690,7 @@ mod tests {
                 .diagnostics()
                 .first()
                 .map(|diagnostic| diagnostic.code()),
-            Some(DiagnosticCode::INTERNAL_ERROR)
+            Some(DiagnosticCode::BUDGET_INVARIANT_FAILURE)
         );
         assert_eq!(context.subsystem(), "typol-core");
         assert_eq!(context.stage(), "budget");

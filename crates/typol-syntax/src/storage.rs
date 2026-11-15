@@ -41,10 +41,10 @@ use core::mem;
 use height::{ChildHeight, Height};
 use opeo::{OResult, Out};
 use typol_core::{
-    ChargedString, ChargedVec, Diagnostic, DiagnosticCode, ExecutionBudget, SourceId, SourceSpan,
-    Span,
+    CapacityExceeded, ChargedString, ChargedVec, Diagnostic, ExecutionBudget, ResourceLimit,
+    SourceId, SourceSpan, Span, diagnostic_context,
 };
-use typol_i18n::{Translator, t};
+use typol_i18n::Translator;
 
 pub(crate) struct StorageOptions<'config> {
     pub(crate) source_id: SourceId,
@@ -186,13 +186,10 @@ impl Storage {
         }
         if let Some(child) = children {
             if child >= self.height_limit {
-                return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
-                    DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                    t! {
-                        name: "diagnostic.emergency.resource_limit_exceeded",
-                        locale: self.translator,
-                    },
+                return Err(out.reborrow().fail(SyntaxDiagnostic::resource_limit(
+                    ResourceLimit::SchemaParseDepth,
                     span,
+                    self.translator,
                 )));
             }
         }
@@ -248,13 +245,10 @@ impl Storage {
             .final_source_len
             .is_some_and(|source_len| span.span().end() > source_len)
         {
-            return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
-                DiagnosticCode::INTERNAL_ERROR,
-                t! {
-                    name: "diagnostic.emergency.internal_error",
-                    locale: self.translator,
-                },
+            return Err(out.reborrow().fail(SyntaxDiagnostic::internal(
+                diagnostic_context!("typol-syntax", "ast-storage", "span-after-source-end"),
                 span,
+                self.translator,
             )));
         }
         Ok(span)
@@ -322,12 +316,10 @@ impl Storage {
             Some(child) => match child.checked_add(1) {
                 Some(height) => height,
                 None => {
+                    let capacity = CapacityExceeded::SyntaxStorage;
                     return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
-                        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                        t! {
-                            name: "diagnostic.emergency.resource_limit_exceeded",
-                            locale: self.translator,
-                        },
+                        capacity.diagnostic_code(),
+                        capacity.emergency_message(self.translator),
                         span,
                     )));
                 }
@@ -336,13 +328,10 @@ impl Storage {
         };
         self.check_node_budget(span, out.reborrow())?;
         if height > self.height_limit {
-            return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                t! {
-                    name: "diagnostic.emergency.resource_limit_exceeded",
-                    locale: self.translator,
-                },
+            return Err(out.reborrow().fail(SyntaxDiagnostic::resource_limit(
+                ResourceLimit::SchemaParseDepth,
                 span,
+                self.translator,
             )));
         }
         let translator = self.translator;
@@ -441,13 +430,10 @@ impl Storage {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ()> {
         if source_len > self.source_limit || self.actual_source_len != Some(source_len) {
-            return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
-                DiagnosticCode::INTERNAL_ERROR,
-                t! {
-                    name: "diagnostic.emergency.internal_error",
-                    locale: self.translator,
-                },
+            return Err(out.reborrow().fail(SyntaxDiagnostic::internal(
+                diagnostic_context!("typol-syntax", "ast-storage", "source-length-mismatch"),
                 span,
+                self.translator,
             )));
         }
         self.final_source_len = Some(source_len);
@@ -460,13 +446,10 @@ impl Storage {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ()> {
         if self.node_count >= self.node_limit {
-            Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                t! {
-                    name: "diagnostic.emergency.resource_limit_exceeded",
-                    locale: self.translator,
-                },
+            Err(out.reborrow().fail(SyntaxDiagnostic::resource_limit(
+                ResourceLimit::SchemaAstNodes,
                 span,
+                self.translator,
             )))
         } else {
             Ok(())
@@ -479,13 +462,10 @@ impl Storage {
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ()> {
         if span.source_id() != self.source_id || span.span().end() > self.source_limit {
-            return Err(out.reborrow().fail(SyntaxDiagnostic::emergency(
-                DiagnosticCode::INTERNAL_ERROR,
-                t! {
-                    name: "diagnostic.emergency.internal_error",
-                    locale: self.translator,
-                },
+            return Err(out.reborrow().fail(SyntaxDiagnostic::internal(
+                diagnostic_context!("typol-syntax", "ast-storage", "invalid-source-span"),
                 span,
+                self.translator,
             )));
         }
         Ok(())

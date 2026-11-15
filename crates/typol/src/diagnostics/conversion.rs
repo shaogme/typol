@@ -2,8 +2,8 @@ use super::{CodecErrors, SessionBudget};
 use crate::diagnostics::CodecStage;
 use opeo::{OResult, Out};
 use typol_core::{
-    BudgetError, ChargedString, Diagnostic, DiagnosticCode, DiagnosticContext, InstancePath,
-    PathSegment, diagnostic_context,
+    BudgetError, CapacityExceeded, ChargedString, Diagnostic, DiagnosticCode, DiagnosticContext,
+    InstancePath, PathSegment, diagnostic_context,
 };
 
 const MAX_CONVERSION_PATH_SEGMENTS: usize = 16;
@@ -61,7 +61,7 @@ impl ConversionErrorKind {
 
     const fn code(self) -> DiagnosticCode {
         match self {
-            Self::InternalBindingInvariant => DiagnosticCode::INTERNAL_ERROR,
+            Self::InternalBindingInvariant => DiagnosticCode::RUST_CONVERSION_INVARIANT_FAILURE,
             _ => DiagnosticCode::RUST_CONVERSION_ERROR,
         }
     }
@@ -239,7 +239,9 @@ impl ConversionDiagnostic {
         ]
         .into_iter()
         .try_fold(0usize, usize::checked_add) else {
-            return Err(out.fail(BudgetError::CapacityExceeded));
+            return Err(out.fail(BudgetError::CapacityExceeded(
+                CapacityExceeded::DiagnosticPayload,
+            )));
         };
         session
             .execution()

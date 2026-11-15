@@ -6,28 +6,9 @@ use typol_syntax::{
     VariantPayloadKind,
 };
 
-use typol_test_support::TestSlot;
-
-#[derive(Debug)]
-struct TestFailure;
-
-macro_rules! test_assert {
-    ($condition:expr $(, $($message:tt)*)?) => {{
-        if !$condition {
-            return Err(TestFailure);
-        }
-    }};
-}
-
-macro_rules! test_assert_eq {
-    ($left:expr, $right:expr $(, $($message:tt)*)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(TestFailure);
-        }
-    }};
-}
+use typol_test_support::{
+    TestFailure, TestSlot, test_assert_early as test_assert, test_assert_eq_early as test_assert_eq,
+};
 
 type TestResult<T = ()> = Result<T, TestFailure>;
 
@@ -37,13 +18,13 @@ trait TestValue<T> {
 
 impl<T, E> TestValue<T> for Result<T, E> {
     fn test_value(self) -> TestResult<T> {
-        self.map_err(|_| TestFailure)
+        self.map_err(|_| TestFailure::new("test result was unavailable"))
     }
 }
 
 impl<T> TestValue<T> for Option<T> {
     fn test_value(self) -> TestResult<T> {
-        self.ok_or(TestFailure)
+        self.ok_or_else(|| TestFailure::new("test value was missing"))
     }
 }
 
@@ -94,7 +75,7 @@ fn declarations_keep_their_source_order_and_structured_payload_shapes() -> TestR
         .test_value()?;
     let module = match module_item.declaration().test_value()? {
         Declaration::Module(module) => module,
-        _ => return Err(TestFailure),
+        _ => return Err(TestFailure::new("unexpected test result")),
     };
     test_assert_eq!(
         errors.access(|out| module.name(out)).test_value()?,
@@ -108,7 +89,7 @@ fn declarations_keep_their_source_order_and_structured_payload_shapes() -> TestR
         .test_value()?;
     let alias = match alias_item.declaration().test_value()? {
         Declaration::TypeAlias(alias) => alias,
-        _ => return Err(TestFailure),
+        _ => return Err(TestFailure::new("unexpected test result")),
     };
     test_assert_eq!(errors.access(|out| alias.name(out)).test_value()?, "Port");
     let struct_item = errors
@@ -117,7 +98,7 @@ fn declarations_keep_their_source_order_and_structured_payload_shapes() -> TestR
         .test_value()?;
     let structure = match struct_item.declaration().test_value()? {
         Declaration::Struct(structure) => structure,
-        _ => return Err(TestFailure),
+        _ => return Err(TestFailure::new("unexpected test result")),
     };
     test_assert_eq!(
         errors.access(|out| structure.name(out)).test_value()?,
@@ -129,7 +110,7 @@ fn declarations_keep_their_source_order_and_structured_payload_shapes() -> TestR
         .test_value()?;
     let enumeration = match enum_item.declaration().test_value()? {
         Declaration::Enum(enumeration) => enumeration,
-        _ => return Err(TestFailure),
+        _ => return Err(TestFailure::new("unexpected test result")),
     };
     let variants = errors
         .access(|out| enumeration.variants(out))
@@ -213,7 +194,7 @@ fn schema_string_defaults_store_the_dedented_block_value_and_full_span() -> Test
     let DefaultValueKind::Scalar(ScalarLiteral::String(value)) =
         errors.access(|out| default.kind(out)).test_value()?
     else {
-        return Err(TestFailure);
+        return Err(TestFailure::new("unexpected test result"));
     };
     test_assert_eq!(
         errors.access(|out| value.value(out)).test_value()?,
@@ -332,7 +313,7 @@ fn type_expressions_retain_builtin_container_array_and_path_forms() -> TestResul
             length: Some(length),
             ..
         } => test_assert_eq!(errors.access(|out| length.raw(out)).test_value()?, "4"),
-        _ => return Err(TestFailure),
+        _ => return Err(TestFailure::new("unexpected test result")),
     }
     let map_field = errors
         .access(|out| fields.get(17, out))
@@ -368,7 +349,7 @@ fn type_expressions_retain_builtin_container_array_and_path_forms() -> TestResul
                 "Endpoint"
             );
         }
-        _ => return Err(TestFailure),
+        _ => return Err(TestFailure::new("unexpected test result")),
     }
 
     Ok(())
@@ -431,7 +412,7 @@ fn defaults_retain_scalar_array_brace_key_and_enum_forms() -> TestResult {
             test_assert_eq!(errors.access(|out| number.raw(out)).test_value()?, "0x2a");
             test_assert!(number.is_negative());
         }
-        _ => return Err(TestFailure),
+        _ => return Err(TestFailure::new("unexpected test result")),
     }
     test_assert!(matches!(default_kind!(1), DefaultValueKind::Scalar(_)));
     test_assert!(matches!(default_kind!(2), DefaultValueKind::None));
@@ -440,7 +421,7 @@ fn defaults_retain_scalar_array_brace_key_and_enum_forms() -> TestResult {
             let elements = errors.access(|out| array.elements(out)).test_value()?;
             test_assert_eq!(elements.len(), 2);
         }
-        _ => return Err(TestFailure),
+        _ => return Err(TestFailure::new("unexpected test result")),
     }
     match default_kind!(4) {
         DefaultValueKind::Braced(braced) => {
@@ -454,11 +435,11 @@ fn defaults_retain_scalar_array_brace_key_and_enum_forms() -> TestResult {
                 BraceKey::String(_)
             ));
         }
-        _ => return Err(TestFailure),
+        _ => return Err(TestFailure::new("unexpected test result")),
     }
     for (index, expected_variant) in ["Empty", "Text", "Record"].into_iter().enumerate() {
         let DefaultValueKind::Enum(value) = default_kind!(index + 5) else {
-            return Err(TestFailure);
+            return Err(TestFailure::new("unexpected test result"));
         };
         test_assert_eq!(
             errors.access(|out| value.variant(out)).test_value()?,
@@ -480,7 +461,7 @@ fn defaults_retain_scalar_array_brace_key_and_enum_forms() -> TestResult {
                     BraceKey::Identifier(_)
                 ));
             }
-            _ => return Err(TestFailure),
+            _ => return Err(TestFailure::new("unexpected test result")),
         }
     }
 
@@ -543,7 +524,7 @@ fn annotations_and_assertions_preserve_order_and_expression_nodes() -> TestResul
         .access(|out| first_annotation.data(out))
         .test_value()?
     else {
-        return Err(TestFailure);
+        return Err(TestFailure::new("unexpected test result"));
     };
     let named_bounds = errors
         .access(|mut out| {
@@ -636,14 +617,14 @@ fn all_annotation_forms_are_parsed_with_their_argument_categories() -> TestResul
             let mut kinds = Vec::new();
             for field_index in 0..fields.len() {
                 let Some(field) = fields.get(field_index, out.reborrow())? else {
-                    return Ok(Err(TestFailure));
+                    return Ok(Err(TestFailure::new("unexpected test outcome")));
                 };
                 let ty = field.ty(out.reborrow())?;
                 let annotations = ty.annotations(out.reborrow())?;
                 for annotation_index in 0..annotations.len() {
                     let Some(annotation) = annotations.get(annotation_index, out.reborrow())?
                     else {
-                        return Ok(Err(TestFailure));
+                        return Ok(Err(TestFailure::new("unexpected test outcome")));
                     };
                     kinds.push(annotation.kind(out.reborrow())?);
                 }
@@ -694,7 +675,7 @@ fn all_annotation_forms_are_parsed_with_their_argument_categories() -> TestResul
     test_assert!(matches!(annotation_data!(1, 4), AnnotationData::Cidr(_)));
     test_assert!(matches!(annotation_data!(2, 2), AnnotationData::All(_)));
     let AnnotationData::Sum(bounds) = annotation_data!(2, 3) else {
-        return Err(TestFailure);
+        return Err(TestFailure::new("unexpected test result"));
     };
     let count = errors
         .access(|mut out| {
@@ -798,7 +779,7 @@ fn empty_brace_defaults_and_trailing_commas_keep_their_syntax_shape() -> TestRes
         .test_value()?;
     let DefaultValueKind::Braced(braced) = errors.access(|out| default.kind(out)).test_value()?
     else {
-        return Err(TestFailure);
+        return Err(TestFailure::new("unexpected test result"));
     };
     let entries = errors.access(|out| braced.entries(out)).test_value()?;
     test_assert!(entries.is_empty());
@@ -857,17 +838,17 @@ fn annotations_belong_to_the_adjacent_recursive_type_expression_node() -> TestRe
     test_assert_eq!(first_annotation_kind!(map_type), AnnotationKind::Size);
     let map_value = match errors.access(|out| map_type.kind(out)).test_value()? {
         TypeExprKind::Map { value } => value,
-        _ => return Err(TestFailure),
+        _ => return Err(TestFailure::new("unexpected test result")),
     };
     test_assert_eq!(first_annotation_kind!(map_value), AnnotationKind::Size);
     let inner_array = match errors.access(|out| map_value.kind(out)).test_value()? {
         TypeExprKind::Array { element, .. } => element,
-        _ => return Err(TestFailure),
+        _ => return Err(TestFailure::new("unexpected test result")),
     };
     test_assert_eq!(first_annotation_kind!(inner_array), AnnotationKind::Size);
     let string_type = match errors.access(|out| inner_array.kind(out)).test_value()? {
         TypeExprKind::Array { element, .. } => element,
-        _ => return Err(TestFailure),
+        _ => return Err(TestFailure::new("unexpected test result")),
     };
     test_assert_eq!(first_annotation_kind!(string_type), AnnotationKind::Length);
     Ok(())
@@ -910,7 +891,7 @@ fn schema_parse_options_control_window_and_token_limits() -> TestResult {
         .test_value()?;
     test_assert_eq!(
         diagnostics.diagnostics().first().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::TOKEN_BYTES_LIMIT_EXCEEDED
     );
 
     Ok(())

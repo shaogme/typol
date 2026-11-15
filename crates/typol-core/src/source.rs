@@ -1,6 +1,6 @@
 use crate::{
-    AllocationError, BudgetError, DiagnosticContext, ExecutionBudget, diagnostic_context,
-    workspace::WorkspaceVec,
+    AllocationError, BudgetError, CapacityExceeded, DiagnosticContext, ExecutionBudget,
+    InternalError, ResourceLimit, diagnostic_context, workspace::WorkspaceVec,
 };
 use core::{cmp::min, error::Error, fmt, num::NonZeroUsize};
 use opeo::{OResult, Out, ResultOutExt};
@@ -245,8 +245,9 @@ impl From<SourceSpan> for LocatedSpan {
 pub enum LocationErrorKind {
     OffsetOutOfBounds,
     NotCharBoundary,
-    ResourceLimitExceeded,
-    InternalInvariantFailure,
+    ResourceLimit(ResourceLimit),
+    CapacityExceeded(CapacityExceeded),
+    Internal(InternalError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -295,13 +296,19 @@ impl LocationError {
     }
 
     pub const fn context(self) -> Option<DiagnosticContext> {
-        self.context
+        match (self.context, self.kind) {
+            (Some(context), _) => Some(context),
+            (None, LocationErrorKind::Internal(error)) => Some(error.context()),
+            (None, _) => None,
+        }
     }
 
     fn internal(context: DiagnosticContext, offset: usize) -> Self {
-        Self::new(LocationErrorKind::InternalInvariantFailure)
-            .with_offset(offset)
-            .with_context(context)
+        Self::new(LocationErrorKind::Internal(
+            InternalError::SourceLocationInvariantFailure(context),
+        ))
+        .with_offset(offset)
+        .with_context(context)
     }
 }
 
@@ -312,10 +319,11 @@ impl fmt::Display for LocationError {
             LocationErrorKind::NotCharBoundary => {
                 "source position is not a UTF-8 character boundary"
             }
-            LocationErrorKind::ResourceLimitExceeded => "source location exceeds resource limits",
-            LocationErrorKind::InternalInvariantFailure => {
-                "source location index invariant violated"
+            LocationErrorKind::ResourceLimit(limit) => {
+                return write!(formatter, "source location {limit} limit exceeded");
             }
+            LocationErrorKind::CapacityExceeded(_) => "source location capacity exceeded",
+            LocationErrorKind::Internal(_) => "source location index invariant violated",
         };
         formatter.write_str(message)
     }
@@ -354,7 +362,7 @@ impl<'a> LineIndex<'a> {
             if byte == b'\n' {
                 line_count = line_count
                     .checked_add(1)
-                    .ok_or(BudgetError::Resource)
+                    .ok_or(BudgetError::CapacityExceeded(CapacityExceeded::SourceInput))
                     .store_err_into(out.reborrow())?;
             }
         }
@@ -458,17 +466,16 @@ impl<'a> LineIndex<'a> {
     ) -> OResult<'slot, ()> {
         if let Some(budget) = self.line_starts.budget() {
             budget.consume_with(count, out.reborrow(), |error| match error {
-                BudgetError::Resource
-                | BudgetError::RegexSteps
-                | BudgetError::RegexSearchSteps
-                | BudgetError::RegexWorkspace => {
-                    LocationError::new(LocationErrorKind::ResourceLimitExceeded).with_offset(offset)
+                BudgetError::ResourceLimit(limit) => {
+                    LocationError::new(LocationErrorKind::ResourceLimit(limit)).with_offset(offset)
                 }
-                BudgetError::Allocation | BudgetError::CapacityExceeded => {
-                    LocationError::internal(LOCATION_BUDGET, offset)
+                BudgetError::Allocation => LocationError::internal(LOCATION_BUDGET, offset),
+                BudgetError::CapacityExceeded(capacity) => {
+                    LocationError::new(LocationErrorKind::CapacityExceeded(capacity))
+                        .with_offset(offset)
                 }
-                BudgetError::InvariantViolation(context) => {
-                    LocationError::internal(*context, offset)
+                BudgetError::Internal(error) => {
+                    LocationError::new(LocationErrorKind::Internal(error)).with_offset(offset)
                 }
             })?;
         }

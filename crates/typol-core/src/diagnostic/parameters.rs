@@ -1,5 +1,5 @@
 use super::kind::DiagnosticFieldStatus;
-use alloc::{borrow::Cow, string::String};
+use alloc::string::String;
 use core::fmt;
 use u18n::RenderError;
 
@@ -146,9 +146,14 @@ impl fmt::Debug for DiagnosticParameters {
     }
 }
 
+/// Borrowed diagnostic text and optional structured parameters.
+///
+/// Catalog messages without parameters can be passed as static translation results. Render
+/// parameterized catalog messages into caller-owned output with a `fmt::Write` sink, then attach
+/// their structured values with [`Self::with_parameters`].
 #[derive(Clone)]
 pub struct DiagnosticMessage<'a> {
-    text: Cow<'a, str>,
+    text: &'a str,
     parameters: Option<&'a DiagnosticParameters>,
     failure: Option<RenderError>,
 }
@@ -157,15 +162,16 @@ impl<'a> DiagnosticMessage<'a> {
     /// Creates a message that is displayed as provided.
     pub const fn custom(text: &'a str) -> Self {
         Self {
-            text: Cow::Borrowed(text),
+            text,
             parameters: None,
             failure: None,
         }
     }
 
+    /// Associates structured values with text rendered into caller-owned output.
     pub const fn with_parameters(text: &'a str, parameters: &'a DiagnosticParameters) -> Self {
         Self {
-            text: Cow::Borrowed(text),
+            text,
             parameters: Some(parameters),
             failure: None,
         }
@@ -173,7 +179,7 @@ impl<'a> DiagnosticMessage<'a> {
 
     /// Returns the final message text.
     pub fn text(&self) -> &str {
-        self.text.as_ref()
+        self.text
     }
 
     pub const fn parameters(&self) -> Option<&'a DiagnosticParameters> {
@@ -185,8 +191,9 @@ impl<'a> DiagnosticMessage<'a> {
     }
 }
 
-impl From<Result<Cow<'static, str>, RenderError>> for DiagnosticMessage<'static> {
-    fn from(message: Result<Cow<'static, str>, RenderError>) -> Self {
+/// Converts a static catalog result while preserving any translation failure.
+impl From<Result<&'static str, RenderError>> for DiagnosticMessage<'static> {
+    fn from(message: Result<&'static str, RenderError>) -> Self {
         match message {
             Ok(text) => Self {
                 text,
@@ -194,7 +201,7 @@ impl From<Result<Cow<'static, str>, RenderError>> for DiagnosticMessage<'static>
                 failure: None,
             },
             Err(error) => Self {
-                text: Cow::Borrowed(""),
+                text: "",
                 parameters: None,
                 failure: Some(error),
             },

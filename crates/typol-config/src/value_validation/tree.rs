@@ -62,6 +62,7 @@ impl TreeTraversal {
                 value: value.root(),
                 member: context.next_member,
                 fallback_validated: false,
+                schema_default_parent: false,
             }),
             out.reborrow(),
         )?;
@@ -105,8 +106,20 @@ impl TreeControl {
         expected: TypeView<'schema>,
         span: Option<LocatedSpan>,
         mut out: Out<'slot, '_, Diagnostic>,
-    ) -> OResult<'slot, NodeId> {
-        context.locations.begin(
+    ) -> OResult<'slot, (NodeId, Option<LocatedSpan>)> {
+        let existing = match context.current_node {
+            Some(parent) => {
+                context
+                    .locations
+                    .existing_child(parent, context.next_member, out.reborrow())?
+            }
+            None if matches!(context.next_member, Member::Root) => context.locations.root_node(),
+            None => None,
+        };
+        if let Some(id) = existing {
+            return Ok((id, context.locations.get(id).and_then(|node| node.span())));
+        }
+        let id = context.locations.begin(
             LocationNode::new(
                 context.current_node,
                 context.next_member,
@@ -116,7 +129,8 @@ impl TreeControl {
             ),
             context.value_nodes,
             out.reborrow(),
-        )
+        )?;
+        Ok((id, None))
     }
 
     fn take_inherited<'schema, 'slot>(
@@ -165,7 +179,7 @@ fn run<'schema, 'slot>(
                     EnvironmentValidation::Stopped => return Ok(()),
                 }
                 if visit.value.source() == ValueSource::SchemaDefault
-                    && visit.target.span.is_none()
+                    && !visit.schema_default_parent
                     && let Some(field) = visit.target.field
                 {
                     visit.target.span = Some(
@@ -187,12 +201,16 @@ fn run<'schema, 'slot>(
                 )?;
                 let parent = context.current_node;
                 context.next_member = visit.member;
-                context.current_node = Some(TreeControl::begin_location(
+                let (node, existing_span) = TreeControl::begin_location(
                     context,
                     visit.target.expected,
                     span,
                     out.reborrow(),
-                )?);
+                )?;
+                if let Some(existing_span) = existing_span {
+                    visit.target.span = Some(existing_span);
+                }
+                context.current_node = Some(node);
                 TreeSupport::push_task(
                     tasks,
                     &mut context.resources.budget_errors,
@@ -211,11 +229,16 @@ fn run<'schema, 'slot>(
                 parent,
                 errors,
             } => {
+                let already_validated = context
+                    .current_node
+                    .and_then(|id| context.locations.get(id))
+                    .is_some_and(|node| node.validated());
                 if context.diagnostics.len() == errors
                     && !matches!(completion, CompletionState::Validated(_))
+                    && !already_validated
                 {
                     #[cfg(test)]
-                    if context.shape_validated {
+                    if context.shape_validated && !matches!(visit.member, Member::Root) {
                         context.shape_skips += 1;
                     }
                     let source = Some(visit.value.source());
@@ -225,7 +248,7 @@ fn run<'schema, 'slot>(
                         .allows_depth(context.nesting_depth)
                     {
                         return Err(out.fail(DiagnosticFactory::make_diagnostic(DetailedDiagnosticRequest {
-                            code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                            code: DiagnosticCode::CONFIG_VALUE_DEPTH_LIMIT_EXCEEDED,
                             message: t! { name: "diagnostic.config.value_tree_nesting_limit", locale: context.resources.translator }.into(),
                             primary: visit.target.span,
                             path: None,
@@ -288,9 +311,14 @@ fn run<'schema, 'slot>(
                     }
                 }
                 if let Some(id) = context.current_node {
+                    let completed_span = context
+                        .locations
+                        .get(id)
+                        .and_then(|node| node.span())
+                        .or(visit.target.span);
                     context
                         .locations
-                        .complete(id, visit.target.span, out.reborrow())?;
+                        .complete(id, completed_span, out.reborrow())?;
                 }
                 context.current_node = parent;
             }
@@ -423,6 +451,7 @@ fn schedule_children<'value, 'schema, 'slot>(
                     member: Member::Optional,
                     fallback_validated: visit.fallback_validated
                         || visit.value.shares_environment_reference(value),
+                    schema_default_parent: visit.value.source() == ValueSource::SchemaDefault,
                 }),
                 out.reborrow(),
             )?;
@@ -530,6 +559,8 @@ fn schedule_children<'value, 'schema, 'slot>(
                             value,
                             member: Member::Payload(variant),
                             fallback_validated: false,
+                            schema_default_parent: visit.value.source()
+                                == ValueSource::SchemaDefault,
                         }),
                         out.reborrow(),
                     )?;

@@ -1,7 +1,7 @@
 #[path = "support/schema_compile.rs"]
 mod schema_support;
 
-use typol_core::{DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId};
+use typol_core::{DiagnosticCode, ExecutionBudget, ExecutionLimits, ResourceLimit, SourceId};
 use typol_schema::{SchemaCompileOptions, SchemaLimits, SchemaSource};
 use typol_syntax::{SchemaParseOptions, SchemaParser};
 use typol_test_support::*;
@@ -61,7 +61,7 @@ fn wide_names_without_defaults_need_budget_beyond_parsing() -> TestResult {
     .test_error()?;
     test_verify_eq!(
         errors.diagnostics().last().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ResourceLimit::ExecutionSteps.diagnostic_code()
     );
     schema_support::SchemaCompileTestSupport::run_without_imports(
         SchemaCompileOptions::default(),

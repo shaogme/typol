@@ -18,7 +18,9 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 use opeo::{OResult, Out, ResultOutExt};
-use typol_core::{ChargedVec, DiagnosticContext, diagnostic_context};
+use typol_core::{
+    CapacityExceeded, ChargedVec, DiagnosticContext, ResourceLimit, diagnostic_context,
+};
 use typol_i18n::Translator;
 use typol_model::BuiltinType;
 
@@ -60,7 +62,7 @@ impl<'session> DescribeContext<'session> {
                 .ok_or_else(|| {
                     CodecErrors::emergency(
                         CodecStage::Binding,
-                        Failure::Resource,
+                        Failure::Capacity(CapacityExceeded::RustConversion),
                         session.translator(),
                     )
                 })
@@ -134,7 +136,7 @@ impl<'session> DescribeContext<'session> {
         if text.len() > self.limits.max_name_bytes() {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Binding,
-                self.session.execution().resource_error().into(),
+                Failure::ResourceLimit(ResourceLimit::StringBytes),
                 self.session.translator(),
             )));
         }
@@ -241,7 +243,7 @@ impl<'session> DescribeContext<'session> {
         }) {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Binding,
-                Failure::internal(NAME_BUDGET_MISMATCH),
+                Failure::binding_internal(NAME_BUDGET_MISMATCH),
                 self.session.translator(),
             )));
         }
@@ -267,7 +269,7 @@ impl<'session> DescribeContext<'session> {
             {
                 return Err(out.fail(CodecErrors::emergency(
                     CodecStage::Binding,
-                    Failure::internal(MEMBER_BUDGET_MISMATCH),
+                    Failure::binding_internal(MEMBER_BUDGET_MISMATCH),
                     self.session.translator(),
                 )));
             }
@@ -278,7 +280,7 @@ impl<'session> DescribeContext<'session> {
                     _ => {
                         return Err(out.fail(CodecErrors::emergency(
                             CodecStage::Binding,
-                            Failure::internal(
+                            Failure::binding_internal(
                                 MEMBER_KIND_MISMATCH.with_object_id(descriptor.slot() as u64),
                             ),
                             self.session.translator(),
@@ -303,7 +305,7 @@ impl<'session> DescribeContext<'session> {
         if descriptor.owner() != self.owner {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Binding,
-                Failure::internal(
+                Failure::binding_internal(
                     DESCRIPTOR_OWNER_MISMATCH.with_object_id(descriptor.slot() as u64),
                 ),
                 self.session.translator(),
@@ -313,7 +315,7 @@ impl<'session> DescribeContext<'session> {
             Some(node) => Ok(node),
             None => Err(out.reborrow().fail(CodecErrors::emergency(
                 CodecStage::Binding,
-                Failure::internal(
+                Failure::binding_internal(
                     DESCRIPTOR_INDEX_MISSING.with_object_id(descriptor.slot() as u64),
                 ),
                 self.session.translator(),

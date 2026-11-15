@@ -265,8 +265,9 @@ impl SourceLoader {
             observer_errors: ErrSlot::new(),
         };
         let diagnostics = &mut context.diagnostics;
-        if !budget.register_source() {
-            diagnostics.push(EmergencyDiagnostics::resource(
+        if let Err(error) = budget.register_source() {
+            diagnostics.push(BudgetDiagnostics::make(
+                error,
                 root_span,
                 diagnostics.translator(),
             ));
@@ -298,7 +299,7 @@ fn append_source<S: Read<SourceReadError>>(
     context: &mut LoadContext<'_, '_>,
 ) -> bool {
     let Ok(id) = u32::try_from(files.len()) else {
-        context.diagnostics.push(EmergencyDiagnostics::resource(
+        context.diagnostics.push(EmergencyDiagnostics::capacity(
             span,
             context.diagnostics.translator(),
         ));

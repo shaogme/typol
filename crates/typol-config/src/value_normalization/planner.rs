@@ -13,8 +13,9 @@ use crate::{
 };
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticMessage, InstancePath,
-    RelatedLocationRole, ValueKind, ValuePayloadView, ValueSource, ValueView,
+    BudgetError, CapacityExceeded, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticMessage,
+    InstancePath, InternalError, RelatedLocationRole, ResourceLimit, ValueKind, ValuePayloadView,
+    ValueSource, ValueView,
 };
 use typol_i18n::{Translator, t};
 use typol_semantic::{TypeKind, VariantPayloadInfo};
@@ -80,16 +81,25 @@ impl NormalizePlanner {
 
     pub(super) fn node<'slot>(
         state: &mut NormalizeState<'_, '_>,
+        input: Input<'_>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, ()> {
-        *state.nodes = state
+        if state.request.existing_nodes_precounted && input.value.is_some() && !input.schema_default
+        {
+            return Ok(());
+        }
+        let next_nodes = state
             .nodes
             .checked_add(1)
-            .filter(|nodes| *nodes <= state.limits.max_value_nodes())
-            .ok_or_else(|| {
-                BudgetDiagnostic::from_error(BudgetError::Resource, state.request.translator)
-            })
+            .ok_or(BudgetError::CapacityExceeded(CapacityExceeded::ConfigValue))
             .store_err_into(out.reborrow())?;
+        if next_nodes > state.limits.max_value_nodes() {
+            return Err(out.fail(BudgetDiagnostic::from_error(
+                BudgetError::ResourceLimit(ResourceLimit::ConfigValueNodes),
+                state.request.translator,
+            )));
+        }
+        *state.nodes = next_nodes;
         Ok(())
     }
 
@@ -118,6 +128,11 @@ impl NormalizePlanner {
             value_source: input.value.map(|_| {
                 if input.schema_default {
                     ValueSource::SchemaDefault
+                } else if state.request.existing_nodes_precounted {
+                    input
+                        .value
+                        .map(ValueView::source)
+                        .unwrap_or(state.request.missing_value_source)
                 } else {
                     ValueSource::RustValue
                 }
@@ -289,6 +304,7 @@ impl NormalizePlanner {
                                     field: None,
                                     schema_default: input.schema_default,
                                     hidden: hidden || type_hidden,
+                                    environment_root: false,
                                 },
                                 role: ChildRole::EnumPayload(variant_name),
                             },
@@ -359,6 +375,7 @@ impl NormalizePlanner {
                                 field: None,
                                 hidden,
                                 schema_default: input.schema_default,
+                                environment_root: false,
                             },
                             role: ChildRole::ArrayItem(index),
                         },
@@ -391,12 +408,14 @@ impl NormalizePlanner {
                         |budget_out| state.budget.consume(1, budget_out),
                         out.reborrow(),
                     )?;
-                    Self::node(state, out.reborrow())?;
+                    Self::node(state, input, out.reborrow())?;
                     let Some(entry) = entry.as_named() else {
                         return Err(out.fail(Self::missing_name_error(state.request.translator)));
                     };
                     let key = entry.name();
-                    Self::text(state, key, out.reborrow())?;
+                    if !state.request.existing_nodes_precounted || input.schema_default {
+                        Self::text(state, key, out.reborrow())?;
+                    }
                     NormalizeOps::push(
                         &mut children,
                         &mut state.errors.budget,
@@ -407,13 +426,14 @@ impl NormalizePlanner {
                                 field: None,
                                 hidden,
                                 schema_default: input.schema_default,
+                                environment_root: false,
                             },
                             role: ChildRole::MapItem(key),
                         },
                         out.reborrow(),
                     )?;
                 }
-                if !input.schema_default {
+                if !input.schema_default && !state.request.existing_nodes_precounted {
                     NormalizeOps::budget_call(
                         &mut state.errors.budget,
                         |sort_out| {
@@ -423,8 +443,10 @@ impl NormalizePlanner {
                                     let (ChildRole::MapItem(left), ChildRole::MapItem(right)) =
                                         (left.role, right.role)
                                     else {
-                                        return Err(compare_out.fail(BudgetError::invariant(
-                                            &NORMALIZE_MAP_CHILD_ROLE,
+                                        return Err(compare_out.fail(BudgetError::Internal(
+                                            InternalError::ConfigValueInvariantFailure(
+                                                NORMALIZE_MAP_CHILD_ROLE,
+                                            ),
                                         )));
                                     };
                                     state
@@ -451,6 +473,7 @@ impl NormalizePlanner {
                             field: None,
                             hidden: input.hidden,
                             schema_default: input.schema_default,
+                            environment_root: false,
                         },
                         role: ChildRole::OptionalContent,
                     },
@@ -529,7 +552,9 @@ impl NormalizePlanner {
                 .get_mut(slot)
                 .ok_or_else(|| {
                     BudgetDiagnostic::from_error(
-                        BudgetError::invariant(&NORMALIZE_FIELD_SLOT),
+                        BudgetError::Internal(InternalError::ConfigValueInvariantFailure(
+                            NORMALIZE_FIELD_SLOT,
+                        )),
                         state.request.translator,
                     )
                 })
@@ -562,7 +587,9 @@ impl NormalizePlanner {
                 .copied()
                 .ok_or_else(|| {
                     BudgetDiagnostic::from_error(
-                        BudgetError::invariant(&NORMALIZE_FIELD_SLOT),
+                        BudgetError::Internal(InternalError::ConfigValueInvariantFailure(
+                            NORMALIZE_FIELD_SLOT,
+                        )),
                         state.request.translator,
                     )
                 })
@@ -609,6 +636,8 @@ impl NormalizePlanner {
                         field: Some(field),
                         hidden: input.hidden,
                         schema_default: input.schema_default || is_schema_default,
+                        environment_root: value
+                            .is_some_and(|value| value.environment_reference().is_some()),
                     },
                     role,
                 },
@@ -625,7 +654,7 @@ impl NormalizePlanner {
     ) -> OResult<'slot, ()> {
         if text.len() > state.limits.max_string_bytes() {
             return Err(out.fail(BudgetDiagnostic::from_error(
-                BudgetError::Resource,
+                BudgetError::ResourceLimit(ResourceLimit::StringBytes),
                 state.request.translator,
             )));
         }
@@ -642,6 +671,6 @@ impl NormalizePlanner {
     }
 
     fn missing_name_error(translator: Translator) -> Diagnostic {
-        DiagnosticFactory::internal(NAMED_ENTRY_NAME_MISSING, None, None, None, translator)
+        DiagnosticFactory::value_internal(NAMED_ENTRY_NAME_MISSING, None, None, None, translator)
     }
 }

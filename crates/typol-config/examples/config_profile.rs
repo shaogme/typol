@@ -205,7 +205,11 @@ fn minimum(
             }
             ProfileOutcome::Failure(errors) => match errors.diagnostics().last() {
                 Some(diagnostic)
-                    if diagnostic.code() == DiagnosticCode::RESOURCE_LIMIT_EXCEEDED =>
+                    if diagnostic.code()
+                        == match quota {
+                            Quota::Steps => DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED,
+                            Quota::Workspace => DiagnosticCode::WORKSPACE_BYTES_LIMIT_EXCEEDED,
+                        } =>
                 {
                     true
                 }

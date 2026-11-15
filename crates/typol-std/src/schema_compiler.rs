@@ -3,8 +3,8 @@ use std::{error::Error, fmt, path::Path, slice::from_ref};
 use opeo::{ErrSlot, OResult, Out};
 
 use typol_core::{
-    BudgetError, ChargedBox, Diagnostic, DiagnosticCode, DiagnosticContext, FilledTerminalSlot,
-    TerminalSlot, diagnostic_context,
+    BudgetError, CapacityExceeded, ChargedBox, DiagnosticCode, DiagnosticContext,
+    FilledTerminalSlot, InternalError, ResourceLimit, TerminalSlot, diagnostic_context,
 };
 use typol_i18n::{Translator, t};
 use typol_report::{DiagnosticReport, ReportContext};
@@ -179,19 +179,28 @@ impl FileSchemaCompileErrors {
     }
 
     fn failure_from_errors(errors: &SchemaCompileErrors) -> BudgetError {
-        errors
-            .diagnostics()
-            .first()
-            .map(Diagnostic::code)
-            .map_or_else(
-                || BudgetError::invariant(&FILE_SCHEMA_INITIALIZATION_CONTEXT),
-                |code| match code {
-                    DiagnosticCode::RESOURCE_LIMIT_EXCEEDED => BudgetError::Resource,
-                    DiagnosticCode::ALLOCATION_FAILED => BudgetError::Allocation,
-                    DiagnosticCode::CAPACITY_EXCEEDED => BudgetError::CapacityExceeded,
-                    _ => BudgetError::invariant(&FILE_SCHEMA_INITIALIZATION_CONTEXT),
-                },
-            )
+        let Some(diagnostic) = errors.diagnostics().first() else {
+            return BudgetError::invariant(&FILE_SCHEMA_INITIALIZATION_CONTEXT);
+        };
+        let code = diagnostic.code();
+        if let Some(limit) = ResourceLimit::from_diagnostic_code(code) {
+            return BudgetError::ResourceLimit(limit);
+        }
+        if code == DiagnosticCode::ALLOCATION_FAILED {
+            return BudgetError::Allocation;
+        }
+        if let Some(capacity) = CapacityExceeded::from_diagnostic_code(code) {
+            return BudgetError::CapacityExceeded(capacity);
+        }
+        if let Some(internal) = InternalError::from_diagnostic_code(
+            code,
+            diagnostic
+                .context()
+                .unwrap_or(FILE_SCHEMA_INITIALIZATION_CONTEXT),
+        ) {
+            return BudgetError::Internal(internal);
+        }
+        BudgetError::invariant(&FILE_SCHEMA_INITIALIZATION_CONTEXT)
     }
 
     fn retained(request: RetainedFileFailure<'_>) -> Self {
@@ -211,13 +220,18 @@ impl FileSchemaCompileErrors {
             usage,
         }) else {
             return Self::initialization_with_usage(
-                SchemaCompileErrors::budget_failure(BudgetError::CapacityExceeded, translator),
+                SchemaCompileErrors::budget_failure(
+                    BudgetError::CapacityExceeded(CapacityExceeded::SchemaStorage),
+                    translator,
+                ),
                 usage,
                 translator,
             );
         };
-        let fallback =
-            SchemaCompileErrors::budget_failure(BudgetError::CapacityExceeded, translator);
+        let fallback = SchemaCompileErrors::budget_failure(
+            BudgetError::CapacityExceeded(CapacityExceeded::SchemaStorage),
+            translator,
+        );
         let fallback_usage = Self::usage_with_failure(&fallback, usage);
         Self {
             storage: FileErrorStorage::Retained {
@@ -368,12 +382,12 @@ impl FileSchemaCompiler {
             Err(caught) => {
                 let error = caught.take();
                 let failure = match error.kind() {
-                    HostErrorKind::ResourceLimitExceeded => Some(BudgetError::Resource),
+                    HostErrorKind::ResourceLimit(limit) => Some(BudgetError::ResourceLimit(limit)),
                     HostErrorKind::AllocationFailed => Some(BudgetError::Allocation),
-                    HostErrorKind::CapacityExceeded => Some(BudgetError::CapacityExceeded),
-                    HostErrorKind::InternalError => {
-                        Some(BudgetError::invariant(error.budget_context()))
+                    HostErrorKind::CapacityExceeded(capacity) => {
+                        Some(BudgetError::CapacityExceeded(capacity))
                     }
+                    HostErrorKind::Internal(internal) => Some(BudgetError::Internal(internal)),
                     _ => None,
                 };
                 if let Some(failure) = failure {

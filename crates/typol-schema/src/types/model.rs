@@ -13,7 +13,7 @@ use core::{
     ops::{Deref, DerefMut},
 };
 use opeo::{OResult, Out};
-use typol_core::{BudgetError, ChargedVec, SourceSpan};
+use typol_core::{BudgetError, CapacityExceeded, ChargedVec, SourceSpan};
 use typol_semantic::TypeId;
 use typol_syntax::BuiltinType;
 
@@ -478,7 +478,9 @@ impl<'graph, 'symbols, 'src, 'context, 'diagnostics>
     ) -> OResult<'slot, (Option<usize>, TypeShapeId)> {
         let Some(node_id) = root else {
             let Some(encoded) = self.index.len().checked_add(1).and_then(NonZeroUsize::new) else {
-                return Err(out.fail(BuildFailure::from(BudgetError::CapacityExceeded)));
+                return Err(out.fail(BuildFailure::from(BudgetError::CapacityExceeded(
+                    CapacityExceeded::SchemaStorage,
+                ))));
             };
             let node_id = self.index.len();
             let shape = TypeShapeId(encoded);

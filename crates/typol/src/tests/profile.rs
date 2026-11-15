@@ -314,7 +314,7 @@ fn wide_name_lookup_succeeds_with_defaults_and_preserves_shared_step_boundary() 
     })?;
     assert_eq!(
         errors.diagnostics().last().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED
     );
     Ok(())
 }

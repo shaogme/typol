@@ -2,19 +2,28 @@ use opeo::{OResult, Out, ResultOutExt};
 use std::cell::Cell;
 use typol_core::{
     AllocationError, BudgetError, Diagnostic, DiagnosticCode, DiagnosticContext, ExecutionBudget,
-    ExecutionLimits, LineIndex, LocatedSpan, LocationError, Read, SliceSource, SourceId,
-    SourceReadError, SourceReadErrorKind, diagnostic_context,
+    ExecutionLimits, InternalError, LineIndex, LocatedSpan, LocationError, Read, SliceSource,
+    SourceId, SourceReadError, SourceReadErrorKind, diagnostic_context,
 };
 use typol_i18n::{Language, Translator};
 use typol_syntax::{
     InputConfig, LexEvent, StreamLimits, StreamLimitsError, SyntaxLimits, TokenCursor, TokenKind,
 };
-use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
+use typol_test_support::{
+    TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot, test_assert_early as test_assert,
+    test_assert_eq_early as test_assert_eq,
+};
 
 struct TestCursor<'source> {
     cursor: TokenCursor<'source>,
     errors: TestSlot<Diagnostic>,
 }
+
+static SOURCE_RANGE_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-syntax-tests",
+    "stream-input",
+    "source-range-unavailable",
+);
 
 impl<'source> TestCursor<'source> {
     fn new(
@@ -111,8 +120,10 @@ impl Read<Diagnostic> for ShortSource<'_> {
         let count = remaining.min(output.len());
         let error = || {
             Diagnostic::from(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::SourceInputInvariantFailure(SOURCE_RANGE_INVARIANT),
+                ))
+                .with_input(source_id, offset),
             )
         };
         let end = self
@@ -149,24 +160,6 @@ impl From<OpeoTestFailure> for TestFailure {
     fn from(_: OpeoTestFailure) -> Self {
         Self
     }
-}
-
-macro_rules! test_assert {
-    ($condition:expr $(, $($message:tt)*)?) => {{
-        if !$condition {
-            return Err(TestFailure);
-        }
-    }};
-}
-
-macro_rules! test_assert_eq {
-    ($left:expr, $right:expr $(, $($message:tt)*)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(TestFailure);
-        }
-    }};
 }
 
 type TestResult<T = ()> = Result<T, TestFailure>;
@@ -383,7 +376,7 @@ fn invalid_reader_counts_and_utf8_emit_one_fatal_event_then_halt() -> TestResult
             test_assert_eq!(
                 error.code(),
                 if invalid_count {
-                    DiagnosticCode::SOURCE_INPUT_ERROR
+                    DiagnosticCode::SOURCE_INPUT_INVARIANT_FAILURE
                 } else {
                     DiagnosticCode::LEXICAL_ERROR
                 }
@@ -422,9 +415,11 @@ fn source_adapter_failures_keep_their_category_and_context() -> TestResult {
                 .with_object_id(0),
         ),
         (
-            SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                .with_offset(2)
-                .with_context(ADAPTER_CONTEXT),
+            SourceReadError::new(SourceReadErrorKind::Internal(
+                InternalError::SourceInputInvariantFailure(ADAPTER_CONTEXT),
+            ))
+            .with_offset(2)
+            .with_context(ADAPTER_CONTEXT),
             ADAPTER_CONTEXT.with_object_id(2),
         ),
     ] {
@@ -473,7 +468,7 @@ fn raw_token_and_decoded_string_limits_have_independent_exact_boundaries() -> Te
                         .diagnostic()
                         .test_value()?
                         .code(),
-                    DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+                    DiagnosticCode::TOKEN_BYTES_LIMIT_EXCEEDED
                 );
             }
         }

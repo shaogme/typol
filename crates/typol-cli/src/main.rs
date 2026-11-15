@@ -20,7 +20,7 @@ fn main() -> ExitCode {
         Err(error) => {
             let translator = Translator::new(error.language());
             match error.message() {
-                Ok(message) => match Commands::usage_error(message.as_ref(), translator) {
+                Ok(message) => match Commands::usage_error(message, translator) {
                     Ok(status) => status,
                     Err(_) => ExitCode::from(3),
                 },

@@ -8,7 +8,10 @@ use alloc::string::String;
 use core::{cell::Cell, error::Error as StdError, fmt};
 use opeo::{Caught, ErrSlot, OResult, Out, ResultOutExt};
 use serde::{de::Error as DeError, ser::Error as SerError};
-use typol_core::{BudgetError, ConfigValue, DiagnosticContext, ValueError, diagnostic_context};
+use typol_core::{
+    BudgetError, CapacityExceeded, ConfigValue, DiagnosticContext, ValueError, ValueErrorKind,
+    diagnostic_context,
+};
 use typol_i18n::Translator;
 use typol_policy::ValueLimits;
 use typol_semantic::{
@@ -25,8 +28,60 @@ static SERDE_SCHEMA_SHAPE_MISMATCH: DiagnosticContext =
 static SERDE_COPY_INVARIANT: DiagnosticContext =
     diagnostic_context!("typol", "serde", "default-value-copy-invariant");
 
+#[derive(Clone, Copy)]
+enum SourceClassification {
+    InternalSource,
+    CopyInvariant,
+}
+
+#[derive(Clone, Copy)]
+enum ErrorPayload {
+    Failure(Failure),
+    Source {
+        error: ValueError,
+        classification: SourceClassification,
+    },
+}
+
+impl ErrorPayload {
+    fn failure(self) -> Failure {
+        match self {
+            Self::Failure(failure) => failure,
+            Self::Source {
+                error,
+                classification: SourceClassification::InternalSource,
+            } => match error.kind() {
+                ValueErrorKind::Internal(internal) => Failure::Internal(internal),
+                _ => Failure::conversion_internal(error.context().unwrap_or(SERDE_COPY_INVARIANT)),
+            },
+            Self::Source {
+                error,
+                classification: SourceClassification::CopyInvariant,
+            } => Failure::conversion_internal(
+                CopyError::InvalidValue(error)
+                    .context()
+                    .unwrap_or(SERDE_COPY_INVARIANT),
+            ),
+        }
+    }
+
+    const fn source(self) -> Option<ValueError> {
+        match self {
+            Self::Failure(_) => None,
+            Self::Source { error, .. } => Some(error),
+        }
+    }
+
+    fn source_ref(&self) -> Option<&ValueError> {
+        match self {
+            Self::Failure(_) => None,
+            Self::Source { error, .. } => Some(error),
+        }
+    }
+}
+
 pub(crate) struct Error {
-    failure: Failure,
+    payload: ErrorPayload,
 }
 
 impl Error {
@@ -43,15 +98,35 @@ impl Error {
     }
 
     pub(crate) fn failure(failure: Failure) -> Self {
-        Self { failure }
+        Self {
+            payload: ErrorPayload::Failure(failure),
+        }
+    }
+
+    fn with_source(error: ValueError, classification: SourceClassification) -> Self {
+        Self {
+            payload: ErrorPayload::Source {
+                error,
+                classification,
+            },
+        }
+    }
+
+    const fn payload(&self) -> ErrorPayload {
+        self.payload
     }
 
     pub(crate) fn internal(context: DiagnosticContext) -> Self {
-        Self::failure(Failure::internal(context))
+        Self::failure(Failure::conversion_internal(context))
     }
 
     pub(crate) fn into_errors(self, translator: Translator) -> CodecErrors {
-        CodecErrors::emergency(CodecStage::Conversion, self.failure, translator)
+        CodecErrors::emergency_with_source(
+            CodecStage::Conversion,
+            self.payload.failure(),
+            translator,
+            self.payload.source(),
+        )
     }
 }
 
@@ -75,14 +150,19 @@ impl From<ValueError> for Error {
 
 impl From<CopyError> for Error {
     fn from(error: CopyError) -> Self {
-        Self::failure(match error {
-            CopyError::Resource => Failure::Resource,
+        let failure = match error {
+            CopyError::ResourceLimit(limit) => Failure::ResourceLimit(limit),
             CopyError::Allocation => Failure::Allocation,
-            CopyError::Capacity => Failure::Capacity,
-            CopyError::Internal | CopyError::InternalAt(_) | CopyError::InvalidValue(_) => {
-                Failure::internal(error.context().unwrap_or(SERDE_COPY_INVARIANT))
+            CopyError::CapacityExceeded(capacity) => Failure::Capacity(capacity),
+            CopyError::Internal(error) => Failure::Internal(error),
+            CopyError::InternalSource(source) => {
+                return Self::with_source(source, SourceClassification::InternalSource);
             }
-        })
+            CopyError::InvalidValue(source) => {
+                return Self::with_source(source, SourceClassification::CopyInvariant);
+            }
+        };
+        Self::failure(failure)
     }
 }
 
@@ -90,7 +170,7 @@ impl fmt::Debug for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SerdeError")
-            .field("failure", &self.failure)
+            .field("failure", &self.payload.failure())
             .finish()
     }
 }
@@ -101,7 +181,13 @@ impl fmt::Display for Error {
     }
 }
 
-impl StdError for Error {}
+impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        self.payload
+            .source_ref()
+            .map(|source| source as &(dyn StdError + 'static))
+    }
+}
 
 impl SerError for Error {
     fn custom<T: fmt::Display>(_: T) -> Self {
@@ -116,7 +202,7 @@ impl DeError for Error {
 }
 
 pub(crate) struct Fault {
-    failure: Cell<Option<Failure>>,
+    payload: Cell<Option<ErrorPayload>>,
 }
 
 pub(crate) struct State<'call> {
@@ -194,7 +280,7 @@ impl<'a, 'schema, 'call> Cursor<'a, 'schema, 'call> {
         let depth = self
             .depth
             .child()
-            .ok_or_else(|| Error::failure(Failure::Resource))
+            .ok_or_else(|| Error::failure(Failure::Capacity(CapacityExceeded::RustConversion)))
             .store_err_into(out.reborrow())?;
         self.session().budget_as(
             |budget_out| {
@@ -223,7 +309,7 @@ impl<'a, 'schema, 'call> Cursor<'a, 'schema, 'call> {
         let depth = self
             .depth
             .child()
-            .ok_or_else(|| Error::failure(Failure::Resource))
+            .ok_or_else(|| Error::failure(Failure::Capacity(CapacityExceeded::RustConversion)))
             .store_err_into(out.reborrow())?;
         self.session().budget_as(
             |budget_out| {
@@ -329,7 +415,7 @@ impl<'a, 'schema, 'call> Cursor<'a, 'schema, 'call> {
             .depth
             .child()
             .map(ValueDepth::level)
-            .ok_or_else(|| Error::failure(Failure::Resource))
+            .ok_or_else(|| Error::failure(Failure::Capacity(CapacityExceeded::RustConversion)))
             .store_err_into(out.reborrow())?;
         let mut limits = ValueLimits::default();
         limits.set_max_value_nodes(
@@ -377,13 +463,13 @@ impl<'a, 'schema, 'call> Cursor<'a, 'schema, 'call> {
 impl Fault {
     pub(crate) fn new() -> Self {
         Self {
-            failure: Cell::new(None),
+            payload: Cell::new(None),
         }
     }
 
-    fn record(&self, failure: Failure) {
-        if self.failure.get().is_none() {
-            self.failure.set(Some(failure));
+    fn record(&self, payload: ErrorPayload) {
+        if self.payload.get().is_none() {
+            self.payload.set(Some(payload));
         }
     }
 
@@ -391,7 +477,7 @@ impl Fault {
     #[cold]
     fn failed<T>(&self, caught: Caught<'_, Error>) -> Result<T, Error> {
         let error = caught.take();
-        self.record(error.failure);
+        self.record(error.payload());
         Err(error)
     }
 
@@ -399,8 +485,8 @@ impl Fault {
         &self,
         operation: impl for<'slot> FnOnce(Out<'slot, 'slot, Error>) -> OResult<'slot, T>,
     ) -> Result<T, Error> {
-        if let Some(failure) = self.failure.get() {
-            return Err(Error::failure(failure));
+        if let Some(payload) = self.payload.get() {
+            return Err(Error { payload });
         }
         // Slots follow the callback stack; Cursor bounds recursive child dispatch.
         let mut errors = ErrSlot::new();
@@ -429,8 +515,8 @@ impl Fault {
         result: Result<T, Error>,
         out: Out<'slot, 'borrow, Error>,
     ) -> OResult<'slot, T> {
-        match self.failure.get() {
-            Some(failure) => Err(out.fail(Error::failure(failure))),
+        match self.payload.get() {
+            Some(payload) => Err(out.fail(Error { payload })),
             None => match result {
                 Ok(value) => Ok(value),
                 Err(error) => Err(out.fail(error)),
@@ -443,8 +529,8 @@ impl Fault {
         value: T,
         out: Out<'slot, 'borrow, Error>,
     ) -> OResult<'slot, T> {
-        match self.failure.get() {
-            Some(failure) => Err(out.fail(Error::failure(failure))),
+        match self.payload.get() {
+            Some(payload) => Err(out.fail(Error { payload })),
             None => Ok(value),
         }
     }
@@ -452,13 +538,20 @@ impl Fault {
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
-    use super::{Error, Translator};
+    use super::{CopyError, Error, Translator};
+    use core::error::Error as StdError;
     use serde::{de::Error as DeError, ser::Error as SerError};
-    use typol_core::DiagnosticCode;
+    use typol_core::{
+        BudgetError, DiagnosticCode, DiagnosticContext, InternalError, ValueError,
+        diagnostic_context,
+    };
     use typol_i18n::Language;
     use typol_test_support::{
         TestExpect, TestResult, test_verify as assert, test_verify_eq as assert_eq,
     };
+
+    static COPY_TEST_INVARIANT: DiagnosticContext =
+        diagnostic_context!("typol-tests", "serde", "copy-invariant");
 
     #[test]
     fn custom_serde_errors_keep_category_without_message_text() -> TestResult {
@@ -505,6 +598,24 @@ mod tests {
                 .test_expect("serde rejections should carry classification context")?;
             assert_eq!(context.failure_point(), expected);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn copied_value_invariant_retains_its_source_error() -> TestResult {
+        let internal = InternalError::ValueStructureInvariantFailure(COPY_TEST_INVARIANT);
+        let source = ValueError::from(BudgetError::Internal(internal));
+        let failure = Error::from(CopyError::InternalSource(source));
+        let errors = failure.into_errors(Translator::new(Language::English));
+        assert_eq!(
+            errors
+                .diagnostics()
+                .first()
+                .test_expect("copy invariant failure should have a diagnostic")?
+                .code(),
+            DiagnosticCode::VALUE_STRUCTURE_INVARIANT_FAILURE
+        );
+        assert!(StdError::source(&errors).is_some());
         Ok(())
     }
 }

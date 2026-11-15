@@ -11,7 +11,10 @@ use typol_syntax::{
     ExprKind, MethodArgumentKind, SchemaAst, SchemaParseOptions, SchemaParser, SyntaxErrors,
     SyntaxLimits, TypeExprKind,
 };
-use typol_test_support::{TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot};
+use typol_test_support::{
+    TestFailure as OpeoTestFailure, TestOpeoOutcome, TestSlot, test_assert_early as test_assert,
+    test_assert_eq_early as test_assert_eq,
+};
 
 struct TestErrors {
     budget: TestSlot<BudgetError>,
@@ -50,24 +53,6 @@ impl From<OpeoTestFailure> for TestFailure {
     fn from(_: OpeoTestFailure) -> Self {
         Self
     }
-}
-
-macro_rules! test_assert {
-    ($condition:expr $(, $($message:tt)*)?) => {{
-        if !$condition {
-            return Err(TestFailure);
-        }
-    }};
-}
-
-macro_rules! test_assert_eq {
-    ($left:expr, $right:expr $(, $($message:tt)*)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(TestFailure);
-        }
-    }};
 }
 
 type TestResult<T = ()> = Result<T, TestFailure>;
@@ -133,7 +118,7 @@ fn check_limit(source: &str, limit: usize, required: usize, errors: &mut TestErr
         let errors = result.test_error()?;
         test_assert_eq!(
             errors.diagnostics().next_back().test_value()?.code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+            DiagnosticCode::SCHEMA_PARSE_DEPTH_LIMIT_EXCEEDED,
             "limit={limit}, required={required}, source={source}"
         );
     }

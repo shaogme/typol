@@ -1,6 +1,6 @@
 ---
 title: Schema implementation
-description: How Typol loads, compiles, freezes, and consumes .tschem Schemas.
+description: How Typol loads, compiles, and consumes .tschem Schemas.
 sidebar:
   order: 4
 ---
@@ -8,284 +8,425 @@ sidebar:
 ## Quick reference
 
 :::tip[Use this page when]
-You need to understand Schema loading, compilation diagnostics, imported files, or how compiled types reach Config parsing and Rust binding.
+You need to understand Schema loading, compile diagnostics, imported files, or how
+compiled types reach Config parsing and Rust binding.
 :::
 
 | Stage | Current behavior |
 | --- | --- |
-| Input | Shared streaming lexer and parser produce an owned Schema AST with source spans. |
-| Compilation | The loader resolves imports, checks static semantics, and builds an immutable compiled Schema. |
-| Consumers | Config parsing and Rust binding read compiled Schema views; host file access stays in adapters. |
+| Input | A streaming lexer and parser produce an owned Schema AST with source spans. |
+| Compilation | The loader resolves imports, checks semantics, and builds an immutable Schema. |
+| Consumers | Config parsing and Rust binding read compiled views; host access stays in adapters. |
 
-This document describes how Typol currently implements `.tschem`: crate responsibilities, processing from source text to an immutable compiled result, static semantic checks, and how Config parsing and Rust type binding consume that result. It supplements the [Schema DSL specification](../schema-dsl/) without changing its lexical, grammatical, or semantic rules.
+This page describes the current implementation of `.tschem`, from source input to
+compiled Schema and its use by Config parsing and Rust bindings. The [Schema DSL
+specification](../schema-dsl/) defines language behavior and remains normative.
 
-This description follows the current source. The Schema DSL remains normative when behavior is unclear.
-
-## 1. Scope and boundaries
+## 1. Scope and architecture
 
 Schema processing has four main layers:
 
-1. `typol-syntax` lexes UTF-8 source into tokens with byte spans and parses Schema into an owned AST.
-2. `typol-schema` uses a host-supplied resolver to load the root and `extern mod` sources, builds module/symbol/type models, and performs static compilation.
-3. `typol-semantic` stores compiled types, fields, variants, constraints, expression programs, regex programs, source locations, and indexes behind read-only views.
-4. `typol-config`, `typol`, and `typol-std` respectively build and validate values using a Schema, provide application-level orchestration, and connect files and process environment.
+1. `typol-syntax` lexes UTF-8 input and parses it into an owned AST.
+2. `typol-schema` loads the root and imported sources, resolves declarations, and compiles them.
+3. `typol-semantic` stores the immutable compiled model and exposes read-only views.
+4. `typol-config`, `typol`, and `typol-std` parse values, coordinate application APIs,
+   and provide host adapters.
 
-Core syntax and semantic crates use `no_std + alloc`. Schema compilation does not access the filesystem itself; `typol-schema::SchemaResolver` is the import boundary. Config parsing does not create a configuration AST; it consumes tokens and constructs values directly. `typol-macros` generates Rust type descriptions at compile time and does not read Schema files. Compatibility with a compiled Schema is checked at runtime by `TypedSchema::bind`.
+Core syntax and semantic crates use `no_std + alloc`. Schema compilation receives a
+`SchemaResolver` instead of accessing files, while Config parsing builds values
+directly without a separate Config AST. `typol-macros` derives Rust type descriptions
+without reading Schema files; `TypedSchema::bind` checks compatibility at runtime.
 
-For application-level setup with the facade in a `no_std + alloc` environment, see the [no_std guide](../../guides/no_std/).
+For application setup without the standard library, see the
+[no_std guide](../../guides/no_std/).
 
 | Responsibility | Main source locations |
 | --- | --- |
-| Lexer, tokens, cursor, Schema AST/parser | `crates/typol-syntax/src/` |
-| Imports, compilation session, modules, symbols | `crates/typol-schema/src/resolver.rs`, `loader.rs`, `session.rs`, `module_tree.rs`, `symbols.rs` |
-| Type resolution, aliases, recursion checks | `crates/typol-schema/src/types.rs` and `types/` |
-| Annotations, regex, expression analysis | `crates/typol-schema/src/annotations.rs`, `regex.rs`, `expressions.rs` |
-| Defaults and final records | `crates/typol-schema/src/defaults.rs`, `compiled.rs` |
-| Compiled model and semantic views | `crates/typol-semantic/src/model.rs`, `views.rs`, `constraints.rs`, `expressions.rs` |
-| Config parse and runtime validation | `crates/typol-config/src/parser.rs`, `validation.rs`, `value_validation.rs` |
-| File loading and application facade | `crates/typol-std/src/schema_compiler.rs`, `crates/typol/src/loading.rs`, `binding.rs`, `descriptor.rs` |
+| Lexer, token cursor, Schema AST/parser | `crates/typol-syntax/src/` |
+| Imports, modules, symbols, and type resolution | `typol-schema`: loader/, module_tree.rs, symbols.rs, types.rs |
+| Annotations, expressions, defaults, and records | `typol-schema`: annotations/, expressions/, defaults/, compiled/ |
+| Compiled model and semantic views | `typol-semantic`: model, views, constraints, expressions |
+| Config parsing and validation | `typol-config`: parser.rs, validation.rs, value_validation.rs |
+| Host loading and Rust binding | `typol-std`: schema_compiler.rs; `typol`: loading/, binding_impl.rs |
 
 ## 2. Source, lexer, and parser
 
-### 2.1 Byte sources and tokens
+### 2.1 Streaming input
 
-Schema input must be valid UTF-8. Lexical rules are defined by [Schema DSL §1](../schema-dsl/#1-lexical-rules). `Read` provides bytes sequentially: a short read is not EOF, and zero bytes indicates EOF. The parser does not require replayable input and does not retain the complete source. The lexer scans on demand rather than building a token array; `TokenCursor` caches at most the current event and one lookahead. Tokens carry a `SourceSpan` containing a source ID and UTF-8 byte range. Identifier and number tokens can expose their source text, while strings expose decoded content. EOF has an empty span at the end of the source.
+Schema input must be valid UTF-8, and its lexical rules are defined by
+[Schema DSL §1](../schema-dsl/#1-lexical-rules). The `Read` interface supplies bytes
+sequentially: a short read is not EOF, and zero bytes means EOF. Parsing does not
+require replayable input or retain the complete source.
 
-Identifier and number token text uses budgeted owned buffers, then the Schema parser copies it into an AST text pool. Strings always use a budgeted owned decode buffer, even when no escape is present, and that buffer is transferred to the AST. Block strings stage only the current token's body because the input may not be replayable; the raw staging area and decoded output are charged at the same time, and scanning work uses the shared execution budget. The token byte ceiling includes delimiters, body bytes, CRLF bytes, and closing indentation. The decoded string ceiling applies only after dedenting, line-ending normalization, and escape decoding. A block string is returned only after the full closing delimiter and decode succeed. The shared lexer reads through a reusable window and does not expose stable source-text slices. Token and AST debug output avoids literal values and shows only kinds, spans, lengths, and similar metadata.
+The lexer scans on demand instead of building a token array. `TokenCursor` caches at
+most the current event and one lookahead, and each token carries a `SourceSpan` with
+a source ID and UTF-8 byte range. Identifier and number tokens can expose their
+source text; string tokens contain decoded text, and EOF has an empty span.
 
-### 2.2 Schema AST and parser limits
+Token and AST text use owned, budgeted storage. Block strings stage only the current
+token body, since an input source may not be replayable; staging and decoded output
+are charged while both are live. Token limits count delimiters and source line
+endings, while string limits apply to the decoded result.
 
-`SchemaParser::parse(source_id, byte_source, options, budget)` accepts `Read<Diagnostic>` and uses `SchemaParseOptions` to configure `SyntaxLimits` and `StreamLimits`. `parse_str` wraps an in-memory string as a `SliceSource`. Use `parse_with_positions` when source-location lookup is needed; success includes the AST and a budgeted `SourcePositionIndex`. The index stores token endpoint byte offsets, line numbers, and Unicode scalar columns without retaining source bytes. The EOF token provides actual source length and position.
+The shared lexer reads through a reusable window and does not expose stable slices
+into source text. Debug output for tokens and AST nodes avoids literal values and
+shows only metadata such as kind, span, and length.
 
-`SchemaParseOptions::with_translator` selects the language for syntax diagnostics. Schema compilation accepts the same setting through `SchemaCompileOptions`; configure both consistently when a tool parses and then compiles separately. The default is English. Diagnostic reasons are created in that language and are not retranslated by a later report writer.
+### 2.2 AST and parse results
 
-The parser does not pre-read or cache the entire input. Source limits constrain reads; the actual byte offset at EOF is used for `SchemaAst::span()`, and successful AST storage tightens span boundaries to that length. Diagnostics use the current known position when EOF is unknown and the exact EOF-token span for EOF syntax errors. Success returns a complete AST; lexical or syntax failure returns non-empty `SyntaxErrors`, never a partial AST. At reliable top-level, module, field, and variant boundaries, the parser can recover to collect independent errors. Recovery shares the parser execution budget; terminal resource, allocation, and internal errors stop parsing.
+`SchemaParser::parse` accepts a byte source, `SchemaParseOptions`, and an
+`ExecutionBudget`. `parse_str` adapts a string to a `SliceSource`; use
+`parse_with_positions` when later location lookup is needed. Its result owns both
+the AST and a `SourcePositionIndex` of byte offsets, line numbers, and Unicode
+scalar columns, without retaining source bytes.
 
-The AST uses table-based nodes and owned text. Callers receive read-only views and cannot forge node IDs or storage tables. It preserves declaration order and spans, alias/container structure, enum payload kinds, annotation argument order, literal syntax, expression structure, and whether object/map literal keys were identifiers or strings. Parsing checks syntax only; it does not resolve names, check types or annotations, or execute expressions. Empty `{}` stays unclassified until compilation determines whether the target is a struct or map.
+`SchemaParseOptions::with_translator` selects the language of syntax diagnostics.
+Compilation accepts the same setting through `SchemaCompileOptions`; tools that
+parse and compile separately should use the same translator. English is the default,
+and later report writers do not translate a diagnostic again.
 
-`SyntaxLimits` bounds parse depth, AST nodes, decoded strings, per-source bytes, and diagnostics. `StreamLimits` separately bounds the token window and bytes per token. Current defaults are depth 128, 100 diagnostics, 256 KiB decoded strings, 100,000 AST nodes per file, an 8,192-byte token window, and a 1 MiB token cap. The parser uses explicit continuation frames for nested declarations, types, defaults, and expressions; recovery is also budgeted.
+The parser reads until EOF and uses the confirmed byte length for the AST span.
+Success returns a complete AST; lexical or syntax errors return non-empty
+`SyntaxErrors`, never a partial AST. At reliable declaration, module, field, and
+variant boundaries, it recovers to collect independent errors.
 
-### 2.4 Parse-only documents and formatting
+Recovery and token access share the parser's execution budget. Resource exhaustion,
+allocation failure, and internal errors stop parsing. AST nodes are read-only views
+owned by their AST, so callers cannot forge node IDs or storage tables.
 
-`SchemaParser::parse_document` is the in-memory path for tools that need the original text. It returns a `SchemaDocument<'source>` that borrows that exact `&str` and owns the successful syntax AST. It does not resolve imports or perform static semantic checks; the existing streaming `parse` path used by compilation still does not retain the complete source.
+The AST preserves source order and spans, type paths and alias targets, annotation
+arguments, all enum payload forms, and the original numeric text. It also retains
+whether brace-literal keys were identifiers or strings, plus expression structure,
+paths, method calls, and closure parameters.
 
-`SchemaFormatter::format` consumes a bound document and `SchemaFormatOptions`, then returns a complete `FormattedSchema` through an OPEO error slot. It uses AST spans to classify declaration, type, default-value, and enum-payload delimiters while preserving source tokens and comments. AST storage, token capacity, and formatter frames count toward the formatter workspace limit; output bytes and nesting depth have separate limits. The formatter treats a complete block string as one token and preserves its original bytes, including internal line endings, indentation, and escape spelling; it standardizes layout only around that token. It preserves every token and comment in source order, standardizes layout and trailing commas, and emits CRLF if the input contains CRLF, otherwise LF. `FormattedSchema::as_str()` allows inspection; consuming `write_to()` sends the complete result to a `fmt::Write` sink.
+Parsing checks syntax only. It does not resolve names, check type compatibility or
+annotation applicability, or execute expressions. An empty `{}` remains an
+unclassified brace literal until compilation determines whether its target is an
+object or a map.
 
-```rust
-use std::{error::Error, io::Error as IoError};
-use typol::{
-    SchemaFormatError, SchemaFormatOptions, SchemaFormatter, SchemaParseOptions, SchemaParser,
-    SyntaxErrors,
-    core::{ExecutionBudget, ExecutionLimits, SourceId},
-    opeo::ErrSlot,
-};
+### 2.3 Limits and parse-only documents
 
-fn format_schema(source: &str) -> Result<String, Box<dyn Error>> {
-    let mut budget_errors = ErrSlot::new();
-    let budget = budget_errors
-        .try_call(|out| {
-            ExecutionBudget::new(ExecutionLimits::new(2_000_000, 16_000_000), out)
-        })
-        .map_err(|caught| IoError::other(format!("{:?}", caught.take())))?;
-    let mut parse_errors = ErrSlot::<SyntaxErrors>::new();
-    let document = parse_errors
-        .try_call(|out| {
-            SchemaParser::parse_document(
-                SourceId::new(0),
-                source,
-                &SchemaParseOptions::default(),
-                &budget,
-                out,
-            )
-        })
-        .map_err(|caught| IoError::other(format!("{:?}", caught.take())))?;
-    let mut format_errors = ErrSlot::<SchemaFormatError>::new();
-    let formatted = format_errors
-        .try_call(|out| {
-            SchemaFormatter::format(document, SchemaFormatOptions::default(), out)
-        })
-        .map_err(|caught| IoError::other(format!("{:?}", caught.take())))?;
-    let mut output = String::new();
-    formatted.write_to(&mut output)?;
-    Ok(output)
-}
-```
+`SchemaLimits::syntax()` supplies parse depth, AST node, decoded string, source-byte,
+and diagnostic limits. `SchemaLimits::stream_limits()` sets the lexer window and
+per-token byte cap; `StreamLimits::try_new()` rejects a zero-sized window. The
+loader also caps total source bytes and file count, and successful compilation
+requires every source to reach EOF.
+
+The default token window is 8,192 bytes and its token cap is 1 MiB. The default
+syntax limits include depth 128, 100 diagnostics, 256 KiB decoded strings, and
+100,000 AST nodes per file. Counts include nodes later discarded during recovery.
+Callers can inspect `SchemaAst::node_count()` and `structure_height()`.
+
+Tools that need to retain original text can call `SchemaParser::parse_document`.
+It returns a `SchemaDocument` borrowing the exact input string and owning the
+successful AST. This path does not resolve imports or check static semantics; the
+compiler's streaming path still does not retain the complete source.
+
+`SchemaFormatter::format` consumes a document and formatting options, then returns
+a complete `FormattedSchema`. It uses AST spans to recognize delimiters while
+preserving tokens and comments. It standardizes layout and trailing commas, keeps
+block-string bytes intact, and emits CRLF if the input uses CRLF, otherwise LF.
+
+Formatter workspace, output size, and nesting depth have separate limits.
+`FormattedSchema::as_str()` provides read access; `write_to()` writes the completed
+result to a `fmt::Write` sink.
 
 ## 3. Compilation sessions and imports
 
 ### 3.1 Entry points
 
-A general or `no_std` caller creates a one-shot session with `SchemaCompiler::new(SchemaCompileOptions)`. For imports, call `compile(root, resolver, observer)`. For in-memory sources without imports, call `compile_without_imports(root)`; an encountered import produces a clear diagnostic. The observer variant registers source names. `SchemaSource::from_source` accepts a one-shot `Read<SourceReadError>`; `from_str` adapts an in-memory string. Source identities compare byte-for-byte and are not written to the compiled artifact. Source objects cannot be copied, and their input is consumed by the loader. An optional `SchemaCompileContext` ties root reads, resolver work, and compiler phases to one shared budget.
-
-`SchemaResolver::resolve` receives the current source identity, one module name, remaining source-byte capacity, and compile context. It returns the next Schema source or a bounded `ResolverError`. The host chooses how module names map to files or in-memory sources. An optional `SourceObserver` registers each identity-to-`SourceId` association for host-readable names. Duplicate identities are not registered twice.
-
-For standard file use, `typol_std::FileSchemaCompiler::compile` opens and checks file handles while the parser reads the Schema body on demand; it does not create a complete file-text buffer. It also handles relative imports, host file identities, and source-name mapping. The application facade `SchemaLoader::compile_file` loads a file, `compile_text` provides an import-free in-memory path, and `compile_with_resolver` supports custom imports. After loading, `LoadedSchema::bind<T>()` creates a reusable binding so multiple configurations can be read without repeatedly matching Rust and Schema types.
-
-A root source explicitly bound to a different call fails with `SCHEMA_CONTEXT_MISMATCH`; an ended execution context fails with `SCHEMA_SESSION_FINISHED`. `SchemaCompileErrors::context_failure()` exposes the structured reason and preserves the root span. These contract/lifecycle failures do not call the resolver. Host resolver failures use `SCHEMA_RESOLVER_ERROR`.
-
-### 3.2 Import graph loading
-
-The root receives `SourceId(0)`; subsequently registered sources receive IDs in load order. The loader requests sources for root AST `extern mod` declarations and loads them depth-first using an explicit stack. Each import edge has a state and optional target; failed edges have no valid target.
-
-Identities compare byte-for-byte. An identity still in `Loading` is an import cycle; an already loaded identity is a duplicate import. Different identities are not treated as the same source merely because they return identical bytes. The loader registers each `SourceId` with the observer before parsing, but reads the body only after identity deduplication. Read failures map from bounded `SourceReadError` categories to structured diagnostics; arbitrary host error text is excluded.
-
-`FileSchemaResolver` maps stable IDs of open files to source identities and keeps handles alive for the session so IDs cannot be reused. Unix uses device/inode; Windows uses volume serial number/file index, so hard links share identity. Platforms without stable IDs deduplicate by canonical path. On Linux, when available, `/proc/self/fd` resolves the import base from the handle actually read; otherwise the requested path is normalized. File contents are still read incrementally.
-
-The loader checks per-file bytes, total source bytes, Schema file count, and import nesting during reads. It counts actual bytes and may request at most one extra byte to distinguish exactly reaching a limit from exceeding it. A low-level error may report bytes already consumed. Schema imports occur only at AST file scope; ordinary DSL `mod` is a namespace within the same source.
-
-### 3.3 Shared session budget
-
-One generic `ExecutionBudget` covers source loading, parsing, non-Regex semantic work, record creation, indexing, location mapping, and freezing. A separate `RegexExecutionBudget`, created from `SchemaCompileOptions::regex()`, covers Regex pattern compilation and Regex checks on Schema defaults; all Regex work in that compile shares it. Each budget reports its own steps, workspace, and failure. `SchemaCompileUsage.steps`, `workspace_bytes`, `peak_workspace_bytes`, and `failure` remain the generic values; the corresponding `regex_*` fields report Regex usage and failures. Resource exhaustion and allocation failure are distinct errors. Stage labels identify current generic work for host observation.
-
-Frozen indexes store sorted name lookup tables by field/variant slot. Index allocation and comparisons use the same budget. Indexes contain slots only; fields and variants remain in declaration order. Read-only variant lookup may use budgeted binary search.
-
-Current `SchemaLimits` defaults include 1 MiB per source, 8 MiB total source bytes, and 64 sources. Nested `SyntaxLimits` include depth 128, 100 diagnostics, 256 KiB decoded strings, and 100,000 AST nodes per file. `StreamLimits` use an 8,192-byte window and 1 MiB token. Schema default validation allows 100,000 value nodes. `RegexLimits` govern pattern bytes/count, nesting, instructions, character ranges, and scratch states. `RegexExecutionLimits` separately default cumulative Regex steps, per-search NFA states, and Regex workspace to 67,108,864 each. The generic Schema execution defaults remain independently configured. Default source excerpts are 65,536 bytes total, 512 bytes per line, 128 records, and two context rows per span. These values are overridable runtime policy, not DSL semantics.
-
-## 4. Static compilation pipeline
-
-`typol-schema::SchemaCompilation::compile` runs the stages below in order. Any diagnostic prevents creation of a usable `CompiledSchema`; the final artifact is returned only when every stage succeeds.
-
-### 4.1 Parse each source
-
-The loader runs `SchemaParser` for the root and every newly imported source. Parse errors retain their `SourceId` and source span. A source with syntax errors does not enter the module tree. Other independently loadable sources may still be used to collect diagnostics unless a terminal budget error occurs.
-
-### 4.2 Module tree and namespaces
-
-`ModuleTree` places each source's root declarations in the corresponding module and recursively adds ordinary `mod` declarations. Modules and type declarations use stable IDs, and module members keep insertion order. The root file's `entry struct` is the sole configuration entry. An entry marker in an imported file does not replace it; that type remains referenceable in the declaration tree.
-
-`SymbolTable` builds a shared module/type namespace index for every module and indexes struct fields, enum variants, and anonymous struct payload fields. It checks duplicate declarations, entry count, duplicate fields, and duplicate variants; duplicate-name diagnostics may point to both declarations. Lookup reports missing, unique, or ambiguous results instead of silently choosing one duplicate.
-
-### 4.3 Type paths and the resolved type graph
-
-Type references search for the first path segment from the current module upward through parent modules. After the first segment resolves, remaining segments are resolved only within module namespaces. A middle segment resolving to a type instead of a module, a final segment that is not a type, or an invalid module/symbol produces a semantic error.
-
-The type graph assigns semantic IDs to built-ins, user types, containers, alias links, and anonymous struct enum payloads. Aliases are transparent shapes: compiled results retain the named alias record and its underlying shape, while use sites can retain alias constraints and `@secret` metadata. The compiler keeps alias-cycle detection separate, then runs a budgeted worklist to find the least fixed point of user declarations that can produce finite values. Built-ins, options, dynamic arrays, maps, and zero-length fixed arrays are constructible; structs require every field to be constructible, and enums require one constructible variant. A positive-length fixed array requires a constructible element. Remaining recursive components fail with `SCHEMA_SEMANTIC_ERROR` and a `recursive type has no finite value` message. Earlier invalid declarations are excluded so unknown references and alias cycles do not cause secondary recursion errors. Unknown paths, nested options, and out-of-range fixed-array lengths retain their existing diagnostics.
-
-Named struct and enum IDs are allocated before field and payload resolution, so recursive references stay as finite ID edges instead of expanding declarations. Freeze validation checks index ranges, field and payload references, owners, and nested-option rules while accepting legal back edges.
-
-Type records include built-ins, options, arrays with optional fixed lengths, maps, structs, and enums. Struct fields and enum variants retain declaration order. Each enum variant records whether it has unit, single-value, or anonymous struct payload. The public syntax AST exposes annotations through `TypeExpr::annotations()`; annotation accessors on alias, field, and single-payload views were removed. Downstream matches on `ConstraintLayer` must handle the new `TypeUse` variant.
-
-### 4.4 Annotations and regex
-
-The parser stores each annotation on the exact recursive type-expression node it follows. Annotation compilation walks the AST and resolved type graph together, assigning root annotations to their declaration owner and nested annotations to a type-use slot. It checks target types, argument forms, repeated annotations, bound ordering, and compatibility among combined constraints. Effective rules merge alias constraints first, then the constraints for the current field, payload, or nested type use.
-
-Schema compilation passes each `@regex` string to `typol-regex`, which compiles a bounded Thompson NFA. See the [regex implementation](../regex-implementation/). Invalid patterns become regex syntax diagnostics. Pattern bytes, regex count, per-pattern and cumulative instruction counts, and character-range counts are bounded. Compiled constraints retain references to regex programs, not a pattern to recompile for every Config validation.
-
-`@env` compiles only from an eligible field root into a field authorization record; it is invalid on nested type uses, aliases, and payload roots. The Schema compiler does not read the environment. `@secret` belongs to its exact type-expression node and is applied to that value for Config diagnostics, safe display, and Rust-value conversion; an alias-root marker continues to mark uses of that alias.
-
-`@variants` resolves every decoded name against the enum reached through transparent aliases and stores sorted, unique `VariantId`s in the compiled rule. Unknown names, duplicates, non-enum targets, repeated annotations on one type node, and empty allow/deny compositions fail before records are frozen. Alias rules and the current type-use rules are intersected; the resulting accepted set must be non-empty even for `option<Enum>`. Default construction applies the same restriction and reports the default value span with a label on the rejecting rule.
-
-### 4.5 Static expression analysis
-
-The expression compiler processes `@assert` and `@all` ASTs. It classifies `self`, `root`, closure parameters, and map `key`/`value` context; then it type-checks paths, methods, literal inference, operators, and comparisons node by node. The program must return boolean. Invalid fields, methods, contexts, operands, or a non-boolean result fail the Schema compilation.
-
-Successful expressions become typed expression nodes and program IDs in `typol-semantic`. `@all` constraints attach to the array or map node immediately followed by the annotation, and their slots are bound to expression programs later. Instance assertions do not execute during Schema compilation. Collection constraints on static defaults are checked by the default-construction stage.
-
-### 4.6 Static default construction
-
-Default compilation uses each field's resolved type to construct a `ConfigValue` from the AST. It checks scalar shape, numeric range, finite floats, and recursively constructs arrays, maps, objects, and enum payloads. Integer defaults accept integer tokens only; float defaults accept float tokens only, matching configuration literals. An `f32` token is parsed directly to binary32 to avoid an intermediate `f64` rounding. A brace literal is classified as struct or map according to its target. Unknown or duplicate object fields and missing required fields invalidate the Schema.
-
-Object defaults may omit fields supplied by field defaults or optional-type rules. Field-default dependencies are evaluated with explicit frames and cycles are detected, including when the Schema type itself is recursive. Compiled nested defaults are copied to applicable fields. Schema defaults never read the environment. Construction recursively checks target shape and local, inherited alias, field, payload, and nested type-use constraints. Enum defaults are resolved to variant IDs and checked against every `@variants` rule; a rejected default reports a Schema semantic diagnostic with a label on the restriction. It retains recovery state, element locations, and labels. Successful validation produces `SchemaDefaultValidation`; full Schema compilation passes that result with the corresponding defaults to `Builder::freeze_with_validated_defaults` to avoid a duplicate traversal. Ordinary `Builder::freeze` receives no validation result and fully validates arbitrary inputs. Value nodes, depth, and strings use Schema compilation's `ValueLimits` and generic `ExecutionBudget`; Regex checks use the same compile-level `RegexExecutionBudget` as pattern compilation. An invalid default cannot produce validation evidence or be frozen. Cross-field `@assert` depends on a complete configuration instance and `root`, so it runs only after a Config value is built.
-
-### 4.7 Freeze and return records
-
-`RecordBuilder` freezes temporary module/symbol/type graphs, constraint slots, defaults, expression programs, and source positions into `typol-semantic::CompiledSchema`. Freezing builds field/variant slot indexes and validates record structure. Ordinary `Builder::freeze` also fully validates each default; full Schema compilation reuses validation results tied to the defaults. The compiled model is returned only when all checks succeed.
-
-The final model is read through immutable `TypeView`, field, variant, and effective-rule views; callers cannot mutate records, indexes, or compile state. Struct field lookup uses sorted slot indexes. Expression field reads confirm the declared slot agrees with the value item's name before reading it. A sorted variant index maps back to records that remain in declaration order. `CompiledSchema::entry()` returns a view of the root entry type.
-
-The final record also indexes source spans to 1-based line/column `SpanLocation`s. Parser-time `SourcePositionIndex` supplies endpoint locations. At freeze time, `SourceCatalog` checks spans against source length and UTF-8 boundaries without reading source text. Lines and columns count Unicode scalar values; spans remain UTF-8 byte offsets. A successful record with a missing endpoint is a compile failure. On error, if a location cannot be provided from the diagnostic or index, the original diagnostic is retained and `LocationStatus` reports unavailable; the source is not reread.
-
-`LoadedFile` retains identity, AST, actual byte length, position index, and a bounded candidate-capture buffer, not full source text. Candidate byte and record budgets are divided among the maximum number of sources so total captured candidates stay within `SchemaLimits::excerpts()`; all storage counts against shared workspace. Once an AST is complete, default-value spans are masked before candidate lines referenced by diagnostics or compiled records are frozen. Successful artifacts own bounded safe `SourceExcerptSet` data. On failure, needed excerpts are extracted before the source catalog is released and transferred to `SchemaCompileErrors`. Missing candidates are marked truncated or unavailable; the source is not reread and the main diagnostic is unchanged.
-
-## 5. Static errors and diagnostic contract
-
-Schema failures return a non-empty `SchemaCompileErrors` collection or a non-allocating inline emergency error. Public readers include `diagnostics()`, `span_location()`, and `location_status()`. Diagnostics have stable codes, primary spans, and optional labels; duplicate-name diagnostics can point to both the new and previous declaration.
-
-Each diagnostic exposes a stable `kind().id()`, its own `DiagnosticStage`, semantic related-location roles, and field availability statuses. `TypolError` provides the same indexed diagnostic and context query surface in std and no_std builds. For applications consuming both Schema and Config failures, use the common facade queries and keep operation stage separate from diagnostic stage.
-
-`Diagnostic::message()` returns the stored reason as a `Result`, because emergency translation can fail and that failure must remain visible to the caller. The reason text is fixed when the diagnostic is produced; reports and JSON consumers use it directly.
-
-`SchemaCompileErrors` implements `Display` and the standard error interface. Display writes error-code name and number, message, available location, and safe source excerpt without first allocating an owned report string. Debug shows diagnostic count and location status only. `internal_cause()` exposes structured `SchemaInternalCause`, preserving AST access error variant, full `usize` index, and range endpoints; internal causes are also included in display output. Read source snapshots with `excerpts()`. With zero excerpt capacity or collection failure, diagnostics and available locations remain, while excerpt status is `Unavailable` or `Truncated`.
-
-Relevant current `typol-core::DiagnosticCode` values are: resource limit 1, allocation 2, lexical error 3, Schema syntax 4, diagnostic limit 5, regex syntax 6, Schema static semantics 7, resolver/host import 8, root compile-context mismatch 19, and finished compile session 20. Resource, allocation, and internal failures take terminal priority. Ordinary diagnostics sort stably by source ID and byte span; a terminal slot is preserved at the diagnostic limit. Diagnostics must not copy full source lines, raw environment values, or sensitive defaults. Host errors use bounded categories and exclude arbitrary OS text.
-
-The syntax layer creates lexical and Schema syntax errors. Missing imports, name/type mismatches, annotation errors, and expression type errors are created during Schema compilation. Callers must stop Config parsing when the Schema is invalid; partial records are not valid for loading.
-
-## 6. Use during Config parsing
-
-`typol-config::ConfigParser::parse` requires a valid `CompiledSchema`, Config source/options, and an `Environment` implementation. It starts at `schema.entry()`, reads tokens according to the expected type, and constructs the value tree directly. The compiled type determines whether braces mean struct or map; parsing does not retry the other interpretation to recover from a type error.
-
-When a struct or anonymous struct payload completes, the parser applies explicit values, field defaults, optional `none`/promotion rules, and diagnostics for unknown, duplicate, or missing required fields. Arrays, fixed arrays, maps, and enum payloads are checked against compiled shape. Struct and active-variant assertions run only after all values are complete. Any construction or validation error prevents a partial instance from being returned.
-
-Local scalar, field, payload, and nested type-use rules run as their values complete; array/map collection rules run when containers close; full-tree assertions run last. Environment reads occur only for explicit `env(...)` expressions authorized by an eligible field-root `@env`. The same raw environment value is read once per name in a call, while each field reference is converted and validated independently. Defaults do not come from the environment. `typol-core::ValueSource` distinguishes configuration literal, Schema default, environment, fallback, and Rust conversion origins.
-
-Compiled alias, field, and payload constraints, expression programs, regex programs, secret markers, and source positions are consumed through read-only views. Runtime regex search uses the caller's limits and bounded scratch; budget exhaustion is a resource error, not a non-match.
-
-## 7. Rust binding and host entry points
-
-`#[derive(Typol)]` generates type descriptions and conversion implementations from Rust types alone; it does not read a Schema during macro expansion. `LoadedSchema::bind` and `TypedSchema::bind(compiled_schema, options)` require the hidden `BudgetedTypol` marker. Derive adds marker bounds for nested fields and enum payloads; built-in scalars and containers implement it subject to their child types. Recursive derive shapes such as `Vec<Self>` are matched by the pair of Rust `TypeId` and Schema `TypeView`; seeing the same pair again closes that branch, while the same Rust type at a different Schema use site is checked independently. Binding, conversion, node, execution, and workspace limits continue to bound finite recursive values. If a derived type contains a handwritten `Typol` type, mark it with `#[typol(trusted)]` and use `bind_trusted`.
-
-Use `Sourced<T>` when a field's origin affects application behavior. It has the same Schema shape as `T`, and `source()` reports the origin category. For a successful `env(...)` lookup, `environment_name()` and `environment_fallback()` expose the retained reference metadata; neither includes the provider's actual value. `Option<Sourced<T>>` records a present inner scalar reference, while `Sourced<Option<T>>` records it on the option value. Environment references are accepted only on scalar or `option<scalar>` fields whose `@env` name matches exactly. Arrays, maps, enum single payloads, unauthorized fields, and `none` values cannot carry a reference.
-
-`Sourced::from_environment` and `Sourced::from_environment_with_fallback` construct explicit references without querying an environment provider. The typed writer validates the name, scalar shape, fallback representability, field location, and `@env` authorization before writing its first byte. Use `into_value()` to intentionally discard the reference and write only the Rust value. When an unset variable selects its expression fallback, the parsed result is `ExplicitFallback`, not an environment reference. `Sourced<T>` intentionally has no `Debug` implementation so wrapped secrets and reference fallbacks are not printed accidentally. `BoundSchema::read_with_value` returns a `BoundRead<T>` containing both the typed value and the `ValidatedConfigValue` produced by that same parse and validation session; `read` remains the value-only convenience method.
-
-Handwritten mappings enter through `LoadedSchema::bind_trusted` or `TypedSchema::bind_trusted` and produce `TrustedBoundSchema` or `TrustedTypedSchema`, keeping that choice visible in the Rust type. Library-managed work through `DescribeContext`, `ConversionContext`, and subtype dispatch remains budgeted. The library cannot constrain callback allocation, blocking, or arbitrary computation, and does not revalidate a handwritten decoder's returned Rust value. `BudgetedTypol` is a capability marker for ordinary APIs, not a sandbox or security boundary against deliberate forgery. Isolate untrusted implementations in a process or Wasm boundary.
-
-Prefer derive for ordinary struct and enum mappings. Keep handwritten implementations for special mappings whose callbacks have been reviewed and are trusted. When migrating, inspect direct `impl Typol` and transitive nesting through derive fields/payloads. Either bind the entire parent containing a handwritten type as trusted or refactor it into ordinary fields/enums and derive. Configuration loading should explicitly compile the Schema, bind the Rust type, then read values; trusted types use `bind_trusted` after loading.
-
-Built-in map bindings support `OrderedMap<T>` without `std`, `std::collections::HashMap<String, T>` with `std`, `hashbrown::HashMap<String, T>` with the opt-in `hashbrown` feature, and `alloc::collections::BTreeMap<String, T>` with the opt-in `btree-map` feature. The BTreeMap implementation also serves `std::collections::BTreeMap`, and `btree-map` does not enable `std`. `OrderedMap` stores keys in Rust string order; its fallible insertion replaces a duplicate key and returns the old value, while conversion decoding rejects duplicate input keys. Decoding first sorts the input key references and reserves the final vector capacity, avoiding quadratic movement during map construction. Hash maps reserve before decoding entries; the `OrderedMap` and hash-map paths charge their actual element capacity and separately charge owned key text. Hash-map estimates do not include table control bytes or allocator metadata. Hashbrown's default foldhash builder usually does not protect against HashDoS, so applications with attacker-controlled keys should assess that trade-off. The standard library `HashMap` remains available with its distinct default hash builder. BTreeMap decoding charges a checked logical estimate of `size_of::<(String, T)>()` per entry plus owned key text and inserts entries directly into the tree. The estimate does not include tree-node layout or allocator metadata. Since BTreeMap has no fallible node-reservation API, node allocation failure follows the global allocator and may panic or abort; it is not returned as a structured allocation error.
-
-When `serde` and `hashbrown` are both enabled, Typol forwards hashbrown's Serde support. Serde's own `Deserialize` callback can allocate independently and does not use the fallible reserve path above.
-
-Text parsing, foreign `ConfigValue` normalization, and Rust serialization share full-tree Schema validation. Rust values cannot skip field/collection constraints or full-tree assertions. Serialization follows Schema field order and decoded map key order. Contextual Serde methods use the same validation after binding; ordinary Serde traits without Schema context do not promise validation against an actual `.tschem`.
-
-`BoundSchema::write(value, sink, options, out)` and the feature-gated `write_serde` use `WriteOptions`; `WriteOptions::default()` selects `TextLayout::Compact` and inherits the loaded schema's conversion limits unless the caller explicitly overrides them. `with_layout(TextLayout::Pretty)` expands non-empty structs, maps, and arrays with four-space indentation, one item per line, and trailing commas; empty containers remain inline. Single-value enum payloads use a multiline group without a payload comma. Pretty output ends with LF, matching `config fmt`; compact output remains a single line without a final newline. `TypedSchema::serialize` and `serialize_serde` use the same options and write to a caller-provided sink. Formatting whitespace is charged to output and execution limits, and the encoder remains iterative. Conversion and complete Schema validation finish before writing; sink or output-limit errors can leave an already-written prefix. Output retains actual `@secret` values.
-
-### Serde bridge support
-
-`TypedSchema::serialize_serde` and `TypedSchema::deserialize_serde` are context-aware Typol bridges that consume or produce Serde data-model events under a successfully bound Schema. Passing a normal Serde trait directly to another serializer/deserializer bypasses this bridge and carries no validation guarantee for a particular `.tschem`. Caller-provided `Serialize`/`Deserialize` code remains a user-code trust boundary even with a `BudgetedTypol` binding; the bridge charges only work it controls.
+Create a one-shot compile session with `SchemaCompiler::new(SchemaCompileOptions)`.
+Call `compile(root, resolver, observer)` when imports are possible, or
+`compile_without_imports(root)` for an in-memory source that must not import other
+files. The observer variant registers source names for the no-import path.
+
+`SchemaSource::from_source` accepts a single-use byte reader, while `from_str`
+adapts an in-memory string. Source identities compare byte-for-byte and are not
+stored in the compiled Schema. A source explicitly tied to another compile context
+fails with `SCHEMA_CONTEXT_MISMATCH`; using an ended context fails with
+`SCHEMA_SESSION_FINISHED`.
+
+`SchemaResolver::resolve` receives the current source identity, one module name,
+the remaining source-byte allowance, and the compile context. The host decides how
+module names map to files or memory. `SourceObserver` can register each loaded
+identity with its `SourceId` for host-readable names.
+
+`typol_std::FileSchemaCompiler` provides file loading and relative imports. It keeps
+file handles open while the parser reads source bytes on demand. The application
+facade offers `SchemaLoader::compile_file`, `compile_text`, and
+`compile_with_resolver`; a resulting `LoadedSchema` can be bound once and reused
+for multiple Config reads.
+
+### 3.2 Import graph
+
+The root source receives `SourceId(0)`; later sources receive IDs in load order.
+Imports are read depth-first with an explicit stack. Each import edge records its
+state and optional target, so a failed edge never points to a valid source.
+
+An identity already being loaded is an import cycle; an identity loaded earlier is
+a duplicate import. Different identities remain distinct even if their contents
+match. The loader registers each source before parsing, but deduplicates its
+identity before reading its body.
+
+The file resolver uses stable file IDs where available: device and inode on Unix,
+or volume serial number and file index on Windows. This makes hard links share an
+identity. If stable IDs are unavailable, it uses canonical paths; on Linux it can
+resolve an import base from `/proc/self/fd`.
+
+Reads enforce per-file and total byte limits, file count, and import depth. The
+loader may request one probe byte to distinguish an exact limit from an overflow.
+Schema imports use file-scope `extern mod`; ordinary `mod` declarations create
+namespaces within a source.
+
+### 3.3 Shared budgets
+
+One `ExecutionBudget` covers source loading, parsing, semantic checks, record
+creation, indexing, location mapping, and freezing. A separate
+`RegexExecutionBudget` covers pattern compilation and regex checks on Schema
+defaults. Each budget reports its own steps, workspace, and failure.
+
+`SchemaCompileUsage` exposes generic usage in `steps`, `workspace_bytes`,
+`peak_workspace_bytes`, and `failure`; its `regex_*` fields report regex usage.
+Resource exhaustion and allocation failure remain distinct errors, and stage labels
+identify the current generic compilation phase.
+
+Default resource policy is configured by `SchemaLimits`, `SyntaxLimits`,
+`StreamLimits`, `ValueLimits`, `RegexLimits`, `RegexExecutionLimits`, and
+`ExcerptLimits`. For example, the default Schema limits allow 1 MiB per source,
+8 MiB total source bytes, and 64 files. These values are overridable runtime
+policies, not DSL semantics.
+
+## 4. Static compilation
+
+`SchemaCompilation::compile` runs the stages below in order. Any diagnostic
+prevents a usable `CompiledSchema` from being returned; compilation succeeds only
+when all stages pass.
+
+### 4.1 Parsing, modules, and symbols
+
+The loader parses the root and each imported source. A source with syntax errors
+does not enter the module tree, though other loadable sources may still contribute
+diagnostics unless a terminal budget error occurs.
+
+`ModuleTree` places declarations into their source modules and adds ordinary
+`mod` declarations recursively. The root file's `entry struct` is the only Config
+entry; an entry marker in an imported file does not replace it.
+
+`SymbolTable` indexes modules, types, fields, variants, and anonymous-struct
+payload fields. It detects duplicate declarations, fields, and variants, as well as
+invalid entry counts. Lookups report missing, unique, or ambiguous results instead
+of selecting one duplicate silently.
+
+### 4.2 Type resolution
+
+The first segment of a type path is resolved from the current module upward through
+its parents. After that segment resolves, remaining segments are searched only in
+module namespaces. A type used as an intermediate module, a non-type at the final
+segment, or an invalid symbol produces a semantic error.
+
+The type graph assigns IDs to built-ins, user types, containers, aliases, and
+anonymous struct enum payloads. Aliases retain their named records and underlying
+shape, while use sites retain applicable alias constraints and `@secret` metadata.
+
+Alias cycles are checked separately. A budgeted worklist then finds which user
+types can construct finite values: structs require all fields to be constructible,
+while enums need one constructible variant. Positive-length fixed arrays require a
+constructible element; zero-length arrays do not.
+
+Recursive components with no finite value fail with a semantic diagnostic.
+Declarations already invalid for other reasons are excluded to avoid secondary
+recursion errors. Named struct and enum IDs are allocated before resolving fields
+and payloads, so legal recursive references remain finite ID edges.
+
+### 4.3 Annotations and expressions
+
+Annotations attach to the exact recursive type-expression node they follow.
+Compilation assigns declaration-root annotations to their owner and nested
+annotations to a `TypeUse` slot. It checks target types, arguments, duplicates,
+bound ordering, and compatibility among combined constraints.
+
+`@regex` strings are compiled by `typol-regex` into bounded Thompson NFAs.
+Compilation checks pattern size, regex count, instruction counts, and character
+ranges; runtime validation reuses the compiled programs. `@env` is allowed only on
+an eligible scalar or optional-scalar field root and creates authorization
+metadata without reading an environment provider.
+
+`@secret` marks its exact type node for diagnostic, display, and Rust-conversion
+redaction; an alias-root marker also applies to uses of that alias. `@variants`
+resolves names through transparent aliases and stores `VariantId`s. Unknown or
+repeated names, invalid targets, and an empty effective set invalidate the Schema.
+
+The expression compiler type-checks `@assert` and `@all`, including paths, methods,
+operators, literal types, and the available `self`, `root`, closure, and map
+contexts. Every expression must return `bool`. Programs are stored in
+`typol-semantic`; assertions run later, while `@all` is attached to its array or
+map type use.
+
+### 4.4 Defaults and freezing
+
+Default compilation builds `ConfigValue`s against resolved field types. It checks
+scalar shape, numeric range, finite floats, containers, objects, enum payloads, and
+applicable constraints. Integer fields accept integer tokens; float fields accept
+float tokens, and `f32` defaults are rounded directly to binary32.
+
+Object defaults may omit fields with defaults or optional types, but missing
+required fields, unknown fields, and duplicate fields invalidate the Schema.
+Default dependencies use explicit frames and detect cycles, including cycles caused
+by recursive Schema types. Defaults never read environment variables.
+
+Successful default validation produces `SchemaDefaultValidation`, which the full
+compiler passes to `Builder::freeze_with_validated_defaults` to avoid a second
+validation walk. A direct `Builder::freeze` receives no such evidence and validates
+its inputs. Value limits and the generic budget cover default construction; regex
+checks use the compile session's regex budget.
+
+`RecordBuilder` freezes module, symbol, type, constraint, default, expression, and
+location data into `CompiledSchema`. It builds sorted lookup indexes while keeping
+fields and variants in declaration order. Callers use immutable `TypeView`, field,
+variant, and rule views; `CompiledSchema::entry()` returns the root entry view.
+
+Source spans remain UTF-8 byte ranges. The compiled model stores 1-based line and
+column locations derived from parser indexes, with columns counted in Unicode
+scalars. Source excerpts are captured under separate bounds; the compiler does not
+retain complete source text or reread a source to fill a missing excerpt.
+
+## 5. Diagnostics
+
+Schema failures return non-empty `SchemaCompileErrors` or a non-allocating
+emergency error. Diagnostics carry stable codes, primary spans, optional labels,
+and location status. Duplicate-name errors can identify both declarations.
+
+`Diagnostic::message()` returns a `Result`, so a translation failure remains
+visible. `Display` writes the code, message, available location, and safe excerpt
+without first building a report string; `Debug` exposes only counts and status.
+`internal_cause()` provides structured internal details when available.
+
+| Category | Code |
+| --- | ---: |
+| Allocation failure | 2 |
+| Lexical error | 3 |
+| Schema syntax error | 4 |
+| Diagnostic limit reached | 5 |
+| Regex syntax error | 6 |
+| Schema static semantic error | 7 |
+| Resolver or host import error | 8 |
+| Root compile-context mismatch | 19 |
+| Compile session ended | 20 |
+
+Ordinary diagnostics are stably sorted by source ID and byte span. Terminal
+resource, allocation, and internal errors take priority, and a diagnostic-limit
+slot is preserved. Core diagnostics do not copy full source lines, raw environment
+values, sensitive defaults, arbitrary host error text, or real file paths.
+
+Syntax errors originate in `typol-syntax`; import, name, type, annotation, and
+expression errors originate during Schema compilation. Config parsing must stop
+when compilation fails because partial records are not valid input.
+
+## 6. Config parsing
+
+`ConfigParser::parse` receives a valid `CompiledSchema`, a Config source and
+options, and an `Environment` implementation. It starts at `schema.entry()`,
+parses tokens according to the expected type, and builds the value tree directly.
+The compiled type determines whether `{}` denotes a struct or a map.
+
+When a struct or anonymous struct payload is complete, the parser applies explicit
+values, field defaults, and optional-value rules. It also reports unknown,
+duplicate, or missing required fields. Arrays, fixed arrays, maps, and enum payloads
+are checked against compiled shapes; any error prevents returning a partial value.
+
+Local constraints run as values complete, collection constraints when arrays or
+maps close, and full-tree assertions last. Assertions run only for the active enum
+variant. Environment lookup occurs only for an explicit `env(...)` expression
+authorized by a field-root `@env`; a name is read once per call, while each
+reference is converted and validated independently.
+
+Schema defaults do not come from the environment. `ValueSource` records whether a
+value came from Config text, a Schema default, an environment lookup, a fallback,
+or Rust conversion. Runtime validation reads compiled rules and regex programs
+through immutable views.
+
+## 7. Rust binding and codecs
+
+`#[derive(Typol)]` describes a Rust type without opening a Schema file.
+`LoadedSchema::bind` checks that description against the entry type and returns a
+reusable binding. Ordinary binding requires `BudgetedTypol`; recursive derived
+types are matched by Rust `TypeId` and Schema view while configured limits bound
+the values they convert.
+
+Handwritten `Typol` implementations use `bind_trusted` and produce visibly trusted
+binding types. Library-managed work remains budgeted, but callbacks can allocate,
+block, or compute outside those limits, and handwritten decoders are not
+revalidated. `BudgetedTypol` is a capability marker, not a sandbox.
+
+`Sourced<T>` retains the origin of a scalar field, including the name and fallback
+metadata for an environment reference. Its Schema shape matches `T`; references
+are accepted only for authorized scalar or optional-scalar fields. The wrapper has
+no `Debug` implementation so it cannot accidentally print secrets or fallbacks.
+
+Map bindings include `OrderedMap<T>` without `std`, `HashMap<String, T>` with
+`std`, and optional `hashbrown` and `btree-map` feature implementations.
+`OrderedMap` sorts keys; hash maps reserve capacity before decoding. BTreeMap uses a
+checked logical allocation estimate, but node allocation follows the global
+allocator because it has no fallible reservation API.
+
+Text parsing performs full-tree validation. For foreign `ConfigValue`s,
+normalization checks shape and fills defaults; `ConfigValueProcessor::validate`
+then checks constraints and assertions. Rust serialization and contextual Serde
+also validate the complete value, so Rust values cannot skip Schema rules.
+The text writer validates before writing, follows Schema field order, and offers
+compact and pretty layouts.
 
 | Serde data-model operation | `serialize_serde` | `deserialize_serde` |
 | --- | --- | --- |
 | Boolean, integer, finite float, string | Supported | Supported |
-| `Option<T>` | Supported; nested option rejected | Supported; nested option rejected |
-| Sequence | Supported as Schema array | Supported as Schema array |
-| Tuple | Supported only for a same-length fixed Schema array | Supported only for a same-length fixed Schema array |
-| Map | Supported with string keys only | Supported with string keys only |
-| Named struct | Type and field names must match Schema | Type and field names must match Schema |
+| `Option<T>` | Supported; nested options rejected | Supported; nested options rejected |
+| Sequence | Schema array | Schema array |
+| Tuple | Same-length fixed Schema array | Same-length fixed Schema array |
+| Map | String keys only | String keys only |
+| Named struct | Type and field names must match | Type and field names must match |
 | Enum variant | Unit, newtype, and named-field payloads | Unit, newtype, and named-field payloads |
-| `serialize_char`, bytes, standalone unit, unit/newtype/tuple struct, tuple enum variant, `collect_str` | Rejected | Not applicable |
-| `deserialize_any`, `deserialize_ignored_any`, root-level `deserialize_identifier`, char, bytes, standalone unit, unit/newtype/tuple struct, tuple enum variant | Not applicable | Rejected |
+| Other: char, bytes, unit, tuple struct/variant, `collect_str` | Rejected | Not applicable |
+| `deserialize_any`/ignored-any, root identifier, char, bytes, unit, tuple struct/variant | Not applicable | Rejected |
 
-The bridge uses three stable `DiagnosticContext::failure_point()` identifiers under `RUST_CONVERSION_ERROR`: `serde-data-model-operation-unsupported` for unsupported operations; `serde-user-custom-rejection` for a user callback rejecting with Serde's custom error; and `serde-schema-shape-mismatch` when a supported operation conflicts with Schema type, names, fields, enum payload, or fixed-array length. Serde internally uses `deserialize_identifier` to read struct field and enum variant names; the root-level restriction means decoding the target itself directly as an identifier is unsupported.
+The bridge reports unsupported operations, user callback rejection, and Schema
+shape mismatches through stable `DiagnosticContext::failure_point()` identifiers.
+Custom Serde error text is not stored or displayed. Callbacks remain a user-code
+trust boundary, and the bridge can budget only work it controls.
 
-Callers can read these static contexts with `CodecErrors::diagnostic_context(index)`. Custom error text is not stored in the error container, Display, Debug, or diagnostics, preventing sensitive input leakage. Full Schema value validation occurs after Serde serialization events are converted; resource, allocation, and Schema errors retain their own categories.
+`typol-std` supplies file, reader, process-environment, and diagnostic adapters.
+Shared facade APIs use the same loading, binding, and error types in `std` and
+`no_std + alloc` builds; callers pass an `Environment` explicitly.
 
-`typol-std` supplies standard adapters such as `FileSchemaResolver`, `FileSchemaCompiler`, and `ProcessEnvironment`. `SchemaLoader` and `LoadedSchema` coordinate Schema loading, source names, binding, and configuration reads. Core parser/compiler code does not call file APIs, `std::env`, or terminal output.
+## 8. Security and source excerpts
 
-The loading facade uses the same `SchemaLoader`, `LoadedSchema`, `BoundSchema`, `ReadRequest`, `TypolError`, and `TypolStage` types in `no_std + alloc` and `std` builds. Shared reads receive an explicit `Environment`; host adapters add file and reader sources, and applications can pass a `ProcessEnvironment` provider when they want process-variable lookups.
+`@secret` and alias-propagated markers protect diagnostics and safe display by
+hiding sensitive messages and truncating paths at the secret boundary. Rust
+conversion errors follow the same policy. If a path cannot be mapped safely, or
+redaction runs out of resources, the original path is not exposed.
 
-## 8. Security and data handling
+Source snapshots retain only bounded, safe lines. Known default-value spans and
+secret Config values are masked before excerpts are published; secret map entries
+hide both keys and values. If masking cannot be proven complete, the excerpt is
+omitted rather than copied in raw form.
 
-- Source spans use byte offsets internally; line and column conversion happens only for display.
-- Raw environment bytes live only in the current Config call's cache and are not copied to ordinary diagnostics.
-- `@secret` and alias-propagated secret markers drive safe diagnostics and display; secret containers hide child paths and map keys.
-- Rust conversion diagnostics from `TypedSchema::serialize`/`deserialize` are hidden and path-truncated before entering `CodecErrors`. Unresolvable paths are cleared, and redaction failure never falls back to an original path.
-- Default-value source ranges and secret Config subtrees are masked before source snapshots are published. Secret map items mask key and value. If masking cannot be proven complete, the line is omitted.
-- Errors and compiled artifacts retain bounded safe source lines, not full input. Default reports exclude raw environment values, real file paths, and native OS error text.
-- Encoded values must retain secrets for round-tripping; safe display and serialization are separate purposes.
-- Generic `Debug` for `ConfigValue`, Schema tokens, and compile errors must not recursively expose sensitive literals.
-- Resource or allocation failure must not panic, recurse without bound, or return partial AST, Schema, or Config values.
-- Unicode string length, regex characters, source columns, and map-key equivalence follow their DSL definitions; UTF-8 byte count, locale, and implicit normalization are not substitutes.
+Excerpt limits cover total bytes, line bytes, record count, and context rows.
+Columns count Unicode scalar values, tabs count as one column, and CRLF is excluded
+from line text. Truncated text stays on UTF-8 boundaries; missing excerpts are
+never recovered by rereading the source.
+
+Secrets remain present in successful values and serialized output. Safe display
+and diagnostic redaction do not encrypt data; applications must protect actual
+values they choose to retain or write.
 
 ## 9. Maintenance
 
-Coverage should be organized by lexical/AST structure; missing, cyclic, and duplicate imports; namespaces and root entry; path resolution, alias cycles, and recursive types; annotation applicability and bound conflicts; complete default construction and constraints; expression types/context; regex subset and cumulative limits; source positions, diagnostic caps, and allocation failures; runtime consumption of compiled records; and Rust binding/contextual codecs. Tests compare stable diagnostic codes, locations, and structured results rather than debug strings. Public end-to-end examples and resource-policy reviews belong in regression coverage. If implementation conflicts with the Schema DSL, record and revise the specification/decision before changing parser or compiler behavior.
+Keep coverage for lexer and AST behavior, import graphs, name and type resolution,
+recursive types, annotation rules, default construction, expression typing,
+regex limits, diagnostics, resource failures, runtime validation, and Rust
+bindings. Compare stable codes, locations, and structured results rather than
+debug strings.
 
-### 9.1 Bounded diagnostic source excerpts
-
-`SchemaLimits::excerpts()` configures `ExcerptLimits` for total storage bytes, line bytes, record count, and context rows per span. Zero disables excerpts. A bounded window starts at the first line of each span; a span extending beyond that window is marked truncated, and context lines are split before/after it. Candidate windows, redaction ranges, and final snapshots each have byte caps and use the call workspace budget. Optional allocation failure does not change the main diagnostic. An owned `SourceExcerptSet` has status `Complete`, `Truncated`, or `Unavailable`; missing records never reread or display source. Columns count Unicode scalars, tabs count as one column, CRLF is excluded from line text, and UTF-8-safe truncation adds an ellipsis.
-
-For Config input, streaming parsing keeps bounded candidates and a recent-line window, pinning lines referenced by diagnostics until the call ends. Delayed diagnostics may use only retained candidates. At completion, only lines referenced by real diagnostics and their context are published. Known secret values and secret map spans are masked; unfinished secret values are masked to input end. Recovery-skipped or unbound content is hidden conservatively. If range recording fails, excerpts are unavailable. Raw environment values never enter the window.
-
-Schema candidates are masked for default-value spans only after a complete AST exists, then lines referenced by diagnostics and compiled records are extracted. On syntax failure, uncertain masking boundaries, or capture failure, raw candidates are discarded. Errors and compiled artifacts retain no full source; new debug output exposes only state and counts.
+When implementation behavior conflicts with the Schema DSL, revise the
+specification or decision record before changing parser or compiler semantics.
+Implementation pages describe the current source; they do not establish language
+rules independently.

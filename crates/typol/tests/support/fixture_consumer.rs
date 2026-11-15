@@ -402,7 +402,9 @@ impl SchemaResolver for Resolver {
         assert_eq!(name, "common");
         let text = include_str!("../fixtures/common.tschem");
         if text.len() > max {
-            return Err(out.fail(ResolverError::ResourceLimitExceeded));
+            return Err(out.fail(ResolverError::ResourceLimit(
+                request.source_byte_limit_kind,
+            )));
         }
         self.source.replace(text);
         Ok(SchemaSource::from_source(b"common", &mut self.source))
@@ -599,7 +601,7 @@ fn roundtrip<T: Target>(binding: &TypedSchema<'_, T>, input: &str, calls: usize)
     });
     assert_eq!(
         errors.diagnostics().last().unwrap().code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::CONFIG_FORMAT_OUTPUT_BYTES_LIMIT_EXCEEDED
     );
     #[cfg(feature = "serde")]
     {

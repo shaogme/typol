@@ -282,9 +282,9 @@ impl StdTypolError {
 
     fn payload_storage_failure(stage: TypolStage, translator: Translator) -> Self {
         let mut diagnostic = Diagnostic::translated_emergency(
-            DiagnosticCode::CAPACITY_EXCEEDED,
+            DiagnosticCode::DIAGNOSTIC_PAYLOAD_CAPACITY_EXCEEDED,
             t! {
-                name: "diagnostic.internal.error_payload_capacity_exceeded",
+                name: "diagnostic.emergency.diagnostic_payload_capacity_exceeded",
                 locale: translator,
             },
         );
@@ -699,7 +699,10 @@ mod tests {
 
             assert_eq!(errors.stage(), stage);
             assert_eq!(errors.diagnostics().len(), 1);
-            assert_eq!(diagnostic.code(), DiagnosticCode::CAPACITY_EXCEEDED);
+            assert_eq!(
+                diagnostic.code(),
+                DiagnosticCode::DIAGNOSTIC_PAYLOAD_CAPACITY_EXCEEDED
+            );
             assert_eq!(context.subsystem(), "typol");
             assert_eq!(context.stage(), "error-storage");
             assert_eq!(context.failure_point(), "error-payload-capacity-exceeded");
@@ -709,12 +712,12 @@ mod tests {
             assert!(errors.source().is_none());
 
             let displayed = errors.to_string();
-            assert!(displayed.contains("failed to store error payload"));
-            assert!(displayed.contains("CAPACITY_EXCEEDED"));
+            assert!(displayed.contains("diagnostic payload capacity exceeded"));
+            assert!(displayed.contains("DIAGNOSTIC_PAYLOAD_CAPACITY_EXCEEDED"));
 
             let rendered = TestOpeo::value(|out| errors.render(RenderOptions::default(), out))?;
-            assert!(rendered.contains("failed to store error payload"));
-            assert!(rendered.contains("CAPACITY_EXCEEDED"));
+            assert!(rendered.contains("diagnostic payload capacity exceeded"));
+            assert!(rendered.contains("DIAGNOSTIC_PAYLOAD_CAPACITY_EXCEEDED"));
         }
         Ok(())
     }
@@ -733,7 +736,7 @@ mod tests {
             .test_expect("loading errors should preserve schema context")?;
 
         assert_eq!(errors.stage(), TypolStage::SchemaCompile);
-        assert_eq!(diagnostic.code(), DiagnosticCode::INTERNAL_ERROR);
+        assert_eq!(diagnostic.code(), DiagnosticCode::BUDGET_INVARIANT_FAILURE);
         assert_eq!(context.subsystem(), "typol-schema");
         assert_eq!(context.stage(), "schema-initialization");
         assert_eq!(context.failure_point(), "test-invariant");

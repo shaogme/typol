@@ -1,34 +1,22 @@
 use typol_core::{
-    BudgetError, Diagnostic, DiagnosticCode, ExecutionBudget, ExecutionLimits, Read, SliceSource,
-    SourceId, SourceReadError, SourceReadErrorKind, SourceSpan,
+    BudgetError, Diagnostic, DiagnosticCode, DiagnosticContext, ExecutionBudget, ExecutionLimits,
+    InternalError, Read, SliceSource, SourceId, SourceReadError, SourceReadErrorKind, SourceSpan,
+    diagnostic_context,
 };
 use typol_syntax::{
     AstAccessError, SchemaAst, SchemaParseOptions, SchemaParser, StreamLimits, SyntaxErrors,
     SyntaxLimits,
     opeo::{OResult, Out},
 };
-use typol_test_support::TestSlot;
+use typol_test_support::{
+    TestFailure, TestSlot, test_assert_early as test_assert, test_assert_eq_early as test_assert_eq,
+};
 
-#[derive(Debug)]
-struct TestFailure;
-
-macro_rules! test_assert {
-    ($condition:expr $(, $($message:tt)*)?) => {{
-        if !$condition {
-            return Err(TestFailure);
-        }
-    }};
-}
-
-macro_rules! test_assert_eq {
-    ($left:expr, $right:expr $(, $($message:tt)*)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(TestFailure);
-        }
-    }};
-}
+static SOURCE_RANGE_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-syntax-tests",
+    "byte-source",
+    "source-range-unavailable",
+);
 
 type TestResult<T = ()> = Result<T, TestFailure>;
 
@@ -38,13 +26,13 @@ trait TestValue<T> {
 
 impl<T, E> TestValue<T> for Result<T, E> {
     fn test_value(self) -> TestResult<T> {
-        self.map_err(|_| TestFailure)
+        self.map_err(|_| TestFailure::new("test result was unavailable"))
     }
 }
 
 impl<T> TestValue<T> for Option<T> {
     fn test_value(self) -> TestResult<T> {
-        self.ok_or(TestFailure)
+        self.ok_or_else(|| TestFailure::new("test value was missing"))
     }
 }
 
@@ -54,7 +42,8 @@ trait TestError<T> {
 
 impl<T, E> TestError<E> for Result<T, E> {
     fn test_error(self) -> TestResult<E> {
-        self.err().ok_or(TestFailure)
+        self.err()
+            .ok_or_else(|| TestFailure::new("expected test error was missing"))
     }
 }
 
@@ -98,20 +87,26 @@ impl Read<Diagnostic> for ShortReader<'_> {
         let count = remaining.min(output.len()).min(self.chunk_bytes);
         let Some(end) = self.offset.checked_add(count) else {
             return Err(out.fail(Diagnostic::from(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::SourceInputInvariantFailure(SOURCE_RANGE_INVARIANT),
+                ))
+                .with_input(source_id, offset),
             )));
         };
         let Some(source) = self.bytes.get(self.offset..end) else {
             return Err(out.fail(Diagnostic::from(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::SourceInputInvariantFailure(SOURCE_RANGE_INVARIANT),
+                ))
+                .with_input(source_id, offset),
             )));
         };
         let Some(destination) = output.get_mut(..count) else {
             return Err(out.fail(Diagnostic::from(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::SourceInputInvariantFailure(SOURCE_RANGE_INVARIANT),
+                ))
+                .with_input(source_id, offset),
             )));
         };
         destination.copy_from_slice(source);
@@ -141,13 +136,17 @@ impl Read<Diagnostic> for FailingReader<'_> {
             .min(self.fail_at.saturating_sub(self.offset));
         let end = self.offset + count;
         let Some(source) = self.bytes.get(self.offset..end) else {
-            let error = SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                .with_input(source_id, offset);
+            let error = SourceReadError::new(SourceReadErrorKind::Internal(
+                InternalError::SourceInputInvariantFailure(SOURCE_RANGE_INVARIANT),
+            ))
+            .with_input(source_id, offset);
             return Err(out.fail(Diagnostic::from(error)));
         };
         let Some(destination) = output.get_mut(..count) else {
-            let error = SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                .with_input(source_id, offset);
+            let error = SourceReadError::new(SourceReadErrorKind::Internal(
+                InternalError::SourceInputInvariantFailure(SOURCE_RANGE_INVARIANT),
+            ))
+            .with_input(source_id, offset);
             return Err(out.fail(Diagnostic::from(error)));
         };
         destination.copy_from_slice(source);
@@ -159,7 +158,7 @@ impl Read<Diagnostic> for FailingReader<'_> {
 fn execution_budget(steps: usize) -> TestResult<ExecutionBudget> {
     TestSlot::<BudgetError>::default()
         .access(|out| ExecutionBudget::new(ExecutionLimits::new(steps, 67_108_864), out))
-        .map_err(|_| TestFailure)
+        .map_err(|_| TestFailure::new("test result was unavailable"))
 }
 
 fn parse_bytes(
@@ -190,13 +189,13 @@ fn summarize(ast: &SchemaAst) -> TestResult<AstSummary> {
     for index in 0..ast.items().len() {
         let item = errors
             .access(|out| ast.items().get(index, out))
-            .map_err(|_| TestFailure)?
+            .map_err(|_| TestFailure::new("test result was unavailable"))?
             .test_value()?;
         item_spans.push(item.span());
     }
     let structure_height = errors
         .access(|out| ast.structure_height(out))
-        .map_err(|_| TestFailure)?;
+        .map_err(|_| TestFailure::new("test result was unavailable"))?;
     Ok(AstSummary {
         span: ast.span(),
         item_spans,
@@ -306,7 +305,7 @@ fn source_limit_read_failure_and_invalid_utf8_never_return_an_ast() -> TestResul
     let error = parse_bytes(&mut oversized, &limited, 67_108_864)?.test_error()?;
     let diagnostics = error.diagnostics();
     let first = diagnostics.first().test_value()?;
-    test_assert_eq!(first.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED);
+    test_assert_eq!(first.code(), DiagnosticCode::SOURCE_BYTES_LIMIT_EXCEEDED);
     test_assert_eq!(
         first.primary().test_value()?.span().start(),
         source.len() - 1
@@ -354,7 +353,7 @@ fn low_execution_budget_terminates_recovery_for_known_and_unknown_length_inputs(
     test_assert!(
         expected
             .iter()
-            .any(|error| { error.code == DiagnosticCode::RESOURCE_LIMIT_EXCEEDED })
+            .any(|error| { error.code == DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED })
     );
     Ok(())
 }

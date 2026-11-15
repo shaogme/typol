@@ -11,14 +11,16 @@ use typol_config::{
     SourceWriter,
 };
 use typol_core::{
-    ConfigValue, ConfigValueBuilder, ExecutionBudget, ExecutionLimits, SliceSource, TextLayout,
-    ValueKind, ValueScalar, ValueSource,
+    ConfigValue, ConfigValueBuilder, DiagnosticCode, ExecutionBudget, ExecutionLimits,
+    ResourceLimit, SliceSource, TextLayout, ValueKind, ValueScalar, ValueSource,
 };
-use typol_schema::{SchemaCompileOptions, SchemaSource};
+use typol_schema::{
+    SchemaCompileOptions, SchemaCompiler, SchemaResolver, SchemaSource, SourceObserver,
+};
 use typol_semantic::CompiledSchema;
 use typol_test_support::{
-    ConfigTestSupport as Support, Payload, TestExtract, TestFailure, TestOpeo, TestOpeoOutcome,
-    TestResult, ValueFactory as Values, test_verify as test_assert, test_verify_eq as test_eq,
+    Payload, TestExtract, TestFailure, TestOpeo, TestOpeoOutcome, TestResult,
+    ValueFactory as Values, test_verify as test_assert, test_verify_eq as test_eq,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,12 +89,22 @@ impl SourceWriter for MemoryWriter {
 }
 
 fn compile(text: &str) -> TestResult<CompiledSchema> {
-    Support::compile_schema(
-        SchemaCompileOptions::default(),
-        SchemaSource::from_str(b"root", text),
-        None,
-        None,
-    )
+    TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::default();
+        let source = SchemaSource::from_str(b"root", text);
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()
 }
 
@@ -512,7 +524,7 @@ fn formatter_enforces_output_and_workspace_limits_without_returning_partial_text
     })?;
     test_eq!(
         output_error.kind(),
-        ConfigFormatErrorKind::ResourceLimitExceeded
+        ConfigFormatErrorKind::ResourceLimit(ResourceLimit::ConfigFormatOutputBytes)
     );
 
     let workspace_error = TestOpeo::error(|out| {
@@ -524,7 +536,7 @@ fn formatter_enforces_output_and_workspace_limits_without_returning_partial_text
     })?;
     test_eq!(
         workspace_error.kind(),
-        ConfigFormatErrorKind::ResourceLimitExceeded
+        ConfigFormatErrorKind::ResourceLimit(ResourceLimit::FormattingWorkspaceBytes)
     );
     Ok(())
 }
@@ -879,7 +891,10 @@ fn candidate_source_limit_is_enforced_before_document_commit() -> TestResult {
             out,
         )
     })?;
-    test_eq!(error.kind(), ConfigEditErrorKind::ResourceLimitExceeded);
+    test_eq!(
+        error.kind(),
+        ConfigEditErrorKind::ResourceLimit(ResourceLimit::SourceBytes)
+    );
     test_eq!(document.source(), original);
     Ok(())
 }
@@ -1214,7 +1229,7 @@ fn pretty_enum_payloads_use_multiline_groups_while_empty_and_environment_values_
 fn candidate_source_is_charged_to_constructed_text_before_parse() -> TestResult {
     let schema = compile("entry struct Root { value: u16 }")?;
     let original = "{value:1}";
-    let limits = ConfigLimits::default().with_max_constructed_text_bytes(original.len());
+    let limits = ConfigLimits::default().with_max_constructed_text_bytes(original.len() - 1);
     let options = ConfigParseOptions::default().with_config(limits);
     let mut document = parse_document_with_options(&schema, original, options)?;
     let path = ConfigPath::new().field("value");
@@ -1227,7 +1242,10 @@ fn candidate_source_is_charged_to_constructed_text_before_parse() -> TestResult 
             out,
         )
     })?;
-    test_eq!(error.kind(), ConfigEditErrorKind::ResourceLimitExceeded);
+    test_eq!(
+        error.kind(),
+        ConfigEditErrorKind::ResourceLimit(ResourceLimit::ConfigTextBytes)
+    );
     test_eq!(document.source(), original);
     Ok(())
 }
@@ -1249,10 +1267,13 @@ fn candidate_parser_resource_diagnostics_are_classified_and_preserved() -> TestR
             out,
         )
     })?;
-    test_eq!(error.kind(), ConfigEditErrorKind::ResourceLimitExceeded);
+    test_eq!(
+        error.kind(),
+        ConfigEditErrorKind::ResourceLimit(ResourceLimit::ConfigValueNodes)
+    );
     test_assert!(error.validation_errors().is_some_and(|errors| {
         errors.diagnostics().iter().any(|diagnostic| {
-            diagnostic.code() == typol_core::DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+            diagnostic.code() == DiagnosticCode::CONFIG_VALUE_NODES_LIMIT_EXCEEDED
         })
     }));
     test_eq!(document.source(), original);

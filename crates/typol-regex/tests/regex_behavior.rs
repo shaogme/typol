@@ -1,12 +1,14 @@
 #[path = "support/clippy.rs"]
 mod clippy;
 
-use typol_core::{BudgetError, ExecutionLimits, RegexExecutionBudget};
+use typol_core::{
+    BudgetError, CapacityExceeded, ExecutionLimits, RegexExecutionBudget, ResourceLimit,
+};
 use typol_opeo_test_support::TestSlot;
 use typol_policy::RegexLimits;
 use typol_regex::{
-    Regex, RegexCompileError, RegexCompiler, RegexMatchError, RegexResource, RegexScratch,
-    RegexScratchError, RegexSyntaxErrorKind,
+    Regex, RegexCompileError, RegexCompiler, RegexMatchError, RegexScratch, RegexScratchError,
+    RegexSyntaxErrorKind,
 };
 
 struct SearchCase {
@@ -100,7 +102,9 @@ impl RegexErrors {
         scratch: &mut RegexScratch,
     ) -> clippy::Attempt<bool, RegexMatchError> {
         let Some(budget) = self.active_budget.as_ref() else {
-            return clippy::Attempt::Failure(RegexMatchError::CapacityExceeded);
+            return clippy::Attempt::Failure(RegexMatchError::CapacityExceeded(
+                CapacityExceeded::RegexExecution,
+            ));
         };
         clippy::Clippy::attempt(&mut self.matching, |out| {
             regex.is_match(input, scratch, budget, out)
@@ -293,8 +297,8 @@ fn reports_resource_failures_without_echoing_pattern_or_input() {
     assert!(
         matches!(
             &compile_result,
-            clippy::Attempt::Failure(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::PatternBytes
+            clippy::Attempt::Failure(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexPatternBytes
             ))
         ),
         "exceeding the pattern byte limit should return the corresponding resource error"
@@ -330,8 +334,8 @@ fn reports_resource_failures_without_echoing_pattern_or_input() {
     assert!(
         matches!(
             &match_result,
-            clippy::Attempt::Failure(RegexMatchError::ResourceLimitExceeded(
-                RegexResource::SearchSteps
+            clippy::Attempt::Failure(RegexMatchError::ResourceLimit(
+                ResourceLimit::RegexSearchSteps
             ))
         ),
         "zero-step budget should report a search resource error"
@@ -361,8 +365,8 @@ fn enforces_compile_scratch_and_search_boundaries() {
     limits.set_max_regex_pattern_bytes(1);
     assert!(matches!(
         errors.compile("é", &limits, &compilation),
-        clippy::Attempt::Failure(RegexCompileError::ResourceLimitExceeded(
-            RegexResource::PatternBytes
+        clippy::Attempt::Failure(RegexCompileError::ResourceLimit(
+            ResourceLimit::RegexPatternBytes
         ))
     ));
 
@@ -376,8 +380,8 @@ fn enforces_compile_scratch_and_search_boundaries() {
     let over_depth = format!("{}a{}", "(".repeat(65), ")".repeat(65));
     assert!(matches!(
         errors.compile(&over_depth, &limits, &compilation),
-        clippy::Attempt::Failure(RegexCompileError::ResourceLimitExceeded(
-            RegexResource::NestingDepth
+        clippy::Attempt::Failure(RegexCompileError::ResourceLimit(
+            ResourceLimit::RegexNestingDepth
         ))
     ));
 
@@ -393,16 +397,16 @@ fn enforces_compile_scratch_and_search_boundaries() {
     limits.set_max_regex_instructions_per_pattern(1);
     assert!(matches!(
         errors.compile("a", &limits, &compilation),
-        clippy::Attempt::Failure(RegexCompileError::ResourceLimitExceeded(
-            RegexResource::InstructionCount
+        clippy::Attempt::Failure(RegexCompileError::ResourceLimit(
+            ResourceLimit::RegexInstructionCount
         ))
     ));
     limits.set_max_regex_instructions_per_pattern(2);
     limits.set_max_regex_ranges_per_pattern(0);
     assert!(matches!(
         errors.compile("a", &limits, &compilation),
-        clippy::Attempt::Failure(RegexCompileError::ResourceLimitExceeded(
-            RegexResource::CharacterRangeCount
+        clippy::Attempt::Failure(RegexCompileError::ResourceLimit(
+            ResourceLimit::RegexCharacterRanges
         ))
     ));
 
@@ -421,8 +425,8 @@ fn enforces_compile_scratch_and_search_boundaries() {
     exact_scratch_limit.set_max_regex_scratch_states(1);
     assert!(matches!(
         errors.scratch(&regex, &exact_scratch_limit),
-        clippy::Attempt::Failure(RegexScratchError::ResourceLimitExceeded(
-            RegexResource::ScratchStateCount
+        clippy::Attempt::Failure(RegexScratchError::ResourceLimit(
+            ResourceLimit::RegexScratchStates
         ))
     ));
 
@@ -467,8 +471,8 @@ fn enforces_compile_scratch_and_search_boundaries() {
     };
     assert_eq!(
         errors.is_match_budgeted(&regex, "a", &mut scratch_two, &search_two),
-        clippy::Attempt::Failure(RegexMatchError::ResourceLimitExceeded(
-            RegexResource::SearchSteps
+        clippy::Attempt::Failure(RegexMatchError::ResourceLimit(
+            ResourceLimit::RegexSearchSteps
         ))
     );
 }
@@ -514,8 +518,8 @@ fn reuses_scratch_across_regexes_and_rejects_insufficient_capacity() {
     };
     assert!(matches!(
         errors.is_match(&large, "aaa", &mut small_scratch),
-        clippy::Attempt::Failure(RegexMatchError::ResourceLimitExceeded(
-            RegexResource::ScratchStateCount
+        clippy::Attempt::Failure(RegexMatchError::ResourceLimit(
+            ResourceLimit::RegexScratchStates
         ))
     ));
 }
@@ -635,8 +639,8 @@ fn regex_budget_separates_cumulative_steps_and_single_search_limit() {
     );
     assert_eq!(
         errors.is_match_budgeted(&regex, "x", &mut scratch, &shared),
-        clippy::Attempt::Failure(RegexMatchError::ResourceLimitExceeded(
-            RegexResource::ExecutionSteps
+        clippy::Attempt::Failure(RegexMatchError::ResourceLimit(
+            ResourceLimit::RegexExecutionSteps
         ))
     );
 
@@ -656,8 +660,8 @@ fn regex_budget_separates_cumulative_steps_and_single_search_limit() {
     };
     assert_eq!(
         errors.is_match_budgeted(&regex, "x", &mut scratch, &zero_search),
-        clippy::Attempt::Failure(RegexMatchError::ResourceLimitExceeded(
-            RegexResource::SearchSteps
+        clippy::Attempt::Failure(RegexMatchError::ResourceLimit(
+            ResourceLimit::RegexSearchSteps
         ))
     );
 }

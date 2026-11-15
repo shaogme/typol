@@ -38,7 +38,8 @@ use crate::{
 use core::{any::TypeId, fmt, mem};
 use opeo::{OResult, Out};
 use typol_core::{
-    BudgetError, NamedValue, ValueError, ValueId, ValuePayload, ValueScalar, ValueView,
+    BudgetError, CapacityExceeded, NamedValue, ResourceLimit, ValueError, ValueId, ValuePayload,
+    ValueScalar, ValueView,
 };
 use typol_i18n::Translator;
 use typol_semantic::{TypeKind, TypeView, VariantPayloadInfo};
@@ -119,7 +120,7 @@ impl<'call> ConversionContext<'call> {
         let Some(depth) = self.depth.child() else {
             return Err(out.fail(CodecErrors::emergency(
                 CodecStage::Conversion,
-                Failure::Resource,
+                Failure::Capacity(CapacityExceeded::RustConversion),
                 self.session.translator(),
             )));
         };
@@ -162,8 +163,8 @@ impl<'call> ConversionContext<'call> {
         ConversionDiagnostics::conversion_error(translator)
     }
 
-    pub fn resource_error(translator: Translator) -> CodecErrors {
-        ConversionDiagnostics::resource_error(translator)
+    pub fn resource_error(limit: ResourceLimit, translator: Translator) -> CodecErrors {
+        ConversionDiagnostics::resource_error(limit, translator)
     }
 
     pub fn allocation_error(translator: Translator) -> CodecErrors {
@@ -176,7 +177,7 @@ impl<'call> ConversionContext<'call> {
     ) -> OResult<'slot, ()> {
         // Each node context is single-entry, preventing manual implementations from re-entering it recursively.
         if self.started {
-            return Err(out.fail(Self::resource_error(self.session.translator())));
+            return Err(out.fail(Conversion::internal_error(self.session.translator())));
         }
         self.check::<T>(out.reborrow())?;
         if self.builder.is_none() {
@@ -201,11 +202,11 @@ impl<'call> ConversionContext<'call> {
         mut out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, ValueId> {
         if self.started {
-            return Err(out.fail(Self::resource_error(self.session.translator())));
+            return Err(out.fail(Conversion::internal_error(self.session.translator())));
         }
         let converted = T::to_config_value(value, self, out.reborrow())?;
         if !self.started {
-            return Err(out.fail(Self::resource_error(self.session.translator())));
+            return Err(out.fail(Conversion::internal_error(self.session.translator())));
         }
         Ok(converted)
     }
@@ -216,11 +217,11 @@ impl<'call> ConversionContext<'call> {
         mut out: Out<'slot, '_, CodecErrors>,
     ) -> OResult<'slot, T> {
         if self.started {
-            return Err(out.fail(Self::resource_error(self.session.translator())));
+            return Err(out.fail(Conversion::internal_error(self.session.translator())));
         }
         let converted = T::from_config_value(value, self, out.reborrow())?;
         if !self.started {
-            return Err(out.fail(Self::resource_error(self.session.translator())));
+            return Err(out.fail(Conversion::internal_error(self.session.translator())));
         }
         Ok(converted)
     }

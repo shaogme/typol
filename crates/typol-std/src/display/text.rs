@@ -5,8 +5,8 @@ use std::{
     str::from_utf8,
 };
 
-use opeo::{OResult, Out, ResultOutExt};
-use typol_core::{ChargedVec, ExecutionBudget};
+use opeo::{ErrSlot, OResult, Out, ResultOutExt};
+use typol_core::{BudgetError, CapacityExceeded, ChargedVec, ExecutionBudget, ResourceLimit};
 
 const LITERAL_CAPACITY: usize = 768;
 
@@ -25,7 +25,7 @@ impl Literal {
             length: 0,
         };
         write!(&mut result, "{value}")
-            .map_err(|_| DisplayError::ResourceLimitExceeded)
+            .map_err(|_| DisplayError::CapacityExceeded(CapacityExceeded::FormatOutput))
             .store_err_into(out.reborrow())?;
         Ok(result)
     }
@@ -325,8 +325,19 @@ impl TextBuffer {
         text: &str,
         mut out: Out<'slot, '_, DisplayError>,
     ) -> OResult<'slot, ()> {
-        self.budget
-            .construct_text(text.len(), self.limit, out.reborrow())?;
+        let mut budget_errors = ErrSlot::<BudgetError>::new();
+        if let Err(caught) = budget_errors.try_call(|budget_out| {
+            self.budget
+                .construct_text(text.len(), self.limit, budget_out)
+        }) {
+            let error = match caught.take() {
+                BudgetError::ResourceLimit(ResourceLimit::ConfigTextBytes) => {
+                    DisplayError::ResourceLimit(ResourceLimit::ConfigFormatOutputBytes)
+                }
+                other => DisplayError::from(other),
+            };
+            return Err(out.fail(error));
+        }
         self.budget.consume(text.len(), out.reborrow())?;
         self.bytes.try_reserve(text.len(), out.reborrow())?;
         for byte in text.bytes() {
@@ -341,7 +352,7 @@ impl TextBuffer {
         mut out: Out<'slot, '_, DisplayError>,
     ) -> OResult<'slot, ()> {
         if text.len() > self.string_limit {
-            return Err(out.fail(DisplayError::ResourceLimitExceeded));
+            return Err(out.fail(DisplayError::ResourceLimit(ResourceLimit::StringBytes)));
         }
         self.write("\"", out.reborrow())?;
         self.escape(text, out.reborrow())?;

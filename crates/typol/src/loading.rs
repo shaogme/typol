@@ -30,6 +30,8 @@ use alloc::vec::Vec;
 #[cfg(not(feature = "std"))]
 use core::str::from_utf8;
 #[cfg(not(feature = "std"))]
+use typol_core::ResourceLimit;
+#[cfg(not(feature = "std"))]
 use typol_schema::{SourceLoadedRequest, SourceObserver, SourceObserverError};
 
 #[cfg(feature = "std")]
@@ -116,7 +118,9 @@ impl SourceObserver for SourceNames {
         out: Out<'slot, '_, SourceObserverError>,
     ) -> OResult<'slot, ()> {
         if request.source_id.get() as usize >= request.context.resources().max_schema_files() {
-            return Err(out.fail(SourceObserverError::CapacityExceeded));
+            return Err(out.fail(SourceObserverError::ResourceLimit(
+                ResourceLimit::SchemaSourceCount,
+            )));
         }
         let mut identity = Vec::new();
         if identity.try_reserve_exact(request.identity.len()).is_err()

@@ -3,7 +3,7 @@ use crate::diagnostics::{
     CodecErrors, CodecStage, ConversionDiagnosticInput, ConversionErrorKind, ConversionPath,
     Failure,
 };
-use typol_core::{BudgetError, ValueError, ValueKind};
+use typol_core::{BudgetError, ResourceLimit, ValueError, ValueKind};
 use typol_i18n::Translator;
 use typol_semantic::TypeKind;
 
@@ -39,8 +39,12 @@ impl ConversionDiagnostics {
         CodecErrors::emergency(CodecStage::Conversion, Failure::Conversion, translator)
     }
 
-    pub(super) fn resource_error(translator: Translator) -> CodecErrors {
-        CodecErrors::emergency(CodecStage::Conversion, Failure::Resource, translator)
+    pub(super) fn resource_error(limit: ResourceLimit, translator: Translator) -> CodecErrors {
+        CodecErrors::emergency(
+            CodecStage::Conversion,
+            Failure::ResourceLimit(limit),
+            translator,
+        )
     }
 
     pub(super) fn allocation_error(translator: Translator) -> CodecErrors {

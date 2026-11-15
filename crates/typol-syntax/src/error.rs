@@ -1,5 +1,4 @@
 use crate::ast::AstAccessError;
-use alloc::borrow::Cow;
 use core::{
     fmt,
     slice::{Iter, from_ref},
@@ -7,8 +6,8 @@ use core::{
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, ChargedString, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext,
-    DiagnosticFailure, DiagnosticLabelInput, DiagnosticMessage, ExecutionBudget,
-    FilledTerminalSlot, RelatedLocationRole, SourceId, SourceSpan, Span, TerminalSlot,
+    DiagnosticLabelInput, DiagnosticMessage, ExecutionBudget, FilledTerminalSlot, InternalError,
+    RelatedLocationRole, ResourceLimit, SourceId, SourceSpan, Span, TerminalSlot,
     diagnostic_context,
 };
 use typol_i18n::{Translator, t};
@@ -23,7 +22,7 @@ pub(crate) struct MessageBuild<'budget> {
 
 pub(crate) struct LabelMessage {
     pub(crate) span: SourceSpan,
-    pub(crate) text: Result<Cow<'static, str>, RenderError>,
+    pub(crate) text: Result<&'static str, RenderError>,
     pub(crate) role: RelatedLocationRole,
 }
 
@@ -221,13 +220,12 @@ impl DiagnosticSink {
         if self.stopped {
             return Ok(());
         }
-        let fatal = matches!(
-            diagnostic.code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
-                | DiagnosticCode::ALLOCATION_FAILED
-                | DiagnosticCode::INTERNAL_ERROR
-                | DiagnosticCode::SOURCE_INPUT_ERROR
-        );
+        let fatal = diagnostic.code().is_resource_limit()
+            || diagnostic.code().is_internal_error()
+            || matches!(
+                diagnostic.code(),
+                DiagnosticCode::ALLOCATION_FAILED | DiagnosticCode::SOURCE_INPUT_ERROR
+            );
         if fatal || diagnostic.code() == DiagnosticCode::DIAGNOSTIC_LIMIT_REACHED {
             self.store_terminal(diagnostic, out.reborrow())?;
             self.stopped = true;
@@ -299,19 +297,27 @@ pub(crate) struct SyntaxDiagnostic;
 impl SyntaxDiagnostic {
     pub(crate) fn emergency(
         code: DiagnosticCode,
-        message: Result<Cow<'static, str>, RenderError>,
+        message: Result<&'static str, RenderError>,
         span: impl Into<Option<SourceSpan>>,
     ) -> Diagnostic {
         let mut diagnostic = match message {
-            Ok(Cow::Borrowed(message)) => Diagnostic::emergency(code, message),
-            Ok(Cow::Owned(_)) => Diagnostic::failure(
-                code,
-                DiagnosticFailure::Translation(RenderError::InvalidCatalog),
-            ),
+            Ok(message) => Diagnostic::emergency(code, message),
             Err(error) => Diagnostic::translation_failure(code, error),
         };
         diagnostic.set_primary(span.into());
         diagnostic
+    }
+
+    pub(crate) fn resource_limit(
+        limit: ResourceLimit,
+        span: impl Into<Option<SourceSpan>>,
+        translator: Translator,
+    ) -> Diagnostic {
+        Self::emergency(
+            limit.diagnostic_code(),
+            limit.emergency_message(translator),
+            span,
+        )
     }
 
     pub(crate) fn internal(
@@ -319,15 +325,24 @@ impl SyntaxDiagnostic {
         span: impl Into<Option<SourceSpan>>,
         translator: Translator,
     ) -> Diagnostic {
+        Self::internal_error(
+            InternalError::SyntaxStorageInvariantFailure(context),
+            span,
+            translator,
+        )
+    }
+
+    pub(crate) fn internal_error(
+        internal: InternalError,
+        span: impl Into<Option<SourceSpan>>,
+        translator: Translator,
+    ) -> Diagnostic {
         let mut diagnostic = Self::emergency(
-            DiagnosticCode::INTERNAL_ERROR,
-            t! {
-                name: "diagnostic.emergency.internal_error",
-                locale: translator,
-            },
+            internal.diagnostic_code(),
+            internal.emergency_message(translator),
             span,
         );
-        diagnostic.set_context(Some(context));
+        diagnostic.set_context(Some(internal.context()));
         diagnostic
     }
 
@@ -485,7 +500,7 @@ impl SyntaxDiagnostic {
             diagnostic.try_add_label_with_text(
                 DiagnosticLabelInput {
                     span,
-                    text: message.as_ref(),
+                    text: message,
                     role,
                 },
                 Some(budget),
@@ -496,7 +511,7 @@ impl SyntaxDiagnostic {
 
     pub(crate) fn make<'slot>(
         build: MessageBuild<'_>,
-        message: Result<Cow<'static, str>, RenderError>,
+        message: Result<&'static str, RenderError>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Diagnostic> {
         let MessageBuild {
@@ -510,12 +525,7 @@ impl SyntaxDiagnostic {
             Err(error) => return Err(out.fail(Diagnostic::translation_failure(code, error))),
         };
         let mut diagnostic = Self::budgeted(span, translator, out.reborrow(), |out| {
-            Diagnostic::try_new(
-                code,
-                DiagnosticMessage::custom(message.as_ref()),
-                Some(budget),
-                out,
-            )
+            Diagnostic::try_new(code, DiagnosticMessage::custom(message), Some(budget), out)
         })?;
         diagnostic.set_primary(Some(span));
         Ok(diagnostic)
@@ -526,26 +536,22 @@ impl SyntaxDiagnostic {
         span: impl Into<Option<SourceSpan>>,
         translator: Translator,
     ) -> Diagnostic {
+        let span = span.into();
+        if let BudgetError::ResourceLimit(limit) = error {
+            let mut diagnostic = Self::resource_limit(limit, span, translator);
+            diagnostic.set_context(error.context());
+            return diagnostic;
+        }
         let message = match error {
             BudgetError::Allocation => t! {
                 name: "diagnostic.emergency.allocation_failed",
                 locale: translator,
             },
-            BudgetError::CapacityExceeded => t! {
-                name: "diagnostic.emergency.capacity_exceeded",
-                locale: translator,
-            },
-            BudgetError::InvariantViolation(_) => t! {
-                name: "diagnostic.emergency.internal_error",
-                locale: translator,
-            },
-            BudgetError::Resource
-            | BudgetError::RegexSteps
-            | BudgetError::RegexSearchSteps
-            | BudgetError::RegexWorkspace => t! {
-                name: "diagnostic.emergency.resource_limit_exceeded",
-                locale: translator,
-            },
+            BudgetError::CapacityExceeded(capacity) => capacity.emergency_message(translator),
+            BudgetError::Internal(internal) => internal.emergency_message(translator),
+            BudgetError::ResourceLimit(limit) => {
+                return Self::resource_limit(limit, span, translator);
+            }
         };
         let mut diagnostic = Self::emergency(error.diagnostic_code(), message, span);
         diagnostic.set_context(error.context());
@@ -574,7 +580,7 @@ mod tests {
             Translator::new(Language::English),
         );
 
-        assert_eq!(diagnostic.code(), DiagnosticCode::INTERNAL_ERROR);
+        assert_eq!(diagnostic.code(), DiagnosticCode::BUDGET_INVARIANT_FAILURE);
         assert_eq!(diagnostic.primary(), Some(span));
         assert_eq!(diagnostic.context(), Some(PARSER_BUDGET_CONTEXT));
     }

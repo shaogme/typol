@@ -1,4 +1,7 @@
-use crate::{BudgetError, DiagnosticContext, diagnostic_context};
+use crate::{
+    BudgetError, CapacityExceeded, DiagnosticContext, InternalError, ResourceLimit,
+    diagnostic_context,
+};
 use core::{
     error::Error,
     fmt::{self, Display},
@@ -35,9 +38,9 @@ pub enum ValueErrorKind {
     DuplicateFieldName,
     EnvironmentReferenceRequired,
     AllocationFailed,
-    ResourceLimitExceeded,
-    CapacityExceeded,
-    InternalInvariantFailure,
+    ResourceLimit(ResourceLimit),
+    CapacityExceeded(CapacityExceeded),
+    Internal(InternalError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,7 +78,7 @@ impl ValueError {
 
     pub(super) const fn internal(context: DiagnosticContext) -> Self {
         Self {
-            kind: ValueErrorKind::InternalInvariantFailure,
+            kind: ValueErrorKind::Internal(InternalError::ValueStructureInvariantFailure(context)),
             first_index: None,
             second_index: None,
             context: Some(context),
@@ -101,9 +104,11 @@ impl Display for ValueError {
                 "environment source requires structured reference metadata"
             }
             ValueErrorKind::AllocationFailed => "memory allocation failed",
-            ValueErrorKind::ResourceLimitExceeded => "execution resource limit exceeded",
-            ValueErrorKind::CapacityExceeded => "workspace capacity exceeded",
-            ValueErrorKind::InternalInvariantFailure => "config value invariant violated",
+            ValueErrorKind::ResourceLimit(limit) => {
+                return write!(formatter, "{limit} limit exceeded");
+            }
+            ValueErrorKind::CapacityExceeded(_) => "workspace capacity exceeded",
+            ValueErrorKind::Internal(_) => "config value invariant violated",
         };
         formatter.write_str(message)
     }
@@ -114,13 +119,10 @@ impl Error for ValueError {}
 impl From<BudgetError> for ValueError {
     fn from(error: BudgetError) -> Self {
         let kind = match error {
-            BudgetError::Resource
-            | BudgetError::RegexSteps
-            | BudgetError::RegexSearchSteps
-            | BudgetError::RegexWorkspace => ValueErrorKind::ResourceLimitExceeded,
+            BudgetError::ResourceLimit(limit) => ValueErrorKind::ResourceLimit(limit),
             BudgetError::Allocation => ValueErrorKind::AllocationFailed,
-            BudgetError::CapacityExceeded => ValueErrorKind::CapacityExceeded,
-            BudgetError::InvariantViolation(_) => ValueErrorKind::InternalInvariantFailure,
+            BudgetError::CapacityExceeded(capacity) => ValueErrorKind::CapacityExceeded(capacity),
+            BudgetError::Internal(error) => ValueErrorKind::Internal(error),
         };
         Self {
             kind,

@@ -9,8 +9,17 @@ use std::{
 };
 
 use opeo::ErrSlot;
-use typol_core::{BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId};
+use typol_core::{
+    BudgetError, DiagnosticContext, ExecutionBudget, ExecutionLimits, InternalError, SourceId,
+    diagnostic_context,
+};
 use typol_syntax::{AstAccessError, SchemaParseOptions, SchemaParser, SyntaxErrors};
+
+static PROFILE_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-syntax-profile",
+    "schema-parse",
+    "diagnostic-or-ast-access-missing",
+);
 
 #[derive(Clone, Copy, Default)]
 struct Statistics {
@@ -172,18 +181,22 @@ fn profile(
         let parse_time = start.elapsed();
         let actual_success = result.is_ok();
         error_code = result.as_ref().err().map_or(0, |errors| {
-            errors
-                .diagnostics()
-                .next_back()
-                .map_or(DiagnosticCode::INTERNAL_ERROR.get(), |diagnostic| {
-                    diagnostic.code().get()
-                })
+            errors.diagnostics().next_back().map_or(
+                InternalError::SyntaxStorageInvariantFailure(PROFILE_INVARIANT)
+                    .diagnostic_code()
+                    .get(),
+                |diagnostic| diagnostic.code().get(),
+            )
         });
         if let Ok(ast) = &result {
             nodes = ast.node_count();
             match errors.ast_access.try_call(|out| ast.structure_height(out)) {
                 Ok(value) => height = value,
-                Err(_) => error_code = DiagnosticCode::INTERNAL_ERROR.get(),
+                Err(_) => {
+                    error_code = InternalError::SyntaxStorageInvariantFailure(PROFILE_INVARIANT)
+                        .diagnostic_code()
+                        .get()
+                }
             }
         }
         steps = execution.steps();

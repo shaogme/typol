@@ -21,7 +21,7 @@ pub(crate) struct ScannedToken {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ScanError {
     InvalidStructure,
-    ResourceLimitExceeded,
+    CapacityExceeded,
 }
 
 pub(crate) struct SourceScanner;
@@ -38,9 +38,7 @@ impl SourceScanner {
                 break;
             }
             newline_before |= matches!(byte, b'\n' | b'\r');
-            *cursor = cursor
-                .checked_add(1)
-                .ok_or(ScanError::ResourceLimitExceeded)?;
+            *cursor = cursor.checked_add(1).ok_or(ScanError::CapacityExceeded)?;
         }
         let Some(start) = Some(*cursor).filter(|start| *start < bytes.len()) else {
             return Ok(None);
@@ -86,9 +84,7 @@ impl SourceScanner {
         if matches!(kind, TokenKind::Atom) {
             *cursor = scan_atom(bytes, start)?;
         } else {
-            *cursor = cursor
-                .checked_add(1)
-                .ok_or(ScanError::ResourceLimitExceeded)?;
+            *cursor = cursor.checked_add(1).ok_or(ScanError::CapacityExceeded)?;
         }
         Ok(Some(ScannedToken {
             start,
@@ -132,9 +128,7 @@ fn scan_atom(bytes: &[u8], start: usize) -> Result<usize, ScanError> {
         if is_whitespace(byte) || is_delimiter(byte) || byte == b'"' || starts_comment {
             break;
         }
-        cursor = cursor
-            .checked_add(1)
-            .ok_or(ScanError::ResourceLimitExceeded)?;
+        cursor = cursor.checked_add(1).ok_or(ScanError::CapacityExceeded)?;
     }
     if cursor == start {
         return Err(ScanError::InvalidStructure);
@@ -145,9 +139,7 @@ fn scan_atom(bytes: &[u8], start: usize) -> Result<usize, ScanError> {
 fn scan_string(source: &str, start: usize) -> Result<usize, ScanError> {
     let bytes = source.as_bytes();
     if bytes.get(start..start.saturating_add(3)) == Some(b"\"\"\"") {
-        let mut cursor = start
-            .checked_add(3)
-            .ok_or(ScanError::ResourceLimitExceeded)?;
+        let mut cursor = start.checked_add(3).ok_or(ScanError::CapacityExceeded)?;
         match bytes.get(cursor) {
             Some(b'\n') => cursor += 1,
             Some(b'\r') if bytes.get(cursor.saturating_add(1)) == Some(&b'\n') => cursor += 2,
@@ -156,77 +148,51 @@ fn scan_string(source: &str, start: usize) -> Result<usize, ScanError> {
         while cursor < bytes.len() {
             let mut content = cursor;
             while matches!(bytes.get(content), Some(b' ' | b'\t')) {
-                content = content
-                    .checked_add(1)
-                    .ok_or(ScanError::ResourceLimitExceeded)?;
+                content = content.checked_add(1).ok_or(ScanError::CapacityExceeded)?;
             }
             if bytes.get(content..content.saturating_add(3)) == Some(b"\"\"\"") {
-                return content
-                    .checked_add(3)
-                    .ok_or(ScanError::ResourceLimitExceeded);
+                return content.checked_add(3).ok_or(ScanError::CapacityExceeded);
             }
             while bytes.get(cursor).is_some_and(|byte| *byte != b'\n') {
-                cursor = cursor
-                    .checked_add(1)
-                    .ok_or(ScanError::ResourceLimitExceeded)?;
+                cursor = cursor.checked_add(1).ok_or(ScanError::CapacityExceeded)?;
             }
             if cursor < bytes.len() {
-                cursor = cursor
-                    .checked_add(1)
-                    .ok_or(ScanError::ResourceLimitExceeded)?;
+                cursor = cursor.checked_add(1).ok_or(ScanError::CapacityExceeded)?;
             }
         }
         return Err(ScanError::InvalidStructure);
     }
-    let mut cursor = start
-        .checked_add(1)
-        .ok_or(ScanError::ResourceLimitExceeded)?;
+    let mut cursor = start.checked_add(1).ok_or(ScanError::CapacityExceeded)?;
     while let Some(byte) = bytes.get(cursor).copied() {
         if byte == b'\\' {
-            cursor = cursor
-                .checked_add(2)
-                .ok_or(ScanError::ResourceLimitExceeded)?;
+            cursor = cursor.checked_add(2).ok_or(ScanError::CapacityExceeded)?;
         } else if byte == b'"' {
-            return cursor
-                .checked_add(1)
-                .ok_or(ScanError::ResourceLimitExceeded);
+            return cursor.checked_add(1).ok_or(ScanError::CapacityExceeded);
         } else {
-            cursor = cursor
-                .checked_add(1)
-                .ok_or(ScanError::ResourceLimitExceeded)?;
+            cursor = cursor.checked_add(1).ok_or(ScanError::CapacityExceeded)?;
         }
     }
     Err(ScanError::InvalidStructure)
 }
 
 fn scan_line_comment(bytes: &[u8], start: usize) -> Result<usize, ScanError> {
-    let mut cursor = start
-        .checked_add(2)
-        .ok_or(ScanError::ResourceLimitExceeded)?;
+    let mut cursor = start.checked_add(2).ok_or(ScanError::CapacityExceeded)?;
     while let Some(byte) = bytes.get(cursor).copied() {
         if matches!(byte, b'\n' | b'\r') {
             return Ok(cursor);
         }
-        cursor = cursor
-            .checked_add(1)
-            .ok_or(ScanError::ResourceLimitExceeded)?;
+        cursor = cursor.checked_add(1).ok_or(ScanError::CapacityExceeded)?;
     }
     Ok(cursor)
 }
 
 fn scan_block_comment(bytes: &[u8], start: usize) -> Result<usize, ScanError> {
-    let mut cursor = start
-        .checked_add(2)
-        .ok_or(ScanError::ResourceLimitExceeded)?;
+    let mut cursor = start.checked_add(2).ok_or(ScanError::CapacityExceeded)?;
     while cursor < bytes.len() {
         if bytes.get(cursor) == Some(&b'*') && bytes.get(cursor.saturating_add(1)) == Some(&b'/') {
-            return cursor
-                .checked_add(2)
-                .ok_or(ScanError::ResourceLimitExceeded);
+            return cursor.checked_add(2).ok_or(ScanError::CapacityExceeded);
         }
-        cursor = cursor
-            .checked_add(1)
-            .ok_or(ScanError::ResourceLimitExceeded)?;
+        cursor = cursor.checked_add(1).ok_or(ScanError::CapacityExceeded)?;
     }
     Err(ScanError::InvalidStructure)
 }

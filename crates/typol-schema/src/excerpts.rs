@@ -1,18 +1,23 @@
-use crate::{SchemaCompileErrors, loader::LoadedFile};
-use alloc::borrow::Cow;
+use crate::{SchemaCompileErrors, diagnostics::EmergencyDiagnostics, loader::LoadedFile};
 use core::mem::size_of;
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, ExcerptLimits, ExecutionBudget,
-    LocatedSpan, SourceExcerptSet, SourceSpan, Span, SpanLocation,
+    BudgetError, ChargedVec, Diagnostic, DiagnosticContext, ExcerptLimits, ExecutionBudget,
+    InternalError, LocatedSpan, SourceExcerptSet, SourceSpan, Span, SpanLocation,
+    diagnostic_context,
 };
-use typol_i18n::{Translator, t};
+use typol_i18n::Translator;
 use typol_syntax::{
     AstAccessError, Declaration, FieldDeclList, SchemaAst, TopLevelItem, VariantPayloadKind,
 };
-use u18n::RenderError;
 
 pub(crate) struct SchemaExcerpts;
+
+static SOURCE_EXCERPT_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-schema",
+    "source-excerpt",
+    "located-diagnostic-invariant-failed",
+);
 
 /// Redacting every default keeps static failures independent of secret alias resolution.
 struct DefaultRanges<'a, 'ast> {
@@ -163,22 +168,13 @@ impl SchemaExcerpts {
         location: SpanLocation,
         translator: Translator,
     ) -> Diagnostic {
-        let message = t! {
-            name: "diagnostic.emergency.internal_error",
-            locale: translator,
-        };
-        let mut diagnostic = match message {
-            Ok(Cow::Borrowed(text)) => {
-                Diagnostic::emergency(DiagnosticCode::SCHEMA_SEMANTIC_ERROR, text)
-            }
-            Ok(_) => Diagnostic::translation_failure(
-                DiagnosticCode::SCHEMA_SEMANTIC_ERROR,
-                RenderError::InvalidCatalog,
-            ),
-            Err(error) => {
-                Diagnostic::translation_failure(DiagnosticCode::SCHEMA_SEMANTIC_ERROR, error)
-            }
-        };
+        let error = InternalError::SourceExcerptInvariantFailure(SOURCE_EXCERPT_INVARIANT);
+        let mut diagnostic = EmergencyDiagnostics::translated(
+            error.diagnostic_code(),
+            error.emergency_message(translator),
+            Some(span),
+        );
+        diagnostic.set_context(Some(error.context()));
         diagnostic.set_located_primary(Some(LocatedSpan::new(span, Some(location))));
         diagnostic
     }

@@ -2,8 +2,8 @@ pub use typol_semantic::{CompiledRegexConstraint, CompiledRegexConstraints};
 
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage, SourceSpan,
-    diagnostic_context,
+    CapacityExceeded, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticMessage,
+    ResourceLimit, SourceSpan, diagnostic_context,
 };
 use typol_i18n::t;
 use typol_policy::RegexLimits;
@@ -129,6 +129,7 @@ impl<'a> RegexConstraintCompiler<'a> {
 
         if self.constraints.len() >= self.limits.max_regex_count() {
             diagnostics.push(EmergencyDiagnostics::resource(
+                ResourceLimit::RegexCompilationBudget,
                 annotation.span(),
                 diagnostics.translator(),
             ));
@@ -137,8 +138,9 @@ impl<'a> RegexConstraintCompiler<'a> {
         let Some(attempted_pattern_bytes) = self.attempted_pattern_bytes.checked_add(pattern.len())
         else {
             self.attempted_pattern_bytes = self.limits.max_regex_total_pattern_bytes();
-            diagnostics.push(EmergencyDiagnostics::resource(
+            diagnostics.push(EmergencyDiagnostics::capacity_error(
                 annotation.span(),
+                CapacityExceeded::RegexCompilation,
                 diagnostics.translator(),
             ));
             return Ok(());
@@ -146,16 +148,24 @@ impl<'a> RegexConstraintCompiler<'a> {
         if attempted_pattern_bytes > self.limits.max_regex_total_pattern_bytes() {
             self.attempted_pattern_bytes = self.limits.max_regex_total_pattern_bytes();
             diagnostics.push(EmergencyDiagnostics::resource(
+                ResourceLimit::RegexPatternBytes,
                 annotation.span(),
                 diagnostics.translator(),
             ));
             return Ok(());
         }
         self.attempted_pattern_bytes = attempted_pattern_bytes;
-        if pattern.len() > self.limits.max_regex_pattern_bytes()
-            || self.instruction_count >= self.limits.max_regex_instructions_total()
-        {
+        if pattern.len() > self.limits.max_regex_pattern_bytes() {
             diagnostics.push(EmergencyDiagnostics::resource(
+                ResourceLimit::RegexPatternBytes,
+                annotation.span(),
+                diagnostics.translator(),
+            ));
+            return Ok(());
+        }
+        if self.instruction_count >= self.limits.max_regex_instructions_total() {
+            diagnostics.push(EmergencyDiagnostics::resource(
+                ResourceLimit::RegexInstructionCount,
                 annotation.span(),
                 diagnostics.translator(),
             ));
@@ -195,8 +205,9 @@ impl<'a> RegexConstraintCompiler<'a> {
             }
         };
         let Some(total_pattern_bytes) = self.pattern_bytes.checked_add(pattern.len()) else {
-            diagnostics.push(EmergencyDiagnostics::resource(
+            diagnostics.push(EmergencyDiagnostics::capacity_error(
                 annotation.span(),
+                CapacityExceeded::RegexCompilation,
                 diagnostics.translator(),
             ));
             return Ok(());
@@ -205,28 +216,32 @@ impl<'a> RegexConstraintCompiler<'a> {
             .instruction_count
             .checked_add(regex.instruction_count())
         else {
-            diagnostics.push(EmergencyDiagnostics::resource(
+            diagnostics.push(EmergencyDiagnostics::capacity_error(
                 annotation.span(),
+                CapacityExceeded::RegexCompilation,
                 diagnostics.translator(),
             ));
             return Ok(());
         };
         if total_instructions > self.limits.max_regex_instructions_total() {
             diagnostics.push(EmergencyDiagnostics::resource(
+                ResourceLimit::RegexInstructionCount,
                 annotation.span(),
                 diagnostics.translator(),
             ));
             return Ok(());
         }
         let Some(total_ranges) = self.range_count.checked_add(regex.range_count()) else {
-            diagnostics.push(EmergencyDiagnostics::resource(
+            diagnostics.push(EmergencyDiagnostics::capacity_error(
                 annotation.span(),
+                CapacityExceeded::RegexCompilation,
                 diagnostics.translator(),
             ));
             return Ok(());
         };
         if total_ranges > self.limits.max_regex_ranges_total() {
             diagnostics.push(EmergencyDiagnostics::resource(
+                ResourceLimit::RegexCharacterRanges,
                 annotation.span(),
                 diagnostics.translator(),
             ));
@@ -266,20 +281,18 @@ fn compile_error_diagnostic(
             ));
             diagnostic
         }
-        RegexCompileError::ResourceLimitExceeded(_) => {
-            EmergencyDiagnostics::resource(span, diagnostics.translator())
+        RegexCompileError::ResourceLimit(limit) => {
+            EmergencyDiagnostics::resource(limit, span, diagnostics.translator())
         }
         RegexCompileError::AllocationFailed => {
             EmergencyDiagnostics::allocation(span, diagnostics.translator())
         }
-        RegexCompileError::CapacityExceeded => {
-            EmergencyDiagnostics::capacity(span, diagnostics.translator())
+        RegexCompileError::CapacityExceeded(capacity) => {
+            EmergencyDiagnostics::capacity_error(span, capacity, diagnostics.translator())
         }
-        RegexCompileError::InternalInvariantFailure(error) => EmergencyDiagnostics::internal(
-            span,
-            error.diagnostic_context(),
-            diagnostics.translator(),
-        ),
+        RegexCompileError::Internal { error, .. } => {
+            EmergencyDiagnostics::internal_error(span, error, diagnostics.translator())
+        }
     }
 }
 

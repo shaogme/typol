@@ -5,20 +5,24 @@ extern crate alloc;
 mod config_values;
 
 pub use config_values::{FieldValue, MapEntry, Named, Payload, ValueFactory, ValueViewInput};
-pub use typol_opeo_test_support::{TestFailure, TestOpeo, TestOpeoOutcome, TestResult, TestSlot};
+pub use typol_opeo_test_support::{
+    TestFailure, TestOpeo, TestOpeoOutcome, TestResult, TestSlot, check, check_eq, ensure,
+    ensure_eq, ensure_err, ensure_ne, ensure_none, ensure_ok, ensure_some,
+};
 
 use alloc::{format, vec::Vec};
 use core::{fmt::Debug, ops::Range};
 use opeo::{OResult, Out};
-use typol_config::{
-    ConfigParseErrors, ConfigParseRequest, ConfigParser, Environment, ValidatedConfigValue,
+use typol_core::{
+    DiagnosticContext, InternalError, Read, SourceId, SourceReadError, SourceReadErrorKind,
+    diagnostic_context,
 };
-use typol_core::{ConfigValue, Read, SourceId, SourceReadError, SourceReadErrorKind};
-use typol_schema::{
-    SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaResolver, SchemaSource,
-    SourceObserver,
-};
-use typol_semantic::CompiledSchema;
+
+static SOURCE_CURSOR_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-test-support",
+    "owned-read-source",
+    "cursor-range-unavailable",
+);
 
 pub struct OwnedReadSource {
     bytes: Vec<u8>,
@@ -59,69 +63,32 @@ impl Read<SourceReadError> for OwnedReadSource {
         }
         let Some(start) = self.bytes.get(self.offset..) else {
             return Err(out.fail(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::SourceInputInvariantFailure(SOURCE_CURSOR_INVARIANT),
+                ))
+                .with_input(source_id, offset),
             ));
         };
         let count = start.len().min(output.len());
         let Some(source) = start.get(..count) else {
             return Err(out.fail(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::SourceInputInvariantFailure(SOURCE_CURSOR_INVARIANT),
+                ))
+                .with_input(source_id, offset),
             ));
         };
         let Some(destination) = output.get_mut(..count) else {
             return Err(out.fail(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::SourceInputInvariantFailure(SOURCE_CURSOR_INVARIANT),
+                ))
+                .with_input(source_id, offset),
             ));
         };
         destination.copy_from_slice(source);
         self.offset += count;
         Ok(count)
-    }
-}
-
-pub struct ConfigTestSupport;
-
-impl ConfigTestSupport {
-    pub fn parse(
-        schema: &CompiledSchema,
-        request: ConfigParseRequest<'_>,
-        environment: &mut dyn Environment,
-    ) -> TestOpeoOutcome<ConfigValue, ConfigParseErrors> {
-        match Self::parse_validated_config(schema, request, environment) {
-            TestOpeoOutcome::Value(value) => TestOpeoOutcome::Value(value.into_config_value()),
-            TestOpeoOutcome::Error(error) => TestOpeoOutcome::Error(error),
-        }
-    }
-
-    pub fn parse_validated_config(
-        schema: &CompiledSchema,
-        request: ConfigParseRequest<'_>,
-        environment: &mut dyn Environment,
-    ) -> TestOpeoOutcome<ValidatedConfigValue, ConfigParseErrors> {
-        TestOpeo::outcome(|out| ConfigParser::new(schema).parse(request, environment, out))
-    }
-
-    pub fn compile_schema<S: Read<SourceReadError>>(
-        options: SchemaCompileOptions,
-        source: SchemaSource<'_, S>,
-        resolver: Option<&mut dyn SchemaResolver>,
-        observer: Option<&mut dyn SourceObserver>,
-    ) -> TestOpeoOutcome<CompiledSchema, SchemaCompileErrors> {
-        TestOpeo::outcome(|mut out| {
-            let compiler = SchemaCompiler::new(options, out.reborrow())?;
-            match resolver {
-                Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
-                None => match observer {
-                    Some(observer) => {
-                        compiler.compile_without_imports_with_observer(source, observer, out)
-                    }
-                    None => compiler.compile_without_imports(source, out),
-                },
-            }
-        })
     }
 }
 
@@ -286,6 +253,43 @@ macro_rules! test_assert {
     ($condition:expr $(,)?) => {
         $crate::TestCheck::condition($condition, stringify!($condition))
     };
+}
+
+#[macro_export]
+macro_rules! test_assert_eq {
+    ($left:expr, $right:expr $(,)?) => {
+        $crate::TestCheck::equal(&$left, &$right, stringify!($left == $right))
+    };
+}
+
+#[macro_export]
+macro_rules! test_assert_early {
+    ($condition:expr, failure = $failure:expr $(, $($message:tt)*)?) => {{
+        if $crate::TestCheck::condition($condition, stringify!($condition)).is_err() {
+            return Err($failure);
+        }
+    }};
+    ($condition:expr $(, $($message:tt)*)?) => {{
+        match $crate::test_assert!($condition) {
+            Ok(()) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! test_assert_eq_early {
+    ($left:expr, $right:expr, failure = $failure:expr $(, $($message:tt)*)?) => {{
+        if $crate::TestCheck::equal(&$left, &$right, stringify!($left == $right)).is_err() {
+            return Err($failure);
+        }
+    }};
+    ($left:expr, $right:expr $(, $($message:tt)*)?) => {{
+        match $crate::test_assert_eq!($left, $right) {
+            Ok(()) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }};
 }
 
 #[macro_export]

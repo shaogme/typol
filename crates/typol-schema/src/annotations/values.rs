@@ -17,8 +17,8 @@ use crate::{
 use core::cmp::Ordering;
 use opeo::{OResult, Out};
 use typol_core::{
-    BudgetError, ChargedVec, DiagnosticContext, DiagnosticMessage, NumericLiteral,
-    NumericTokenKind, SourceSpan,
+    BudgetError, CapacityExceeded, ChargedVec, DiagnosticContext, DiagnosticMessage, InternalError,
+    NumericLiteral, NumericTokenKind, ResourceLimit, SourceSpan,
 };
 use typol_i18n::{Translator, t};
 use typol_semantic::VariantRestrictionMode;
@@ -38,34 +38,33 @@ pub(crate) enum AnnotationError {
         earlier_span: SourceSpan,
     },
     Allocation,
-    Resource,
-    Capacity,
-    Internal(DiagnosticContext),
+    ResourceLimit(ResourceLimit),
+    CapacityExceeded(CapacityExceeded),
+    Internal(InternalError),
 }
 
 impl AnnotationError {
     pub(crate) const fn internal(context: DiagnosticContext) -> Self {
-        Self::Internal(context)
+        Self::Internal(InternalError::SchemaCompilationInvariantFailure(context))
     }
 }
 
 impl From<BudgetError> for AnnotationError {
     fn from(error: BudgetError) -> Self {
         match error {
-            BudgetError::Resource
-            | BudgetError::RegexSteps
-            | BudgetError::RegexSearchSteps
-            | BudgetError::RegexWorkspace => Self::Resource,
+            BudgetError::ResourceLimit(limit) => Self::ResourceLimit(limit),
             BudgetError::Allocation => Self::Allocation,
-            BudgetError::CapacityExceeded => Self::Capacity,
-            BudgetError::InvariantViolation(context) => Self::Internal(*context),
+            BudgetError::CapacityExceeded(capacity) => Self::CapacityExceeded(capacity),
+            BudgetError::Internal(error) => Self::Internal(error),
         }
     }
 }
 
 impl From<AstAccessError> for AnnotationError {
     fn from(error: AstAccessError) -> Self {
-        Self::Internal(EmergencyDiagnostics::ast_access_context(error))
+        Self::Internal(InternalError::SchemaAstAccessInvariantFailure(
+            EmergencyDiagnostics::ast_access_context(error),
+        ))
     }
 }
 
@@ -127,7 +126,7 @@ impl AnnotationValues {
         while let Some(link_id) = link {
             context.consume(1, span, diagnostics, out.reborrow())?;
             let Some(next_depth) = depth.checked_add(1) else {
-                diagnostics.push(EmergencyDiagnostics::resource(
+                diagnostics.push(EmergencyDiagnostics::capacity(
                     span,
                     diagnostics.translator(),
                 ));
@@ -136,6 +135,7 @@ impl AnnotationValues {
             depth = next_depth;
             if depth > context.limits().max_nesting_depth() {
                 diagnostics.push(EmergencyDiagnostics::resource(
+                    ResourceLimit::ValidationTraversal,
                     span,
                     diagnostics.translator(),
                 ));
@@ -447,7 +447,9 @@ impl AnnotationValues {
         context.execution().consume(path.len(), out.reborrow())?;
         let segment_count = path.split('.').count();
         if segment_count == 0 || segment_count > limits.max_nesting_depth() {
-            return Err(out.fail(AnnotationError::Resource));
+            return Err(out.fail(AnnotationError::ResourceLimit(
+                ResourceLimit::ValidationTraversal,
+            )));
         }
         let mut fields = ChargedVec::new(Some(context.execution()), out.reborrow())?;
         fields.try_reserve_exact(segment_count, out.reborrow())?;

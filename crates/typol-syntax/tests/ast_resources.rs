@@ -1,28 +1,9 @@
 use typol_core::{BudgetError, DiagnosticCode, ExecutionBudget, ExecutionLimits, SourceId};
 use typol_syntax::{AstAccessError, SchemaParseOptions, SchemaParser, SyntaxErrors, SyntaxLimits};
 
-use typol_test_support::TestSlot;
-
-#[derive(Debug)]
-struct TestFailure;
-
-macro_rules! test_assert {
-    ($condition:expr $(, $($message:tt)*)?) => {{
-        if !$condition {
-            return Err(TestFailure);
-        }
-    }};
-}
-
-macro_rules! test_assert_eq {
-    ($left:expr, $right:expr $(, $($message:tt)*)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(TestFailure);
-        }
-    }};
-}
+use typol_test_support::{
+    TestFailure, TestSlot, test_assert_early as test_assert, test_assert_eq_early as test_assert_eq,
+};
 
 type TestResult<T = ()> = Result<T, TestFailure>;
 
@@ -38,13 +19,13 @@ trait TestValue<T> {
 
 impl<T, E> TestValue<T> for Result<T, E> {
     fn test_value(self) -> TestResult<T> {
-        self.map_err(|_| TestFailure)
+        self.map_err(|_| TestFailure::new("test result was unavailable"))
     }
 }
 
 impl<T> TestValue<T> for Option<T> {
     fn test_value(self) -> TestResult<T> {
-        self.ok_or(TestFailure)
+        self.ok_or_else(|| TestFailure::new("test value was missing"))
     }
 }
 
@@ -54,7 +35,8 @@ trait TestError<T> {
 
 impl<T, E> TestError<E> for Result<T, E> {
     fn test_error(self) -> TestResult<E> {
-        self.err().ok_or(TestFailure)
+        self.err()
+            .ok_or_else(|| TestFailure::new("expected test error was missing"))
     }
 }
 
@@ -212,7 +194,11 @@ fn every_arena_node_counts_and_whole_tree_heights_match_parent_edges() -> TestRe
                 .test_error()?;
             test_assert_eq!(
                 errors.diagnostics().next_back().test_value()?.code(),
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                if node_limit < count {
+                    DiagnosticCode::SCHEMA_AST_NODES_LIMIT_EXCEEDED
+                } else {
+                    DiagnosticCode::SCHEMA_PARSE_DEPTH_LIMIT_EXCEEDED
+                },
                 "{source}"
             );
         }
@@ -247,7 +233,7 @@ fn node_budget_is_independent_of_diagnostic_budget_and_includes_failed_construct
             .test_error()?;
         test_assert_eq!(
             error.diagnostics().next_back().test_value()?.code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+            DiagnosticCode::SCHEMA_AST_NODES_LIMIT_EXCEEDED
         );
         test_assert_eq!(
             error
@@ -280,7 +266,7 @@ fn node_budget_is_independent_of_diagnostic_budget_and_includes_failed_construct
     );
     test_assert_eq!(
         errors.diagnostics().next_back().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::SCHEMA_AST_NODES_LIMIT_EXCEEDED
     );
 
     Ok(())
@@ -412,7 +398,7 @@ fn typed_annotation_payloads_have_independent_count_and_height_boundaries() -> T
                 .next_back()
                 .test_value()?
                 .code(),
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+            DiagnosticCode::SCHEMA_PARSE_DEPTH_LIMIT_EXCEEDED
         );
     }
     test_assert_eq!(SyntaxLimits::default().max_schema_ast_nodes(), 100_000);

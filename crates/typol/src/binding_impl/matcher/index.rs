@@ -380,7 +380,7 @@ impl<'schema> BindingIndex<'schema> {
 fn index_invariant(translator: Translator) -> CodecErrors {
     CodecErrors::emergency(
         CodecStage::Binding,
-        Failure::internal(INDEX_INVARIANT),
+        Failure::binding_internal(INDEX_INVARIANT),
         translator,
     )
 }

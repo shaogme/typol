@@ -1,5 +1,5 @@
 use crate::{
-    context::{AssignmentTarget, CompletionState, RuleContext},
+    context::{AssignmentTarget, RuleContext},
     diagnostics::{BudgetDiagnostic, DiagnosticFactory},
     instance::{Member, NodeId},
     parser::{
@@ -8,7 +8,7 @@ use crate::{
         enums::EnumFrame,
         literals::{ContextDiagnosticRequest, LiteralParser, ParsedValue},
         recovery::ParseFailure,
-        semantics::{SemanticParser, SubtreeValidator},
+        semantics::SemanticParser,
     },
     value::ValueFactory,
 };
@@ -20,10 +20,10 @@ use typol_core::{
 };
 use typol_i18n::{Translator, t};
 use typol_semantic::{
-    ConstraintList, FieldView, SchemaAccessError, TypeKind, TypeView, VariantPayloadInfo,
-    VariantView,
+    ConstraintList, FieldList, FieldView, SchemaAccessError, TypeKind, TypeView,
+    VariantPayloadInfo, VariantView,
 };
-use typol_syntax::{Keyword, TokenKind};
+use typol_syntax::{BuiltinType, Keyword, TokenKind};
 
 static PARSER_FRAME_STATE: DiagnosticContext = diagnostic_context!(
     "typol-config",
@@ -188,28 +188,15 @@ impl<'schema> ValueScope<'schema> {
         parsed: ParsedValue,
         mut out: Out<'slot, '_, ParseFailure>,
     ) -> OResult<'slot, ParsedValue> {
-        if !matches!(parsed.completion, CompletionState::ChildrenComplete) {
-            SubtreeValidator::validate(
-                context,
-                target,
-                &parsed.value,
-                parsed.completion,
+        SemanticParser::check_completed(context, target, &parsed.value, out.reborrow())?;
+        if let Some(id) = context.current_node {
+            ParserControl::diagnostic_call(
+                &context.diagnostic_errors,
+                |diagnostic_out| context.locations.complete(id, parsed.span, diagnostic_out),
                 out.reborrow(),
             )?;
-        } else {
-            SemanticParser::check_completed(context, target, &parsed.value, out.reborrow())?;
-            if let Some(id) = context.current_node {
-                ParserControl::diagnostic_call(
-                    &context.diagnostic_errors,
-                    |diagnostic_out| context.locations.complete(id, parsed.span, diagnostic_out),
-                    out.reborrow(),
-                )?;
-            }
         }
-        Ok(ParsedValue {
-            completion: CompletionState::ChildrenComplete,
-            ..parsed
-        })
+        Ok(parsed)
     }
 }
 
@@ -280,101 +267,131 @@ impl<'schema> Body<'schema> {
             )?;
             return Err(out.fail(diagnostic.into()));
         }
-        let body = match expected_kind {
-            TypeKind::Builtin(builtin) => {
-                let parsed = LiteralParser::parse_scalar(context, builtin, out.reborrow())?;
-                return Ok(Start::Value(parsed));
-            }
-            TypeKind::Option { inner } => {
-                if let Some(none) = LiteralParser::take_none(context, out.reborrow())? {
-                    return Ok(Start::Value(none));
-                }
-                ParserControl::enter_nesting(
-                    context,
-                    span,
-                    Some(context.value_source),
-                    out.reborrow(),
-                )?;
-                let constraints = schema_call(
-                    &mut context.session.validation().schema_access_errors,
-                    |schema_out| {
-                        RuleContext::constraints(
-                            expected,
-                            context.target_field,
-                            context.assignment_variant,
-                            schema_out,
-                        )
-                    },
-                    out.reborrow(),
-                )?;
-                ParserControl::budget_call(
-                    &mut context.session.validation().budget_errors,
-                    |budget_out| {
-                        context
-                            .inherited_constraints
-                            .try_push(constraints, budget_out)
-                    },
-                    out.reborrow(),
-                )?;
-                Body::Option {
-                    child: ChildPhase::pending(inner),
-                    span,
-                }
-            }
+        Self::start_expected(context, expected, expected_kind, span, out.reborrow())
+    }
+
+    fn start_expected<'slot>(
+        context: &mut ParserContext<'schema, '_, '_>,
+        expected: TypeView<'schema>,
+        kind: TypeKind<'schema>,
+        span: LocatedSpan,
+        out: Out<'slot, '_, ParseFailure>,
+    ) -> OResult<'slot, Start<'schema>> {
+        match kind {
+            TypeKind::Builtin(builtin) => Self::start_scalar(context, builtin, out),
+            TypeKind::Option { inner } => Self::start_option(context, expected, inner, span, out),
             TypeKind::Array { .. } | TypeKind::Map { .. } => {
-                ParserControl::enter_nesting(
-                    context,
-                    span,
-                    Some(context.value_source),
-                    out.reborrow(),
-                )?;
-                Body::Collection(CollectionFrame::new(
-                    context,
+                Self::start_collection(context, expected, span, out)
+            }
+            TypeKind::Struct { fields } => Self::start_structure(context, fields, span, out),
+            TypeKind::Enum { .. } => Self::start_enum(context, expected, span, out),
+        }
+    }
+
+    fn start_scalar<'slot>(
+        context: &mut ParserContext<'schema, '_, '_>,
+        builtin: BuiltinType,
+        out: Out<'slot, '_, ParseFailure>,
+    ) -> OResult<'slot, Start<'schema>> {
+        LiteralParser::parse_scalar(context, builtin, out).map(Start::Value)
+    }
+
+    fn start_option<'slot>(
+        context: &mut ParserContext<'schema, '_, '_>,
+        expected: TypeView<'schema>,
+        inner: TypeView<'schema>,
+        span: LocatedSpan,
+        mut out: Out<'slot, '_, ParseFailure>,
+    ) -> OResult<'slot, Start<'schema>> {
+        if let Some(none) = LiteralParser::take_none(context, out.reborrow())? {
+            return Ok(Start::Value(none));
+        }
+        ParserControl::enter_nesting(context, span, Some(context.value_source), out.reborrow())?;
+        let constraints = schema_call(
+            &mut context.session.validation().schema_access_errors,
+            |schema_out| {
+                RuleContext::constraints(
                     expected,
-                    span,
-                    out.reborrow(),
-                )?)
+                    context.target_field,
+                    context.assignment_variant,
+                    schema_out,
+                )
+            },
+            out.reborrow(),
+        )?;
+        ParserControl::budget_call(
+            &mut context.session.validation().budget_errors,
+            |budget_out| {
+                context
+                    .inherited_constraints
+                    .try_push(constraints, budget_out)
+            },
+            out.reborrow(),
+        )?;
+        Ok(Start::Frame(Body::Option {
+            child: ChildPhase::pending(inner),
+            span,
+        }))
+    }
+
+    fn start_collection<'slot>(
+        context: &mut ParserContext<'schema, '_, '_>,
+        expected: TypeView<'schema>,
+        span: LocatedSpan,
+        mut out: Out<'slot, '_, ParseFailure>,
+    ) -> OResult<'slot, Start<'schema>> {
+        ParserControl::enter_nesting(context, span, Some(context.value_source), out.reborrow())?;
+        let frame = CollectionFrame::new(context, expected, span, out.reborrow())?;
+        Ok(Start::Frame(Body::Collection(frame)))
+    }
+
+    fn start_structure<'slot>(
+        context: &mut ParserContext<'schema, '_, '_>,
+        fields: FieldList<'schema>,
+        span: LocatedSpan,
+        mut out: Out<'slot, '_, ParseFailure>,
+    ) -> OResult<'slot, Start<'schema>> {
+        ParserControl::enter_nesting(context, span, Some(context.value_source), out.reborrow())?;
+        let frame = StructureFrame::new(context, fields, out.reborrow())?;
+        Ok(Start::Frame(Body::Structure(frame, span)))
+    }
+
+    fn start_enum<'slot>(
+        context: &mut ParserContext<'schema, '_, '_>,
+        expected: TypeView<'schema>,
+        span: LocatedSpan,
+        mut out: Out<'slot, '_, ParseFailure>,
+    ) -> OResult<'slot, Start<'schema>> {
+        ParserControl::enter_nesting(context, span, Some(context.value_source), out.reborrow())?;
+        let frame = EnumFrame::new(context, expected, span, out.reborrow())?;
+        frame.enter_payload(context, out.reborrow())?;
+        Self::start_enum_payload(context, frame, out.reborrow())
+    }
+
+    fn start_enum_payload<'slot>(
+        context: &mut ParserContext<'schema, '_, '_>,
+        frame: EnumFrame<'schema>,
+        mut out: Out<'slot, '_, ParseFailure>,
+    ) -> OResult<'slot, Start<'schema>> {
+        let payload = schema_call(
+            &mut context.session.validation().schema_access_errors,
+            |schema_out| frame.variant().payload(schema_out),
+            out.reborrow(),
+        )?;
+        match payload {
+            VariantPayloadInfo::Unit => {
+                let parsed = frame.finish_unit(context, out.reborrow())?;
+                Ok(Start::Value(parsed))
             }
-            TypeKind::Struct { fields } => {
-                ParserControl::enter_nesting(
-                    context,
-                    span,
-                    Some(context.value_source),
-                    out.reborrow(),
-                )?;
-                Body::Structure(StructureFrame::new(context, fields, out.reborrow())?, span)
+            VariantPayloadInfo::Single { ty } => Ok(Start::Frame(Body::Single {
+                frame,
+                child: ChildPhase::pending(ty),
+            })),
+            VariantPayloadInfo::Structure { fields } => {
+                let fields = StructureFrame::new(context, fields, out.reborrow())?;
+                Ok(Start::Frame(Body::EnumStructure(fields, frame)))
             }
-            TypeKind::Enum { .. } => {
-                ParserControl::enter_nesting(
-                    context,
-                    span,
-                    Some(context.value_source),
-                    out.reborrow(),
-                )?;
-                let frame = EnumFrame::new(context, expected, span, out.reborrow())?;
-                frame.enter_payload(context, out.reborrow())?;
-                let payload = schema_call(
-                    &mut context.session.validation().schema_access_errors,
-                    |schema_out| frame.variant().payload(schema_out),
-                    out.reborrow(),
-                )?;
-                match payload {
-                    VariantPayloadInfo::Unit => {
-                        let parsed = frame.finish_unit(context, out.reborrow())?;
-                        return Ok(Start::Value(parsed));
-                    }
-                    VariantPayloadInfo::Single { ty } => Body::Single {
-                        frame,
-                        child: ChildPhase::pending(ty),
-                    },
-                    VariantPayloadInfo::Structure { fields } => Body::EnumStructure(
-                        StructureFrame::new(context, fields, out.reborrow())?,
-                        frame,
-                    ),
-                }
-            }
-        };
-        Ok(Start::Frame(body))
+        }
     }
 
     pub(super) fn next<'slot>(
@@ -490,7 +507,6 @@ impl<'schema> Body<'schema> {
             out.reborrow(),
         )?;
         Ok(ParsedValue {
-            completion: CompletionState::ChildrenComplete,
             value,
             span: ParserControl::diagnostic_call(
                 &context.diagnostic_errors,

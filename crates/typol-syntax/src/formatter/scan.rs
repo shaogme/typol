@@ -7,9 +7,9 @@ use crate::{
     EnumDefaultPayloadKind, FieldDeclList, SchemaAst, StructDecl, Symbol, TopLevelItem, TypeExpr,
     TypeExprKind, VariantPayloadKind, token::CommentKind,
 };
-use typol_core::SourceSpan;
+use typol_core::{ResourceLimit, SourceSpan};
 
-use super::{SchemaFormatError, SchemaFormatErrorKind, SchemaFormatOptions};
+use super::errors::{SchemaFormatError, SchemaFormatErrorKind, SchemaFormatOptions};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LexemeKind {
@@ -69,14 +69,23 @@ fn reserve_geometrically<T>(
     let required = items
         .len()
         .checked_add(1)
-        .ok_or_else(|| SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded))?;
+        .ok_or_else(SchemaFormatError::capacity_exceeded)?;
     let available_bytes = workspace_limit
         .checked_sub(other_capacity_bytes)
-        .ok_or_else(|| SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded))?;
+        .ok_or_else(|| {
+            SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimit(
+                ResourceLimit::FormattingWorkspaceBytes,
+            ))
+        })?;
     let maximum_capacity = (available_bytes / item_size).min(capacity_limit);
     if required > maximum_capacity {
+        let limit = if required > capacity_limit {
+            ResourceLimit::FormattingNestingDepth
+        } else {
+            ResourceLimit::FormattingWorkspaceBytes
+        };
         return Err(SchemaFormatError::new(
-            SchemaFormatErrorKind::ResourceLimitExceeded,
+            SchemaFormatErrorKind::ResourceLimit(limit),
         ));
     }
     if items.capacity() < required {
@@ -126,10 +135,10 @@ fn scan_tokens_impl(
     let mut offset = 0;
     let ast_bytes = ast
         .memory_bytes()
-        .ok_or_else(|| SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded))?;
+        .ok_or_else(SchemaFormatError::capacity_exceeded)?;
     if ast_bytes > options.max_workspace_bytes() {
         return Err(SchemaFormatError::new(
-            SchemaFormatErrorKind::ResourceLimitExceeded,
+            SchemaFormatErrorKind::ResourceLimit(ResourceLimit::FormattingWorkspaceBytes),
         ));
     }
     while offset < bytes.len() {
@@ -189,9 +198,9 @@ fn scan_tokens_impl(
             LexemeKind::Number
         } else {
             let (symbol, width) = scan_symbol(bytes, offset)?;
-            offset = offset.checked_add(width).ok_or_else(|| {
-                SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
-            })?;
+            offset = offset
+                .checked_add(width)
+                .ok_or_else(SchemaFormatError::capacity_exceeded)?;
             LexemeKind::Symbol(symbol)
         };
         let container = match kind {
@@ -212,13 +221,9 @@ fn scan_tokens_impl(
                     frames
                         .capacity()
                         .checked_mul(size_of::<ScanFrame>())
-                        .ok_or_else(|| {
-                            SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
-                        })?,
+                        .ok_or_else(SchemaFormatError::capacity_exceeded)?,
                 )
-                .ok_or_else(|| {
-                    SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
-                })?,
+                .ok_or_else(SchemaFormatError::capacity_exceeded)?,
             options.max_workspace_bytes(),
             usize::MAX,
         )?;
@@ -235,7 +240,7 @@ fn scan_tokens_impl(
             if let Some(close) = opening_close(symbol, container) {
                 if frames.len() >= options.max_nesting_depth() {
                     return Err(SchemaFormatError::new(
-                        SchemaFormatErrorKind::ResourceLimitExceeded,
+                        SchemaFormatErrorKind::ResourceLimit(ResourceLimit::FormattingNestingDepth),
                     ));
                 }
                 reserve_geometrically(
@@ -245,15 +250,9 @@ fn scan_tokens_impl(
                             tokens
                                 .capacity()
                                 .checked_mul(size_of::<TokenSpan>())
-                                .ok_or_else(|| {
-                                    SchemaFormatError::new(
-                                        SchemaFormatErrorKind::ResourceLimitExceeded,
-                                    )
-                                })?,
+                                .ok_or_else(SchemaFormatError::capacity_exceeded)?,
                         )
-                        .ok_or_else(|| {
-                            SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
-                        })?,
+                        .ok_or_else(SchemaFormatError::capacity_exceeded)?,
                     options.max_workspace_bytes(),
                     options.max_nesting_depth(),
                 )?;
@@ -697,7 +696,7 @@ fn scan_string(bytes: &[u8], start: usize) -> Result<usize, SchemaFormatError> {
     if bytes.get(start..start.saturating_add(3)) == Some(b"\"\"\"") {
         let mut cursor = start
             .checked_add(3)
-            .ok_or_else(|| SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded))?;
+            .ok_or_else(SchemaFormatError::capacity_exceeded)?;
         match bytes.get(cursor) {
             Some(b'\n') => cursor += 1,
             Some(b'\r') if bytes.get(cursor.saturating_add(1)) == Some(&b'\n') => cursor += 2,
@@ -706,49 +705,49 @@ fn scan_string(bytes: &[u8], start: usize) -> Result<usize, SchemaFormatError> {
         while cursor < bytes.len() {
             let mut content = cursor;
             while matches!(bytes.get(content), Some(b' ' | b'\t')) {
-                content = content.checked_add(1).ok_or_else(|| {
-                    SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
-                })?;
+                content = content
+                    .checked_add(1)
+                    .ok_or_else(SchemaFormatError::capacity_exceeded)?;
             }
             if bytes.get(content..content.saturating_add(3)) == Some(b"\"\"\"") {
-                return content.checked_add(3).ok_or_else(|| {
-                    SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
-                });
+                return content
+                    .checked_add(3)
+                    .ok_or_else(SchemaFormatError::capacity_exceeded);
             }
             while bytes.get(cursor).is_some_and(|byte| *byte != b'\n') {
-                cursor = cursor.checked_add(1).ok_or_else(|| {
-                    SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
-                })?;
+                cursor = cursor
+                    .checked_add(1)
+                    .ok_or_else(SchemaFormatError::capacity_exceeded)?;
             }
             if cursor < bytes.len() {
-                cursor = cursor.checked_add(1).ok_or_else(|| {
-                    SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
-                })?;
+                cursor = cursor
+                    .checked_add(1)
+                    .ok_or_else(SchemaFormatError::capacity_exceeded)?;
             }
         }
         return Err(inconsistent_source());
     }
     let mut cursor = start
         .checked_add(1)
-        .ok_or_else(|| SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded))?;
+        .ok_or_else(SchemaFormatError::capacity_exceeded)?;
     while let Some(byte) = bytes.get(cursor).copied() {
         if byte == b'\\' {
-            cursor = cursor.checked_add(2).ok_or_else(|| {
-                SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
-            })?;
+            cursor = cursor
+                .checked_add(2)
+                .ok_or_else(SchemaFormatError::capacity_exceeded)?;
         } else if byte == b'"' {
-            return cursor.checked_add(1).ok_or_else(|| {
-                SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
-            });
+            return cursor
+                .checked_add(1)
+                .ok_or_else(SchemaFormatError::capacity_exceeded);
         } else {
-            cursor = cursor.checked_add(1).ok_or_else(|| {
-                SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
-            })?;
+            cursor = cursor
+                .checked_add(1)
+                .ok_or_else(SchemaFormatError::capacity_exceeded)?;
         }
     }
     Err(inconsistent_source())
 }
 
 fn inconsistent_source() -> SchemaFormatError {
-    SchemaFormatError::new(SchemaFormatErrorKind::InconsistentSource)
+    SchemaFormatError::inconsistent_source()
 }

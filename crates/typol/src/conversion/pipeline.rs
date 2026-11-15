@@ -419,7 +419,7 @@ impl ConversionState {
             .ok_or_else(|| {
                 CodecErrors::emergency(
                     CodecStage::Conversion,
-                    Failure::internal(CONVERSION_STATE_MISSING),
+                    Failure::conversion_internal(CONVERSION_STATE_MISSING),
                     session.translator(),
                 )
             })
@@ -441,7 +441,7 @@ impl ConversionState {
             .ok_or_else(|| {
                 CodecErrors::emergency(
                     CodecStage::Conversion,
-                    Failure::internal(CONVERSION_STATE_MISSING),
+                    Failure::conversion_internal(CONVERSION_STATE_MISSING),
                     session.translator(),
                 )
             })
@@ -479,7 +479,7 @@ impl Conversion {
     pub(crate) fn internal_error(translator: Translator) -> CodecErrors {
         CodecErrors::emergency(
             CodecStage::Conversion,
-            Failure::internal(CONVERSION_BINDING_INVARIANT),
+            Failure::conversion_internal(CONVERSION_BINDING_INVARIANT),
             translator,
         )
     }

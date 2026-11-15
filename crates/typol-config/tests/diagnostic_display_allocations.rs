@@ -1,5 +1,3 @@
-use typol_test_support::ConfigTestSupport as Support;
-
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
@@ -8,12 +6,15 @@ use std::{
 };
 
 use typol_config::{
-    ConfigLimits, ConfigParseErrors, ConfigParseOptions, ConfigParseRequest, Environment,
-    EnvironmentError, EnvironmentReadContext,
+    ConfigLimits, ConfigParseErrors, ConfigParseOptions, ConfigParseRequest, ConfigParser,
+    Environment, EnvironmentError, EnvironmentReadContext,
     opeo::{OResult, Out},
 };
 use typol_core::{ExcerptLimits, SliceSource};
-use typol_schema::{SchemaCompileOptions, SchemaLimits, SchemaSource};
+use typol_schema::{
+    SchemaCompileOptions, SchemaCompiler, SchemaLimits, SchemaResolver, SchemaSource,
+    SourceObserver,
+};
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
 
@@ -114,12 +115,22 @@ impl Write for DisplayBuffer {
 }
 
 fn compile(source: &str, limits: SchemaLimits) -> TestResult<CompiledSchema> {
-    Support::compile_schema(
-        SchemaCompileOptions::new(limits),
-        SchemaSource::from_str(b"display-allocation", source),
-        None,
-        None,
-    )
+    TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::new(limits);
+        let source = SchemaSource::from_str(b"display-allocation", source);
+        let resolver: Option<&mut dyn SchemaResolver> = None;
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()
 }
 
@@ -140,17 +151,20 @@ fn build_many_diagnostic_error() -> TestResult<ConfigParseErrors> {
     config = config.with_max_diagnostics(128);
     let schema = compile(&declarations, SchemaLimits::default())?;
     let mut source = SliceSource::new(input.as_bytes());
-    let errors = Support::parse(
-        &schema,
-        ConfigParseRequest::new(
-            &mut source,
-            "allocation-test",
-            ConfigParseOptions::default()
-                .with_excerpts(excerpts)
-                .with_config(config),
-        ),
-        &mut NoEnvironment,
-    )
+    let errors = TestOpeo::outcome(|out| {
+        ConfigParser::new(&schema).parse(
+            ConfigParseRequest::new(
+                &mut source,
+                "allocation-test",
+                ConfigParseOptions::default()
+                    .with_excerpts(excerpts)
+                    .with_config(config),
+            ),
+            &mut NoEnvironment,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
     .test_error()?;
     test_assert!(errors.diagnostics().len() >= 90)?;
     test_assert!(errors.excerpts().storage_bytes() <= excerpts.max_bytes())?;

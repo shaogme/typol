@@ -17,8 +17,8 @@ use crate::{
 use ::opeo::{ErrSlot, OResult, Out};
 use core::cell::RefCell;
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticContext, ExcerptLimits, ExecutionBudget, Read,
-    SourceCapture, SourceId, diagnostic_context,
+    BudgetError, CapacityExceeded, ChargedVec, Diagnostic, DiagnosticContext, ExcerptLimits,
+    ExecutionBudget, Read, ResourceLimit, SourceCapture, SourceId, diagnostic_context,
 };
 use typol_i18n::Translator;
 use typol_semantic::CompiledSchema;
@@ -156,7 +156,7 @@ impl<'schema> ConfigParser<'schema> {
         )?;
         let source = parsed.source.ok_or_else(|| {
             out.reborrow().fail(ConfigParseErrors::emergency(
-                DiagnosticFactory::internal(
+                DiagnosticFactory::collection_internal(
                     CONFIG_MISSING_TERMINAL_DIAGNOSTIC,
                     None,
                     None,
@@ -220,7 +220,7 @@ impl<'schema> ConfigParser<'schema> {
         let translator = request.options().translator();
         if budget.limits() != *request.options().execution() {
             return Err(out.fail(ConfigParseErrors::emergency(
-                DiagnosticFactory::internal(
+                DiagnosticFactory::parser_internal(
                     CONFIG_PARSE_BUDGET_MISMATCH,
                     None,
                     None,
@@ -235,7 +235,10 @@ impl<'schema> ConfigParser<'schema> {
         let parts = request.into_parts();
         let Some(source_id) = self.schema.next_source_id() else {
             return Err(out.fail(ConfigParseErrors::emergency(
-                BudgetDiagnostic::from_error(BudgetError::Resource, translator),
+                BudgetDiagnostic::from_error(
+                    BudgetError::CapacityExceeded(CapacityExceeded::SourceInput),
+                    translator,
+                ),
                 None,
                 translator,
             )));
@@ -521,8 +524,13 @@ fn parse_for_schema_with_budget<'slot, R: Read + ?Sized>(
 ) -> OResult<'slot, ValidatedConfigValue> {
     let translator = request.options().translator();
     if budget.limits() != *request.options().execution() {
-        let diagnostic =
-            DiagnosticFactory::internal(CONFIG_PARSE_BUDGET_MISMATCH, None, None, None, translator);
+        let diagnostic = DiagnosticFactory::parser_internal(
+            CONFIG_PARSE_BUDGET_MISMATCH,
+            None,
+            None,
+            None,
+            translator,
+        );
         return Err(out.fail(ConfigParseErrors::emergency(
             diagnostic,
             schema.next_source_id(),
@@ -533,7 +541,10 @@ fn parse_for_schema_with_budget<'slot, R: Read + ?Sized>(
     let parts = request.into_parts();
     let Some(source_id) = schema.next_source_id() else {
         return Err(out.fail(ConfigParseErrors::emergency(
-            BudgetDiagnostic::from_error(BudgetError::Resource, translator),
+            BudgetDiagnostic::from_error(
+                BudgetError::CapacityExceeded(CapacityExceeded::SourceInput),
+                translator,
+            ),
             None,
             translator,
         )));
@@ -558,7 +569,10 @@ fn check_source<'slot, 'borrow, R: Read + ?Sized>(
     let options = request.options();
     if request.display_name().len() > options.config().max_display_name_bytes() {
         return Err(out.fail(ConfigParseErrors::emergency(
-            BudgetDiagnostic::from_error(BudgetError::Resource, options.translator()),
+            BudgetDiagnostic::from_error(
+                BudgetError::ResourceLimit(ResourceLimit::StringBytes),
+                options.translator(),
+            ),
             schema.next_source_id(),
             options.translator(),
         )));

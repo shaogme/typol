@@ -4,16 +4,18 @@ use opeo::ErrSlot;
 use std::{
     env::temp_dir,
     error::Error,
+    fmt::{Display, Formatter, Result as FmtResult},
     fs::{OpenOptions, remove_file, rename, write},
     io::{self, ErrorKind, Read as IoRead, Write as IoWrite},
     path::{Path, PathBuf},
     process::id,
     sync::atomic::{AtomicUsize, Ordering},
 };
+use typol_opeo_test_support::{ensure, ensure_eq};
 
 use typol_core::{
-    BudgetError, ExecutionBudget, ExecutionLimits, Read as SourceRead, SourceId, SourceReadError,
-    SourceReadErrorKind, Write as SinkWrite, WriteError,
+    BudgetError, ExecutionBudget, ExecutionLimits, InternalError, Read as SourceRead,
+    ResourceLimit, SourceId, SourceReadError, SourceReadErrorKind, Write as SinkWrite, WriteError,
 };
 
 #[cfg(target_os = "linux")]
@@ -22,36 +24,42 @@ use std::{
     os::unix::ffi::OsStrExt,
 };
 
+#[derive(Debug)]
+struct HostErrorSummary {
+    operation: HostOperation,
+    kind: HostErrorKind,
+}
+
+impl HostErrorSummary {
+    fn operation(&self) -> HostOperation {
+        self.operation
+    }
+
+    fn kind(&self) -> HostErrorKind {
+        self.kind
+    }
+}
+
+impl From<HostError> for HostErrorSummary {
+    fn from(error: HostError) -> Self {
+        Self {
+            operation: error.operation(),
+            kind: error.kind(),
+        }
+    }
+}
+
+impl Display for HostErrorSummary {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        write!(formatter, "{:?} {:?}", self.operation, self.kind)
+    }
+}
+
+impl Error for HostErrorSummary {}
+
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
     fn mkfifo(path: *const c_char, mode: u32) -> c_int;
-}
-
-macro_rules! ensure {
-    ($condition:expr $(,)?) => {
-        if !$condition {
-            return Err(
-                io::Error::other(concat!("assertion failed: ", stringify!($condition))).into(),
-            );
-        }
-    };
-}
-
-macro_rules! ensure_eq {
-    ($left:expr, $right:expr $(,)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(io::Error::other(format!(
-                "assertion failed: {} and {} differ (actual {:?}, expected {:?})",
-                stringify!($left),
-                stringify!($right),
-                left,
-                right,
-            ))
-            .into());
-        }
-    }};
 }
 
 static TEMP_FILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -110,23 +118,26 @@ fn open_schema_input(
     path: &Path,
     limit: usize,
     budget: &ExecutionBudget,
-) -> Result<FileSchemaInput, HostError> {
+) -> Result<FileSchemaInput, HostErrorSummary> {
     let mut errors = ErrSlot::<HostError>::new();
     match errors
         .try_call(|out| FileSchemaInput::open(path, limit, budget, HostOperation::SchemaRead, out))
     {
         Ok(input) => Ok(input),
-        Err(caught) => Err(caught.take()),
+        Err(caught) => Err(caught.take().into()),
     }
 }
 
-fn open_config_input(path: &Path, budget: &ExecutionBudget) -> Result<FileConfigInput, HostError> {
+fn open_config_input(
+    path: &Path,
+    budget: &ExecutionBudget,
+) -> Result<FileConfigInput, HostErrorSummary> {
     let mut errors = ErrSlot::<HostError>::new();
     match errors.try_call(|out| {
         FileConfigInput::open(path, FileConfigInputLimits::default(), 10, budget, out)
     }) {
         Ok(input) => Ok(input),
-        Err(caught) => Err(caught.take()),
+        Err(caught) => Err(caught.take().into()),
     }
 }
 
@@ -309,13 +320,19 @@ fn file_schema_input_rejects_unclaimed_or_reissued_sources() -> Result<(), Box<d
     let error = read_schema_input(&mut input, &mut [0; 1], 0)
         .err()
         .ok_or_else(|| io::Error::other("unclaimed source should reject reads"))?;
-    ensure_eq!(error.kind(), SourceReadErrorKind::InternalInvariantFailure);
+    ensure!(matches!(
+        error.kind(),
+        SourceReadErrorKind::Internal(InternalError::HostAdapterInvariantFailure(_))
+    ));
     input.claim();
     input.claim();
     let error = read_schema_input(&mut input, &mut [0; 1], 0)
         .err()
         .ok_or_else(|| io::Error::other("source claimed more than once should reject reads"))?;
-    ensure_eq!(error.kind(), SourceReadErrorKind::InternalInvariantFailure);
+    ensure!(matches!(
+        error.kind(),
+        SourceReadErrorKind::Internal(InternalError::HostAdapterInvariantFailure(_))
+    ));
     ensure_eq!(
         error
             .context()
@@ -339,7 +356,10 @@ fn file_growth_after_metadata_is_detected_by_one_byte_probe() -> Result<(), Box<
     let error = read_schema_input(&mut input, &mut output, 3)
         .err()
         .ok_or_else(|| io::Error::other("file growth should exceed the source byte limit"))?;
-    ensure_eq!(error.kind(), SourceReadErrorKind::ResourceLimitExceeded);
+    ensure_eq!(
+        error.kind(),
+        SourceReadErrorKind::ResourceLimit(ResourceLimit::SourceBytes)
+    );
     ensure_eq!(error.offset(), Some(3));
     ensure_eq!(error.requested_bytes(), Some(1));
     ensure_eq!(error.consumed_bytes(), Some(1));
@@ -360,7 +380,10 @@ fn file_schema_input_rejects_metadata_size_above_limit() -> Result<(), Box<dyn E
     let error = open_schema_input(file.path(), 2, &budget)
         .err()
         .ok_or_else(|| io::Error::other("oversized file should be rejected while opening"))?;
-    ensure_eq!(error.kind(), HostErrorKind::ResourceLimitExceeded);
+    ensure_eq!(
+        error.kind(),
+        HostErrorKind::ResourceLimit(ResourceLimit::SourceBytes)
+    );
     Ok(())
 }
 
@@ -413,7 +436,10 @@ fn read_source_rejects_counts_beyond_the_supplied_buffer() -> Result<(), Box<dyn
     let error = read_source(&mut source, &mut [0; 2])
         .err()
         .ok_or_else(|| io::Error::other("reader cannot report more bytes than the buffer holds"))?;
-    ensure_eq!(error.kind(), SourceReadErrorKind::InternalInvariantFailure);
+    ensure!(matches!(
+        error.kind(),
+        SourceReadErrorKind::Internal(InternalError::HostAdapterInvariantFailure(_))
+    ));
     ensure_eq!(error.offset(), Some(0));
     ensure_eq!(error.requested_bytes(), Some(2));
     ensure_eq!(

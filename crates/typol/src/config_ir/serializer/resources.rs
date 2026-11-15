@@ -209,10 +209,9 @@ impl<'sink> BoundedBuffer<'sink> {
         if let Err(error) = self.sink.write_all(bytes) {
             let failure = match error {
                 WriteError::AllocationFailed => ConfigIrError::AllocationFailed,
-                WriteError::CapacityExceeded => ConfigIrError::OutputLimitExceeded,
-                WriteError::HostFailure | WriteError::InternalInvariantFailure => {
-                    ConfigIrError::SerializationFailed
-                }
+                WriteError::CapacityExceeded(capacity) => ConfigIrError::CapacityExceeded(capacity),
+                WriteError::HostFailure => ConfigIrError::SerializationFailed,
+                WriteError::Internal(internal) => ConfigIrError::Internal(internal),
             };
             return self.record_failure(failure);
         }

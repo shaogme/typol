@@ -105,10 +105,14 @@ impl BoundaryError {
                 primary,
                 value_source,
             ),
-            Self::Internal(context) => {
-                DiagnosticFactory::internal(context, primary, None, value_source, translator)
-            }
-            Self::UnresolvedPath => DiagnosticFactory::internal(
+            Self::Internal(context) => DiagnosticFactory::secret_policy_internal(
+                context,
+                primary,
+                None,
+                value_source,
+                translator,
+            ),
+            Self::UnresolvedPath => DiagnosticFactory::secret_policy_internal(
                 SECRET_UNRESOLVED_DYNAMIC_PATH,
                 primary,
                 None,
@@ -502,7 +506,7 @@ impl SecretPolicy {
                                 }
                             }
                             if matches!(segment, PathSegment::MapKey(_)) {
-                                return Err(out.fail(DiagnosticFactory::internal(
+                                return Err(out.fail(DiagnosticFactory::secret_policy_internal(
                                     SECRET_UNRESOLVED_DYNAMIC_PATH,
                                     primary,
                                     None,
@@ -669,7 +673,7 @@ impl SecretPolicy {
                             }
                             return Ok(());
                         }
-                        return Err(out.fail(DiagnosticFactory::internal(
+                        return Err(out.fail(DiagnosticFactory::secret_policy_internal(
                             diagnostic
                                 .context()
                                 .unwrap_or(SECRET_UNRESOLVED_DYNAMIC_PATH),

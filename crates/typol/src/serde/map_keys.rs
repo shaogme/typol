@@ -1,6 +1,6 @@
-use crate::{serde::model::Error, session::SessionBudget, value::MapEntry};
+use crate::{diagnostics::Failure, serde::model::Error, session::SessionBudget, value::MapEntry};
 use opeo::{OResult, Out, ResultOutExt};
-use typol_core::{ChargedVec, DiagnosticContext, diagnostic_context};
+use typol_core::{CapacityExceeded, ChargedVec, DiagnosticContext, diagnostic_context};
 
 static MAP_KEY_INDEX_INVARIANT: DiagnosticContext =
     diagnostic_context!("typol", "serde", "map-key-index-invariant");
@@ -75,14 +75,14 @@ impl MapKeys {
             .len()
             .checked_add(1)
             .and_then(|count| count.checked_mul(2))
-            .ok_or_else(|| Error::from(session.execution().resource_error()))
+            .ok_or_else(|| Error::failure(Failure::Capacity(CapacityExceeded::RustConversion)))
             .store_err_into(out.reborrow())?;
         if needed <= self.slots.len() {
             return Ok(());
         }
         let capacity = needed
             .checked_next_power_of_two()
-            .ok_or_else(|| Error::from(session.execution().resource_error()))
+            .ok_or_else(|| Error::failure(Failure::Capacity(CapacityExceeded::RustConversion)))
             .store_err_into(out.reborrow())?
             .max(8);
         let mut slots =

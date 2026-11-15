@@ -602,7 +602,7 @@ fn shared_budget_mismatch_and_exhausted_balance_are_rejected() -> TestResult {
             .first()
             .test_expect("budget mismatches should include diagnostics")?
             .code(),
-        DiagnosticCode::INTERNAL_ERROR
+        DiagnosticCode::CONFIG_PARSER_INVARIANT_FAILURE
     );
     let input = object(ValueSupport::scalar(|builder, out| {
         builder.add_unsigned(1, ValueSource::RustValue, out)
@@ -621,7 +621,7 @@ fn shared_budget_mismatch_and_exhausted_balance_are_rejected() -> TestResult {
             .first()
             .test_expect("budget mismatches should include diagnostics")?
             .code(),
-        DiagnosticCode::INTERNAL_ERROR
+        DiagnosticCode::CONFIG_VALIDATION_INVARIANT_FAILURE
     );
     let budget = TestOpeo::value(|out| ExecutionBudget::new(*options.execution(), out))?;
     TestOpeo::value::<BudgetError, _>(|out| budget.consume(options.execution().max_steps(), out))?;
@@ -642,7 +642,7 @@ fn shared_budget_mismatch_and_exhausted_balance_are_rejected() -> TestResult {
             .first()
             .test_expect("resource exhaustion should include diagnostics")?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED
     );
     Ok(())
 }
@@ -687,7 +687,7 @@ fn parsing_and_final_target_share_the_same_step_limit() -> TestResult {
             .first()
             .test_expect("decode errors should include diagnostics")?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED
     );
     let options = WriteOptions::new(0)
         .with_validation(ConfigValidationOptions::new(
@@ -710,7 +710,7 @@ fn parsing_and_final_target_share_the_same_step_limit() -> TestResult {
             .first()
             .test_expect("encode errors should include diagnostics")?
             .code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::CONFIG_FORMAT_OUTPUT_BYTES_LIMIT_EXCEEDED
     );
     Ok(())
 }
@@ -1306,7 +1306,10 @@ fn facade_depth_contract_roundtrips_at_127_and_128_and_rejects_129_early() -> Te
         .diagnostics()
         .first()
         .test_expect("binding at depth 129 should return a conversion-depth diagnostic")?;
-    assert_eq!(diagnostic.code(), DiagnosticCode::RESOURCE_LIMIT_EXCEEDED);
+    assert_eq!(
+        diagnostic.code(),
+        DiagnosticCode::TYPE_BINDING_DEPTH_LIMIT_EXCEEDED
+    );
     assert_eq!(
         diagnostic
             .context()

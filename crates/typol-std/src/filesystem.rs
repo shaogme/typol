@@ -10,14 +10,16 @@ pub use source_writer::{FileSourceWriter, SourceWriteError, SourceWriteErrorKind
 
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 use std::{fmt, fs::File, mem::take, path::Path};
-use typol_core::{BudgetError, ChargedVec, SourceId};
+use typol_core::{
+    BudgetError, CapacityExceeded, ChargedVec, InternalError, ResourceLimit, SourceId,
+};
 use typol_schema::{
     ResolverError, SchemaCompileContext, SchemaCompileStage, SchemaResolveRequest, SchemaResolver,
     SchemaSource,
 };
 
 use self::{
-    input::{FileSchemaInput, OpenedSchemaFile},
+    input::{FileSchemaInput, OpenedSchemaFile, SchemaInputParams},
     paths::{FileIdentity, NativePath, PathCandidate, PathResolutionParams},
 };
 use crate::{FileSchemaLimits, HostError, HostErrorKind, HostFailureStep, HostOperation};
@@ -129,12 +131,24 @@ impl FileSchemaResolver {
         if self.limits.max_files() == 0 || resources.max_schema_files() == 0 {
             return Err(out.fail(HostError::new(
                 HostOperation::SchemaRead,
-                HostErrorKind::ResourceLimitExceeded,
+                HostErrorKind::ResourceLimit(ResourceLimit::SchemaSourceCount),
             )));
         }
-        let source_byte_limit = resources
-            .max_source_bytes()
-            .min(resources.max_schema_total_bytes());
+        let (schema_source_limit, source_limit_kind) =
+            if resources.max_source_bytes() <= resources.max_schema_total_bytes() {
+                (resources.max_source_bytes(), ResourceLimit::SourceBytes)
+            } else {
+                (
+                    resources.max_schema_total_bytes(),
+                    ResourceLimit::SchemaTotalBytes,
+                )
+            };
+        let (source_byte_limit, source_limit_kind) =
+            if self.limits.max_file_bytes() < schema_source_limit {
+                (self.limits.max_file_bytes(), ResourceLimit::SourceBytes)
+            } else {
+                (schema_source_limit, source_limit_kind)
+            };
         let opened = OpenedSchemaFile::open(path, HostOperation::SchemaRead, out.reborrow())?;
         let file_identity = opened.identity();
         let path = NativePath::from_opened_file(
@@ -149,9 +163,12 @@ impl FileSchemaResolver {
         )?;
         let source_path = path.copy(budget, HostOperation::SchemaRead, out.reborrow())?;
         let (input, pin) = opened.into_input_and_pin(
-            source_byte_limit.min(self.limits.max_file_bytes()),
-            budget,
-            HostOperation::SchemaRead,
+            SchemaInputParams {
+                limit: source_byte_limit.min(self.limits.max_file_bytes()),
+                limit_kind: source_limit_kind,
+                budget,
+                operation: HostOperation::SchemaRead,
+            },
             out.reborrow(),
         )?;
         let identity = self.register(path, file_identity, pin, out.reborrow())?;
@@ -200,7 +217,7 @@ impl FileSchemaResolver {
                     .map_err(|_| {
                         HostError::new(
                             HostOperation::SchemaRead,
-                            HostErrorKind::ResourceLimitExceeded,
+                            HostErrorKind::CapacityExceeded(CapacityExceeded::HostSource),
                         )
                     })
                     .store_err_into(out.reborrow())?;
@@ -210,14 +227,14 @@ impl FileSchemaResolver {
         if self.files.len() >= self.limits.max_files() {
             return Err(out.fail(HostError::new(
                 HostOperation::SchemaRead,
-                HostErrorKind::ResourceLimitExceeded,
+                HostErrorKind::ResourceLimit(ResourceLimit::SchemaSourceCount),
             )));
         }
         let identity = u64::try_from(self.files.len())
             .map_err(|_| {
                 HostError::new(
                     HostOperation::SchemaRead,
-                    HostErrorKind::ResourceLimitExceeded,
+                    HostErrorKind::CapacityExceeded(CapacityExceeded::HostSource),
                 )
             })
             .map(u64::to_le_bytes)
@@ -248,39 +265,37 @@ impl FileSchemaResolver {
 
     fn import<'slot>(
         &mut self,
-        from: &[u8],
-        module: &str,
-        limit: usize,
+        request: SchemaResolveRequest<'_>,
         mut out: Out<'slot, '_, HostError>,
     ) -> OResult<'slot, ()> {
         let operation = HostOperation::SchemaRead;
         let budget = self.context.execution();
-        budget.consume_with(from.len(), out.reborrow(), |error| {
+        budget.consume_with(request.from_identity.len(), out.reborrow(), |error| {
             HostError::budget(operation, error)
         })?;
-        if module.len() > self.limits.max_name_bytes() {
+        if request.module_name.len() > self.limits.max_name_bytes() {
             return Err(out.fail(HostError::new(
                 operation,
-                HostErrorKind::ResourceLimitExceeded,
+                HostErrorKind::ResourceLimit(ResourceLimit::StringBytes),
             )));
         }
-        budget.consume_with(module.len(), out.reborrow(), |error| {
+        budget.consume_with(request.module_name.len(), out.reborrow(), |error| {
             HostError::budget(operation, error)
         })?;
-        let identity = <[u8; 8]>::try_from(from)
+        let identity = <[u8; 8]>::try_from(request.from_identity)
             .map_err(|_| HostError::new(operation, HostErrorKind::InvalidRequest))
             .store_err_into(out.reborrow())?;
         let index = usize::try_from(u64::from_le_bytes(identity))
             .map_err(|_| HostError::new(operation, HostErrorKind::InvalidRequest))
             .store_err_into(out.reborrow())?;
-        if !valid_module(module) || !self.root_attempted {
+        if !valid_module(request.module_name) || !self.root_attempted {
             return Err(out.fail(HostError::new(operation, HostErrorKind::InvalidRequest)));
         }
         let mut selection_errors = take(&mut self.selection_errors);
         let selection = select_candidate(
             &mut selection_errors,
-            |selection_out| self.select(index, module, false, selection_out),
-            |selection_out| self.select(index, module, true, selection_out),
+            |selection_out| self.select(index, request.module_name, false, selection_out),
+            |selection_out| self.select(index, request.module_name, true, selection_out),
             out.reborrow(),
         );
         self.selection_errors = selection_errors;
@@ -289,9 +304,16 @@ impl FileSchemaResolver {
         self.current = None;
         let file_identity = selected.file.identity();
         let (input, pin) = selected.file.into_input_and_pin(
-            limit.min(self.limits.max_file_bytes()),
-            budget,
-            operation,
+            SchemaInputParams {
+                limit: request.source_byte_limit.min(self.limits.max_file_bytes()),
+                limit_kind: if self.limits.max_file_bytes() < request.source_byte_limit {
+                    ResourceLimit::SourceBytes
+                } else {
+                    request.source_byte_limit_kind
+                },
+                budget,
+                operation,
+            },
             out.reborrow(),
         )?;
         self.identity = self.register(selected.path, file_identity, pin, out.reborrow())?;
@@ -339,10 +361,12 @@ impl FileSchemaResolver {
     fn record_failure(&mut self, error: HostError) -> HostError {
         self.failure_context = Some(error);
         let failure = match error.kind() {
-            HostErrorKind::ResourceLimitExceeded => Some(BudgetError::Resource),
+            HostErrorKind::ResourceLimit(limit) => Some(BudgetError::ResourceLimit(limit)),
             HostErrorKind::AllocationFailed => Some(BudgetError::Allocation),
-            HostErrorKind::CapacityExceeded => Some(BudgetError::CapacityExceeded),
-            HostErrorKind::InternalError => Some(BudgetError::invariant(error.budget_context())),
+            HostErrorKind::CapacityExceeded(capacity) => {
+                Some(BudgetError::CapacityExceeded(capacity))
+            }
+            HostErrorKind::Internal(internal) => Some(BudgetError::Internal(internal)),
             _ => None,
         };
         if let Some(failure) = failure {
@@ -366,7 +390,7 @@ impl SchemaResolver for FileSchemaResolver {
         }
         self.context
             .execution()
-            .consume_with(0, out.reborrow(), |_| ResolverError::ResourceLimitExceeded)?;
+            .consume_with(0, out.reborrow(), resolver_budget_error)?;
         let source_id = <[u8; 8]>::try_from(request.from_identity)
             .ok()
             .map(u64::from_le_bytes)
@@ -374,14 +398,7 @@ impl SchemaResolver for FileSchemaResolver {
             .map(SourceId::new);
         let mut errors = take(&mut self.errors);
         let error = {
-            let result = errors.try_call(|host_out| {
-                self.import(
-                    request.from_identity,
-                    request.module_name,
-                    request.source_byte_limit,
-                    host_out,
-                )
-            });
+            let result = errors.try_call(|host_out| self.import(request, host_out));
             match result {
                 Ok(()) => None,
                 Err(caught) => Some(caught.take()),
@@ -405,11 +422,15 @@ impl SchemaResolver for FileSchemaResolver {
                 Some(source_id) => error.with_source_id(source_id),
                 None => error,
             };
+            let internal = match error.kind() {
+                HostErrorKind::Internal(internal) => internal,
+                _ => InternalError::HostAdapterInvariantFailure(error.context()),
+            };
             self.failure_context = Some(error);
             self.context
                 .execution()
-                .record_failure(BudgetError::invariant(error.budget_context()));
-            return Err(out.fail(ResolverError::InternalInvariantFailure));
+                .record_failure(BudgetError::Internal(internal));
+            return Err(out.fail(ResolverError::Internal(internal)));
         };
         current_input.claim();
         Ok(SchemaSource::from_source_in_context(
@@ -474,11 +495,20 @@ fn select_candidate<'slot, 'borrow>(
 fn resolver_error(error: HostError) -> ResolverError {
     match error.kind() {
         HostErrorKind::NotFound => ResolverError::NotFound,
-        HostErrorKind::ResourceLimitExceeded => ResolverError::ResourceLimitExceeded,
+        HostErrorKind::ResourceLimit(limit) => ResolverError::ResourceLimit(limit),
         HostErrorKind::AllocationFailed => ResolverError::AllocationFailed,
-        HostErrorKind::CapacityExceeded => ResolverError::CapacityExceeded,
-        HostErrorKind::InternalError => ResolverError::InternalInvariantFailure,
+        HostErrorKind::CapacityExceeded(capacity) => ResolverError::CapacityExceeded(capacity),
+        HostErrorKind::Internal(internal) => ResolverError::Internal(internal),
         _ => ResolverError::HostFailure,
+    }
+}
+
+fn resolver_budget_error(error: BudgetError) -> ResolverError {
+    match error {
+        BudgetError::ResourceLimit(limit) => ResolverError::ResourceLimit(limit),
+        BudgetError::Allocation => ResolverError::AllocationFailed,
+        BudgetError::CapacityExceeded(capacity) => ResolverError::CapacityExceeded(capacity),
+        BudgetError::Internal(internal) => ResolverError::Internal(internal),
     }
 }
 
@@ -525,7 +555,7 @@ fn controlled_selection_failures_only_fall_back_for_not_found() {
         HostErrorKind::PermissionDenied,
         HostErrorKind::NotRegularFile,
         HostErrorKind::ReadFailure,
-        HostErrorKind::ResourceLimitExceeded,
+        HostErrorKind::ResourceLimit(ResourceLimit::SourceBytes),
         HostErrorKind::AllocationFailed,
         HostErrorKind::NotFound,
     ] {

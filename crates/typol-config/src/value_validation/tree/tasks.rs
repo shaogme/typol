@@ -6,8 +6,8 @@ use crate::{
 };
 use opeo::{OResult, Out};
 use typol_core::{
-    ChargedVec, Diagnostic, DiagnosticContext, LocatedSpan, ValueKind, ValuePayloadView, ValueView,
-    diagnostic_context,
+    ChargedVec, Diagnostic, DiagnosticContext, LocatedSpan, ValueKind, ValuePayloadView,
+    ValueSource, ValueView, diagnostic_context,
 };
 use typol_i18n::Translator;
 use typol_semantic::{ConstraintList, FieldList, TypeView, VariantView};
@@ -24,6 +24,7 @@ pub(super) struct Visit<'value, 'schema> {
     pub(super) value: ValueView<'value>,
     pub(super) member: Member<'schema>,
     pub(super) fallback_validated: bool,
+    pub(super) schema_default_parent: bool,
 }
 
 pub(super) enum Children<'value, 'schema> {
@@ -80,7 +81,8 @@ impl<'value, 'schema> Children<'value, 'schema> {
                 let ValueKind::Array(values) = value.as_ref() else {
                     return Err(out.fail(internal(*span, resources.translator)));
                 };
-                let Some(value) = values.get(*next) else {
+                let schema_default_parent = value.source() == ValueSource::SchemaDefault;
+                let Some(entry) = values.get(*next) else {
                     return Ok(None);
                 };
                 let member = Member::Index(*next);
@@ -93,9 +95,10 @@ impl<'value, 'schema> Children<'value, 'schema> {
                         variant: None,
                         span: *span,
                     },
-                    value: value.value(),
+                    value: entry.value(),
                     member,
                     fallback_validated: false,
+                    schema_default_parent,
                 }
             }
             Self::Map {
@@ -107,6 +110,7 @@ impl<'value, 'schema> Children<'value, 'schema> {
                 let ValueKind::Map(entries) = value.as_ref() else {
                     return Err(out.fail(internal(*span, resources.translator)));
                 };
+                let schema_default_parent = value.source() == ValueSource::SchemaDefault;
                 let Some(entry) = entries.get(*next) else {
                     return Ok(None);
                 };
@@ -123,6 +127,7 @@ impl<'value, 'schema> Children<'value, 'schema> {
                     value: entry.value(),
                     member,
                     fallback_validated: false,
+                    schema_default_parent,
                 }
             }
             Self::Fields {
@@ -178,6 +183,7 @@ impl<'value, 'schema> Children<'value, 'schema> {
                 if !equal {
                     return Err(out.fail(internal(*span, resources.translator)));
                 }
+                let schema_default_parent = value.source() == ValueSource::SchemaDefault;
                 let value = value_entry.value();
                 *next += 1;
                 let expected = TreeSupport::schema_call(
@@ -201,6 +207,7 @@ impl<'value, 'schema> Children<'value, 'schema> {
                     value,
                     member,
                     fallback_validated: false,
+                    schema_default_parent,
                 }
             }
         };

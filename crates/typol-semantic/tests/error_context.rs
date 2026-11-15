@@ -1,4 +1,7 @@
-use typol_core::{DiagnosticContext, DiagnosticContextDescriptor, SourceId, SourceSpan, Span};
+use typol_core::{
+    DiagnosticContext, DiagnosticContextDescriptor, InternalError, ResourceLimit, SourceId,
+    SourceSpan, Span,
+};
 use typol_semantic::{CopyError, EvalError, EvalFailure, RegexExecutionError};
 
 static TEST_CONTEXT_DESCRIPTOR: DiagnosticContextDescriptor =
@@ -27,8 +30,8 @@ fn copy_internal_error_exposes_its_static_failure_context() {
 #[test]
 fn regex_error_keeps_its_failure_context_and_constraint_span() {
     let span = SourceSpan::new(SourceId::new(3), Span::point(8));
-    let error = RegexExecutionError::InternalAt {
-        context: TEST_CONTEXT,
+    let error = RegexExecutionError::Internal {
+        error: InternalError::RegexExecutionInvariantFailure(TEST_CONTEXT),
         source_span: None,
     }
     .with_source_span(span);
@@ -40,8 +43,8 @@ fn regex_error_keeps_its_failure_context_and_constraint_span() {
 
 #[test]
 fn unlocated_regex_error_does_not_invent_a_source_span() {
-    let error = RegexExecutionError::InternalAt {
-        context: TEST_CONTEXT,
+    let error = RegexExecutionError::Internal {
+        error: InternalError::RegexExecutionInvariantFailure(TEST_CONTEXT),
         source_span: None,
     };
 
@@ -51,9 +54,12 @@ fn unlocated_regex_error_does_not_invent_a_source_span() {
 #[test]
 fn located_evaluation_error_keeps_its_classification_and_source_span() {
     let span = SourceSpan::new(SourceId::new(2), Span::point(5));
-    let error = EvalError::Resource.with_source_span(span);
+    let error = EvalError::ResourceLimit(ResourceLimit::ValidationTraversal).with_source_span(span);
 
-    assert_eq!(error.kind(), EvalFailure::Resource);
+    assert_eq!(
+        error.kind(),
+        EvalFailure::ResourceLimit(ResourceLimit::ValidationTraversal)
+    );
     assert_eq!(error.source_span(), Some(span));
     assert_eq!(error.context(), None);
 }

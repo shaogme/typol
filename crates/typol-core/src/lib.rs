@@ -12,6 +12,7 @@ mod input;
 mod numeric;
 mod optional_storage;
 mod path;
+mod resource_limit;
 mod source;
 mod storage;
 mod value;
@@ -24,11 +25,12 @@ pub use budget::{
     TerminalSlot,
 };
 pub use diagnostic::{
-    Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticContextDescriptor, DiagnosticFailure,
-    DiagnosticFieldStatus, DiagnosticKind, DiagnosticLabel, DiagnosticLabelInput,
-    DiagnosticMessage, DiagnosticObjectIdentifier, DiagnosticParameter, DiagnosticParameterValue,
-    DiagnosticParameters, DiagnosticStage, MAX_DIAGNOSTIC_PARAMETER_NAME_BYTES,
-    MAX_DIAGNOSTIC_PARAMETERS, MAX_RELATED_LOCATIONS, RelatedLocation, RelatedLocationRole,
+    CapacityExceeded, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticContextDescriptor,
+    DiagnosticFailure, DiagnosticFieldStatus, DiagnosticKind, DiagnosticLabel,
+    DiagnosticLabelInput, DiagnosticMessage, DiagnosticObjectIdentifier, DiagnosticParameter,
+    DiagnosticParameterValue, DiagnosticParameters, DiagnosticStage, InternalError,
+    MAX_DIAGNOSTIC_PARAMETER_NAME_BYTES, MAX_DIAGNOSTIC_PARAMETERS, MAX_RELATED_LOCATIONS,
+    RelatedLocation, RelatedLocationRole,
 };
 pub use excerpt_capture::{SecretRange, SourceCapture};
 pub use excerpt_limits::ExcerptLimits;
@@ -39,6 +41,7 @@ pub use input::{
 };
 pub use numeric::{FloatConversionError, NumericLiteral, NumericTokenKind};
 pub use path::{InstancePath, PathSegment};
+pub use resource_limit::ResourceLimit;
 pub use source::{
     LineIndex, LocatedSpan, LocationError, LocationErrorKind, SourceId, SourceLocation, SourceSpan,
     Span, SpanError, SpanLocation,
@@ -82,7 +85,7 @@ pub struct SourceRevision(u64);
 
 /// A failure reported by a source writer or by the bounded document layer.
 pub enum SourceCommitError<E> {
-    ResourceLimitExceeded,
+    ResourceLimit(ResourceLimit),
     AllocationFailed,
     Writer(E),
 }
@@ -119,7 +122,9 @@ impl SourceRevision {
 impl<E> fmt::Debug for SourceCommitError<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ResourceLimitExceeded => formatter.write_str("ResourceLimitExceeded"),
+            Self::ResourceLimit(limit) => {
+                formatter.debug_tuple("ResourceLimit").field(limit).finish()
+            }
             Self::AllocationFailed => formatter.write_str("AllocationFailed"),
             Self::Writer(_) => formatter.write_str("Writer(..)"),
         }
@@ -129,7 +134,7 @@ impl<E> fmt::Debug for SourceCommitError<E> {
 impl<E: fmt::Display> fmt::Display for SourceCommitError<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ResourceLimitExceeded => formatter.write_str("source write limit exceeded"),
+            Self::ResourceLimit(limit) => write!(formatter, "source write {limit} limit exceeded"),
             Self::AllocationFailed => formatter.write_str("source write allocation failed"),
             Self::Writer(error) => fmt::Display::fmt(error, formatter),
         }
@@ -140,7 +145,7 @@ impl<E: Error + 'static> Error for SourceCommitError<E> {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Writer(error) => Some(error),
-            Self::ResourceLimitExceeded | Self::AllocationFailed => None,
+            Self::ResourceLimit(_) | Self::AllocationFailed => None,
         }
     }
 }

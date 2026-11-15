@@ -193,7 +193,7 @@ impl MapIndex {
                 budget.consume(1, out.reborrow())?;
             }
             let Some(value) = entry.value else {
-                return Err(out.fail(E::from(DiagnosticFactory::internal(
+                return Err(out.fail(E::from(DiagnosticFactory::parser_internal(
                     MAP_INDEX_VALUE_MISSING.with_object_id(index as u64),
                     None,
                     None,

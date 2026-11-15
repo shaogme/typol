@@ -112,7 +112,7 @@ impl<'a> ConfigSession<'a> {
         }
     }
 
-    fn pin_diagnostics(&self, diagnostics: &DiagnosticBuffer<'_>) {
+    pub(crate) fn pin_diagnostics(&self, diagnostics: &DiagnosticBuffer<'_>) {
         for diagnostic in diagnostics.iter() {
             for span in diagnostic
                 .located_primary()
@@ -353,26 +353,19 @@ fn source_read_diagnostic(error: SourceReadError, translator: Translator) -> Dia
     let mut diagnostic = Diagnostic::translated_emergency(
         code,
         match error.kind() {
-            SourceReadErrorKind::ResourceLimitExceeded => t! {
-                name: "diagnostic.emergency.resource_limit_exceeded",
-                locale: translator,
-            },
+            SourceReadErrorKind::ResourceLimit(limit) => limit.emergency_message(translator),
             SourceReadErrorKind::AllocationFailed => t! {
                 name: "diagnostic.emergency.allocation_failed",
                 locale: translator,
             },
-            SourceReadErrorKind::CapacityExceeded => t! {
-                name: "diagnostic.emergency.capacity_exceeded",
-                locale: translator,
-            },
+            SourceReadErrorKind::CapacityExceeded(capacity) => {
+                capacity.emergency_message(translator)
+            }
             SourceReadErrorKind::HostFailure => t! {
                 name: "diagnostic.emergency.source_input_error",
                 locale: translator,
             },
-            SourceReadErrorKind::InternalInvariantFailure => t! {
-                name: "diagnostic.emergency.internal_error",
-                locale: translator,
-            },
+            SourceReadErrorKind::Internal(error) => error.emergency_message(translator),
         },
     );
     diagnostic.set_context(error.context());

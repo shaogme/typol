@@ -8,7 +8,7 @@ pub use typol_config::{
 use alloc::vec::Vec;
 use core::{error::Error, fmt, ops::Deref};
 use opeo::ErrSlot;
-use typol_core::{BudgetError, ChargedBox, ConfigValue, Write};
+use typol_core::{BudgetError, CapacityExceeded, ChargedBox, ConfigValue, InternalError, Write};
 use typol_semantic::CompiledSchema;
 
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 16_777_216;
@@ -40,6 +40,8 @@ pub enum ConfigIrErrorKind {
     InvalidNestingDepthLimit,
     SecretValueRejected,
     AllocationFailed,
+    CapacityExceeded,
+    Internal,
     SerializationFailed,
     NormalizationFailed,
     ValidationFailed,
@@ -97,6 +99,8 @@ pub enum ConfigIrError {
     InvalidNestingDepthLimit { requested: usize, maximum: usize },
     SecretValueRejected,
     AllocationFailed,
+    CapacityExceeded(CapacityExceeded),
+    Internal(InternalError),
     SerializationFailed,
     NormalizationFailed(RetainedConfigValueErrors),
     ValidationFailed(RetainedConfigValueErrors),
@@ -116,6 +120,8 @@ impl ConfigIrError {
             Self::InvalidNestingDepthLimit { .. } => ConfigIrErrorKind::InvalidNestingDepthLimit,
             Self::SecretValueRejected => ConfigIrErrorKind::SecretValueRejected,
             Self::AllocationFailed => ConfigIrErrorKind::AllocationFailed,
+            Self::CapacityExceeded(_) => ConfigIrErrorKind::CapacityExceeded,
+            Self::Internal(_) => ConfigIrErrorKind::Internal,
             Self::SerializationFailed => ConfigIrErrorKind::SerializationFailed,
             Self::NormalizationFailed(_) => ConfigIrErrorKind::NormalizationFailed,
             Self::ValidationFailed(_) => ConfigIrErrorKind::ValidationFailed,
@@ -319,6 +325,13 @@ impl fmt::Display for ConfigIrError {
             ),
             Self::SecretValueRejected => formatter.write_str("IR export contains a secret value"),
             Self::AllocationFailed => formatter.write_str("IR serialization allocation failed"),
+            Self::CapacityExceeded(capacity) => {
+                write!(
+                    formatter,
+                    "IR serialization capacity exceeded ({capacity:?})"
+                )
+            }
+            Self::Internal(_) => formatter.write_str("internal IR serialization invariant failed"),
             Self::SerializationFailed => formatter.write_str("IR JSON serialization failed"),
             Self::NormalizationFailed(errors) => {
                 write!(

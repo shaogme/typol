@@ -59,9 +59,9 @@ impl EncoderModel {
     pub(super) fn write_failure(error: WriteError) -> Failure {
         match error {
             WriteError::AllocationFailed => Failure::Allocation,
-            WriteError::CapacityExceeded => Failure::Capacity,
+            WriteError::CapacityExceeded(capacity) => Failure::Capacity(capacity),
             WriteError::HostFailure => Failure::Encoding,
-            WriteError::InternalInvariantFailure => Failure::internal(ENCODER_INVARIANT),
+            WriteError::Internal(internal) => Failure::Internal(internal),
         }
     }
 

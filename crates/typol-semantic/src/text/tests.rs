@@ -3,7 +3,7 @@ use core::fmt::{Debug, Formatter, Result as FmtResult};
 
 use crate::TextValidation;
 use typol_core::BudgetError;
-use typol_test_support::TestSlot;
+use typol_test_support::{TestSlot, check, check_eq};
 
 enum TestError {
     Budget(BudgetError),
@@ -27,35 +27,11 @@ impl From<BudgetError> for TestError {
 
 type TestResult<T> = Result<T, TestError>;
 
-macro_rules! check {
-    ($condition:expr $(, $($message:tt)+)? $(,)?) => {{
-        if !$condition {
-            return Err(TestError::Assertion(alloc::format!(
-                "assertion failed: {}",
-                stringify!($condition)
-            )));
-        }
-    }};
-}
-
-macro_rules! check_eq {
-    ($actual:expr, $expected:expr $(,)?) => {{
-        let actual = &$actual;
-        let expected = &$expected;
-        if actual != expected {
-            return Err(TestError::Assertion(alloc::format!(
-                "assertion failed: {}; actual={actual:?}, expected={expected:?}",
-                stringify!($actual)
-            )));
-        }
-    }};
-}
-
 #[test]
 fn strict_ip_literals_cover_compression_and_embedded_ipv4() -> TestResult<()> {
     let mut errors = TestSlot::<TestError>::default();
     for text in ["0.0.0.0", "255.255.255.255", "192.0.2.9"] {
-        check!(
+        check!((|message: &str| TestError::Assertion(message.into()));
             errors
                 .access(|out| TextValidation::parse_ipv4::<TestError>(text, out))?
                 .is_some(),
@@ -71,19 +47,19 @@ fn strict_ip_literals_cover_compression_and_embedded_ipv4() -> TestResult<()> {
         "1..2.3",
         "1.2.3.4 ",
     ] {
-        check!(
+        check!((|message: &str| TestError::Assertion(message.into()));
             errors
                 .access(|out| TextValidation::parse_ipv4::<TestError>(text, out))?
                 .is_none(),
             "{text}"
         );
     }
-    check_eq!(
+    check_eq!((|message: &str| TestError::Assertion(message.into()));
         errors.access(|out| TextValidation::parse_ipv6::<TestError>("2001:db8::1", out))?,
         errors
             .access(|out| TextValidation::parse_ipv6::<TestError>("2001:0DB8:0:0:0:0:0:1", out))?
     );
-    check_eq!(
+    check_eq!((|message: &str| TestError::Assertion(message.into()));
         errors.access(|out| TextValidation::parse_ipv6::<TestError>("::ffff:192.0.2.1", out))?,
         errors.access(|out| TextValidation::parse_ipv6::<TestError>(
             "0:0:0:0:0:ffff:c000:201",
@@ -97,7 +73,7 @@ fn strict_ip_literals_cover_compression_and_embedded_ipv4() -> TestResult<()> {
         "1:2:3:4:5:6:7:8",
         "1:2:3:4:5:6:192.0.2.1",
     ] {
-        check!(
+        check!((|message: &str| TestError::Assertion(message.into()));
             errors
                 .access(|out| TextValidation::parse_ipv6::<TestError>(text, out))?
                 .is_some(),
@@ -118,7 +94,7 @@ fn strict_ip_literals_cover_compression_and_embedded_ipv4() -> TestResult<()> {
         "::g",
         "::1:",
     ] {
-        check!(
+        check!((|message: &str| TestError::Assertion(message.into()));
             errors
                 .access(|out| TextValidation::parse_ipv6::<TestError>(text, out))?
                 .is_none(),
@@ -138,7 +114,7 @@ fn dns_labels_and_total_lengths_are_bounded_without_ipv4_fallback() -> TestResul
         "1a.2.3.4",
         "192.0.2.1.",
     ] {
-        check!(
+        check!((|message: &str| TestError::Assertion(message.into()));
             errors.access(|out| TextValidation::valid_host::<TestError>(text, out))?,
             "{text}"
         );
@@ -160,13 +136,13 @@ fn dns_labels_and_total_lengths_are_bounded_without_ipv4_fallback() -> TestResul
         "256.2.3.4",
         "256.2.3.4.",
     ] {
-        check!(
+        check!((|message: &str| TestError::Assertion(message.into()));
             !errors.access(|out| TextValidation::valid_host::<TestError>(text, out))?,
             "{text}"
         );
     }
-    check!(errors.access(|out| TextValidation::valid_host::<TestError>(&"a".repeat(63), out))?);
-    check!(!errors.access(|out| TextValidation::valid_host::<TestError>(&"a".repeat(64), out))?);
+    check!((|message: &str| TestError::Assertion(message.into())); errors.access(|out| TextValidation::valid_host::<TestError>(&"a".repeat(63), out))?);
+    check!((|message: &str| TestError::Assertion(message.into())); !errors.access(|out| TextValidation::valid_host::<TestError>(&"a".repeat(64), out))?);
     let host = format!(
         "{}.{}.{}.{}",
         "a".repeat(63),
@@ -174,10 +150,10 @@ fn dns_labels_and_total_lengths_are_bounded_without_ipv4_fallback() -> TestResul
         "c".repeat(63),
         "d".repeat(61)
     );
-    check_eq!(host.len(), 253);
-    check!(errors.access(|out| TextValidation::valid_host::<TestError>(&host, out))?);
-    check!(errors.access(|out| TextValidation::valid_host::<TestError>(&format!("{host}."), out))?);
-    check!(
+    check_eq!((|message: &str| TestError::Assertion(message.into())); host.len(), 253);
+    check!((|message: &str| TestError::Assertion(message.into())); errors.access(|out| TextValidation::valid_host::<TestError>(&host, out))?);
+    check!((|message: &str| TestError::Assertion(message.into())); errors.access(|out| TextValidation::valid_host::<TestError>(&format!("{host}."), out))?);
+    check!((|message: &str| TestError::Assertion(message.into()));
         !errors.access(|out| TextValidation::valid_host::<TestError>(&format!("{host}d"), out))?
     );
     Ok(())
@@ -187,7 +163,7 @@ fn dns_labels_and_total_lengths_are_bounded_without_ipv4_fallback() -> TestResul
 fn email_ascii_subset_and_cidr_prefixes_have_independent_counterexamples() -> TestResult<()> {
     let mut errors = TestSlot::<TestError>::default();
     for text in ["a+b@example.com", "a_b@example.com", "a.b-c@EXAMPLE.com"] {
-        check!(
+        check!((|message: &str| TestError::Assertion(message.into()));
             errors.access(|out| TextValidation::valid_email::<TestError>(text, out))?,
             "{text}"
         );
@@ -209,30 +185,30 @@ fn email_ascii_subset_and_cidr_prefixes_have_independent_counterexamples() -> Te
         "@example.com",
         "a@",
     ] {
-        check!(
+        check!((|message: &str| TestError::Assertion(message.into()));
             !errors.access(|out| TextValidation::valid_email::<TestError>(text, out))?,
             "{text}"
         );
     }
-    check!(
+    check!((|message: &str| TestError::Assertion(message.into()));
         errors.access(|out| TextValidation::valid_email::<TestError>(
             &format!("{}@example.com", "a".repeat(64)),
             out
         ))?
     );
-    check!(
+    check!((|message: &str| TestError::Assertion(message.into()));
         !errors.access(|out| TextValidation::valid_email::<TestError>(
             &format!("{}@example.com", "a".repeat(65)),
             out
         ))?
     );
-    check!(
+    check!((|message: &str| TestError::Assertion(message.into()));
         errors.access(|out| TextValidation::valid_email::<TestError>(
             &format!("a@{}.com", "a".repeat(63)),
             out
         ))?
     );
-    check!(
+    check!((|message: &str| TestError::Assertion(message.into()));
         !errors.access(|out| TextValidation::valid_email::<TestError>(
             &format!("a@{}.com", "a".repeat(64)),
             out
@@ -245,11 +221,11 @@ fn email_ascii_subset_and_cidr_prefixes_have_independent_counterexamples() -> Te
         "c".repeat(63),
         "d".repeat(61)
     );
-    check!(
+    check!((|message: &str| TestError::Assertion(message.into()));
         errors
             .access(|out| TextValidation::valid_email::<TestError>(&format!("a@{domain}"), out))?
     );
-    check!(
+    check!((|message: &str| TestError::Assertion(message.into()));
         !errors
             .access(|out| TextValidation::valid_email::<TestError>(&format!("a@{domain}d"), out))?
     );
@@ -259,17 +235,17 @@ fn email_ascii_subset_and_cidr_prefixes_have_independent_counterexamples() -> Te
         "192.0.2.9/32",
         "192.0.2.9/00024",
     ] {
-        check!(
+        check!((|message: &str| TestError::Assertion(message.into()));
             errors.access(|out| TextValidation::valid_cidr::<TestError>(text, true, out))?,
             "{text}"
         );
     }
     for text in ["::1/0", "::1/128", "2001:db8::9/64", "::ffff:192.0.2.9/128"] {
-        check!(
+        check!((|message: &str| TestError::Assertion(message.into()));
             errors.access(|out| TextValidation::valid_cidr::<TestError>(text, false, out))?,
             "{text}"
         );
-        check!(
+        check!((|message: &str| TestError::Assertion(message.into()));
             !errors.access(|out| TextValidation::valid_cidr::<TestError>(text, true, out))?,
             "{text}"
         );
@@ -289,7 +265,7 @@ fn email_ascii_subset_and_cidr_prefixes_have_independent_counterexamples() -> Te
         "192.0.2.9/２４",
         "192.0.2.9/24 ",
     ] {
-        check!(
+        check!((|message: &str| TestError::Assertion(message.into()));
             !errors.access(|out| TextValidation::valid_cidr::<TestError>(text, false, out))?,
             "{text}"
         );

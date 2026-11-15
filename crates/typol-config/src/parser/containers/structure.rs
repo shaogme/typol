@@ -1,5 +1,4 @@
 use crate::{
-    context::{AssignmentTarget, CompletionState},
     diagnostics::DiagnosticFactory,
     parser::{
         containers::{ContainerSupport, StructureSpans},
@@ -8,7 +7,6 @@ use crate::{
             ContextDiagnosticRequest, ExpectedSymbol, ExpectedValueSymbol, ParsedValue, Syntax,
         },
         recovery::{ParseFailure, Recovery},
-        semantics::SubtreeValidator,
     },
     value::{FieldValue, ValueFactory},
     value_normalization::{MissingFieldDecision, MissingFieldValue},
@@ -340,7 +338,7 @@ impl<'schema> StructureFrame<'schema> {
     ) -> OResult<'slot, ChargedVec<FieldValue>> {
         let mut output = ChargedVec::new(Some(&context.budget), out.reborrow())?;
         output.try_reserve_exact(self.fields.len(), out.reborrow())?;
-        for (index, field_id) in self.fields.iter().enumerate() {
+        for (index, field) in self.fields.iter().enumerate() {
             context.budget.consume(1, out.reborrow())?;
             let Some(slot) = self.slots.get_mut(index) else {
                 return Err(out.fail(ContainerSupport::invalid_parser_state(
@@ -349,7 +347,6 @@ impl<'schema> StructureFrame<'schema> {
                 )));
             };
             let state = replace(slot, FieldSlot::unseen());
-            let field = field_id;
             match state.state {
                 FieldSlotState::Present => {
                     let Some(value) = state.value else {
@@ -381,7 +378,7 @@ impl<'schema> StructureFrame<'schema> {
             )?;
             ContainerSupport::push_field_path(context, field_name, close_span, out.reborrow())?;
             context.next_member = ContainerSupport::field_member(context, field);
-            let completed = item_errors.try_call(|mut item_out| {
+            let missing = item_errors.try_call(|mut item_out| {
                 let default = ParserControl::schema_call(
                     &mut context.session.validation().schema_access_errors,
                     |schema_out| field.default_value(schema_out),
@@ -397,75 +394,10 @@ impl<'schema> StructureFrame<'schema> {
                     |schema_out| expected.kind(schema_out),
                     item_out.reborrow(),
                 )?;
-                let decision = MissingFieldValue::decide(false, default, kind);
-                let value = match decision {
-                    MissingFieldDecision::SchemaDefault(default) => {
-                        let value = SubtreeValidator::copy_default(
-                            context,
-                            default,
-                            field,
-                            item_out.reborrow(),
-                        )?;
-                        let field_span = ParserControl::schema_call(
-                            &mut context.session.validation().schema_access_errors,
-                            |schema_out| field.span(schema_out),
-                            item_out.reborrow(),
-                        )?;
-                        SubtreeValidator::validate(
-                            context,
-                            AssignmentTarget {
-                                expected,
-                                field: Some(field_id),
-                                variant: None,
-                                span: field_span.into(),
-                            },
-                            &value,
-                            CompletionState::NeedsTraversalWithKnownShape,
-                            item_out.reborrow(),
-                        )?;
-                        value
-                    }
-                    MissingFieldDecision::OptionalNone => {
-                        ParserControl::count_value_node(
-                            context,
-                            close_span,
-                            Some(context.value_source),
-                            item_out.reborrow(),
-                        )?;
-                        let value = ContainerSupport::value_call(
-                            &mut context.value_errors,
-                            |value_out| {
-                                ValueFactory::none(
-                                    context.value_source,
-                                    Some(&context.budget),
-                                    value_out,
-                                )
-                            },
-                            ValueCallContext {
-                                span: close_span,
-                                source: context.value_source,
-                                translator: context.session.translator(),
-                            },
-                            item_out.reborrow(),
-                        )?;
-                        let field_span = ParserControl::schema_call(
-                            &mut context.session.validation().schema_access_errors,
-                            |schema_out| field.span(schema_out),
-                            item_out.reborrow(),
-                        )?;
-                        SubtreeValidator::validate(
-                            context,
-                            AssignmentTarget {
-                                expected,
-                                field: Some(field_id),
-                                variant: None,
-                                span: field_span.into(),
-                            },
-                            &value,
-                            CompletionState::NeedsTraversal,
-                            item_out.reborrow(),
-                        )?;
-                        value
+                match MissingFieldValue::decide(false, default, kind) {
+                    MissingFieldDecision::SchemaDefault(_) | MissingFieldDecision::OptionalNone => {
+                        context.needs_normalization = true;
+                        Ok(())
                     }
                     MissingFieldDecision::Required => {
                         let diagnostic = ContainerSupport::missing_field_diagnostic(
@@ -473,34 +405,21 @@ impl<'schema> StructureFrame<'schema> {
                             close_span,
                             item_out.reborrow(),
                         )?;
-                        return Err(item_out.fail(diagnostic.into()));
+                        Err(item_out.fail(diagnostic.into()))
                     }
                     MissingFieldDecision::Provided => {
-                        return Err(item_out.fail(ContainerSupport::invalid_parser_state(
+                        Err(item_out.fail(ContainerSupport::invalid_parser_state(
                             Some(close_span),
                             context.session.translator(),
-                        )));
+                        )))
                     }
-                };
-                ParserControl::construct_text(context, field_name.len(), item_out.reborrow())?;
-                let field_value = ParserControl::budget_call(
-                    &mut context.session.validation().budget_errors,
-                    |budget_out| {
-                        FieldValue::try_new(field_name, value, Some(&context.budget), budget_out)
-                    },
-                    item_out.reborrow(),
-                )?;
-                Ok(field_value)
+                }
             });
             context.path.pop();
-            match completed {
-                Ok(value) => output.try_push(value, out.reborrow())?,
-                Err(caught) => {
-                    let failure = caught.take();
-                    self.failed = true;
-                    if !Recovery::record_failure(context, failure) {
-                        return Err(out.fail(ParseFailure::reported()));
-                    }
+            if let Err(caught) = missing {
+                self.failed = true;
+                if !Recovery::record_failure(context, caught.take()) {
+                    return Err(out.fail(ParseFailure::reported()));
                 }
             }
         }
@@ -537,7 +456,6 @@ impl<'schema> StructureFrame<'schema> {
             out.reborrow(),
         )?;
         Ok(ParsedValue {
-            completion: CompletionState::ChildrenComplete,
             value,
             span: ParserControl::diagnostic_call(
                 &context.diagnostic_errors,

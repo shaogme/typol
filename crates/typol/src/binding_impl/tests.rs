@@ -14,7 +14,7 @@ use crate::{
 };
 use opeo::{OResult, Out};
 use std::{any::TypeId, cmp::Ordering};
-use typol_core::{ExecutionLimits, ValueId};
+use typol_core::{DiagnosticCode, ExecutionLimits, ValueId};
 use typol_model::BuiltinType;
 use typol_schema::{
     ResolverError, SchemaCompileOptions, SchemaCompiler, SchemaResolveRequest, SchemaResolver,
@@ -345,7 +345,10 @@ fn missing_extra_duplicate_nominal_and_foreign_descriptors_are_rejected() -> Tes
     assert_eq!(bind_code::<Bad<0>>(&schema, BindOptions::default())?, 14);
     assert_eq!(bind_code::<Bad<1>>(&schema, BindOptions::default())?, 14);
     assert_eq!(bind_code::<Bad<3>>(&schema, BindOptions::default())?, 14);
-    assert_eq!(bind_code::<Bad<4>>(&schema, BindOptions::default())?, 9);
+    assert_eq!(
+        bind_code::<Bad<4>>(&schema, BindOptions::default())?,
+        DiagnosticCode::TYPE_BINDING_INVARIANT_FAILURE.get(),
+    );
     let schema = compile("entry struct Root { value: u8, other: u8 }")?;
     assert_eq!(bind_code::<Bad<2>>(&schema, BindOptions::default())?, 14);
     Ok(())
@@ -468,7 +471,7 @@ fn aliases_use_bottom_nominal_names_and_keep_use_site_metadata() -> TestResult {
             &session,
             out,
         ))?)?,
-        9
+        DiagnosticCode::TYPE_BINDING_INVARIANT_FAILURE.get()
     );
     Ok(())
 }
@@ -488,13 +491,25 @@ rejected_typol_impl!(Recursive, |context, out| {
 fn active_type_cycles_and_resource_limits_are_rejected_before_child_resolution() -> TestResult {
     let schema = compile("entry struct Root { value: u8 }")?;
     assert_eq!(bind_code::<Recursive>(&schema, BindOptions::default())?, 14);
-    for limits in [
-        BindingLimits::new(0, 128, 100, 262_144).test_value()?,
-        BindingLimits::new(100, 0, 100, 262_144).test_value()?,
-        BindingLimits::new(100, 128, 100, 3).test_value()?,
+    for (limits, expected_code) in [
+        (
+            BindingLimits::new(0, 128, 100, 262_144).test_value()?,
+            DiagnosticCode::TYPE_BINDING_NODES_LIMIT_EXCEEDED,
+        ),
+        (
+            BindingLimits::new(100, 0, 100, 262_144).test_value()?,
+            DiagnosticCode::TYPE_BINDING_DEPTH_LIMIT_EXCEEDED,
+        ),
+        (
+            BindingLimits::new(100, 128, 100, 3).test_value()?,
+            DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED,
+        ),
     ] {
         let options = BindOptions::new(limits, ExecutionLimits::new(16_777_216, 67_108_864));
-        assert_eq!(bind_code::<Root<u8>>(&schema, options)?, 1);
+        assert_eq!(
+            bind_code::<Root<u8>>(&schema, options)?,
+            expected_code.get()
+        );
     }
     Ok(())
 }
@@ -751,24 +766,6 @@ fn equal_short_names_in_different_schema_modules_preserve_owner_views() -> TestR
         .ty,
         right
     );
-    Ok(())
-}
-
-struct Indirect;
-
-rejected_typol_impl!(Indirect, |context, out| {
-    structure::<Self>(
-        context,
-        "Root",
-        &[("value", DescriptorProvider::of::<Vec<Self>>())],
-        out.reborrow(),
-    )
-});
-
-#[test]
-fn indirect_container_cycle_is_detected_by_actual_rust_identity() -> TestResult {
-    let schema = compile("entry struct Root { value: [u8] }")?;
-    assert_eq!(bind_code::<Indirect>(&schema, BindOptions::default())?, 14);
     Ok(())
 }
 

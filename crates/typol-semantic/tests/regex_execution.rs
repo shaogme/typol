@@ -1,15 +1,14 @@
 use core::fmt::{Debug, Formatter, Result as FmtResult};
-use typol_core::{BudgetError, RegexExecutionBudget};
+use typol_core::{BudgetError, RegexExecutionBudget, ResourceLimit};
 use typol_policy::RegexLimits;
-use typol_regex::{
-    RegexCompileError, RegexCompiler, RegexMatchError, RegexResource, RegexScratchError,
-};
+use typol_regex::{RegexCompileError, RegexCompiler, RegexMatchError, RegexScratchError};
 use typol_semantic::{RegexExecutionError, RegexExecutor, RegexMatchOptions, opeo::ErrSlot};
+use typol_test_support::{check, check_eq};
 
 enum TestError {
     Budget(BudgetError),
     Compile(RegexCompileError),
-    Execution(RegexExecutionError),
+    Execution(Box<RegexExecutionError>),
     MissingExpectedError,
     Assertion(&'static str),
 }
@@ -40,29 +39,11 @@ impl From<RegexCompileError> for TestError {
 
 impl From<RegexExecutionError> for TestError {
     fn from(error: RegexExecutionError) -> Self {
-        Self::Execution(error)
+        Self::Execution(Box::new(error))
     }
 }
 
 type TestResult<T> = Result<T, TestError>;
-
-macro_rules! check_eq {
-    ($actual:expr, $expected:expr $(,)?) => {{
-        let actual = &$actual;
-        let expected = &$expected;
-        if actual != expected {
-            return Err(TestError::Assertion(stringify!($actual)));
-        }
-    }};
-}
-
-macro_rules! check {
-    ($condition:expr $(, $($message:tt)+)? $(,)?) => {{
-        if !$condition {
-            return Err(TestError::Assertion(stringify!($condition)));
-        }
-    }};
-}
 
 #[test]
 fn matches_independent_patterns_and_reuses_larger_scratch() -> TestResult<()> {
@@ -88,7 +69,7 @@ fn matches_independent_patterns_and_reuses_larger_scratch() -> TestResult<()> {
         let regex = compile_errors
             .call(|out| RegexCompiler::compile(pattern, &limits, &compilation, out))?;
         for (input, expected) in cases {
-            check_eq!(
+            check_eq!(TestError::Assertion;
                 execution_errors.call(|out| {
                     executor.is_match_budgeted(
                         &regex,
@@ -120,7 +101,7 @@ fn none_skips_scratch_and_resource_errors_stay_structured() -> TestResult<()> {
     let mut executor = RegexExecutor::new();
     let mut limits = defaults;
     limits.set_max_regex_scratch_states(0);
-    check_eq!(
+    check_eq!(TestError::Assertion;
         execution_errors.call(|out| {
             executor.is_match_budgeted(
                 &regex,
@@ -134,7 +115,7 @@ fn none_skips_scratch_and_resource_errors_stay_structured() -> TestResult<()> {
         }),
         Ok(true)
     );
-    check_eq!(
+    check_eq!(TestError::Assertion;
         execution_errors.call(|out| {
             executor.is_match_budgeted(
                 &regex,
@@ -147,7 +128,7 @@ fn none_skips_scratch_and_resource_errors_stay_structured() -> TestResult<()> {
             )
         }),
         Err(RegexExecutionError::Scratch(
-            RegexScratchError::ResourceLimitExceeded(RegexResource::ScratchStateCount)
+            RegexScratchError::ResourceLimit(ResourceLimit::RegexScratchStates)
         ))
     );
     limits = defaults;
@@ -167,12 +148,12 @@ fn none_skips_scratch_and_resource_errors_stay_structured() -> TestResult<()> {
         })
         .err()
         .ok_or(TestError::MissingExpectedError)?;
-    check!(matches!(
+    check!(TestError::Assertion; matches!(
         error,
-        RegexExecutionError::Match(RegexMatchError::ResourceLimitExceeded(_))
+        RegexExecutionError::Match(RegexMatchError::ResourceLimit(_))
     ));
     let debug = format!("{error:?}");
-    check!(!debug.contains("private-input"));
-    check!(!debug.contains("secret"));
+    check!(TestError::Assertion; !debug.contains("private-input"));
+    check!(TestError::Assertion; !debug.contains("secret"));
     Ok(())
 }

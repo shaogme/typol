@@ -2,8 +2,8 @@ use crate::diagnostics::{BudgetDiagnostic, DetailedDiagnosticRequest, Diagnostic
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
     BudgetError, ChargedVec, ConfigValue, Diagnostic, DiagnosticCode, DiagnosticContext,
-    ExecutionBudget, InstancePath, LocatedSpan, ValueEntries, ValueError, ValueErrorKind,
-    ValueView, diagnostic_context,
+    ExecutionBudget, InstancePath, InternalError, LocatedSpan, ValueEntries, ValueError,
+    ValueErrorKind, ValueSource, ValueView, diagnostic_context,
 };
 use typol_i18n::{Translator, t};
 use typol_policy::ValueLimits;
@@ -29,11 +29,6 @@ pub(super) static NORMALIZE_TAKE_SINGLE: DiagnosticContext = diagnostic_context!
     "value-normalization",
     "single-value-count-mismatch",
 );
-pub(super) static NORMALIZE_VALUE_CONSTRUCTION: DiagnosticContext = diagnostic_context!(
-    "typol-config",
-    "value-normalization",
-    "value-container-construction-failed",
-);
 
 pub(crate) struct NormalizeRequest<'a> {
     pub(crate) translator: Translator,
@@ -44,6 +39,8 @@ pub(crate) struct NormalizeRequest<'a> {
     pub(crate) text_limit: usize,
     pub(crate) schema_default: bool,
     pub(crate) allow_unvalidated_environment_sources: bool,
+    pub(crate) existing_nodes_precounted: bool,
+    pub(crate) missing_value_source: ValueSource,
 }
 
 pub(super) struct NormalizeBudgetErrors {
@@ -82,6 +79,7 @@ pub(super) struct Input<'a> {
     pub(super) field: Option<FieldView<'a>>,
     pub(super) hidden: bool,
     pub(super) schema_default: bool,
+    pub(super) environment_root: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -210,13 +208,17 @@ impl NormalizeOps {
     ) -> OResult<'slot, ConfigValue> {
         let Some(value) = values.next() else {
             return Err(out.fail(BudgetDiagnostic::from_error(
-                BudgetError::invariant(&NORMALIZE_TAKE_SINGLE),
+                BudgetError::Internal(InternalError::ConfigValueInvariantFailure(
+                    NORMALIZE_TAKE_SINGLE,
+                )),
                 translator,
             )));
         };
         if values.next().is_some() {
             return Err(out.fail(BudgetDiagnostic::from_error(
-                BudgetError::invariant(&NORMALIZE_TAKE_SINGLE),
+                BudgetError::Internal(InternalError::ConfigValueInvariantFailure(
+                    NORMALIZE_TAKE_SINGLE,
+                )),
                 translator,
             )));
         }
@@ -225,7 +227,9 @@ impl NormalizeOps {
 
     pub(super) fn invariant_error(translator: Translator) -> Diagnostic {
         BudgetDiagnostic::from_error(
-            BudgetError::invariant(&NORMALIZE_FINISH_INVARIANT),
+            BudgetError::Internal(InternalError::ConfigValueInvariantFailure(
+                NORMALIZE_FINISH_INVARIANT,
+            )),
             translator,
         )
     }
@@ -235,14 +239,14 @@ impl NormalizeOps {
             ValueErrorKind::AllocationFailed => {
                 BudgetDiagnostic::from_error(BudgetError::Allocation, translator)
             }
-            ValueErrorKind::ResourceLimitExceeded => {
-                BudgetDiagnostic::from_error(BudgetError::Resource, translator)
+            ValueErrorKind::ResourceLimit(limit) => {
+                BudgetDiagnostic::from_error(BudgetError::ResourceLimit(limit), translator)
             }
-            ValueErrorKind::CapacityExceeded => {
-                BudgetDiagnostic::from_error(BudgetError::CapacityExceeded, translator)
+            ValueErrorKind::CapacityExceeded(capacity) => {
+                BudgetDiagnostic::from_error(BudgetError::CapacityExceeded(capacity), translator)
             }
-            ValueErrorKind::InternalInvariantFailure => DiagnosticFactory::internal(
-                error.context().unwrap_or(NORMALIZE_VALUE_CONSTRUCTION),
+            ValueErrorKind::Internal(internal) => DiagnosticFactory::internal_error(
+                internal,
                 None,
                 None,
                 None,

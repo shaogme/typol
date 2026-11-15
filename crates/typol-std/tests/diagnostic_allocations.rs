@@ -1,7 +1,3 @@
-#[macro_use]
-#[path = "support/assertions.rs"]
-mod assertions;
-
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
@@ -12,8 +8,11 @@ use std::{
 };
 
 use opeo::ErrSlot;
-use typol_core::{BudgetError, Diagnostic, DiagnosticCode, ExecutionLimits, SourceExcerptSet};
+use typol_core::{
+    BudgetError, Diagnostic, DiagnosticCode, ExecutionLimits, ResourceLimit, SourceExcerptSet,
+};
 use typol_i18n::{Language, Translator};
+use typol_opeo_test_support::{ensure, ensure_eq};
 use typol_std::{
     DiagnosticContext, DiagnosticRenderError, DiagnosticRenderer, DisplayError, RenderOptions,
 };
@@ -178,9 +177,9 @@ fn each_single_and_persistent_allocation_failure_releases_the_entire_output()
     let failed = measure(&diagnostics, None, false, short);
     ensure_eq!(
         failed.error,
-        Some(DiagnosticRenderError::Display(
-            DisplayError::ResourceLimitExceeded
-        ))
+        Some(DiagnosticRenderError::Display(DisplayError::ResourceLimit(
+            ResourceLimit::FormattingWorkspaceBytes
+        )))
     );
     ensure_eq!(failed.state.live, 0);
     for index in 0..baseline.state.attempts {

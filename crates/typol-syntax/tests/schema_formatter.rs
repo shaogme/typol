@@ -1,6 +1,6 @@
 use std::{error::Error, fmt::Debug, io::Error as IoError};
 
-use typol_core::{ExecutionBudget, ExecutionLimits, SourceId};
+use typol_core::{ExecutionBudget, ExecutionLimits, ResourceLimit, SourceId};
 use typol_syntax::{
     SchemaDocument, SchemaFormatError, SchemaFormatErrorKind, SchemaFormatOptions, SchemaFormatter,
     SchemaParseOptions, SchemaParser, SyntaxErrors, opeo::ErrSlot,
@@ -354,7 +354,7 @@ fn rejects_output_workspace_and_depth_limits_without_partial_result() -> Result<
     )?;
     ensure_equal(
         output_error.kind(),
-        SchemaFormatErrorKind::ResourceLimitExceeded,
+        SchemaFormatErrorKind::ResourceLimit(ResourceLimit::SchemaFormatOutputBytes),
         "output limit error kind",
     )?;
     let workspace_error = format_error(
@@ -363,7 +363,7 @@ fn rejects_output_workspace_and_depth_limits_without_partial_result() -> Result<
     )?;
     ensure_equal(
         workspace_error.kind(),
-        SchemaFormatErrorKind::ResourceLimitExceeded,
+        SchemaFormatErrorKind::ResourceLimit(ResourceLimit::FormattingWorkspaceBytes),
         "workspace limit error kind",
     )?;
     let depth_error = format_error(
@@ -372,7 +372,7 @@ fn rejects_output_workspace_and_depth_limits_without_partial_result() -> Result<
     )?;
     ensure_equal(
         depth_error.kind(),
-        SchemaFormatErrorKind::ResourceLimitExceeded,
+        SchemaFormatErrorKind::ResourceLimit(ResourceLimit::FormattingNestingDepth),
         "nesting limit error kind",
     )?;
     Ok(())

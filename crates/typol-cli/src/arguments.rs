@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     ffi::OsString,
     path::{Path, PathBuf},
 };
@@ -52,7 +51,7 @@ pub struct ParsedCommand {
 }
 
 pub struct ArgumentError {
-    message: TranslationResult<Cow<'static, str>>,
+    message: TranslationResult<&'static str>,
     language: Language,
 }
 
@@ -128,7 +127,8 @@ impl ParsedCommand {
 }
 
 impl ArgumentError {
-    pub const fn message(&self) -> &TranslationResult<Cow<'static, str>> {
+    /// Returns the localized static usage message or its translation failure.
+    pub const fn message(&self) -> &TranslationResult<&'static str> {
         &self.message
     }
 
@@ -573,7 +573,7 @@ impl Arguments {
         Ok(())
     }
 
-    fn error(message: TranslationResult<Cow<'static, str>>, language: Language) -> ArgumentError {
+    fn error(message: TranslationResult<&'static str>, language: Language) -> ArgumentError {
         ArgumentError { message, language }
     }
 }

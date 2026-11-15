@@ -10,6 +10,7 @@ use std::{
 };
 
 use typol_config::{SourceExpectation, SourceRevision, SourceWriter};
+use typol_core::{CapacityExceeded, ResourceLimit};
 
 #[cfg(any(test, unix, windows))]
 use std::io::Error as IoError;
@@ -28,7 +29,8 @@ pub enum SourceWriteErrorKind {
     InvalidTarget,
     ConcurrentModification,
     TargetAlreadyExists,
-    ResourceLimitExceeded,
+    ResourceLimit(ResourceLimit),
+    CapacityExceeded(CapacityExceeded),
     AllocationFailed,
     ReadFailure,
     TemporaryFileFailure,
@@ -88,27 +90,45 @@ impl SourceWriteError {
 
 impl fmt::Display for SourceWriteError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self.kind {
-            SourceWriteErrorKind::InvalidTarget => "source target is invalid",
-            SourceWriteErrorKind::ConcurrentModification => "source changed since it was read",
-            SourceWriteErrorKind::TargetAlreadyExists => "source target already exists",
-            SourceWriteErrorKind::ResourceLimitExceeded => "source file limit exceeded",
-            SourceWriteErrorKind::AllocationFailed => "source allocation failed",
-            SourceWriteErrorKind::ReadFailure => "source could not be read",
+        match self.kind {
+            SourceWriteErrorKind::InvalidTarget => formatter.write_str("source target is invalid"),
+            SourceWriteErrorKind::ConcurrentModification => {
+                formatter.write_str("source changed since it was read")
+            }
+            SourceWriteErrorKind::TargetAlreadyExists => {
+                formatter.write_str("source target already exists")
+            }
+            SourceWriteErrorKind::ResourceLimit(limit) => {
+                write!(formatter, "source {limit} limit exceeded")
+            }
+            SourceWriteErrorKind::CapacityExceeded(_) => {
+                formatter.write_str("source capacity exceeded")
+            }
+            SourceWriteErrorKind::AllocationFailed => {
+                formatter.write_str("source allocation failed")
+            }
+            SourceWriteErrorKind::ReadFailure => formatter.write_str("source could not be read"),
             SourceWriteErrorKind::TemporaryFileFailure => {
-                "source temporary file could not be created"
+                formatter.write_str("source temporary file could not be created")
             }
-            SourceWriteErrorKind::WriteFailure => "source temporary file could not be written",
-            SourceWriteErrorKind::FlushFailure => "source temporary file could not be flushed",
-            SourceWriteErrorKind::SyncFailure => "source temporary file could not be synchronized",
-            SourceWriteErrorKind::DirectorySyncFailure => {
-                "source was replaced but its directory could not be synchronized"
+            SourceWriteErrorKind::WriteFailure => {
+                formatter.write_str("source temporary file could not be written")
             }
+            SourceWriteErrorKind::FlushFailure => {
+                formatter.write_str("source temporary file could not be flushed")
+            }
+            SourceWriteErrorKind::SyncFailure => {
+                formatter.write_str("source temporary file could not be synchronized")
+            }
+            SourceWriteErrorKind::DirectorySyncFailure => formatter
+                .write_str("source was replaced but its directory could not be synchronized"),
             SourceWriteErrorKind::AtomicReplaceUnsupported => {
-                "atomic replacement is unsupported for this target"
+                formatter.write_str("atomic replacement is unsupported for this target")
             }
-            SourceWriteErrorKind::RenameFailure => "source atomic replacement failed",
-        })
+            SourceWriteErrorKind::RenameFailure => {
+                formatter.write_str("source atomic replacement failed")
+            }
+        }
     }
 }
 
@@ -141,9 +161,9 @@ impl SourceWriter for FileSourceWriter {
             return Err(SourceWriteError::new(SourceWriteErrorKind::InvalidTarget));
         }
         if replacement.len() > max_bytes {
-            return Err(SourceWriteError::new(
-                SourceWriteErrorKind::ResourceLimitExceeded,
-            ));
+            return Err(SourceWriteError::new(SourceWriteErrorKind::ResourceLimit(
+                ResourceLimit::SourceBytes,
+            )));
         }
         let expectation = match expectation {
             SourceExpectation::ExactSnapshot(snapshot) => ExpectedTarget::Snapshot(snapshot),
@@ -252,10 +272,15 @@ fn check_target(
             ));
         }
         ExpectedTarget::Snapshot(expected) => {
-            if metadata.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
-                return Err(SourceWriteError::new(
-                    SourceWriteErrorKind::ResourceLimitExceeded,
-                ));
+            let max_bytes_u64 = u64::try_from(max_bytes).map_err(|_| {
+                SourceWriteError::new(SourceWriteErrorKind::CapacityExceeded(
+                    CapacityExceeded::HostSource,
+                ))
+            })?;
+            if metadata.len() > max_bytes_u64 {
+                return Err(SourceWriteError::new(SourceWriteErrorKind::ResourceLimit(
+                    ResourceLimit::SourceBytes,
+                )));
             }
             let current = read_bounded(target, max_bytes)?;
             if current.as_slice() != *expected {
@@ -272,24 +297,29 @@ fn check_target(
 }
 
 fn read_bounded(target: &Path, max_bytes: usize) -> Result<Vec<u8>, SourceWriteError> {
-    let capacity = max_bytes
-        .checked_add(1)
-        .ok_or_else(|| SourceWriteError::new(SourceWriteErrorKind::ResourceLimitExceeded))?;
+    let capacity = max_bytes.checked_add(1).ok_or_else(|| {
+        SourceWriteError::new(SourceWriteErrorKind::CapacityExceeded(
+            CapacityExceeded::HostSource,
+        ))
+    })?;
     let mut contents = Vec::new();
     contents
         .try_reserve_exact(capacity)
         .map_err(|_| SourceWriteError::new(SourceWriteErrorKind::AllocationFailed))?;
-    let limit = u64::try_from(capacity)
-        .map_err(|_| SourceWriteError::new(SourceWriteErrorKind::ResourceLimitExceeded))?;
+    let limit = u64::try_from(capacity).map_err(|_| {
+        SourceWriteError::new(SourceWriteErrorKind::CapacityExceeded(
+            CapacityExceeded::HostSource,
+        ))
+    })?;
     File::open(target)
         .map_err(|_| SourceWriteError::new(SourceWriteErrorKind::ReadFailure))?
         .take(limit)
         .read_to_end(&mut contents)
         .map_err(|_| SourceWriteError::new(SourceWriteErrorKind::ReadFailure))?;
     if contents.len() > max_bytes {
-        return Err(SourceWriteError::new(
-            SourceWriteErrorKind::ResourceLimitExceeded,
-        ));
+        return Err(SourceWriteError::new(SourceWriteErrorKind::ResourceLimit(
+            ResourceLimit::SourceBytes,
+        )));
     }
     Ok(contents)
 }

@@ -294,7 +294,7 @@ impl ExpressionCompiler {
             .checked_add(symbols.fields().len())
             .and_then(|count| count.checked_add(symbols.variants().len()));
         let Some(all_task_capacity) = all_task_capacity else {
-            diagnostics.push(EmergencyDiagnostics::resource(
+            diagnostics.push(EmergencyDiagnostics::capacity(
                 fallback,
                 diagnostics.translator(),
             ));

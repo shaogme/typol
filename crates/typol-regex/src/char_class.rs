@@ -1,5 +1,5 @@
 use crate::{
-    RegexCompileError, RegexErrorContext, RegexMatchError, RegexResource,
+    RegexCompileError, RegexErrorContext, RegexMatchError,
     error::{
         CHARACTER_CLASS_BUDGET_MISSING, CHARACTER_CLASS_PREVIOUS_RANGE_MISSING,
         CHARACTER_CLASS_RANGE_MISSING, CHARACTER_CLASS_SLOT_MISSING,
@@ -8,7 +8,7 @@ use crate::{
     matcher::RegexMatcher,
 };
 use opeo::{OResult, Out, ResultOutExt};
-use typol_core::{ChargedVec, RegexExecutionBudget};
+use typol_core::{ChargedVec, RegexExecutionBudget, ResourceLimit};
 
 const SURROGATE_START: u32 = 0xD800;
 const SURROGATE_END: u32 = 0xDFFF;
@@ -49,9 +49,9 @@ impl CharClass {
         let budget = self
             .ranges
             .regex_budget(out.reborrow())?
-            .ok_or(RegexCompileError::InternalInvariantFailure(
-                RegexErrorContext::new(CHARACTER_CLASS_BUDGET_MISSING),
-            ))
+            .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                CHARACTER_CLASS_BUDGET_MISSING,
+            )))
             .store_err_into(out.reborrow())?;
         let mut ranges = ChargedVec::new_regex(Some(&budget), out.reborrow())?;
         ranges.try_reserve_exact(self.ranges.len(), out.reborrow())?;
@@ -83,9 +83,9 @@ impl CharClass {
                 .ranges
                 .get(middle)
                 .copied()
-                .ok_or(RegexMatchError::InternalInvariantFailure(
-                    RegexErrorContext::new(MATCH_CHARACTER_CLASS_RANGE_MISSING),
-                ))
+                .ok_or(RegexMatchError::internal(RegexErrorContext::new(
+                    MATCH_CHARACTER_CLASS_RANGE_MISSING,
+                )))
                 .store_err_into(out.reborrow())?;
             if value < range.start {
                 high = middle;
@@ -150,9 +150,9 @@ impl CharClassBuilder {
         let budget = self
             .ranges
             .regex_budget(out.reborrow())?
-            .ok_or(RegexCompileError::InternalInvariantFailure(
-                RegexErrorContext::new(CHARACTER_CLASS_BUDGET_MISSING),
-            ))
+            .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                CHARACTER_CLASS_BUDGET_MISSING,
+            )))
             .store_err_into(out.reborrow())?
             .try_clone(out.reborrow())?;
         for range in class.ranges() {
@@ -173,14 +173,14 @@ impl CharClassBuilder {
             let budget = self
                 .ranges
                 .regex_budget(out.reborrow())?
-                .ok_or(RegexCompileError::InternalInvariantFailure(
-                    RegexErrorContext::new(CHARACTER_CLASS_BUDGET_MISSING),
-                ))
+                .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                    CHARACTER_CLASS_BUDGET_MISSING,
+                )))
                 .store_err_into(out.reborrow())?;
             self.ranges = complement(&self.ranges, available_ranges, &budget, out.reborrow())?;
         } else if self.ranges.len() > available_ranges {
-            return Err(out.fail(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::CharacterRangeCount,
+            return Err(out.fail(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexCharacterRanges,
             )));
         }
         Ok(CharClass {
@@ -195,8 +195,8 @@ impl CharClassBuilder {
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, ()> {
         if self.ranges.len() >= self.temporary_limit {
-            return Err(out.fail(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::CharacterRangeCount,
+            return Err(out.fail(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexCharacterRanges,
             )));
         }
         self.ranges.try_reserve(1, out.reborrow())?;
@@ -223,8 +223,8 @@ impl CharClass {
             _ => return Ok(None),
         };
         if range_count > available_ranges {
-            return Err(out.fail(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::CharacterRangeCount,
+            return Err(out.fail(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexCharacterRanges,
             )));
         }
         let mut builder = CharClassBuilder::new(4, budget, out.reborrow())?;
@@ -257,8 +257,8 @@ impl CharClass {
         mut out: Out<'slot, '_, RegexCompileError>,
     ) -> OResult<'slot, CharClass> {
         if available_ranges < 2 {
-            return Err(out.fail(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::CharacterRangeCount,
+            return Err(out.fail(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexCharacterRanges,
             )));
         }
         let mut builder = CharClassBuilder::new(3, budget, out.reborrow())?;
@@ -274,9 +274,9 @@ fn normalize<'slot>(
 ) -> OResult<'slot, ()> {
     let budget = ranges
         .regex_budget(out.reborrow())?
-        .ok_or(RegexCompileError::InternalInvariantFailure(
-            RegexErrorContext::new(CHARACTER_CLASS_BUDGET_MISSING),
-        ))
+        .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+            CHARACTER_CLASS_BUDGET_MISSING,
+        )))
         .store_err_into(out.reborrow())?
         .try_clone(out.reborrow())?;
     ranges.sort_by(
@@ -292,40 +292,40 @@ fn normalize<'slot>(
         let range = ranges
             .get(read)
             .copied()
-            .ok_or(RegexCompileError::InternalInvariantFailure(
-                RegexErrorContext::new(CHARACTER_CLASS_RANGE_MISSING),
-            ))
+            .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                CHARACTER_CLASS_RANGE_MISSING,
+            )))
             .store_err_into(out.reborrow())?;
         if merged == 0 {
             *ranges
                 .get_mut(0)
-                .ok_or(RegexCompileError::InternalInvariantFailure(
-                    RegexErrorContext::new(CHARACTER_CLASS_SLOT_MISSING),
-                ))
+                .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                    CHARACTER_CLASS_SLOT_MISSING,
+                )))
                 .store_err_into(out.reborrow())? = range;
             merged = 1;
             continue;
         }
         let previous_index = merged
             .checked_sub(1)
-            .ok_or(RegexCompileError::InternalInvariantFailure(
-                RegexErrorContext::new(CHARACTER_CLASS_PREVIOUS_RANGE_MISSING),
-            ))
+            .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                CHARACTER_CLASS_PREVIOUS_RANGE_MISSING,
+            )))
             .store_err_into(out.reborrow())?;
         let previous = ranges
             .get_mut(previous_index)
-            .ok_or(RegexCompileError::InternalInvariantFailure(
-                RegexErrorContext::new(CHARACTER_CLASS_SLOT_MISSING),
-            ))
+            .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                CHARACTER_CLASS_SLOT_MISSING,
+            )))
             .store_err_into(out.reborrow())?;
         if range.start <= previous.end.saturating_add(1) {
             previous.end = previous.end.max(range.end);
         } else {
             *ranges
                 .get_mut(merged)
-                .ok_or(RegexCompileError::InternalInvariantFailure(
-                    RegexErrorContext::new(CHARACTER_CLASS_SLOT_MISSING),
-                ))
+                .ok_or(RegexCompileError::internal(RegexErrorContext::new(
+                    CHARACTER_CLASS_SLOT_MISSING,
+                )))
                 .store_err_into(out.reborrow())? = range;
             merged += 1;
         }
@@ -351,13 +351,13 @@ fn complement<'slot>(
     )?;
     count = count
         .checked_add(second_count)
-        .ok_or(RegexCompileError::ResourceLimitExceeded(
-            RegexResource::CharacterRangeCount,
+        .ok_or(RegexCompileError::ResourceLimit(
+            ResourceLimit::RegexCharacterRanges,
         ))
         .store_err_into(out.reborrow())?;
     if count > available_ranges {
-        return Err(out.fail(RegexCompileError::ResourceLimitExceeded(
-            RegexResource::CharacterRangeCount,
+        return Err(out.fail(RegexCompileError::ResourceLimit(
+            ResourceLimit::RegexCharacterRanges,
         )));
     }
 
@@ -405,8 +405,8 @@ fn complement_segment_count<'slot>(
         if cursor < start {
             count = count
                 .checked_add(1)
-                .ok_or(RegexCompileError::ResourceLimitExceeded(
-                    RegexResource::CharacterRangeCount,
+                .ok_or(RegexCompileError::ResourceLimit(
+                    ResourceLimit::RegexCharacterRanges,
                 ))
                 .store_err_into(out.reborrow())?;
         }
@@ -417,8 +417,8 @@ fn complement_segment_count<'slot>(
     if cursor <= segment_end {
         count = count
             .checked_add(1)
-            .ok_or(RegexCompileError::ResourceLimitExceeded(
-                RegexResource::CharacterRangeCount,
+            .ok_or(RegexCompileError::ResourceLimit(
+                ResourceLimit::RegexCharacterRanges,
             ))
             .store_err_into(out.reborrow())?;
     }

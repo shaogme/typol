@@ -9,7 +9,7 @@ use serde::{
     Deserialize, Deserializer,
     de::{SeqAccess, Visitor},
 };
-use typol_core::{AllocationError, ExecutionLimits};
+use typol_core::{AllocationError, DiagnosticCode, ExecutionLimits};
 use typol_test_support::{
     TestExtract, TestResult, test_verify as assert, test_verify_eq as assert_eq,
 };
@@ -148,7 +148,7 @@ fn node_depth_and_shared_step_limits_are_exact() -> TestResult {
             .err()
             .test_value()?
         )?,
-        1
+        DiagnosticCode::TYPE_BINDING_NODES_LIMIT_EXCEEDED.get()
     );
     assert_eq!(
         Support::code(
@@ -161,7 +161,7 @@ fn node_depth_and_shared_step_limits_are_exact() -> TestResult {
             .err()
             .test_value()?
         )?,
-        1
+        DiagnosticCode::TYPE_BINDING_DEPTH_LIMIT_EXCEEDED.get()
     );
     let call = Support::new_session(ExecutionLimits::new(18, 4096), 4096, 4096)?;
     assert!(
@@ -200,7 +200,7 @@ fn node_depth_and_shared_step_limits_are_exact() -> TestResult {
             .err()
             .test_value()?
         )?,
-        1
+        DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED.get()
     );
 
     Ok(())

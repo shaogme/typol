@@ -1,8 +1,8 @@
 use crate::diagnostics::{DiagnosticList, EmergencyDiagnostics, ErrorDiagnostics};
 use core::{cmp::Ordering, error::Error, fmt, slice::from_ref};
 use typol_core::{
-    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, SourceExcerptSet,
-    SourceId, SourceSpan,
+    BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, ResourceLimit,
+    SourceExcerptSet, SourceId, SourceSpan,
 };
 use typol_i18n::{Translator, t};
 use typol_report::{DiagnosticReport, ReportContext};
@@ -14,7 +14,7 @@ static UNAVAILABLE_EXCERPTS: SourceExcerptSet = SourceExcerptSet::unavailable();
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocationFailure {
     AllocationFailure,
-    ResourceLimitExceeded,
+    ResourceLimit(ResourceLimit),
     CapacityExceeded,
     InvalidSpan,
     SourceUnavailable,
@@ -116,13 +116,21 @@ impl SchemaCompileErrors {
 
     pub fn budget_failure(error: BudgetError, translator: Translator) -> Self {
         let budget_domain = match error {
-            BudgetError::RegexSteps
-            | BudgetError::RegexSearchSteps
-            | BudgetError::RegexWorkspace => SchemaCompileBudgetDomain::Regex,
-            BudgetError::Resource
+            BudgetError::ResourceLimit(
+                ResourceLimit::RegexCompilationBudget
+                | ResourceLimit::RegexPatternBytes
+                | ResourceLimit::RegexNestingDepth
+                | ResourceLimit::RegexInstructionCount
+                | ResourceLimit::RegexCharacterRanges
+                | ResourceLimit::RegexExecutionSteps
+                | ResourceLimit::RegexSearchSteps
+                | ResourceLimit::RegexWorkspaceBytes
+                | ResourceLimit::RegexScratchStates,
+            ) => SchemaCompileBudgetDomain::Regex,
+            BudgetError::ResourceLimit(_)
             | BudgetError::Allocation
-            | BudgetError::CapacityExceeded
-            | BudgetError::InvariantViolation(_) => SchemaCompileBudgetDomain::Execution,
+            | BudgetError::CapacityExceeded(_)
+            | BudgetError::Internal(_) => SchemaCompileBudgetDomain::Execution,
         };
         Self::budget_failure_in_domain(error, budget_domain, translator)
     }
@@ -142,21 +150,9 @@ impl SchemaCompileErrors {
                 name: "diagnostic.emergency.allocation_failed",
                 locale: translator,
             },
-            BudgetError::CapacityExceeded => t! {
-                name: "diagnostic.emergency.capacity_exceeded",
-                locale: translator,
-            },
-            BudgetError::InvariantViolation(_) => t! {
-                name: "diagnostic.emergency.internal_error",
-                locale: translator,
-            },
-            BudgetError::Resource
-            | BudgetError::RegexSteps
-            | BudgetError::RegexSearchSteps
-            | BudgetError::RegexWorkspace => t! {
-                name: "diagnostic.emergency.resource_limit_exceeded",
-                locale: translator,
-            },
+            BudgetError::CapacityExceeded(capacity) => capacity.emergency_message(translator),
+            BudgetError::Internal(error) => error.emergency_message(translator),
+            BudgetError::ResourceLimit(limit) => limit.emergency_message(translator),
         };
         let mut diagnostic = EmergencyDiagnostics::translated(code, message, None);
         diagnostic.set_context(error.context());
@@ -241,9 +237,7 @@ impl SchemaCompileErrors {
         match &self.storage {
             SchemaErrorStorage::Inline(diagnostic) => {
                 if diagnostic.primary().is_none() && diagnostic.labels().is_empty() {
-                    if diagnostic.code() == DiagnosticCode::INTERNAL_ERROR
-                        && diagnostic.context().is_some()
-                    {
+                    if diagnostic.code().is_internal_error() && diagnostic.context().is_some() {
                         return LocationStatus::Unavailable(location_failure_from_context(
                             diagnostic.context(),
                         ));
@@ -252,13 +246,14 @@ impl SchemaCompileErrors {
                 }
                 let reason = match diagnostic.code() {
                     DiagnosticCode::ALLOCATION_FAILED => LocationFailure::AllocationFailure,
-                    DiagnosticCode::RESOURCE_LIMIT_EXCEEDED => {
-                        LocationFailure::ResourceLimitExceeded
-                    }
-                    DiagnosticCode::CAPACITY_EXCEEDED => LocationFailure::CapacityExceeded,
+                    code if code.is_resource_limit() => LocationFailure::ResourceLimit(
+                        ResourceLimit::from_diagnostic_code(code)
+                            .unwrap_or(ResourceLimit::WorkspaceBytes),
+                    ),
+                    code if code.is_capacity_exceeded() => LocationFailure::CapacityExceeded,
                     DiagnosticCode::SCHEMA_CONTEXT_MISMATCH
                     | DiagnosticCode::SCHEMA_SESSION_FINISHED => LocationFailure::SourceUnavailable,
-                    DiagnosticCode::INTERNAL_ERROR => {
+                    code if code.is_internal_error() => {
                         location_failure_from_context(diagnostic.context())
                     }
                     _ => LocationFailure::InternalError,
@@ -284,7 +279,7 @@ impl SchemaCompileErrors {
         self.diagnostics()
             .iter()
             .rev()
-            .find(|diagnostic| diagnostic.code() == DiagnosticCode::INTERNAL_ERROR)
+            .find(|diagnostic| diagnostic.code().is_internal_error())
             .and_then(Diagnostic::context)
     }
 
@@ -455,7 +450,7 @@ fn compare_spans(left: SourceSpan, right: SourceSpan) -> Ordering {
 }
 
 fn schema_internal_cause_from_diagnostic(diagnostic: &Diagnostic) -> Option<SchemaInternalCause> {
-    if diagnostic.code() != DiagnosticCode::INTERNAL_ERROR {
+    if diagnostic.code() != DiagnosticCode::SCHEMA_AST_ACCESS_INVARIANT_FAILURE {
         return None;
     }
     let context = diagnostic.context()?;
@@ -506,9 +501,9 @@ mod tests {
     fn errors_for_ast_access(error: AstAccessError) -> SchemaCompileErrors {
         let translator = Translator::new(Language::English);
         let mut diagnostic = EmergencyDiagnostics::translated(
-            DiagnosticCode::INTERNAL_ERROR,
+            DiagnosticCode::SCHEMA_AST_ACCESS_INVARIANT_FAILURE,
             t! {
-                name: "diagnostic.emergency.internal_error",
+                name: "diagnostic.emergency.schema_ast_access_invariant_failure",
                 locale: translator,
             },
             None,

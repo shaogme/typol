@@ -3,8 +3,8 @@ use core::{cell::Cell, error::Error, fmt, num::NonZeroUsize, str::from_utf8};
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
     BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, ExecutionBudget,
-    LocatedSpan, Read, SourceId, SourceLocation, SourceReadError, SourceReadErrorKind, SourceSpan,
-    Span, SpanLocation, diagnostic_context,
+    InternalError, LocatedSpan, Read, ResourceLimit, SourceId, SourceLocation, SourceReadError,
+    SourceReadErrorKind, SourceSpan, Span, SpanLocation, diagnostic_context,
 };
 use typol_i18n::{Translator, t};
 
@@ -313,15 +313,18 @@ impl<'input> Input<'input> {
             }
             let count = read?;
             if count > size {
+                let context = diagnostic_context!(
+                    "typol-syntax",
+                    "stream-input",
+                    "source-read-count-exceeds-buffer"
+                );
                 return Err(out.reborrow().fail(
                     self.source_error(
-                        SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                            .with_context(diagnostic_context!(
-                                "typol-syntax",
-                                "stream-input",
-                                "source-read-count-exceeds-buffer"
-                            ))
-                            .with_input(self.source_id, self.fetched),
+                        SourceReadError::new(SourceReadErrorKind::Internal(
+                            InternalError::SourceInputInvariantFailure(context),
+                        ))
+                        .with_context(context)
+                        .with_input(self.source_id, self.fetched),
                     ),
                 ));
             }
@@ -332,12 +335,20 @@ impl<'input> Input<'input> {
                 return Ok(None);
             }
             if remaining == 0 {
-                return Err(out.reborrow().fail(self.resource_failure()));
+                return Err(out
+                    .reborrow()
+                    .fail(self.resource_failure(ResourceLimit::SourceBytes)));
             }
             self.fetched = self
                 .fetched
                 .checked_add(count)
-                .ok_or_else(|| self.resource_failure())
+                .ok_or_else(|| {
+                    self.internal_failure(diagnostic_context!(
+                        "typol-syntax",
+                        "stream-input",
+                        "fetched-byte-count-overflow"
+                    ))
+                })
                 .store_err_into(out.reborrow())?;
             self.index = 0;
             self.length = count;
@@ -357,7 +368,13 @@ impl<'input> Input<'input> {
         self.index = self
             .index
             .checked_add(1)
-            .ok_or_else(|| self.resource_failure())
+            .ok_or_else(|| {
+                self.internal_failure(diagnostic_context!(
+                    "typol-syntax",
+                    "stream-input",
+                    "window-index-overflow"
+                ))
+            })
             .store_err_into(out.reborrow())?;
         Ok(Some(byte))
     }
@@ -455,14 +472,14 @@ impl<'input> Input<'input> {
         let Some(end) = self.offset.checked_add(self.pending_len) else {
             return Err(out
                 .reborrow()
-                .fail(self.internal_failure(diagnostic_context!(
+                .fail(self.location_failure(diagnostic_context!(
                     "typol-syntax",
                     "stream-input",
                     "invalid-utf8-span-end-overflow"
                 ))));
         };
         let span = Span::new_with(self.offset, end, out.reborrow(), |_| {
-            self.internal_failure(diagnostic_context!(
+            self.location_failure(diagnostic_context!(
                 "typol-syntax",
                 "stream-input",
                 "invalid-utf8-span-reversed"
@@ -506,7 +523,13 @@ impl<'input> Input<'input> {
         let offset = self
             .offset
             .checked_add(width)
-            .ok_or_else(|| self.resource_failure())
+            .ok_or_else(|| {
+                self.location_failure(diagnostic_context!(
+                    "typol-syntax",
+                    "stream-input",
+                    "source-offset-overflow"
+                ))
+            })
             .store_err_into(out.reborrow())?;
         let (line, column) = if character == '\n' {
             let line = self
@@ -514,7 +537,13 @@ impl<'input> Input<'input> {
                 .get()
                 .checked_add(1)
                 .and_then(NonZeroUsize::new)
-                .ok_or_else(|| self.resource_failure())
+                .ok_or_else(|| {
+                    self.location_failure(diagnostic_context!(
+                        "typol-syntax",
+                        "stream-input",
+                        "source-line-overflow"
+                    ))
+                })
                 .store_err_into(out.reborrow())?;
             (line, NonZeroUsize::MIN)
         } else if !paired_cr {
@@ -523,7 +552,13 @@ impl<'input> Input<'input> {
                 .get()
                 .checked_add(1)
                 .and_then(NonZeroUsize::new)
-                .ok_or_else(|| self.resource_failure())
+                .ok_or_else(|| {
+                    self.location_failure(diagnostic_context!(
+                        "typol-syntax",
+                        "stream-input",
+                        "source-column-overflow"
+                    ))
+                })
                 .store_err_into(out.reborrow())?;
             (self.line, column)
         } else {
@@ -606,38 +641,69 @@ impl<'input> Input<'input> {
         Ok(span)
     }
 
-    pub(crate) fn resource_failure(&self) -> Diagnostic {
+    pub(crate) fn resource_failure(&self, limit: ResourceLimit) -> Diagnostic {
         self.fatal.set(true);
-        let mut error = SyntaxDiagnostic::emergency(
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-            t! {
-                name: "diagnostic.emergency.resource_limit_exceeded",
-                locale: self.translator,
-            },
-            self.mark().source_span(),
-        );
+        let mut error =
+            SyntaxDiagnostic::resource_limit(limit, self.mark().source_span(), self.translator);
         error.set_located_primary(Some(self.mark()));
         error
     }
 
     pub(crate) fn internal_failure(&self, context: DiagnosticContext) -> Diagnostic {
         self.fatal.set(true);
-        let mut diagnostic =
-            SyntaxDiagnostic::internal(context, self.mark().source_span(), self.translator);
+        let mut diagnostic = SyntaxDiagnostic::internal_error(
+            InternalError::SourceInputInvariantFailure(context),
+            self.mark().source_span(),
+            self.translator,
+        );
+        diagnostic.set_located_primary(Some(self.mark()));
+        diagnostic
+    }
+
+    fn location_failure(&self, context: DiagnosticContext) -> Diagnostic {
+        self.fatal.set(true);
+        let mut diagnostic = SyntaxDiagnostic::internal_error(
+            InternalError::SourceLocationInvariantFailure(context),
+            self.mark().source_span(),
+            self.translator,
+        );
         diagnostic.set_located_primary(Some(self.mark()));
         diagnostic
     }
 
     pub(crate) fn source_error(&self, error: SourceReadError) -> Diagnostic {
         self.fatal.set(true);
-        let mut diagnostic = SyntaxDiagnostic::emergency(
-            DiagnosticCode::SOURCE_INPUT_ERROR,
-            t! {
-                name: "diagnostic.emergency.source_input_error",
-                locale: self.translator,
-            },
-            self.mark().source_span(),
-        );
+        let mut diagnostic = match error.kind() {
+            SourceReadErrorKind::ResourceLimit(limit) => {
+                SyntaxDiagnostic::resource_limit(limit, self.mark().source_span(), self.translator)
+            }
+            SourceReadErrorKind::AllocationFailed => SyntaxDiagnostic::emergency(
+                DiagnosticCode::ALLOCATION_FAILED,
+                t! {
+                    name: "diagnostic.emergency.allocation_failed",
+                    locale: self.translator,
+                },
+                self.mark().source_span(),
+            ),
+            SourceReadErrorKind::CapacityExceeded(capacity) => SyntaxDiagnostic::emergency(
+                capacity.diagnostic_code(),
+                capacity.emergency_message(self.translator),
+                self.mark().source_span(),
+            ),
+            SourceReadErrorKind::HostFailure => SyntaxDiagnostic::emergency(
+                DiagnosticCode::SOURCE_INPUT_ERROR,
+                t! {
+                    name: "diagnostic.emergency.source_input_error",
+                    locale: self.translator,
+                },
+                self.mark().source_span(),
+            ),
+            SourceReadErrorKind::Internal(internal) => SyntaxDiagnostic::emergency(
+                internal.diagnostic_code(),
+                internal.emergency_message(self.translator),
+                self.mark().source_span(),
+            ),
+        };
         diagnostic.set_located_primary(Some(self.mark()));
         let mut context = error.context().unwrap_or_else(|| {
             diagnostic_context!("typol-syntax", "stream-input", "source-adapter-read")
@@ -739,7 +805,8 @@ mod tests {
         let error = call(&mut errors, |out| input.byte(4, out))
             .test_error()
             .map_err(|_| TestFailure)?;
-        if error.code() != DiagnosticCode::INTERNAL_ERROR || input.pending_len != 4 {
+        if error.code() != DiagnosticCode::SOURCE_INPUT_INVARIANT_FAILURE || input.pending_len != 4
+        {
             return Err(TestFailure);
         }
         let context = error.context().ok_or(TestFailure)?;

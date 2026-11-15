@@ -1,12 +1,16 @@
+mod errors;
 mod scan;
 
+pub use errors::{FormattedSchema, SchemaFormatError, SchemaFormatErrorKind, SchemaFormatOptions};
+
 use alloc::{string::String, vec::Vec};
-use core::{error::Error, fmt, mem::size_of};
+use core::mem::size_of;
 use opeo::{OResult, Out};
 
 use self::scan::{ContainerKind, LexemeKind, TokenScanner, TokenSpan};
 
 use crate::{SchemaAst, token::Symbol};
+use typol_core::{CapacityExceeded, ResourceLimit};
 
 const INDENT_WIDTH: usize = 4;
 const INDENT_SPACES: &str = "                                                                ";
@@ -16,31 +20,6 @@ pub struct SchemaDocument<'source> {
     source: &'source str,
     ast: SchemaAst,
     source_limit: usize,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SchemaFormatErrorKind {
-    ResourceLimitExceeded,
-    AllocationFailed,
-    InconsistentSource,
-    OutputSinkFailure,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SchemaFormatError {
-    kind: SchemaFormatErrorKind,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SchemaFormatOptions {
-    max_output_bytes: usize,
-    max_workspace_bytes: usize,
-    max_nesting_depth: usize,
-}
-
-#[derive(Debug)]
-pub struct FormattedSchema {
-    text: String,
 }
 
 pub struct SchemaFormatter;
@@ -87,96 +66,6 @@ impl<'source> SchemaDocument<'source> {
     }
 }
 
-impl SchemaFormatError {
-    pub(crate) const fn new(kind: SchemaFormatErrorKind) -> Self {
-        Self { kind }
-    }
-
-    pub const fn kind(self) -> SchemaFormatErrorKind {
-        self.kind
-    }
-}
-
-impl fmt::Display for SchemaFormatError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self.kind {
-            SchemaFormatErrorKind::ResourceLimitExceeded => {
-                "schema formatting resource limit exceeded"
-            }
-            SchemaFormatErrorKind::AllocationFailed => "schema formatting allocation failed",
-            SchemaFormatErrorKind::InconsistentSource => {
-                "schema formatting source structure is inconsistent"
-            }
-            SchemaFormatErrorKind::OutputSinkFailure => "schema formatting output sink failed",
-        })
-    }
-}
-
-impl Error for SchemaFormatError {}
-
-impl SchemaFormatOptions {
-    pub const fn new(
-        max_output_bytes: usize,
-        max_workspace_bytes: usize,
-        max_nesting_depth: usize,
-    ) -> Self {
-        Self {
-            max_output_bytes,
-            max_workspace_bytes,
-            max_nesting_depth,
-        }
-    }
-
-    pub const fn max_output_bytes(&self) -> usize {
-        self.max_output_bytes
-    }
-
-    pub const fn max_workspace_bytes(&self) -> usize {
-        self.max_workspace_bytes
-    }
-
-    pub const fn max_nesting_depth(&self) -> usize {
-        self.max_nesting_depth
-    }
-
-    pub const fn with_max_output_bytes(mut self, value: usize) -> Self {
-        self.max_output_bytes = value;
-        self
-    }
-
-    pub const fn with_max_workspace_bytes(mut self, value: usize) -> Self {
-        self.max_workspace_bytes = value;
-        self
-    }
-
-    pub const fn with_max_nesting_depth(mut self, value: usize) -> Self {
-        self.max_nesting_depth = value;
-        self
-    }
-}
-
-impl Default for SchemaFormatOptions {
-    fn default() -> Self {
-        Self::new(1_048_576, 4_194_304, 128)
-    }
-}
-
-impl FormattedSchema {
-    pub fn as_str(&self) -> &str {
-        &self.text
-    }
-
-    pub fn into_string(self) -> String {
-        self.text
-    }
-
-    pub fn write_to(self, output: &mut impl fmt::Write) -> Result<(), SchemaFormatError> {
-        output
-            .write_str(&self.text)
-            .map_err(|_| SchemaFormatError::new(SchemaFormatErrorKind::OutputSinkFailure))
-    }
-}
-
 impl SchemaFormatter {
     /// Produces a canonical representation while preserving every source token and comment.
     pub fn format<'slot>(
@@ -203,7 +92,7 @@ impl SchemaFormatter {
     ) -> Result<FormattedSchema, SchemaFormatError> {
         if source.len() > source_limit {
             return Err(SchemaFormatError::new(
-                SchemaFormatErrorKind::ResourceLimitExceeded,
+                SchemaFormatErrorKind::ResourceLimit(ResourceLimit::SourceBytes),
             ));
         }
         let newline = if source.contains("\r\n") {
@@ -212,9 +101,11 @@ impl SchemaFormatter {
             "\n"
         };
         let tokens = TokenScanner::scan(source, ast, options)?;
-        let ast_bytes = ast
-            .memory_bytes()
-            .ok_or_else(|| SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded))?;
+        let ast_bytes = ast.memory_bytes().ok_or_else(|| {
+            SchemaFormatError::new(SchemaFormatErrorKind::CapacityExceeded(
+                CapacityExceeded::FormatOutput,
+            ))
+        })?;
         let text = render_tokens(RenderInput {
             source,
             tokens: &tokens,
@@ -223,7 +114,7 @@ impl SchemaFormatter {
             options,
             newline,
         })?;
-        Ok(FormattedSchema { text })
+        Ok(FormattedSchema::new(text))
     }
 }
 
@@ -233,23 +124,37 @@ fn reserve_format_frame(
     ast_bytes: usize,
     options: SchemaFormatOptions,
 ) -> Result<(), SchemaFormatError> {
-    let required = frames
-        .len()
-        .checked_add(1)
-        .ok_or_else(|| SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded))?;
+    let required = frames.len().checked_add(1).ok_or_else(|| {
+        SchemaFormatError::new(SchemaFormatErrorKind::CapacityExceeded(
+            CapacityExceeded::FormatOutput,
+        ))
+    })?;
     let token_bytes = token_capacity
         .checked_mul(size_of::<TokenSpan>())
         .and_then(|bytes| bytes.checked_add(ast_bytes))
-        .ok_or_else(|| SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded))?;
+        .ok_or_else(|| {
+            SchemaFormatError::new(SchemaFormatErrorKind::CapacityExceeded(
+                CapacityExceeded::FormatOutput,
+            ))
+        })?;
     let available_bytes = options
         .max_workspace_bytes()
         .checked_sub(token_bytes)
-        .ok_or_else(|| SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded))?;
+        .ok_or_else(|| {
+            SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimit(
+                ResourceLimit::FormattingWorkspaceBytes,
+            ))
+        })?;
     let maximum_capacity =
         (available_bytes / size_of::<FormatFrame>()).min(options.max_nesting_depth());
     if required > maximum_capacity {
+        let limit = if required > options.max_nesting_depth() {
+            ResourceLimit::FormattingNestingDepth
+        } else {
+            ResourceLimit::FormattingWorkspaceBytes
+        };
         return Err(SchemaFormatError::new(
-            SchemaFormatErrorKind::ResourceLimitExceeded,
+            SchemaFormatErrorKind::ResourceLimit(limit),
         ));
     }
     if frames.capacity() < required {
@@ -272,12 +177,16 @@ impl OutputBuffer {
     }
 
     fn append(&mut self, text: &str) -> Result<(), SchemaFormatError> {
-        let length = self
-            .text
-            .len()
-            .checked_add(text.len())
-            .filter(|length| *length <= self.limit)
-            .ok_or_else(|| SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded))?;
+        let length = self.text.len().checked_add(text.len()).ok_or_else(|| {
+            SchemaFormatError::new(SchemaFormatErrorKind::CapacityExceeded(
+                CapacityExceeded::FormatOutput,
+            ))
+        })?;
+        if length > self.limit {
+            return Err(SchemaFormatError::new(
+                SchemaFormatErrorKind::ResourceLimit(ResourceLimit::SchemaFormatOutputBytes),
+            ));
+        }
         if self.text.capacity() < length {
             let doubled_capacity = self.text.capacity().saturating_mul(2).max(1);
             let target_capacity = doubled_capacity.max(length).min(self.limit);
@@ -353,7 +262,9 @@ impl OutputBuffer {
     fn indent(&mut self, level: usize) -> Result<(), SchemaFormatError> {
         if self.is_line_start() {
             let mut spaces = level.checked_mul(INDENT_WIDTH).ok_or_else(|| {
-                SchemaFormatError::new(SchemaFormatErrorKind::ResourceLimitExceeded)
+                SchemaFormatError::new(SchemaFormatErrorKind::CapacityExceeded(
+                    CapacityExceeded::FormatOutput,
+                ))
             })?;
             while spaces > 0 {
                 let chunk = spaces.min(64);
@@ -450,7 +361,7 @@ fn render_tokens(input: RenderInput<'_, '_>) -> Result<String, SchemaFormatError
                 output.append(raw)?;
                 if frames.len() >= options.max_nesting_depth() {
                     return Err(SchemaFormatError::new(
-                        SchemaFormatErrorKind::ResourceLimitExceeded,
+                        SchemaFormatErrorKind::ResourceLimit(ResourceLimit::FormattingNestingDepth),
                     ));
                 }
                 reserve_format_frame(&mut frames, token_capacity, ast_bytes, options)?;

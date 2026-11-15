@@ -33,13 +33,11 @@ fn renders_catalog_messages_with_the_translation_macro() {
     let english = t! {
         name: "cli.help",
         locale: english_translator,
-    }
-    .map(|text| text.into_owned());
+    };
     let chinese = t! {
         name: "cli.help",
         locale: chinese_translator,
-    }
-    .map(|text| text.into_owned());
+    };
 
     assert!(matches!(english.as_ref(), Ok(text) if text.starts_with("Usage:")));
     assert!(matches!(chinese.as_ref(), Ok(text) if text.starts_with("用法：")));
@@ -69,8 +67,9 @@ fn returns_sink_failures_without_a_text_fallback() {
     let translator = Translator::new(Language::English);
     let mut failing_writer = FailingWriter;
     let failure = t! {
-        name: "diagnostic.schema.root_missing_entry",
+        name: "diagnostic.config.fixed_array_length_mismatch",
         locale: translator,
+        args: { expected: 4usize, actual: 3usize },
         sink: &mut failing_writer,
     };
     assert!(failure.is_err());

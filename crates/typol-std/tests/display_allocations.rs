@@ -1,7 +1,3 @@
-#[macro_use]
-#[path = "support/assertions.rs"]
-mod assertions;
-
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
@@ -17,7 +13,8 @@ use typol_config::{
     ConfigParseErrors, ConfigParseOptions, ConfigParseRequest, ConfigParser, Environment,
     EnvironmentError, EnvironmentReadContext,
 };
-use typol_core::{ConfigValue, ExecutionLimits, SliceSource};
+use typol_core::{ConfigValue, ExecutionLimits, ResourceLimit, SliceSource};
+use typol_opeo_test_support::{ensure, ensure_eq};
 use typol_schema::{
     ResolverError, SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaResolveRequest,
     SchemaResolver, SchemaSource,
@@ -249,7 +246,12 @@ fn each_single_and_persistent_allocation_failure_releases_the_entire_output()
         exact.max_output_bytes(),
     );
     let failed = measure(&schema, &value, None, false, short);
-    ensure_eq!(failed.error, Some(DisplayError::ResourceLimitExceeded));
+    ensure_eq!(
+        failed.error,
+        Some(DisplayError::ResourceLimit(
+            ResourceLimit::FormattingWorkspaceBytes
+        ))
+    );
     ensure_eq!(failed.state.live, 0);
     for index in 0..baseline.state.attempts {
         for persistent in [false, true] {

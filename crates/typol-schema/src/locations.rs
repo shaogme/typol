@@ -5,7 +5,8 @@ use core::cmp::Ordering;
 use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 use typol_core::{
     BudgetError, ChargedVec, Diagnostic, DiagnosticCode, DiagnosticContext, ExcerptLimits,
-    ExecutionBudget, SourceId, SourceSpan, Span, SpanLocation, diagnostic_context,
+    ExecutionBudget, InternalError, ResourceLimit, SourceId, SourceSpan, Span, SpanLocation,
+    diagnostic_context,
 };
 use typol_i18n::Translator;
 use typol_syntax::SourcePositionIndex;
@@ -72,14 +73,16 @@ impl SourceLocations {
             Some(diagnostic) => (diagnostic.code(), diagnostic.context()),
             None => {
                 diagnostics.append_terminal(schema_internal!(diagnostics.translator(), fallback));
-                (DiagnosticCode::INTERNAL_ERROR, None)
+                (DiagnosticCode::SCHEMA_COMPILATION_INVARIANT_FAILURE, None)
             }
         };
         let failure = match code {
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED => Some(LocationFailure::ResourceLimitExceeded),
+            code if code.is_resource_limit() => {
+                ResourceLimit::from_diagnostic_code(code).map(LocationFailure::ResourceLimit)
+            }
             DiagnosticCode::ALLOCATION_FAILED => Some(LocationFailure::AllocationFailure),
-            DiagnosticCode::CAPACITY_EXCEEDED => Some(LocationFailure::CapacityExceeded),
-            DiagnosticCode::INTERNAL_ERROR => Some(location_failure_from_context(context)),
+            code if code.is_capacity_exceeded() => Some(LocationFailure::CapacityExceeded),
+            code if code.is_internal_error() => Some(location_failure_from_context(context)),
             _ => execution.failure().map(location_failure),
         };
         if let Some(failure) = failure {
@@ -117,10 +120,11 @@ impl SourceLocations {
                 }
                 let diagnostic = Self::diagnostic(error, fallback, diagnostics.translator());
                 let reason = match diagnostic.code() {
-                    DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
-                    | DiagnosticCode::ALLOCATION_FAILED
-                    | DiagnosticCode::CAPACITY_EXCEEDED
-                    | DiagnosticCode::INTERNAL_ERROR => diagnostic_failure(&diagnostic),
+                    code if code.is_resource_limit() => diagnostic_failure(&diagnostic),
+                    DiagnosticCode::ALLOCATION_FAILED => LocationFailure::AllocationFailure,
+                    code if code.is_capacity_exceeded() || code.is_internal_error() => {
+                        diagnostic_failure(&diagnostic)
+                    }
                     _ => LocationFailure::InternalError,
                 };
                 diagnostics.append_terminal(diagnostic);
@@ -148,10 +152,12 @@ impl SourceLocations {
     ) -> OResult<'slot, ChargedVec<(SourceSpan, SpanLocation)>> {
         let execution = spans
             .budget()
-            .ok_or(BudgetError::invariant(schema_context_ref!(
-                "location-indexing",
-                "span-budget-missing"
-            )))
+            .ok_or(BudgetError::Internal(
+                InternalError::SourceLocationInvariantFailure(*schema_context_ref!(
+                    "location-indexing",
+                    "span-budget-missing"
+                )),
+            ))
             .store_err_into(out.reborrow())?
             .try_clone(out.reborrow())?;
         spans.sort_by(
@@ -256,22 +262,22 @@ fn attached_location(diagnostics: &ErrorDiagnostics, span: SourceSpan) -> Option
 
 fn location_failure(error: BudgetError) -> LocationFailure {
     match error {
-        BudgetError::Resource
-        | BudgetError::RegexSteps
-        | BudgetError::RegexSearchSteps
-        | BudgetError::RegexWorkspace => LocationFailure::ResourceLimitExceeded,
+        BudgetError::ResourceLimit(limit) => LocationFailure::ResourceLimit(limit),
         BudgetError::Allocation => LocationFailure::AllocationFailure,
-        BudgetError::CapacityExceeded => LocationFailure::CapacityExceeded,
-        BudgetError::InvariantViolation(_) => LocationFailure::InternalError,
+        BudgetError::CapacityExceeded(_) => LocationFailure::CapacityExceeded,
+        BudgetError::Internal(_) => LocationFailure::InternalError,
     }
 }
 
 fn diagnostic_failure(diagnostic: &Diagnostic) -> LocationFailure {
     match diagnostic.code() {
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED => LocationFailure::ResourceLimitExceeded,
+        code if code.is_resource_limit() => ResourceLimit::from_diagnostic_code(code).map_or(
+            LocationFailure::InternalError,
+            LocationFailure::ResourceLimit,
+        ),
         DiagnosticCode::ALLOCATION_FAILED => LocationFailure::AllocationFailure,
-        DiagnosticCode::CAPACITY_EXCEEDED => LocationFailure::CapacityExceeded,
-        DiagnosticCode::INTERNAL_ERROR => location_failure_from_context(diagnostic.context()),
+        code if code.is_capacity_exceeded() => LocationFailure::CapacityExceeded,
+        code if code.is_internal_error() => location_failure_from_context(diagnostic.context()),
         _ => LocationFailure::InternalError,
     }
 }

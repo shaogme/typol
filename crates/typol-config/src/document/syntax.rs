@@ -1,7 +1,11 @@
+use super::{
+    ConfigEditError, ConfigEditErrorKind, path::PathValueKind, syntax_scanner::SyntaxScanner,
+};
 use opeo::{ErrSlot, OResult, Out};
-use typol_core::{BudgetError, ChargedString, ChargedVec, ExecutionBudget, Span, TextLayout};
-
-use super::{ConfigEditError, ConfigEditErrorKind, path::PathValueKind};
+use typol_core::{
+    BudgetError, CapacityExceeded, ChargedString, ChargedVec, ExecutionBudget, ResourceLimit, Span,
+    TextLayout,
+};
 
 #[derive(Clone, Copy)]
 pub(super) struct SourceContainer {
@@ -27,12 +31,6 @@ pub(super) struct SourceLayout<'source> {
     pub(super) colon_spacing: &'source str,
 }
 
-struct LexicalSpan {
-    end: usize,
-    comment: bool,
-    block_string: bool,
-}
-
 struct EmptyIndentation<'source> {
     indent: &'source str,
     unit: &'source str,
@@ -44,7 +42,9 @@ pub(super) struct SourceSyntax;
 fn repeated_scan_steps(bytes: usize, passes: usize) -> Result<usize, ConfigEditErrorKind> {
     bytes
         .checked_mul(passes)
-        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)
+        .ok_or(ConfigEditErrorKind::CapacityExceeded(
+            CapacityExceeded::ConfigEdit,
+        ))
 }
 
 impl SourceSyntax {
@@ -101,7 +101,7 @@ impl SourceSyntax {
         let mut depth = 0usize;
         let bytes = source.as_bytes();
         while cursor < position {
-            if let Some(lexeme) = lexical_span(source, cursor)? {
+            if let Some(lexeme) = SyntaxScanner::lexical_span(source, cursor)? {
                 cursor = lexeme.end.min(position);
                 continue;
             }
@@ -112,14 +112,18 @@ impl SourceSyntax {
                 if matches!(byte, b'{' | b'[' | b'(') {
                     depth = depth
                         .checked_add(1)
-                        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                        .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                            CapacityExceeded::ConfigEdit,
+                        ))?;
                 } else if matches!(byte, b'}' | b']' | b')') {
                     depth = depth.saturating_sub(1);
                 }
             }
             cursor = cursor
                 .checked_add(1)
-                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                    CapacityExceeded::ConfigEdit,
+                ))?;
         }
         Ok((indent, depth))
     }
@@ -139,7 +143,7 @@ impl SourceSyntax {
         let mut multiline = false;
         let mut line_break = "\n";
         while cursor < bounds.close {
-            if let Some(lexeme) = lexical_span(source, cursor)? {
+            if let Some(lexeme) = SyntaxScanner::lexical_span(source, cursor)? {
                 if lexeme.comment {
                     let comment = source
                         .get(cursor..lexeme.end)
@@ -172,7 +176,9 @@ impl SourceSyntax {
             }
             cursor = cursor
                 .checked_add(1)
-                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                    CapacityExceeded::ConfigEdit,
+                ))?;
         }
         let indentation = if multiline && infer_empty_indent {
             Self::empty_container_indent(source, bounds.open, budget)?
@@ -259,7 +265,7 @@ impl SourceSyntax {
                     }
                     let mut cursor = previous_start.max(lexical_end);
                     while cursor < line_end {
-                        if let Some(lexeme) = lexical_span(source, cursor)? {
+                        if let Some(lexeme) = SyntaxScanner::lexical_span(source, cursor)? {
                             if lexeme.block_string {
                                 block_string_end = lexeme.end;
                                 break;
@@ -268,15 +274,20 @@ impl SourceSyntax {
                             cursor = lexeme.end;
                             continue;
                         }
-                        cursor = cursor
-                            .checked_add(1)
-                            .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                        cursor =
+                            cursor
+                                .checked_add(1)
+                                .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                                    CapacityExceeded::ConfigEdit,
+                                ))?;
                     }
                 }
                 previous_start = if line_end < line_start {
                     line_end
                         .checked_add(1)
-                        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?
+                        .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                            CapacityExceeded::ConfigEdit,
+                        ))?
                 } else {
                     line_start
                 };
@@ -286,7 +297,7 @@ impl SourceSyntax {
         let mut same_line_depth = 0usize;
         let bytes = source.as_bytes();
         while cursor < open {
-            if let Some(lexeme) = lexical_span(source, cursor)? {
+            if let Some(lexeme) = SyntaxScanner::lexical_span(source, cursor)? {
                 cursor = lexeme.end.min(open);
                 continue;
             }
@@ -294,19 +305,27 @@ impl SourceSyntax {
                 return Err(ConfigEditErrorKind::EditConflict);
             };
             if matches!(byte, b'{' | b'[' | b'(') {
-                same_line_depth = same_line_depth
-                    .checked_add(1)
-                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                same_line_depth =
+                    same_line_depth
+                        .checked_add(1)
+                        .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                            CapacityExceeded::ConfigEdit,
+                        ))?;
             } else if matches!(byte, b'}' | b']' | b')') {
                 same_line_depth = same_line_depth.saturating_sub(1);
             }
             cursor = cursor
                 .checked_add(1)
-                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                    CapacityExceeded::ConfigEdit,
+                ))?;
         }
-        let indent_levels = same_line_depth
-            .checked_add(1)
-            .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+        let indent_levels =
+            same_line_depth
+                .checked_add(1)
+                .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                    CapacityExceeded::ConfigEdit,
+                ))?;
         Ok(EmptyIndentation {
             indent,
             unit: indent_unit,
@@ -335,7 +354,7 @@ impl SourceSyntax {
         let mut cursor = item_start;
         let mut nested = 0usize;
         while cursor < bounds.close {
-            if let Some(lexeme) = lexical_span(source, cursor)
+            if let Some(lexeme) = SyntaxScanner::lexical_span(source, cursor)
                 .map_err(|kind| out.reborrow().fail(ConfigEditError::new(kind)))?
             {
                 cursor = lexeme.end;
@@ -367,23 +386,24 @@ impl SourceSyntax {
                 }
                 item_start = cursor.checked_add(1).ok_or_else(|| {
                     out.reborrow().fail(ConfigEditError::new(
-                        ConfigEditErrorKind::ResourceLimitExceeded,
+                        ConfigEditErrorKind::CapacityExceeded(CapacityExceeded::ConfigEdit),
                     ))
                 })?;
                 previous_comma = Some(cursor);
             } else if matches!(byte, b'{' | b'[' | b'(') {
                 nested = nested.checked_add(1).ok_or_else(|| {
                     out.reborrow().fail(ConfigEditError::new(
-                        ConfigEditErrorKind::ResourceLimitExceeded,
+                        ConfigEditErrorKind::CapacityExceeded(CapacityExceeded::ConfigEdit),
                     ))
                 })?;
             } else if matches!(byte, b'}' | b']' | b')') && nested > 0 {
                 nested -= 1;
             }
             cursor = cursor.checked_add(1).ok_or_else(|| {
-                out.reborrow().fail(ConfigEditError::new(
-                    ConfigEditErrorKind::ResourceLimitExceeded,
-                ))
+                out.reborrow()
+                    .fail(ConfigEditError::new(ConfigEditErrorKind::CapacityExceeded(
+                        CapacityExceeded::ConfigEdit,
+                    )))
             })?;
         }
         let mut invalid = false;
@@ -418,10 +438,13 @@ impl SourceSyntax {
         let prefix = source
             .get(item.start..span.start())
             .ok_or(ConfigEditErrorKind::EditConflict)?;
-        let scan_bytes = prefix
-            .len()
-            .checked_mul(2)
-            .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+        let scan_bytes =
+            prefix
+                .len()
+                .checked_mul(2)
+                .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                    CapacityExceeded::ConfigEdit,
+                ))?;
         consume(budget, scan_bytes)?;
         let line_start = prefix
             .rfind('\n')
@@ -448,19 +471,23 @@ impl SourceSyntax {
             if cursor >= span.start() {
                 break " ";
             }
-            if let Some(lexeme) = lexical_span(source, cursor)? {
+            if let Some(lexeme) = SyntaxScanner::lexical_span(source, cursor)? {
                 cursor = lexeme.end;
                 continue;
             }
             if bytes.get(cursor) == Some(&b':') {
                 let start = cursor
                     .checked_add(1)
-                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                    .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                        CapacityExceeded::ConfigEdit,
+                    ))?;
                 let mut end = start;
                 while matches!(bytes.get(end), Some(b' ' | b'\t')) {
                     end = end
                         .checked_add(1)
-                        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                        .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                            CapacityExceeded::ConfigEdit,
+                        ))?;
                 }
                 break source
                     .get(start..end)
@@ -468,7 +495,9 @@ impl SourceSyntax {
             }
             cursor = cursor
                 .checked_add(1)
-                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                    CapacityExceeded::ConfigEdit,
+                ))?;
         };
         Ok((indent, colon_spacing))
     }
@@ -489,7 +518,7 @@ impl SourceSyntax {
             .map_err(|caught| edit_budget_error(caught.take()))?;
         let mut cursor = start;
         while cursor < end {
-            if let Some(lexeme) = lexical_span(source, cursor)? {
+            if let Some(lexeme) = SyntaxScanner::lexical_span(source, cursor)? {
                 if lexeme.comment {
                     let text = source
                         .get(cursor..lexeme.end)
@@ -500,7 +529,9 @@ impl SourceSyntax {
             } else {
                 cursor = cursor
                     .checked_add(1)
-                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                    .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                        CapacityExceeded::ConfigEdit,
+                    ))?;
             }
         }
         Ok(comments)
@@ -527,7 +558,7 @@ impl SourceSyntax {
         let mut cursor = span.start();
         let mut open = None;
         while cursor < span.end() {
-            if let Some(lexeme) = lexical_span(source, cursor)? {
+            if let Some(lexeme) = SyntaxScanner::lexical_span(source, cursor)? {
                 cursor = lexeme.end;
                 continue;
             }
@@ -537,15 +568,19 @@ impl SourceSyntax {
             }
             cursor = cursor
                 .checked_add(1)
-                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                    CapacityExceeded::ConfigEdit,
+                ))?;
         }
         let open = open.ok_or(ConfigEditErrorKind::InvalidContainer)?;
         cursor = open
             .checked_add(1)
-            .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+            .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                CapacityExceeded::ConfigEdit,
+            ))?;
         let mut nested = 0usize;
         while cursor < span.end() {
-            if let Some(lexeme) = lexical_span(source, cursor)? {
+            if let Some(lexeme) = SyntaxScanner::lexical_span(source, cursor)? {
                 cursor = lexeme.end;
                 continue;
             }
@@ -555,7 +590,9 @@ impl SourceSyntax {
             if matches!(byte, b'{' | b'[' | b'(') {
                 nested = nested
                     .checked_add(1)
-                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                    .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                        CapacityExceeded::ConfigEdit,
+                    ))?;
             } else if matches!(byte, b'}' | b']' | b')') {
                 if nested == 0 {
                     if byte == closing {
@@ -570,7 +607,9 @@ impl SourceSyntax {
             }
             cursor = cursor
                 .checked_add(1)
-                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+                .ok_or(ConfigEditErrorKind::CapacityExceeded(
+                    CapacityExceeded::ConfigEdit,
+                ))?;
         }
         Err(ConfigEditErrorKind::InvalidContainer)
     }
@@ -608,7 +647,9 @@ fn append_charged(
         .filter(|length| *length <= limit)
         .is_none()
     {
-        return Err(ConfigEditErrorKind::ResourceLimitExceeded);
+        return Err(ConfigEditErrorKind::ResourceLimit(
+            ResourceLimit::ConfigFormatOutputBytes,
+        ));
     }
     let mut errors = ErrSlot::<BudgetError>::new();
     errors
@@ -617,147 +658,12 @@ fn append_charged(
     Ok(())
 }
 
-fn lexical_span(source: &str, start: usize) -> Result<Option<LexicalSpan>, ConfigEditErrorKind> {
-    let bytes = source.as_bytes();
-    match bytes.get(start).copied() {
-        Some(b'"') => skip_string(source, start).map(|end| {
-            Some(LexicalSpan {
-                end,
-                comment: false,
-                block_string: bytes.get(start..start.saturating_add(3)) == Some(b"\"\"\""),
-            })
-        }),
-        Some(b'/') if bytes.get(start.saturating_add(1)) == Some(&b'/') => {
-            skip_line_comment(source, start).map(|end| {
-                Some(LexicalSpan {
-                    end,
-                    comment: true,
-                    block_string: false,
-                })
-            })
-        }
-        Some(b'/') if bytes.get(start.saturating_add(1)) == Some(&b'*') => {
-            skip_block_comment(source, start).map(|end| {
-                Some(LexicalSpan {
-                    end,
-                    comment: true,
-                    block_string: false,
-                })
-            })
-        }
-        _ => Ok(None),
-    }
-}
-
-fn skip_string(source: &str, start: usize) -> Result<usize, ConfigEditErrorKind> {
-    let bytes = source.as_bytes();
-    if bytes.get(start..start.saturating_add(3)) == Some(b"\"\"\"") {
-        let mut cursor = start
-            .checked_add(3)
-            .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-        match bytes.get(cursor) {
-            Some(b'\n') => cursor += 1,
-            Some(b'\r') if bytes.get(cursor.saturating_add(1)) == Some(&b'\n') => cursor += 2,
-            _ => return Err(ConfigEditErrorKind::EditConflict),
-        }
-        while cursor < bytes.len() {
-            let mut content = cursor;
-            while matches!(bytes.get(content), Some(b' ' | b'\t')) {
-                content = content
-                    .checked_add(1)
-                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-            }
-            if bytes.get(content..content.saturating_add(3)) == Some(b"\"\"\"") {
-                return content
-                    .checked_add(3)
-                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded);
-            }
-            while bytes.get(cursor).is_some_and(|byte| *byte != b'\n') {
-                cursor = cursor
-                    .checked_add(1)
-                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-            }
-            if cursor < bytes.len() {
-                cursor = cursor
-                    .checked_add(1)
-                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-            }
-        }
-        return Err(ConfigEditErrorKind::EditConflict);
-    }
-    let mut cursor = start
-        .checked_add(1)
-        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-    while let Some(byte) = bytes.get(cursor).copied() {
-        if byte == b'\\' {
-            cursor = cursor
-                .checked_add(2)
-                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-        } else if byte == b'"' {
-            return cursor
-                .checked_add(1)
-                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded);
-        } else {
-            cursor = cursor
-                .checked_add(1)
-                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-        }
-    }
-    Err(ConfigEditErrorKind::EditConflict)
-}
-
-fn skip_line_comment(source: &str, start: usize) -> Result<usize, ConfigEditErrorKind> {
-    let bytes = source.as_bytes();
-    let mut cursor = start
-        .checked_add(2)
-        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-    while let Some(byte) = bytes.get(cursor).copied() {
-        cursor = cursor
-            .checked_add(1)
-            .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-        if byte == b'\n' {
-            return Ok(cursor);
-        }
-        if byte == b'\r' {
-            if bytes.get(cursor) == Some(&b'\n') {
-                cursor = cursor
-                    .checked_add(1)
-                    .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-            }
-            return Ok(cursor);
-        }
-    }
-    Ok(cursor)
-}
-
-fn skip_block_comment(source: &str, start: usize) -> Result<usize, ConfigEditErrorKind> {
-    let bytes = source.as_bytes();
-    let mut cursor = start
-        .checked_add(2)
-        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-    while cursor < bytes.len() {
-        if bytes.get(cursor) == Some(&b'*') && bytes.get(cursor.saturating_add(1)) == Some(&b'/') {
-            return cursor
-                .checked_add(2)
-                .ok_or(ConfigEditErrorKind::ResourceLimitExceeded);
-        }
-        cursor = cursor
-            .checked_add(1)
-            .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
-    }
-    Err(ConfigEditErrorKind::EditConflict)
-}
-
 fn edit_budget_error(error: BudgetError) -> ConfigEditErrorKind {
     match error {
-        BudgetError::Resource
-        | BudgetError::RegexSteps
-        | BudgetError::RegexSearchSteps
-        | BudgetError::RegexWorkspace
-        | BudgetError::CapacityExceeded => ConfigEditErrorKind::ResourceLimitExceeded,
-        BudgetError::Allocation | BudgetError::InvariantViolation(_) => {
-            ConfigEditErrorKind::AllocationFailed
-        }
+        BudgetError::ResourceLimit(limit) => ConfigEditErrorKind::ResourceLimit(limit),
+        BudgetError::CapacityExceeded(capacity) => ConfigEditErrorKind::CapacityExceeded(capacity),
+        BudgetError::Allocation => ConfigEditErrorKind::AllocationFailed,
+        BudgetError::Internal(error) => ConfigEditErrorKind::Internal(error),
     }
 }
 
@@ -765,7 +671,7 @@ fn edit_budget_error(error: BudgetError) -> ConfigEditErrorKind {
 mod tests {
     use super::{ConfigEditErrorKind, SourceSyntax};
     use alloc::format;
-    use typol_core::{ExecutionBudget, ExecutionLimits};
+    use typol_core::{ExecutionBudget, ExecutionLimits, ResourceLimit};
     use typol_test_support::{
         TestFailure, TestOpeo, TestResult, test_verify as test_assert, test_verify_eq as test_eq,
     };
@@ -803,7 +709,12 @@ mod tests {
 
         let result = SourceSyntax::indent_context(&source, position, Some(&budget));
 
-        test_eq!(result, Err(ConfigEditErrorKind::ResourceLimitExceeded));
+        test_eq!(
+            result,
+            Err(ConfigEditErrorKind::ResourceLimit(
+                ResourceLimit::ExecutionSteps
+            ))
+        );
         test_eq!(budget.steps(), position);
         Ok(())
     }
@@ -842,7 +753,9 @@ mod tests {
 
         test_assert!(matches!(
             result,
-            Err(ConfigEditErrorKind::ResourceLimitExceeded)
+            Err(ConfigEditErrorKind::ResourceLimit(
+                ResourceLimit::ExecutionSteps
+            ))
         ));
         test_eq!(budget.steps(), open);
         Ok(())

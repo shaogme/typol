@@ -1,23 +1,35 @@
-use typol_test_support::{ConfigTestSupport as Support, TestOpeoOutcome};
+use typol_test_support::TestOpeoOutcome;
 
 use std::collections::BTreeMap;
 use typol_config::{
-    ConfigLimits, ConfigParseErrors, ConfigParseOptions, ConfigParseRequest, Environment,
-    EnvironmentError, EnvironmentReadContext, StreamLimits,
+    ConfigLimits, ConfigParseErrors, ConfigParseOptions, ConfigParseRequest, ConfigParser,
+    Environment, EnvironmentError, EnvironmentReadContext, StreamLimits,
     opeo::{OResult, Out},
 };
 use typol_core::{
-    ConfigValue, DiagnosticCode, ExcerptLimits, ExecutionLimits, Read, SliceSource, SourceId,
-    SourceReadError, SourceReadErrorKind, ValueKind, ValuePayloadView, ValueSource, ValueView,
+    ConfigValue, DiagnosticCode, DiagnosticContext, ExcerptLimits, ExecutionLimits, InternalError,
+    Read, ResourceLimit, SliceSource, SourceId, SourceReadError, SourceReadErrorKind, ValueKind,
+    ValuePayloadView, ValueSource, ValueView, diagnostic_context,
 };
 use typol_policy::RegexOptions;
 use typol_schema::{
-    ResolverError, SchemaCompileOptions, SchemaResolveRequest, SchemaResolver, SchemaSource,
+    ResolverError, SchemaCompileOptions, SchemaCompiler, SchemaResolveRequest, SchemaResolver,
+    SchemaSource, SourceObserver,
 };
 use typol_semantic::CompiledSchema;
 use typol_test_support::*;
 
-type ConfigLimitBuilder = (fn(ConfigLimits, usize) -> ConfigLimits, usize);
+static SOURCE_RANGE_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-config-tests",
+    "stream-input",
+    "source-range-unavailable",
+);
+
+struct ConfigLimitBuilder {
+    with_limit: fn(ConfigLimits, usize) -> ConfigLimits,
+    upper: usize,
+    expected: &'static [DiagnosticCode],
+}
 
 #[derive(Clone, Copy, Default)]
 struct TestResources {
@@ -103,6 +115,7 @@ struct Counterexample {
 struct ResourceLimitSetter {
     set: fn(&mut TestResources, usize),
     upper: usize,
+    expected: DiagnosticCode,
 }
 
 const SERVER: Fixture = Fixture {
@@ -154,7 +167,7 @@ impl SchemaResolver for MemoryResolver {
         }
         let text = include_str!("../../../examples/config/common.tschem");
         if text.len() > max_bytes {
-            return Err(out.fail(ResolverError::ResourceLimitExceeded));
+            return Err(out.fail(ResolverError::ResourceLimit(ResourceLimit::SourceBytes)));
         }
         self.source.replace(text);
         Ok(SchemaSource::from_source(b"common", &mut self.source))
@@ -203,12 +216,22 @@ impl Environment for MemoryEnvironment {
 
 fn compile(fixture: &Fixture) -> TestResult<CompiledSchema> {
     let mut resolver = MemoryResolver::default();
-    let schema = Support::compile_schema(
-        SchemaCompileOptions::default(),
-        SchemaSource::from_str(fixture.name.as_bytes(), fixture.schema),
-        Some(&mut resolver),
-        None,
-    )
+    let schema = TestOpeo::outcome(|mut out| {
+        let options = SchemaCompileOptions::default();
+        let source = SchemaSource::from_str(fixture.name.as_bytes(), fixture.schema);
+        let resolver: Option<&mut dyn SchemaResolver> = Some(&mut resolver);
+        let observer: Option<&mut dyn SourceObserver> = None;
+        let compiler = SchemaCompiler::new(options, out.reborrow())?;
+        match resolver {
+            Some(resolver) => compiler.compile(source, resolver, observer, out.reborrow()),
+            None => match observer {
+                Some(observer) => {
+                    compiler.compile_without_imports_with_observer(source, observer, out)
+                }
+                None => compiler.compile_without_imports(source, out),
+            },
+        }
+    })
     .test_value()?;
     test_assert!(!resolver.invalid_origin)?;
     test_eq!(resolver.calls, usize::from(fixture.name != "all_types"))?;
@@ -222,14 +245,17 @@ fn parse(
     provider: &mut MemoryEnvironment,
     limits: impl Into<TestLimits>,
 ) -> TestOpeoOutcome<ConfigValue, ConfigParseErrors> {
-    Support::parse(
-        schema,
-        config_request(
-            (&mut SliceSource::new((text).as_bytes()), fixture.name),
-            limits,
-        ),
-        provider,
-    )
+    TestOpeo::outcome(|out| {
+        ConfigParser::new(schema).parse(
+            config_request(
+                (&mut SliceSource::new((text).as_bytes()), fixture.name),
+                limits,
+            ),
+            provider,
+            out,
+        )
+    })
+    .map(|value| value.into_config_value())
 }
 
 fn field<'a>(value: impl Into<ValueViewInput<'a>>, name: &str) -> TestResult<ValueView<'a>> {
@@ -262,7 +288,35 @@ fn at<'a>(value: impl Into<ValueViewInput<'a>>, path: &[&str]) -> TestResult<Val
 
 fn assert_code(errors: &ConfigParseErrors, code: DiagnosticCode) -> TestResult<()> {
     test_assert!(!errors.diagnostics().is_empty())?;
-    test_assert!(errors.diagnostics().iter().all(|d| d.code() == code))?;
+    test_verify!(
+        errors
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code() == code),
+        "expected diagnostic code {}, got {:?}",
+        code.get(),
+        errors
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.code().get())
+            .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+fn assert_one_of_codes(errors: &ConfigParseErrors, codes: &[DiagnosticCode]) -> TestResult<()> {
+    test_assert!(!errors.diagnostics().is_empty())?;
+    let actual: Vec<_> = errors
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.code())
+        .collect();
+    test_verify!(
+        actual.iter().all(|code| codes.contains(code)),
+        "expected diagnostic codes {:?}, got {:?}",
+        codes.iter().map(|code| code.get()).collect::<Vec<_>>(),
+        actual.iter().map(|code| code.get()).collect::<Vec<_>>()
+    );
     Ok(())
 }
 
@@ -876,8 +930,8 @@ fn imported_schema_labels_and_provider_failures_use_public_owned_errors() -> Tes
                 DiagnosticCode::ALLOCATION_FAILED,
             ),
             (
-                EnvironmentError::ResourceLimitExceeded,
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+                EnvironmentError::ResourceLimit(ResourceLimit::EnvironmentBytes),
+                DiagnosticCode::ENVIRONMENT_BYTES_LIMIT_EXCEEDED,
             ),
         ] {
             let mut provider = MemoryEnvironment {
@@ -906,15 +960,34 @@ fn imported_schema_labels_and_provider_failures_use_public_owned_errors() -> Tes
 fn fixture_resource_boundaries_accept_exact_limit_and_reject_one_less() -> TestResult<()> {
     for fixture in [&SERVER, &DATABASE, &ALL_TYPES] {
         let schema = compile(fixture)?;
-        let config_builders: [ConfigLimitBuilder; 4] = [
-            (ConfigLimits::with_max_source_bytes, fixture.config.len()),
-            (ConfigLimits::with_max_string_bytes, 256),
-            (ConfigLimits::with_max_value_nodes, 512),
-            (ConfigLimits::with_max_nesting_depth, 32),
+        let config_builders = [
+            ConfigLimitBuilder {
+                with_limit: ConfigLimits::with_max_source_bytes,
+                upper: fixture.config.len(),
+                expected: &[DiagnosticCode::SOURCE_BYTES_LIMIT_EXCEEDED],
+            },
+            ConfigLimitBuilder {
+                with_limit: ConfigLimits::with_max_string_bytes,
+                upper: 256,
+                expected: &[DiagnosticCode::STRING_BYTES_LIMIT_EXCEEDED],
+            },
+            ConfigLimitBuilder {
+                with_limit: ConfigLimits::with_max_value_nodes,
+                upper: 512,
+                expected: &[DiagnosticCode::CONFIG_VALUE_NODES_LIMIT_EXCEEDED],
+            },
+            ConfigLimitBuilder {
+                with_limit: ConfigLimits::with_max_nesting_depth,
+                upper: 32,
+                expected: &[
+                    DiagnosticCode::CONFIG_VALUE_DEPTH_LIMIT_EXCEEDED,
+                    DiagnosticCode::VALIDATION_TRAVERSAL_LIMIT_EXCEEDED,
+                ],
+            },
         ];
-        for (with_limit, upper) in config_builders {
+        for builder in config_builders {
             let run = |bound| {
-                let config = with_limit(ConfigLimits::default(), bound);
+                let config = (builder.with_limit)(ConfigLimits::default(), bound);
                 let resources = TestResources::default();
                 parse(
                     fixture,
@@ -924,24 +997,21 @@ fn fixture_resource_boundaries_accept_exact_limit_and_reject_one_less() -> TestR
                     &(&resources, &config),
                 )
             };
-            run(upper).test_value()?;
-            let (mut low, mut high) = (0, upper);
+            run(builder.upper).test_value()?;
+            let (mut low, mut high) = (0, builder.upper);
             while low < high {
                 let middle = low + (high - low) / 2;
                 match run(middle) {
                     TestOpeoOutcome::Value(_) => high = middle,
                     TestOpeoOutcome::Error(errors) => {
-                        assert_code(&errors, DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)?;
+                        assert_one_of_codes(&errors, builder.expected)?;
                         low = middle + 1;
                     }
                 }
             }
             test_assert!(low > 0)?;
             run(low).test_value()?;
-            assert_code(
-                &run(low - 1).test_error()?,
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-            )?;
+            assert_one_of_codes(&run(low - 1).test_error()?, builder.expected)?;
         }
         let resource_setters = [
             ResourceLimitSetter {
@@ -951,6 +1021,7 @@ fn fixture_resource_boundaries_accept_exact_limit_and_reject_one_less() -> TestR
                         .with_execution(limits.regex.execution().with_max_search_steps(value))
                 },
                 upper: 4096,
+                expected: DiagnosticCode::REGEX_SEARCH_STEPS_LIMIT_EXCEEDED,
             },
             ResourceLimitSetter {
                 set: |limits, value| {
@@ -959,6 +1030,7 @@ fn fixture_resource_boundaries_accept_exact_limit_and_reject_one_less() -> TestR
                     limits.regex = limits.regex.with_limits(regex_limits);
                 },
                 upper: 4096,
+                expected: DiagnosticCode::REGEX_SCRATCH_STATES_LIMIT_EXCEEDED,
             },
         ];
         for setter in resource_setters {
@@ -981,23 +1053,20 @@ fn fixture_resource_boundaries_accept_exact_limit_and_reject_one_less() -> TestR
                 match run(middle) {
                     TestOpeoOutcome::Value(_) => high = middle,
                     TestOpeoOutcome::Error(errors) => {
-                        assert_code(&errors, DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)?;
+                        assert_code(&errors, setter.expected)?;
                         low = middle + 1;
                     }
                 }
             }
             test_assert!(low > 0)?;
             run(low).test_value()?;
-            assert_code(
-                &run(low - 1).test_error()?,
-                DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-            )?;
+            assert_code(&run(low - 1).test_error()?, setter.expected)?;
         }
         let limits = ConfigLimits::default().with_max_source_bytes(fixture.config.len() - 1);
         let mut provider = MemoryEnvironment::required(fixture);
         assert_code(
             &parse(fixture, &schema, fixture.config, &mut provider, &limits).test_error()?,
-            DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
+            DiagnosticCode::SOURCE_BYTES_LIMIT_EXCEEDED,
         )?;
         provider.assert_cached(fixture)?;
     }
@@ -1108,20 +1177,26 @@ impl Read for FragmentSource<'_> {
         let count = output.len().min(end - self.offset);
         let Some(end) = self.offset.checked_add(count) else {
             return Err(out.fail(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::SourceInputInvariantFailure(SOURCE_RANGE_INVARIANT),
+                ))
+                .with_input(source_id, offset),
             ));
         };
         let Some(target) = output.get_mut(..count) else {
             return Err(out.fail(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::SourceInputInvariantFailure(SOURCE_RANGE_INVARIANT),
+                ))
+                .with_input(source_id, offset),
             ));
         };
         let Some(source) = self.bytes.get(self.offset..end) else {
             return Err(out.fail(
-                SourceReadError::new(SourceReadErrorKind::InternalInvariantFailure)
-                    .with_input(source_id, offset),
+                SourceReadError::new(SourceReadErrorKind::Internal(
+                    InternalError::SourceInputInvariantFailure(SOURCE_RANGE_INVARIANT),
+                ))
+                .with_input(source_id, offset),
             ));
         };
         target.copy_from_slice(source);
@@ -1152,16 +1227,19 @@ fn original_fixtures_preserve_values_origins_and_environment_cache_at_every_spli
                 next_cut: 0,
             };
             let mut provider = MemoryEnvironment::required(fixture);
-            let value = Support::parse(
-                &schema,
-                ConfigParseRequest::new(
-                    &mut input,
-                    fixture.name,
-                    ConfigParseOptions::default()
-                        .with_stream(StreamLimits::try_new(chunk, 1_048_576).test_value()?),
-                ),
-                &mut provider,
-            )
+            let stream_limits = StreamLimits::try_new(chunk, 1_048_576).test_value()?;
+            let value = TestOpeo::outcome(|out| {
+                ConfigParser::new(&schema).parse(
+                    ConfigParseRequest::new(
+                        &mut input,
+                        fixture.name,
+                        ConfigParseOptions::default().with_stream(stream_limits),
+                    ),
+                    &mut provider,
+                    out,
+                )
+            })
+            .map(|value| value.into_config_value())
             .test_value()?;
             test_eq!(snapshot(&value), expected)?;
             provider.assert_cached(fixture)?;

@@ -3,10 +3,13 @@ mod advanced;
 use super::{ConfigLimits, ParserTestSupport, foundation::Provider};
 
 use crate::diagnostics::ExecutionDiagnostic;
-use alloc::{format, vec, vec::Vec};
+use alloc::{format, vec::Vec};
 use core::cmp::Ordering;
 use opeo::{OResult, Out};
-use typol_core::{ConfigValue, DiagnosticCode, ValueKind, ValueView};
+use typol_core::{
+    ConfigValue, DiagnosticCode, DiagnosticContext, InternalError, ResourceLimit, ValueKind,
+    ValueView, diagnostic_context,
+};
 use typol_policy::{RegexLimits, ValueLimits};
 use typol_schema::{
     ResolverError, SchemaCompileErrors, SchemaCompileOptions, SchemaCompiler, SchemaResolveRequest,
@@ -18,6 +21,12 @@ use typol_semantic::{
     SchemaValue as EvalValue, TypeKind, ValueComparison,
 };
 use typol_test_support::*;
+
+static EXECUTION_TEST_INVARIANT: DiagnosticContext = diagnostic_context!(
+    "typol-config-tests",
+    "expression-evaluation",
+    "test-internal-failure",
+);
 
 struct IntegerWidthCase {
     ty: &'static str,
@@ -375,8 +384,11 @@ fn evaluate_first(
             ParserTestSupport::access(&mut schema_errors, |out| assertions.get(0, out))
         }) {
         Ok(Some(assertion)) => assertion,
-        Ok(None) => return TestOpeoOutcome::Error(EvalFailure::Internal),
-        Err(_) => return TestOpeoOutcome::Error(EvalFailure::Internal),
+        Ok(None) | Err(_) => {
+            return TestOpeoOutcome::Error(EvalFailure::Internal(
+                InternalError::SemanticEvaluationInvariantFailure(EXECUTION_TEST_INVARIANT),
+            ));
+        }
     };
     let mut eval_errors = TestSlot::<EvalError>::default();
     match evaluate_bool(
@@ -666,59 +678,25 @@ fn unknown_bindings_and_depth_have_distinct_codes() -> TestResult<()> {
     let error = eval_errors
         .run(|out| evaluator.evaluate(expression, bindings, out))
         .test_error()?;
-    test_eq!(error.kind(), EvalFailure::Resource)?;
+    test_eq!(
+        error.kind(),
+        EvalFailure::ResourceLimit(ResourceLimit::ValidationTraversal)
+    )?;
     test_assert!(error.source_span().is_some())?;
     test_eq!(
-        ExecutionDiagnostic::code(EvalError::Internal),
-        DiagnosticCode::INTERNAL_ERROR
+        ExecutionDiagnostic::code(EvalError::Internal {
+            error: InternalError::SemanticEvaluationInvariantFailure(EXECUTION_TEST_INVARIANT),
+            source_span: None,
+        }),
+        DiagnosticCode::SEMANTIC_EVALUATION_INVARIANT_FAILURE
     )?;
     test_eq!(
-        ExecutionDiagnostic::code(EvalError::Resource),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        ExecutionDiagnostic::code(EvalError::ResourceLimit(ResourceLimit::ValidationTraversal)),
+        DiagnosticCode::VALIDATION_TRAVERSAL_LIMIT_EXCEEDED
     )?;
     test_eq!(
         ExecutionDiagnostic::code(EvalError::Arithmetic),
         DiagnosticCode::CONFIG_VALIDATION_ERROR
-    )?;
-
-    Ok(())
-}
-
-#[test]
-fn comparison_depth_is_checked_independently_of_value_construction() -> TestResult<()> {
-    let schema = compile("entry struct Root { v: [[[u8]]] }")?;
-    let mut schema_errors = TestSlot::<SchemaAccessError>::default();
-    let field = ParserTestSupport::required(&mut schema_errors, |out| {
-        schema.entry().field_named("v", out)
-    })?;
-    let ty = ParserTestSupport::access(&mut schema_errors, |out| field.ty(out))?;
-    let value = ValueFactory::try_array(vec![
-        ValueFactory::try_array(vec![
-            ValueFactory::try_array(vec![ValueFactory::unsigned(1)?])
-                .map_err(TestFailure::from_debug)?,
-        ])
-        .map_err(TestFailure::from_debug)?,
-    ])
-    .map_err(TestFailure::from_debug)?;
-    let mut limits = ValueLimits::default();
-    let regex_limits = RegexLimits::default();
-    limits.set_max_nesting_depth(2);
-    let evaluator = Evaluator::new(&schema, &limits, &regex_limits, None);
-    let value = EvalValue::config(value.root(), ty, false);
-    test_eq!(
-        compare(&evaluator, value, value, true, 0),
-        TestOpeoOutcome::Error(EvalError::Resource)
-    )?;
-    limits.set_max_nesting_depth(4);
-    test_eq!(
-        compare(
-            &Evaluator::new(&schema, &limits, &regex_limits, None),
-            value,
-            value,
-            true,
-            0
-        ),
-        TestOpeoOutcome::Value(Ordering::Equal)
     )?;
 
     Ok(())

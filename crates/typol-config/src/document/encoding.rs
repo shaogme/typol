@@ -5,8 +5,8 @@ use core::{
 };
 use opeo::ErrSlot;
 use typol_core::{
-    BudgetError, ChargedString, ChargedVec, ExecutionBudget, TextLayout, ValueEntries, ValueKind,
-    ValuePayloadView, ValueScalar, ValueSource, ValueView,
+    BudgetError, CapacityExceeded, ChargedString, ChargedVec, ExecutionBudget, ResourceLimit,
+    TextLayout, ValueEntries, ValueKind, ValuePayloadView, ValueScalar, ValueSource, ValueView,
 };
 
 pub(super) struct ScalarEncoder;
@@ -425,17 +425,23 @@ fn append_indent(
         .indent_unit
         .len()
         .checked_mul(options.context.indent_levels)
-        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+        .ok_or(ConfigEditErrorKind::CapacityExceeded(
+            CapacityExceeded::ConfigEdit,
+        ))?;
     let pretty_indent_bytes = depth
         .checked_mul(4)
-        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+        .ok_or(ConfigEditErrorKind::CapacityExceeded(
+            CapacityExceeded::ConfigEdit,
+        ))?;
     let length = options
         .context
         .indent
         .len()
         .checked_add(base_indent_bytes)
         .and_then(|length| length.checked_add(pretty_indent_bytes))
-        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+        .ok_or(ConfigEditErrorKind::CapacityExceeded(
+            CapacityExceeded::ConfigEdit,
+        ))?;
     consume(options.budget, length)?;
     append_text(output, options.context.indent, options.limit)?;
     for _ in 0..options.context.indent_levels {
@@ -508,9 +514,11 @@ fn append_float(
     let unsigned = mantissa.strip_prefix('-').unwrap_or(mantissa);
     let decimal = unsigned.find('.').unwrap_or(unsigned.len());
     let decimal = i32::try_from(decimal)
-        .map_err(|_| ConfigEditErrorKind::ResourceLimitExceeded)?
+        .map_err(|_| ConfigEditErrorKind::CapacityExceeded(CapacityExceeded::ConfigEdit))?
         .checked_add(exponent)
-        .ok_or(ConfigEditErrorKind::ResourceLimitExceeded)?;
+        .ok_or(ConfigEditErrorKind::CapacityExceeded(
+            CapacityExceeded::ConfigEdit,
+        ))?;
     let mut digits = FixedText::new();
     for character in unsigned.chars().filter(|character| *character != '.') {
         digits
@@ -523,12 +531,12 @@ fn append_float(
     if decimal <= 0 {
         append_text(output, "0.", limit)?;
         let zeros = usize::try_from(decimal.unsigned_abs())
-            .map_err(|_| ConfigEditErrorKind::ResourceLimitExceeded)?;
+            .map_err(|_| ConfigEditErrorKind::CapacityExceeded(CapacityExceeded::ConfigEdit))?;
         append_zeros(output, zeros, limit)?;
         append_text(output, digits.as_str()?, limit)
     } else {
-        let decimal =
-            usize::try_from(decimal).map_err(|_| ConfigEditErrorKind::ResourceLimitExceeded)?;
+        let decimal = usize::try_from(decimal)
+            .map_err(|_| ConfigEditErrorKind::CapacityExceeded(CapacityExceeded::ConfigEdit))?;
         let digits = digits.as_str()?;
         if decimal >= digits.len() {
             append_text(output, digits, limit)?;
@@ -624,13 +632,15 @@ fn append_text(
     text: &str,
     limit: usize,
 ) -> Result<(), ConfigEditErrorKind> {
-    if output
-        .len()
-        .checked_add(text.len())
-        .filter(|length| *length <= limit)
-        .is_none()
-    {
-        return Err(ConfigEditErrorKind::ResourceLimitExceeded);
+    let Some(length) = output.len().checked_add(text.len()) else {
+        return Err(ConfigEditErrorKind::CapacityExceeded(
+            CapacityExceeded::ConfigEdit,
+        ));
+    };
+    if length > limit {
+        return Err(ConfigEditErrorKind::ResourceLimit(
+            ResourceLimit::ConfigFormatOutputBytes,
+        ));
     }
     let mut errors = ErrSlot::<BudgetError>::new();
     errors
@@ -651,13 +661,9 @@ fn consume(budget: Option<&ExecutionBudget>, steps: usize) -> Result<(), ConfigE
 
 fn budget_error_kind(error: BudgetError) -> ConfigEditErrorKind {
     match error {
-        BudgetError::Resource
-        | BudgetError::RegexSteps
-        | BudgetError::RegexSearchSteps
-        | BudgetError::RegexWorkspace
-        | BudgetError::CapacityExceeded => ConfigEditErrorKind::ResourceLimitExceeded,
-        BudgetError::Allocation | BudgetError::InvariantViolation(_) => {
-            ConfigEditErrorKind::AllocationFailed
-        }
+        BudgetError::ResourceLimit(limit) => ConfigEditErrorKind::ResourceLimit(limit),
+        BudgetError::CapacityExceeded(capacity) => ConfigEditErrorKind::CapacityExceeded(capacity),
+        BudgetError::Allocation => ConfigEditErrorKind::AllocationFailed,
+        BudgetError::Internal(error) => ConfigEditErrorKind::Internal(error),
     }
 }

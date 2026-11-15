@@ -339,7 +339,7 @@ impl Typol for Recursive {
 }
 
 #[test]
-fn handwritten_recursive_conversion_is_stopped_by_the_node_dispatcher() -> TestResult {
+fn handwritten_recursive_conversion_reports_reentrant_dispatch() -> TestResult {
     let schema = BindingTestSupport::compile("entry struct Recursive { value: u8 }")?;
     let binding = BindingTestSupport::bind::<Recursive>(&schema, BindOptions::default())?;
     let session = BindingTestSupport::codec_session()?;
@@ -351,7 +351,7 @@ fn handwritten_recursive_conversion_is_stopped_by_the_node_dispatcher() -> TestR
             &session,
             ConversionLimits::default(),
         )?)?,
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED.get()
+        DiagnosticCode::RUST_CONVERSION_INVARIANT_FAILURE.get()
     );
     let config = dynamic(TestValues::unsigned(1))?;
     assert_eq!(
@@ -361,7 +361,7 @@ fn handwritten_recursive_conversion_is_stopped_by_the_node_dispatcher() -> TestR
             &session,
             ConversionLimits::default(),
         )?)?,
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED.get()
+        DiagnosticCode::RUST_CONVERSION_INVARIANT_FAILURE.get()
     );
     Ok(())
 }
@@ -407,7 +407,7 @@ fn renamed_reordered_nested_fields_follow_schema_order() -> TestResult {
     let shallow_limits = ConversionLimits::new(100, 1).test_value()?;
     assert_eq!(
         BindingTestSupport::code(encode_error(&binding, &value, &session, shallow_limits,)?)?,
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED.get()
+        DiagnosticCode::TYPE_BINDING_DEPTH_LIMIT_EXCEEDED.get()
     );
     assert_eq!(
         BindingTestSupport::code(decode_error(
@@ -416,7 +416,7 @@ fn renamed_reordered_nested_fields_follow_schema_order() -> TestResult {
             &session,
             shallow_limits,
         )?)?,
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED.get()
+        DiagnosticCode::TYPE_BINDING_DEPTH_LIMIT_EXCEEDED.get()
     );
     Ok(())
 }
@@ -476,7 +476,7 @@ fn hash_map_uses_unicode_key_order_and_counts_keys_as_nodes() -> TestResult {
             &session,
             ConversionLimits::new(9, 2).test_value()?,
         )?)?,
-        1
+        DiagnosticCode::TYPE_BINDING_NODES_LIMIT_EXCEEDED.get()
     );
     Ok(())
 }

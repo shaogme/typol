@@ -125,7 +125,11 @@ fn conversions_share_budget_and_check_exact_node_depth_and_live_capacity_boundar
         let session = BindingTestSupport::codec_session()?;
         assert_eq!(
             BindingTestSupport::code(encode_error(&binding, &value, &session, limits)?)?,
-            1
+            if limits.max_nodes() < 4 {
+                DiagnosticCode::TYPE_BINDING_NODES_LIMIT_EXCEEDED.get()
+            } else {
+                DiagnosticCode::TYPE_BINDING_DEPTH_LIMIT_EXCEEDED.get()
+            }
         );
         assert_eq!(session.execution().workspace_bytes(), initial);
     }
@@ -147,7 +151,10 @@ fn conversions_share_budget_and_check_exact_node_depth_and_live_capacity_boundar
         match (succeeds, result) {
             (true, TestOpeoOutcome::Value(decoded)) => assert_eq!(decoded, value),
             (false, TestOpeoOutcome::Error(errors)) => {
-                assert_eq!(BindingTestSupport::code(errors)?, 1)
+                assert_eq!(
+                    BindingTestSupport::code(errors)?,
+                    DiagnosticCode::WORKSPACE_BYTES_LIMIT_EXCEEDED.get()
+                )
             }
             (true, TestOpeoOutcome::Error(errors)) => {
                 return Err(TestFailure::new(format!(
@@ -189,7 +196,7 @@ fn conversions_share_budget_and_check_exact_node_depth_and_live_capacity_boundar
             &session,
             ConversionLimits::new(4, 2).test_value()?,
         )?)?,
-        1
+        DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED.get()
     );
     Ok(())
 }
@@ -251,7 +258,7 @@ fn decoded_strings_preserve_unicode_and_exact_text_budget() -> TestResult {
             .diagnostics()
             .last()
             .map(|diagnostic| diagnostic.code()),
-        Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+        Some(DiagnosticCode::CONFIG_TEXT_BYTES_LIMIT_EXCEEDED)
     );
     assert_eq!(short_session.execution().constructed_text_bytes(), 0);
     Ok(())
@@ -421,7 +428,7 @@ fn sourced_values_obey_conversion_node_limits() -> TestResult {
             .diagnostics()
             .last()
             .map(|diagnostic| diagnostic.code()),
-        Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+        Some(DiagnosticCode::TYPE_BINDING_NODES_LIMIT_EXCEEDED)
     );
     Ok(())
 }
@@ -448,7 +455,7 @@ fn sourced_environment_text_is_checked_before_copying() -> TestResult {
             .diagnostics()
             .last()
             .map(|diagnostic| diagnostic.code()),
-        Some(DiagnosticCode::RESOURCE_LIMIT_EXCEEDED)
+        Some(DiagnosticCode::CONFIG_TEXT_BYTES_LIMIT_EXCEEDED)
     );
     assert_eq!(session.execution().constructed_text_bytes(), 0);
 

@@ -1,7 +1,7 @@
 mod host_error;
 mod source_excerpt;
 
-use std::{borrow::Cow, error::Error, fmt};
+use std::{error::Error, fmt};
 
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
@@ -104,7 +104,7 @@ impl MessageTranslator {
 
     pub(super) fn write_translated<'slot>(
         &mut self,
-        text: Result<Cow<'static, str>, RenderError>,
+        text: Result<&'static str, RenderError>,
         output: &mut impl FormatOutput,
         mut out: Out<'slot, '_, DisplayError>,
     ) -> OResult<'slot, ()> {
@@ -117,7 +117,7 @@ impl MessageTranslator {
                 )));
             }
         };
-        output.escape(text.as_ref(), false, out.reborrow())
+        output.escape(text, false, out.reborrow())
     }
 
     fn write_diagnostic<'slot>(
@@ -308,7 +308,7 @@ impl DiagnosticRenderer {
 }
 
 fn write_translated<'slot>(
-    text: Result<Cow<'static, str>, RenderError>,
+    text: Result<&'static str, RenderError>,
     localizer: &mut MessageTranslator,
     output: &mut impl FormatOutput,
     mut out: Out<'slot, '_, DisplayError>,
@@ -322,7 +322,7 @@ fn write_translated<'slot>(
             )));
         }
     };
-    output.escape(text.as_ref(), false, out.reborrow())
+    output.escape(text, false, out.reborrow())
 }
 
 fn write_report_title_localized<'slot>(

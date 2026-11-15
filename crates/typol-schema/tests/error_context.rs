@@ -15,7 +15,7 @@ fn inline_budget_failures_keep_context_without_inventing_a_span() -> TestResult 
     let diagnostic = errors.diagnostics().first().test_value()?;
     let context = diagnostic.context().test_value()?;
 
-    test_verify_eq!(diagnostic.code(), DiagnosticCode::INTERNAL_ERROR);
+    test_verify_eq!(diagnostic.code(), DiagnosticCode::BUDGET_INVARIANT_FAILURE);
     test_verify!(diagnostic.primary().is_none());
     test_verify_eq!(context.subsystem(), "test");
     test_verify_eq!(context.stage(), "schema-init");

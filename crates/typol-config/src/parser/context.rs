@@ -58,6 +58,7 @@ pub(super) struct ParserContext<'schema, 'source, 'limits> {
     pub(super) value_source: ValueSource,
     pub(super) nesting_depth: usize,
     pub(super) value_nodes: usize,
+    pub(super) needs_normalization: bool,
     pub(super) diagnostics: DiagnosticBuffer<'schema>,
     pub(super) diagnostic_errors: RefCell<ErrSlot<Diagnostic>>,
     pub(super) tree_diagnostic_errors: ErrSlot<Diagnostic>,
@@ -105,6 +106,13 @@ pub(super) struct ParserControlRequest<'schema, 'source, 'limits> {
     pub(super) source_id: SourceId,
     pub(super) limits: &'limits ConfigLimits,
     pub(super) session: ConfigSession<'limits>,
+}
+
+struct ResourceDiagnosticRequest<'message> {
+    code: DiagnosticCode,
+    message: &'message str,
+    span: LocatedSpan,
+    value_source: Option<ValueSource>,
 }
 
 impl ParserControl {
@@ -179,6 +187,7 @@ impl ParserControl {
                 value_source: ValueSource::ConfigLiteral,
                 nesting_depth: 0,
                 value_nodes: 0,
+                needs_normalization: false,
                 diagnostics,
                 diagnostic_errors: RefCell::new(ErrSlot::new()),
                 tree_diagnostic_errors: ErrSlot::new(),
@@ -277,9 +286,12 @@ impl ParserControl {
                 |diagnostic_out| {
                     ParserControl::resource_diagnostic(
                         context,
-                        "configuration value node count exceeded the limit",
-                        span,
-                        value_source,
+                        ResourceDiagnosticRequest {
+                            code: DiagnosticCode::CONFIG_VALUE_CAPACITY_EXCEEDED,
+                            message: "configuration value node count exceeded the limit",
+                            span,
+                            value_source,
+                        },
                         diagnostic_out,
                     )
                 },
@@ -293,9 +305,12 @@ impl ParserControl {
                 |diagnostic_out| {
                     ParserControl::resource_diagnostic(
                         context,
-                        "configuration value node count exceeded the limit",
-                        span,
-                        value_source,
+                        ResourceDiagnosticRequest {
+                            code: DiagnosticCode::CONFIG_VALUE_NODES_LIMIT_EXCEEDED,
+                            message: "configuration value node count exceeded the limit",
+                            span,
+                            value_source,
+                        },
                         diagnostic_out,
                     )
                 },
@@ -322,9 +337,12 @@ impl ParserControl {
             |diagnostic_out| {
                 ParserControl::resource_diagnostic(
                     context,
-                    "configuration nesting depth exceeded the limit",
-                    span,
-                    value_source,
+                    ResourceDiagnosticRequest {
+                        code: DiagnosticCode::CONFIG_VALUE_DEPTH_LIMIT_EXCEEDED,
+                        message: "configuration nesting depth exceeded the limit",
+                        span,
+                        value_source,
+                    },
                     diagnostic_out,
                 )
             },
@@ -345,9 +363,12 @@ impl ParserControl {
                 |diagnostic_out| {
                     ParserControl::resource_diagnostic(
                         context,
-                        "configuration nesting depth exceeded the limit",
-                        span,
-                        value_source,
+                        ResourceDiagnosticRequest {
+                            code: DiagnosticCode::CONFIG_PARSER_INVARIANT_FAILURE,
+                            message: "configuration nesting depth exceeded the limit",
+                            span,
+                            value_source,
+                        },
                         diagnostic_out,
                     )
                 },
@@ -367,24 +388,22 @@ impl ParserControl {
 
     fn resource_diagnostic<'schema, 'source, 'limits, 'slot>(
         context: &ParserContext<'schema, 'source, 'limits>,
-        message: &str,
-        span: LocatedSpan,
-        value_source: Option<ValueSource>,
+        request: ResourceDiagnosticRequest<'_>,
         mut out: Out<'slot, '_, Diagnostic>,
     ) -> OResult<'slot, Diagnostic> {
         let path = LiteralParser::copy_path_with_source(
             context,
-            Some(span),
-            value_source,
+            Some(request.span),
+            request.value_source,
             out.reborrow(),
         )?;
         Ok(DiagnosticFactory::make_diagnostic(
             DetailedDiagnosticRequest {
-                code: DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-                message: message.into(),
-                primary: Some(span),
+                code: request.code,
+                message: request.message.into(),
+                primary: Some(request.span),
                 path: Some(path),
-                value_source,
+                value_source: request.value_source,
                 context: None,
                 translator: context.session.translator(),
             },

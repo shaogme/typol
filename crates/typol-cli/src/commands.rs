@@ -1,7 +1,6 @@
 mod json;
 
 use std::{
-    borrow::Cow,
     boxed::Box,
     error::Error,
     fmt,
@@ -74,7 +73,7 @@ impl Error for CommandError {
 
 type LoadResult<T> = Result<T, Box<TypolError>>;
 type TranslationResult<T> = Result<T, CommandError>;
-type LocalizedText = Result<Cow<'static, str>, RenderError>;
+type LocalizedText = Result<&'static str, RenderError>;
 
 struct SchemaSyntaxFailure<'a> {
     errors: &'a SyntaxErrors,
@@ -203,8 +202,8 @@ impl Commands {
     ) -> TranslationResult<ExitCode> {
         let message = message?;
         let written = match output_format {
-            OutputFormat::Text => Self::write_stderr(message.as_ref()),
-            OutputFormat::Json => DiagnosticJson::write_operation_failure(message.as_ref()),
+            OutputFormat::Text => Self::write_stderr(message),
+            OutputFormat::Json => DiagnosticJson::write_operation_failure(message),
         };
         Ok(Self::result_code(status, written))
     }
@@ -280,13 +279,11 @@ impl Commands {
             Err(caught) => {
                 let errors = caught.take();
                 let terminal = errors.diagnostics().any(|diagnostic| {
-                    matches!(
-                        diagnostic.code(),
-                        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
-                            | DiagnosticCode::ALLOCATION_FAILED
-                            | DiagnosticCode::CAPACITY_EXCEEDED
-                            | DiagnosticCode::INTERNAL_ERROR
-                    )
+                    let code = diagnostic.code();
+                    code.is_resource_limit()
+                        || code == DiagnosticCode::ALLOCATION_FAILED
+                        || code.is_capacity_exceeded()
+                        || code.is_internal_error()
                 });
                 if terminal {
                     return Self::operation_failure(

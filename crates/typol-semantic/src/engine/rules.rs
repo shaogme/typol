@@ -6,8 +6,8 @@ use crate::{
 use core::cmp::Ordering;
 use opeo::{OResult, Out, ResultOutExt};
 use typol_core::{
-    ChargedVec, DiagnosticContext, ExecutionBudget, ValueEntries, ValueKind, ValuePayloadView,
-    ValueView, diagnostic_context,
+    ChargedVec, DiagnosticContext, ExecutionBudget, ResourceLimit, ValueEntries, ValueKind,
+    ValuePayloadView, ValueView, diagnostic_context,
 };
 
 static RULE_EVALUATION_INTERNAL: DiagnosticContext = diagnostic_context!(
@@ -307,12 +307,12 @@ impl<'e, 'schema, 'values> FingerprintState<'e, 'schema, 'values> {
         mut out: Out<'slot, '_, EvalError>,
     ) -> OResult<'slot, ()> {
         if depth >= self.evaluator.limits().max_nesting_depth() {
-            return Err(out.fail(EvalError::Resource));
+            return Err(out.fail(EvalError::ResourceLimit(ResourceLimit::ValidationTraversal)));
         }
         self.evaluator.checked(value, false, out.reborrow())?;
         let next = depth
             .checked_add(1)
-            .ok_or(EvalError::Resource)
+            .ok_or(EvalError::internal(RULE_EVALUATION_INTERNAL))
             .store_err_into(out.reborrow())?;
         match value.kind() {
             EvalKind::Signed(value) => {
@@ -597,7 +597,7 @@ impl ValueRules {
     ) -> OResult<'slot, Option<bool>> {
         let string = || match value.as_ref() {
             ValueKind::String(value) => Ok(value),
-            _ => Err(EvalError::internal(RULE_EVALUATION_INTERNAL)),
+            _ => Err(RULE_EVALUATION_INTERNAL),
         };
         let text = TextChecks::new(budget);
         let result = match rule {
@@ -623,7 +623,7 @@ impl ValueRules {
                     if byte & 0xc0 != 0x80 {
                         length = length
                             .checked_add(1)
-                            .ok_or(EvalError::Resource)
+                            .ok_or(EvalError::internal(RULE_EVALUATION_INTERNAL))
                             .store_err_into(out.reborrow())?;
                     }
                 }
@@ -688,7 +688,9 @@ impl ValueRules {
         if let Some(path) = by {
             for (depth, id) in path.iter().enumerate() {
                 if depth >= evaluator.limits().max_nesting_depth() {
-                    return Err(out.fail(EvalError::Resource));
+                    return Err(
+                        out.fail(EvalError::ResourceLimit(ResourceLimit::ValidationTraversal))
+                    );
                 }
                 evaluator.step(out.reborrow())?;
                 let type_info = evaluator.schema().type_info(ty, out.reborrow())?;
@@ -741,7 +743,7 @@ impl ValueRules {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "compiler"))]
     pub(crate) fn unique_with_hash_for_test<'result_slot, 'e, 'schema, 'values, 'path, Hash>(
         request: UniqueRequest<'e, 'schema, 'values, 'path, Hash>,
         out: Out<'result_slot, '_, EvalError>,
@@ -800,19 +802,21 @@ mod tests {
                 rules::{UniqueRequest, ValueRules},
             },
         };
-        use alloc::{format, string::String, vec::Vec};
+        use alloc::{boxed::Box, format, string::String, vec::Vec};
         use core::fmt::{Debug, Formatter, Result as FmtResult};
         use opeo::{ErrSlot, OResult, Out};
         use typol_core::{
             BudgetError, ChargedVec, ConfigValue, ConfigValueBuilder, ExecutionBudget,
-            ExecutionLimits, SourceId, SourceSpan, Span, SpanError, ValueError, ValueId,
-            ValueSource,
+            ExecutionLimits, ResourceLimit, SourceId, SourceSpan, Span, SpanError, ValueError,
+            ValueId, ValueSource,
         };
         use typol_model::BuiltinType;
         use typol_policy::{RegexLimits, ValueLimits};
+        use typol_test_support::{check, check_eq};
 
+        #[derive(Eq, PartialEq)]
         enum TestError {
-            Evaluation(EvalError),
+            Evaluation(Box<EvalError>),
             Budget(BudgetError),
             Value(ValueError),
             Span(SpanError),
@@ -833,7 +837,7 @@ mod tests {
 
         impl From<EvalError> for TestError {
             fn from(error: EvalError) -> Self {
-                Self::Evaluation(error)
+                Self::Evaluation(Box::new(error))
             }
         }
 
@@ -877,8 +881,8 @@ mod tests {
             fn evaluate<T>(
                 &mut self,
                 operation: impl for<'slot> FnOnce(Out<'slot, 'slot, EvalError>) -> OResult<'slot, T>,
-            ) -> Result<T, EvalError> {
-                self.evaluation.call(operation)
+            ) -> TestResult<T> {
+                self.evaluation.call(operation).map_err(Into::into)
             }
 
             fn allocate<T>(
@@ -929,29 +933,6 @@ mod tests {
             Ok(value)
         }
 
-        macro_rules! check_eq {
-            ($actual:expr, $expected:expr $(,)?) => {{
-                let actual = &$actual;
-                let expected = &$expected;
-                if actual != expected {
-                    return Err(TestError::Assertion(format!(
-                        "assertion failed: {}; actual={actual:?}, expected={expected:?}",
-                        stringify!($actual)
-                    )));
-                }
-            }};
-        }
-
-        macro_rules! check {
-            ($condition:expr $(,)?) => {{
-                if !$condition {
-                    return Err(TestError::Assertion(format!(
-                        "assertion failed: {}",
-                        stringify!($condition)
-                    )));
-                }
-            }};
-        }
         struct Numbers;
 
         fn constant_hash<'schema, 'values, 'slot, 'call>(
@@ -1034,7 +1015,7 @@ mod tests {
                     out,
                 )
             })?;
-            check_eq!(duplicates.as_slice(), [false, false, true, false, true]);
+            check_eq!((|message: &str| TestError::Assertion(message.into())); duplicates.as_slice(), [false, false, true, false, true]);
             Ok(())
         }
 
@@ -1046,7 +1027,7 @@ mod tests {
             let regex_limits = RegexLimits::default();
             let evaluator = Evaluator::new(&Numbers, &limits, &regex_limits, None);
             let value = unsigned_value(&mut slots, 1)?;
-            check_eq!(
+            check_eq!((|message: &str| TestError::Assertion(message.into()));
                 slots.evaluate(|out| {
                     ValueRules::fingerprint(
                         &evaluator,
@@ -1054,12 +1035,14 @@ mod tests {
                         out,
                     )
                 }),
-                Err(EvalError::Resource)
+                Err(TestError::Evaluation(Box::new(EvalError::ResourceLimit(
+                    ResourceLimit::ValidationTraversal,
+                ))))
             );
             limits.set_max_nesting_depth(1);
             let evaluator = Evaluator::new(&Numbers, &limits, &regex_limits, None);
             let value = unsigned_value(&mut slots, 256)?;
-            check!(matches!(
+            check!((|message: &str| TestError::Assertion(message.into())); matches!(
                 slots.evaluate(|out| {
                     ValueRules::fingerprint(
                         &evaluator,
@@ -1067,7 +1050,8 @@ mod tests {
                         out,
                     )
                 }),
-                Err(error) if error.is_internal() && error.context().is_some()
+                Err(TestError::Evaluation(error))
+                    if error.is_internal() && error.context().is_some()
             ));
             Ok(())
         }
@@ -1094,8 +1078,13 @@ mod tests {
                 .ok_or(TestError::Assertion(String::from(
                     "evaluation error is missing",
                 )))?;
-            check!(error.is_internal() && error.context().is_some());
-            check_eq!(error.source_span(), Some(span));
+            let TestError::Evaluation(error) = error else {
+                return Err(TestError::Assertion(String::from(
+                    "evaluation failure has the wrong category",
+                )));
+            };
+            check!((|message: &str| TestError::Assertion(message.into())); error.is_internal() && error.context().is_some());
+            check_eq!((|message: &str| TestError::Assertion(message.into())); error.source_span(), Some(span));
             let closure = TypedExpressionNode::new(
                 TypedExpressionKind::Binding(ExpressionBinding::Closure(ClosureLocalId::new(0))),
                 TypeId::new(0),
@@ -1111,8 +1100,13 @@ mod tests {
                 .ok_or(TestError::Assertion(String::from(
                     "evaluation error is missing",
                 )))?;
-            check!(error.is_internal() && error.context().is_some());
-            check_eq!(error.source_span(), Some(span));
+            let TestError::Evaluation(error) = error else {
+                return Err(TestError::Assertion(String::from(
+                    "evaluation failure has the wrong category",
+                )));
+            };
+            check!((|message: &str| TestError::Assertion(message.into())); error.is_internal() && error.context().is_some());
+            check_eq!((|message: &str| TestError::Assertion(message.into())); error.source_span(), Some(span));
             Ok(())
         }
 
@@ -1121,9 +1115,9 @@ mod tests {
             let access = SchemaAccessError::new("program", 11);
             let error = EvalError::from(access);
 
-            check!(error.is_internal());
-            check_eq!(error.schema_access(), Some(access));
-            check_eq!(
+            check!((|message: &str| TestError::Assertion(message.into())); error.is_internal());
+            check_eq!((|message: &str| TestError::Assertion(message.into())); error.schema_access(), Some(access));
+            check_eq!((|message: &str| TestError::Assertion(message.into()));
                 error.context().map(|context| context.object_id()),
                 Some(Some(11))
             );
@@ -1153,9 +1147,9 @@ mod tests {
                     out,
                 )
             })?;
-            check!(duplicates.iter().all(|duplicate| !duplicate));
+            check!((|message: &str| TestError::Assertion(message.into())); duplicates.iter().all(|duplicate| !duplicate));
             let steps = budget.steps();
-            check!(steps > input.len());
+            check!((|message: &str| TestError::Assertion(message.into())); steps > input.len());
             for quota in [steps, steps - 1] {
                 let shared = slots.allocate(|out| {
                     ExecutionBudget::new(ExecutionLimits::new(quota, 1_048_576), out)
@@ -1175,7 +1169,10 @@ mod tests {
                 }) {
                     Ok(_) if quota == steps => {}
                     Err(caught) if quota < steps => {
-                        check_eq!(caught.get(), &EvalError::Resource);
+                        check_eq!((|message: &str| TestError::Assertion(message.into()));
+                            caught.get(),
+                            &EvalError::ResourceLimit(ResourceLimit::ExecutionSteps)
+                        );
                     }
                     _ => {
                         return Err(TestError::Assertion(format!(

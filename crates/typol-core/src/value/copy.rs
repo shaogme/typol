@@ -1,6 +1,6 @@
 use crate::{
-    BudgetError, ChargedVec, DiagnosticContext, ExecutionBudget, ValueError, ValueSource,
-    diagnostic_context,
+    BudgetError, CapacityExceeded, ChargedVec, DiagnosticContext, ExecutionBudget, ResourceLimit,
+    ValueError, ValueSource, diagnostic_context,
     value::{
         ConfigValueBuilder, NamedValue, ValueEntries, ValueId, ValueKind, ValuePayload,
         ValuePayloadView, ValueView,
@@ -404,7 +404,9 @@ impl ValueViewCopier {
                 } => {
                     let end = start.checked_add(child_count).ok_or_else(|| {
                         out.reborrow()
-                            .fail(ValueError::from(BudgetError::CapacityExceeded))
+                            .fail(ValueError::from(BudgetError::CapacityExceeded(
+                                CapacityExceeded::BudgetBookkeeping,
+                            )))
                     })?;
                     if end != state.values.len() {
                         return Err(out
@@ -639,9 +641,11 @@ impl ValueViewCopier {
         depth: usize,
         out: Out<'slot, '_, ValueError>,
     ) -> OResult<'slot, usize> {
-        depth
-            .checked_add(1)
-            .ok_or_else(|| out.fail(ValueError::from(BudgetError::CapacityExceeded)))
+        depth.checked_add(1).ok_or_else(|| {
+            out.fail(ValueError::from(BudgetError::CapacityExceeded(
+                CapacityExceeded::BudgetBookkeeping,
+            )))
+        })
     }
 
     fn check_copy_depth<'slot>(
@@ -650,7 +654,9 @@ impl ValueViewCopier {
         out: Out<'slot, '_, ValueError>,
     ) -> OResult<'slot, ()> {
         if depth > limits.max_nesting_depth() {
-            return Err(out.fail(ValueError::from(BudgetError::Resource)));
+            return Err(out.fail(ValueError::from(BudgetError::ResourceLimit(
+                ResourceLimit::ConfigValueDepth,
+            ))));
         }
         Ok(())
     }

@@ -1,8 +1,8 @@
 use std::{error::Error, io::Error as IoError, thread};
 use typol_core::{
     BudgetError, ConfigValue, ConfigValueBuilder, ExecutionBudget, ExecutionLimits, NamedValue,
-    ValueCopyLimits, ValueError, ValueErrorKind, ValueKind, ValuePayload, ValuePayloadView,
-    ValueScalar, ValueSource, ValueView,
+    ResourceLimit, ValueCopyLimits, ValueError, ValueErrorKind, ValueKind, ValuePayload,
+    ValuePayloadView, ValueScalar, ValueSource, ValueView,
 };
 use typol_opeo_test_support::TestOpeo;
 
@@ -112,7 +112,7 @@ fn assert_copy_limit(
         return Err(IoError::other("value copy did not follow the requested depth limit").into());
     }
     if let Err(error) = result {
-        if error.kind() != ValueErrorKind::ResourceLimitExceeded {
+        if error.kind() != ValueErrorKind::ResourceLimit(ResourceLimit::ConfigValueDepth) {
             return Err(IoError::other("depth error used the wrong category").into());
         }
     }
@@ -139,7 +139,7 @@ fn exact_depth_is_allowed_and_excess_depth_is_a_resource_error() -> Result<(), B
         TestOpeo::call(|out| builder.append_view(source.root(), ValueCopyLimits::new(255), out))
             .err()
             .ok_or_else(|| IoError::other("copy above its depth limit succeeded"))?;
-    if error.kind() != ValueErrorKind::ResourceLimitExceeded {
+    if error.kind() != ValueErrorKind::ResourceLimit(ResourceLimit::ConfigValueDepth) {
         return Err(IoError::other("depth error used the wrong category").into());
     }
     let fallback = TestOpeo::call(|out| builder.add_bool(true, ValueSource::RustValue, out))?;
@@ -181,7 +181,7 @@ fn failed_view_append_restores_builder_nodes() -> Result<(), Box<dyn Error>> {
         TestOpeo::call(|out| builder.append_view(source.root(), ValueCopyLimits::new(2), out))
             .err()
             .ok_or_else(|| IoError::other("copy above its depth limit succeeded"))?;
-    if error.kind() != ValueErrorKind::ResourceLimitExceeded {
+    if error.kind() != ValueErrorKind::ResourceLimit(ResourceLimit::ConfigValueDepth) {
         return Err(IoError::other("depth error used the wrong category").into());
     }
     let appended = TestOpeo::call(|out| builder.add_bool(true, ValueSource::RustValue, out))?;
@@ -241,7 +241,7 @@ fn failed_value_append_restores_builder_nodes() -> Result<(), Box<dyn Error>> {
     let error = TestOpeo::call(|out| target.append_value(source, out))
         .err()
         .ok_or_else(|| IoError::other("append unexpectedly fit the remaining step budget"))?;
-    if error.kind() != ValueErrorKind::ResourceLimitExceeded {
+    if error.kind() != ValueErrorKind::ResourceLimit(ResourceLimit::ExecutionSteps) {
         return Err(IoError::other("step error used the wrong category").into());
     }
     let completed = TestOpeo::call(|out| target.finish(existing, out))?;
@@ -505,7 +505,7 @@ fn workspace_and_step_budgets_fail_as_values_errors() -> Result<(), Box<dyn Erro
         TestOpeo::call(|out| builder.append_view(source.root(), ValueCopyLimits::new(128), out))
             .err()
             .ok_or_else(|| IoError::other("copy exceeded no workspace limit"))?;
-    if error.kind() != ValueErrorKind::ResourceLimitExceeded {
+    if error.kind() != ValueErrorKind::ResourceLimit(ResourceLimit::WorkspaceBytes) {
         return Err(IoError::other("workspace error used the wrong category").into());
     }
 
@@ -516,7 +516,7 @@ fn workspace_and_step_budgets_fail_as_values_errors() -> Result<(), Box<dyn Erro
         TestOpeo::call(|out| builder.append_view(source.root(), ValueCopyLimits::new(128), out))
             .err()
             .ok_or_else(|| IoError::other("copy exceeded no step limit"))?;
-    if error.kind() != ValueErrorKind::ResourceLimitExceeded {
+    if error.kind() != ValueErrorKind::ResourceLimit(ResourceLimit::ExecutionSteps) {
         return Err(IoError::other("step error used the wrong category").into());
     }
     Ok(())

@@ -15,21 +15,15 @@ use typol_core::{
     diagnostic_context,
 };
 use typol_i18n::t;
-use typol_regex::{RegexMatchError, RegexScratchError};
 use typol_semantic::{
-    Constraint, ConstraintData, EvalError, RegexExecutionError, RegexExecutionFailure,
-    RegexMatchOptions, SchemaRules, VariantRestrictionMode,
+    Constraint, ConstraintData, EvalError, RegexExecutionError, RegexMatchOptions, SchemaRules,
+    VariantRestrictionMode,
 };
 
 static SCALAR_VALUE_SHAPE: DiagnosticContext = diagnostic_context!(
     "typol-config",
     "scalar-validation",
     "constraint-value-type-mismatch",
-);
-static SCALAR_REGEX_INTERNAL: DiagnosticContext = diagnostic_context!(
-    "typol-config",
-    "regex-validation",
-    "regex-failure-without-context",
 );
 static SCALAR_REGEX_ALLOCATION: DiagnosticContext = diagnostic_context!(
     "typol-config",
@@ -163,20 +157,7 @@ fn regex_failure<'slot>(
     error: RegexExecutionError,
     mut out: Out<'slot, '_, Diagnostic>,
 ) -> OResult<'slot, Diagnostic> {
-    let code = match error {
-        RegexExecutionError::Scratch(error) => scratch_error_code(error),
-        RegexExecutionError::Match(error) => match_error_code(error),
-        RegexExecutionError::Budget(error) => error.diagnostic_code(),
-        RegexExecutionError::Internal | RegexExecutionError::InternalAt { .. } => {
-            DiagnosticCode::INTERNAL_ERROR
-        }
-        RegexExecutionError::Located { error, .. } => match error {
-            RegexExecutionFailure::Scratch(error) => scratch_error_code(error),
-            RegexExecutionFailure::Match(error) => match_error_code(error),
-            RegexExecutionFailure::Budget(error) => error.diagnostic_code(),
-            RegexExecutionFailure::Internal(_) => DiagnosticCode::INTERNAL_ERROR,
-        },
-    };
+    let code = error.diagnostic_code();
     if code == DiagnosticCode::ALLOCATION_FAILED {
         let mut diagnostic = allocation(metadata);
         diagnostic.set_context(Some(error.context().unwrap_or(SCALAR_REGEX_ALLOCATION)));
@@ -193,25 +174,39 @@ fn regex_failure<'slot>(
         },
         out.reborrow(),
     )?;
-    let context = if code == DiagnosticCode::INTERNAL_ERROR {
-        Some(error.context().unwrap_or(SCALAR_REGEX_INTERNAL))
+    let internal = error.internal_error();
+    let context = internal.map(|error| error.context());
+    let diagnostic_message = if hidden {
+        t! { name: "diagnostic.validation.value_hidden", locale: metadata.translator }.into()
     } else {
-        None
+        t! { name: "diagnostic.validation.regex_execution_failed", locale: metadata.translator }
+            .into()
     };
-    let mut diagnostic = DiagnosticFactory::detailed_diagnostic(DetailedDiagnosticRequest {
-        code,
-        message: if hidden {
-            t! { name: "diagnostic.validation.value_hidden", locale: metadata.translator }.into()
-        } else {
-            t! { name: "diagnostic.validation.regex_execution_failed", locale: metadata.translator }
-                .into()
-        },
-        primary: metadata.span,
-        path: Some(path),
-        value_source: metadata.source,
-        context,
-        translator: metadata.translator,
-    });
+    let mut diagnostic = match (internal, error.capacity_exceeded()) {
+        (Some(internal), _) => DiagnosticFactory::internal_error(
+            internal,
+            metadata.span,
+            Some(path),
+            metadata.source,
+            metadata.translator,
+        ),
+        (None, Some(capacity)) => DiagnosticFactory::capacity_error(
+            capacity,
+            metadata.span,
+            Some(path),
+            metadata.source,
+            metadata.translator,
+        ),
+        (None, None) => DiagnosticFactory::detailed_diagnostic(DetailedDiagnosticRequest {
+            code,
+            message: diagnostic_message,
+            primary: metadata.span,
+            path: Some(path),
+            value_source: metadata.source,
+            context,
+            translator: metadata.translator,
+        }),
+    };
     if hidden {
         diagnostic.set_kind(DiagnosticKind::new(
             "typol.validation.regex_execution_failed",
@@ -221,7 +216,7 @@ fn regex_failure<'slot>(
     if diagnostic.code() == DiagnosticCode::ALLOCATION_FAILED || diagnostic.is_emergency() {
         return Ok(diagnostic);
     }
-    if code == DiagnosticCode::INTERNAL_ERROR {
+    if internal.is_some() {
         diagnostic.set_context(context);
     }
     if let Some(source_span) = error.source_span() {
@@ -304,24 +299,6 @@ fn diagnostic_label_error(
         diagnostic.set_value_source(metadata.source);
     }
     diagnostic
-}
-
-fn scratch_error_code(error: RegexScratchError) -> DiagnosticCode {
-    match error {
-        RegexScratchError::ResourceLimitExceeded(_) => DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-        RegexScratchError::AllocationFailed => DiagnosticCode::ALLOCATION_FAILED,
-        RegexScratchError::CapacityExceeded => DiagnosticCode::CAPACITY_EXCEEDED,
-        RegexScratchError::InternalInvariantFailure(_) => DiagnosticCode::INTERNAL_ERROR,
-    }
-}
-
-fn match_error_code(error: RegexMatchError) -> DiagnosticCode {
-    match error {
-        RegexMatchError::ResourceLimitExceeded(_) => DiagnosticCode::RESOURCE_LIMIT_EXCEEDED,
-        RegexMatchError::AllocationFailed => DiagnosticCode::ALLOCATION_FAILED,
-        RegexMatchError::CapacityExceeded => DiagnosticCode::CAPACITY_EXCEEDED,
-        RegexMatchError::InternalInvariantFailure(_) => DiagnosticCode::INTERNAL_ERROR,
-    }
 }
 
 struct EvaluationFailureRequest<'work, 'schema, 'diagnostics> {

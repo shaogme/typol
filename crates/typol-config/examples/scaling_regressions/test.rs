@@ -225,7 +225,7 @@ fn large_environment_values_use_the_same_default_step_balance_and_stop_later_rea
         run_workload(&workload, ConfigParseOptions::default(), &mut provider).test_error()?;
     test_eq!(
         errors.diagnostics().last().test_value()?.code(),
-        DiagnosticCode::RESOURCE_LIMIT_EXCEEDED
+        DiagnosticCode::EXECUTION_STEPS_LIMIT_EXCEEDED
     )?;
     test_assert!(provider.calls() < 256)?;
 

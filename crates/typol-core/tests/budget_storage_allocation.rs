@@ -4,7 +4,6 @@ use std::{
     env,
     error::Error,
     fmt,
-    io::Error as IoError,
     process::Command,
     ptr::null_mut,
 };
@@ -12,44 +11,7 @@ use typol_core::{
     BudgetError, ChargedString, ChargedVec, ConfigValueBuilder, DiagnosticContext, ExecutionBudget,
     ExecutionLimits, ValueCopyLimits, ValueError, ValueErrorKind, ValueSource, diagnostic_context,
 };
-use typol_opeo_test_support::TestOpeo;
-
-macro_rules! ensure {
-    ($condition:expr $(,)?) => {
-        if !$condition {
-            return Err(IoError::other(concat!("assertion failed: ", stringify!($condition))).into());
-        }
-    };
-    ($condition:expr, $($argument:tt)+) => {
-        if !$condition {
-            return Err(IoError::other(format!($($argument)+)).into());
-        }
-    };
-}
-
-macro_rules! ensure_eq {
-    ($left:expr, $right:expr $(,)?) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(IoError::other(format!(
-                "assertion failed: {} and {} differ (actual {:?}, expected {:?})",
-                stringify!($left),
-                stringify!($right),
-                left,
-                right,
-            ))
-            .into());
-        }
-    }};
-    ($left:expr, $right:expr, $($argument:tt)+) => {{
-        let left = &$left;
-        let right = &$right;
-        if left != right {
-            return Err(IoError::other(format!($($argument)+)).into());
-        }
-    }};
-}
+use typol_opeo_test_support::{TestOpeo, ensure, ensure_eq};
 
 static MISSING_TEST_ITEM: DiagnosticContext = diagnostic_context!(
     "typol-core-tests",

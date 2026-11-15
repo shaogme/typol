@@ -2,8 +2,8 @@ use std::{error::Error, fmt, io::ErrorKind};
 
 use opeo::{ErrSlot, OResult, Out};
 use typol_core::{
-    BudgetError, DiagnosticContext, SourceId, SourceReadError, SourceReadErrorKind,
-    diagnostic_context,
+    BudgetError, CapacityExceeded, DiagnosticContext, InternalError, ResourceLimit, SourceId,
+    SourceReadError, SourceReadErrorKind, diagnostic_context,
 };
 use typol_i18n::{Language, Translator};
 
@@ -204,10 +204,10 @@ pub enum HostErrorKind {
     NotRegularFile,
     InvalidRequest,
     ReadFailure,
-    ResourceLimitExceeded,
+    ResourceLimit(ResourceLimit),
     AllocationFailed,
-    CapacityExceeded,
-    InternalError,
+    CapacityExceeded(CapacityExceeded),
+    Internal(InternalError),
 }
 
 /// Owns only finite categories and does not retain paths, input, or raw native error text.
@@ -217,7 +217,7 @@ pub struct HostError {
     kind: HostErrorKind,
     step: HostFailureStep,
     source_id: Option<SourceId>,
-    source_context: Option<&'static DiagnosticContext>,
+    source_context: Option<DiagnosticContext>,
     input_context: Option<DiagnosticContext>,
     offset: Option<usize>,
 }
@@ -244,7 +244,11 @@ impl HostError {
     }
 
     pub(crate) const fn internal(operation: HostOperation, step: HostFailureStep) -> Self {
-        Self::with_step(operation, HostErrorKind::InternalError, step)
+        Self::with_step(
+            operation,
+            HostErrorKind::Internal(InternalError::HostAdapterInvariantFailure(step.context())),
+            step,
+        )
     }
 
     pub(crate) const fn with_source_id(mut self, source_id: SourceId) -> Self {
@@ -267,12 +271,20 @@ impl HostError {
     pub const fn budget_error(&self) -> Option<BudgetError> {
         match self.step {
             HostFailureStep::BudgetAccounting => match self.kind {
-                HostErrorKind::ResourceLimitExceeded => Some(BudgetError::Resource),
+                HostErrorKind::ResourceLimit(limit) => Some(BudgetError::ResourceLimit(limit)),
                 HostErrorKind::AllocationFailed => Some(BudgetError::Allocation),
-                HostErrorKind::CapacityExceeded => Some(BudgetError::CapacityExceeded),
+                HostErrorKind::CapacityExceeded(capacity) => {
+                    Some(BudgetError::CapacityExceeded(capacity))
+                }
+                HostErrorKind::Internal(error) => Some(BudgetError::Internal(error)),
                 _ => None,
             },
-            HostFailureStep::BudgetInvariant => Some(BudgetError::invariant(self.budget_context())),
+            HostFailureStep::BudgetInvariant => match self.kind {
+                HostErrorKind::Internal(error) => Some(BudgetError::Internal(error)),
+                _ => Some(BudgetError::Internal(
+                    InternalError::BudgetInvariantFailure(self.budget_context()),
+                )),
+            },
             _ => None,
         }
     }
@@ -297,15 +309,15 @@ impl HostError {
 
     pub const fn source_context(&self) -> Option<DiagnosticContext> {
         match self.source_context {
-            Some(context) => Some(*context),
+            Some(context) => Some(context),
             None => self.input_context,
         }
     }
 
-    pub(crate) const fn budget_context(&self) -> &'static DiagnosticContext {
+    pub(crate) const fn budget_context(&self) -> DiagnosticContext {
         match self.source_context {
             Some(context) => context,
-            None => self.step.context_ref(),
+            None => self.step.context(),
         }
     }
 
@@ -316,29 +328,21 @@ impl HostError {
 
     pub fn budget(operation: HostOperation, error: BudgetError) -> Self {
         let (step, source_context) = match error {
-            BudgetError::InvariantViolation(context) => {
+            BudgetError::Internal(InternalError::BudgetInvariantFailure(context)) => {
                 (HostFailureStep::BudgetInvariant, Some(context))
             }
-            BudgetError::Resource
-            | BudgetError::RegexSteps
-            | BudgetError::RegexSearchSteps
-            | BudgetError::RegexWorkspace
+            BudgetError::Internal(_) => (HostFailureStep::BudgetAccounting, None),
+            BudgetError::ResourceLimit(_)
             | BudgetError::Allocation
-            | BudgetError::CapacityExceeded => (HostFailureStep::BudgetAccounting, None),
+            | BudgetError::CapacityExceeded(_) => (HostFailureStep::BudgetAccounting, None),
         };
-        let mut host_error = Self::with_step(
-            operation,
-            match error {
-                BudgetError::Resource
-                | BudgetError::RegexSteps
-                | BudgetError::RegexSearchSteps
-                | BudgetError::RegexWorkspace => HostErrorKind::ResourceLimitExceeded,
-                BudgetError::Allocation => HostErrorKind::AllocationFailed,
-                BudgetError::CapacityExceeded => HostErrorKind::CapacityExceeded,
-                BudgetError::InvariantViolation(_) => HostErrorKind::InternalError,
-            },
-            step,
-        );
+        let kind = match error {
+            BudgetError::ResourceLimit(limit) => HostErrorKind::ResourceLimit(limit),
+            BudgetError::Allocation => HostErrorKind::AllocationFailed,
+            BudgetError::CapacityExceeded(capacity) => HostErrorKind::CapacityExceeded(capacity),
+            BudgetError::Internal(internal) => HostErrorKind::Internal(internal),
+        };
+        let mut host_error = Self::with_step(operation, kind, step);
         host_error.source_context = source_context;
         host_error
     }
@@ -349,29 +353,29 @@ impl HostError {
             SourceReadErrorKind::HostFailure => {
                 (HostErrorKind::ReadFailure, HostFailureStep::SourceRead)
             }
-            SourceReadErrorKind::ResourceLimitExceeded => (
-                HostErrorKind::ResourceLimitExceeded,
+            SourceReadErrorKind::ResourceLimit(limit) => (
+                HostErrorKind::ResourceLimit(limit),
                 HostFailureStep::SourceResourceLimit,
             ),
             SourceReadErrorKind::AllocationFailed => (
                 HostErrorKind::AllocationFailed,
                 HostFailureStep::SourceAllocation,
             ),
-            SourceReadErrorKind::CapacityExceeded => (
-                HostErrorKind::CapacityExceeded,
+            SourceReadErrorKind::CapacityExceeded(capacity) => (
+                HostErrorKind::CapacityExceeded(capacity),
                 HostFailureStep::SourceCapacity,
             ),
-            SourceReadErrorKind::InternalInvariantFailure => (
-                HostErrorKind::InternalError,
+            SourceReadErrorKind::Internal(internal) => (
+                HostErrorKind::Internal(internal),
                 HostFailureStep::SourceInvariant,
             ),
         };
         let mut host_error = Self::with_step(operation, kind, step);
         host_error.source_id = error.source_id();
         host_error.offset = error.offset();
-        host_error.input_context = error.context().or_else(|| {
-            (error.kind() == SourceReadErrorKind::InternalInvariantFailure)
-                .then_some(HOST_SOURCE_INVARIANT_CONTEXT)
+        host_error.input_context = error.context().or_else(|| match error.kind() {
+            SourceReadErrorKind::Internal(internal) => Some(internal.context()),
+            _ => None,
         });
         host_error
     }
